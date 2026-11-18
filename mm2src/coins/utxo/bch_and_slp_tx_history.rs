@@ -30,6 +30,9 @@ struct BchAndSlpHistoryCtx<Storage: TxHistoryStorage> {
     /// The chain-changed events of the coin's client: one ends the wait for the next pass at once (CRD ch.38 §38.5C
     /// amendment of 2026-11-18, item 3).
     chain_changes: ChainChangeWatch,
+    /// A chain-changed event came and no listing has succeeded since: it survives a failed listing and is cleared only
+    /// by an Ok one.
+    chain_changed: bool,
 }
 
 // States have to be generic over storage type because BchAndSlpHistoryCtx is generic over it
@@ -102,6 +105,8 @@ impl<T: TxHistoryStorage> State for FetchingTxHashes<T> {
         let maybe_tx_ids = ctx.coin.request_tx_history(ctx.metrics.clone()).await;
         match maybe_tx_ids {
             RequestTxHistoryResult::Ok(all_tx_ids_with_height, qualifying_tip) => {
+                // The pass the event asked for has its listing.
+                ctx.chain_changed = false;
                 let in_storage = match ctx.storage.unique_tx_hashes_num_in_history(ctx.coin.ticker()).await {
                     Ok(num) => num,
                     Err(e) => return Self::change_state(Stopped::storage_error(e)),
@@ -181,15 +186,18 @@ impl<T: TxHistoryStorage> State for WaitForHistoryUpdateTrigger<T> {
 
     async fn on_changed(self: Box<Self>, ctx: &mut BchAndSlpHistoryCtx<T>) -> StateResult<Self::Ctx, Self::Result> {
         loop {
-            // A chain-changed event runs the pass at once, whatever the tests below say.
+            // A chain-changed event runs the pass at once, whatever the tests below say. The event is kept in the flag
+            // until a listing succeeds, and a burst of events counts once.
             {
                 let idle = Timer::sleep(30.);
                 futures::pin_mut!(idle);
                 let event = ctx.chain_changes.wait();
                 futures::pin_mut!(event);
-                if let futures::future::Either::Right(_) = futures::future::select(idle, event).await {
-                    return Self::change_state(FetchingTxHashes::new());
-                }
+                futures::future::select(idle, event).await;
+            }
+            ctx.chain_changed |= ctx.chain_changes.take();
+            if ctx.chain_changed {
+                return Self::change_state(FetchingTxHashes::new());
             }
             match ctx.storage.history_contains_unconfirmed_txes(ctx.coin.ticker()).await {
                 Ok(contains) => {
@@ -500,6 +508,7 @@ pub async fn bch_and_slp_history_loop(
         current_balance,
         absence: AbsenceMarks::default(),
         chain_changes,
+        chain_changed: false,
     };
     let state_machine: StateMachine<_, ()> = StateMachine::from_ctx(ctx);
     state_machine.run(Init::new()).await;
@@ -638,6 +647,7 @@ mod tests {
             current_balance: BigDecimal::from(0),
             absence: AbsenceMarks::default(),
             chain_changes: ChainChangeWatch::default(),
+            chain_changed: false,
         };
         let state = FetchingTransactionsData::<SqliteTxHistoryStorage>::new(vec![(malformed_hash, 0), (valid_hash, 0)]);
         let _next = block_on(Box::new(state).on_changed(&mut ctx));
@@ -696,6 +706,7 @@ mod tests {
             current_balance: BigDecimal::from(0),
             absence: AbsenceMarks::default(),
             chain_changes: ChainChangeWatch::default(),
+            chain_changed: false,
         };
         let _next = block_on(Box::new(Init::<SqliteTxHistoryStorage>::new()).on_changed(&mut ctx));
 
@@ -749,6 +760,7 @@ mod tests {
             current_balance: BigDecimal::from(0),
             absence: AbsenceMarks::default(),
             chain_changes: ChainChangeWatch::default(),
+            chain_changed: false,
         };
         // Indirect check only: the state machine gives no hook to name the next state, so this proves that the state
         // does not panic and hands over (a `ChangeState`, not a `Finish`) with the sync state as `Init` set it.
@@ -831,6 +843,7 @@ mod absence_tests {
                     current_balance: BigDecimal::from(0),
                     absence: AbsenceMarks::default(),
                     chain_changes: ChainChangeWatch::default(),
+                    chain_changed: false,
                 },
                 ticker,
             }
@@ -934,6 +947,53 @@ mod absence_tests {
             "the wait was not cut short"
         );
         assert!(!fx.ctx.absence.any());
+    }
+
+    /// Two events that are queued together make one pass: the wait takes the whole burst.
+    #[test]
+    fn two_queued_chain_changed_events_give_one_pass() {
+        let mut fx = Fixture::new(|_| vec![]);
+        let (events, receiver) = futures::channel::mpsc::unbounded();
+        fx.ctx.chain_changes = ChainChangeWatch::from_receiver(receiver);
+        events.unbounded_send(()).unwrap();
+        events.unbounded_send(()).unwrap();
+        let _next =
+            block_on(Box::new(WaitForHistoryUpdateTrigger::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(fx.ctx.chain_changed, "the pass is asked for");
+        assert!(
+            !fx.ctx.chain_changes.take(),
+            "no second event is left for a second pass"
+        );
+    }
+
+    fn native_listing_error() -> common::jsonrpc_client::JsonRpcError {
+        common::jsonrpc_client::JsonRpcError {
+            client_info: "test".to_owned(),
+            request: common::jsonrpc_client::JsonRpcRequestEnum::Single(common::jsonrpc_client::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: "0".to_owned(),
+                method: "listtransactions".to_owned(),
+                params: Vec::new(),
+            }),
+            error: common::jsonrpc_client::JsonRpcErrorType::Transport("no answer".to_owned()),
+        }
+    }
+
+    /// A chain-changed event survives a failed listing and is cleared only by an Ok one.
+    #[test]
+    fn a_failed_listing_keeps_the_chain_changed_flag_and_an_ok_one_clears_it() {
+        let mut fx = Fixture::new(|_| vec![]);
+        fx.ctx.chain_changed = true;
+        NativeClientImpl::get_block_count.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(800u64))));
+        NativeClientImpl::list_transactions
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::err(native_listing_error()))));
+        let _next = block_on(Box::new(FetchingTxHashes::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(fx.ctx.chain_changed, "the failed listing keeps the event");
+
+        NativeClientImpl::list_transactions
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(vec![]))));
+        let _next = block_on(Box::new(FetchingTxHashes::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(!fx.ctx.chain_changed, "the Ok listing clears it");
     }
 
     #[test]

@@ -2578,26 +2578,25 @@ impl PoolShared {
             return;
         }
         whole.push(report.base);
-        let (first, reported) = {
+        let first = {
             let mut view = self.chain_view.lock().unwrap_or_else(|p| p.into_inner());
             // The server may have changed its answer meanwhile: then nothing is concluded.
             let Some(first) = view.lowest_difference(low, &whole) else {
                 return;
             };
-            (first, view.replace(first, low, whole))
+            view.replace(low, whole);
+            first
         };
-        if reported {
-            if first == low {
-                warn!(
-                    "{}: the Electrum servers report a reorganization of the chain at or below height {}",
-                    self.ticker, first
-                );
-            } else {
-                warn!(
-                    "{}: the Electrum servers report a reorganization of the chain from height {}",
-                    self.ticker, first
-                );
-            }
+        if first == low {
+            warn!(
+                "{}: the Electrum servers report a reorganization of the chain at or below height {}",
+                self.ticker, first
+            );
+        } else {
+            warn!(
+                "{}: the Electrum servers report a reorganization of the chain from height {}",
+                self.ticker, first
+            );
         }
         self.chain_subscribers
             .lock()

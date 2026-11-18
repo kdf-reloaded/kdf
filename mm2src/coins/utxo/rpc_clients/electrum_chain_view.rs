@@ -10,8 +10,7 @@
 use super::electrum_measure::{same_block, BASE_HEADER_LEN};
 use std::collections::BTreeMap;
 
-/// The number of heights the view holds, and the number of heights below the highest that a replaced header is
-/// remembered for: `2T + 2` (CRD ch.38 §38.5C amendment, items 1 and 4).
+/// The number of heights the view holds: `2T + 2` (CRD ch.38 §38.5C amendment, item 1).
 pub(super) fn window_of(tolerance: u64) -> u64 { tolerance.saturating_mul(2).saturating_add(2) }
 
 /// What the client does when a connection first reports a height above the highest of the view.
@@ -31,8 +30,6 @@ pub(super) struct ChainView {
     window: u64,
     /// Height to base header, at most `window` heights, the highest last.
     headers: BTreeMap<u64, Vec<u8>>,
-    /// The base headers the view lost to a replacement, with their heights, within `window` heights of the highest.
-    replaced: Vec<(u64, Vec<u8>)>,
 }
 
 /// The first [`BASE_HEADER_LEN`] bytes of `header`.
@@ -58,7 +55,6 @@ impl ChainView {
         ChainView {
             window: window_of(tolerance),
             headers: BTreeMap::new(),
-            replaced: Vec::new(),
         }
     }
 
@@ -92,7 +88,6 @@ impl ChainView {
     /// Starts the view again at `height` with `base`.
     pub(super) fn restart(&mut self, height: u64, base: Vec<u8>) {
         self.headers.clear();
-        self.replaced.clear();
         self.headers.insert(height, base);
     }
 
@@ -118,39 +113,13 @@ impl ChainView {
     }
 
     /// Replaces the view by `headers` (consecutive, the first at `from`, the last the new tip's), the chain having
-    /// changed from `first_difference` on. The headers the view held from there on are remembered as replaced. Returns
-    /// whether the change is to be reported: not when the new chain's header at `first_difference` is one the view
-    /// held there within the last `2T + 2` heights.
-    pub(super) fn replace(&mut self, first_difference: u64, from: u64, headers: Vec<Vec<u8>>) -> bool {
-        let new_at_difference = headers
-            .get(usize::try_from(first_difference.saturating_sub(from)).unwrap_or(usize::MAX))
-            .cloned();
-        let back = new_at_difference.map_or(false, |new| {
-            self.replaced
-                .iter()
-                .any(|(height, old)| *height == first_difference && same_block(old, &new))
-        });
-        let lost: Vec<(u64, Vec<u8>)> = self
-            .headers
-            .iter()
-            .filter(|(height, _)| **height >= first_difference)
-            .map(|(height, header)| (*height, header.clone()))
-            .collect();
-        for (height, old) in lost {
-            if !self
-                .replaced
-                .iter()
-                .any(|(h, held)| *h == height && same_block(held, &old))
-            {
-                self.replaced.push((height, old));
-            }
-        }
+    /// changed. Every change is a reorganization, a change back to a chain the view held before included.
+    pub(super) fn replace(&mut self, from: u64, headers: Vec<Vec<u8>>) {
         self.headers.clear();
         for (offset, header) in headers.into_iter().enumerate() {
             self.headers.insert(from + offset as u64, header);
         }
         self.prune();
-        !back
     }
 
     fn prune(&mut self) {
@@ -158,7 +127,6 @@ impl ChainView {
         // `window` heights: the highest and the `window - 1` below it.
         let floor = (highest + 1).saturating_sub(self.window);
         self.headers = self.headers.split_off(&floor);
-        self.replaced.retain(|(height, _)| *height >= floor);
     }
 }
 
@@ -208,29 +176,32 @@ mod tests {
     }
 
     #[test]
-    fn a_change_back_is_not_reported_again() {
+    fn a_replacement_holds_the_new_chain_and_a_change_back_is_a_replacement_too() {
         let mut view = ChainView::new(1);
         view.restart(10, header(1));
         view.extend(11, vec![header(1)]);
         // Chain B replaces 10 and 11 and adds 12.
-        assert!(view.replace(10, 10, vec![header(2), header(2), header(2)]));
-        // Chain A comes back at 10.
-        assert!(!view.replace(10, 10, vec![header(1), header(1), header(1), header(1)]));
-        // Chain B again: still within the window of what was held.
-        assert!(!view.replace(10, 10, vec![header(2), header(2), header(2), header(2)]));
+        view.replace(10, vec![header(2), header(2), header(2)]);
+        assert_eq!(view.snapshot().get(&12), Some(&header(2)));
+        // Chain A comes back at 10: the view holds it, as for any other change.
+        assert_eq!(
+            view.lowest_difference(10, &[header(1), header(1), header(1), header(1)]),
+            Some(10)
+        );
+        view.replace(10, vec![header(1), header(1), header(1), header(1)]);
+        assert_eq!(view.heights(), vec![10, 11, 12, 13]);
+        assert_eq!(
+            view.lowest_difference(10, &[header(1), header(1), header(1), header(1)]),
+            None
+        );
     }
 
     #[test]
-    fn a_chain_the_view_no_longer_remembers_is_reported() {
+    fn a_replacement_keeps_only_the_window() {
         let mut view = ChainView::new(1);
         view.restart(10, header(1));
-        assert!(view.replace(10, 10, vec![header(2)]));
-        for height in 11..=20 {
-            view.extend(height, vec![header(2)]);
-        }
-        assert!(view.replace(20, 17, vec![header(3), header(3), header(3), header(3)]));
-        // The first chain was forgotten long ago.
-        assert!(view.replace(17, 17, vec![header(1), header(1), header(1), header(1)]));
+        view.replace(10, vec![header(2); 10]);
+        assert_eq!(view.heights(), vec![16, 17, 18, 19]);
     }
 
     #[test]

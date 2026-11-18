@@ -5603,7 +5603,7 @@ fn t38_5c_chain_view_a_chain_that_only_grows_gives_no_event() {
 }
 
 /// A two-block reorganization at the tip: one event, one WARN naming the lowest height that differs, and the view
-/// holds the new chain. A race back and forth between the two chains is reported once.
+/// holds the new chain. A race back and forth between the two chains is reported at every change.
 #[test]
 fn t38_5c_chain_view_a_reorganization_gives_one_event_and_one_warn() {
     let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
@@ -5659,19 +5659,82 @@ fn t38_5c_chain_view_a_reorganization_gives_one_event_and_one_warn() {
             )]);
         }
 
-        // The chain 1 comes back, and then the chain 2 again: both changes are events; neither is reported again.
+        // The chain 1 comes back, and then the chain 2 again: each change is an event and a WARN of its own.
         for height in [H + 9, H + 10, H + 11, H + 12] {
             server.set_chain_header(height, &chain_hdr(1, height));
         }
         push_tip_and_settle(&client, &server, H + 12, H + 12).await;
+        assert_eq!(events_in(&mut first), 1);
         for height in [H + 9, H + 10, H + 11, H + 12, H + 13] {
             server.set_chain_header(height, &chain_hdr(2, height));
         }
         push_tip_and_settle(&client, &server, H + 13, H + 13).await;
-        assert_eq!(events_in(&mut first), 2);
+        assert_eq!(events_in(&mut first), 1);
         assert_eq!(events_in(&mut second), 2);
+        let view = client.pool.chain_view_for_test();
+        assert_eq!(view.keys().copied().collect::<Vec<_>>(), vec![
+            H + 10,
+            H + 11,
+            H + 12,
+            H + 13
+        ]);
         if capturing {
-            assert_eq!(warns(ticker).len(), 1, "{:?}", warns(ticker));
+            let from = format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain from height {}",
+                H + 9
+            );
+            // The view then held H + 9 as its lowest height, so the third change is reported "at or below" it.
+            let at_or_below = format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain at or below height {}",
+                H + 9
+            );
+            assert_eq!(warns(ticker), vec![from.clone(), from, at_or_below]);
+        }
+    });
+}
+
+/// One change that two connections report gives one event and one WARN.
+#[test]
+fn t38_5c_chain_view_one_change_reported_by_two_connections_gives_one_warn() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "CHV2B";
+        let (a, b) = (chain_stub(H).await, chain_stub(H).await);
+        let client = chain_client(ticker, &[&a, &b], quiet_timings());
+        let mut events = client.pool.subscribe_chain_changes();
+        join_with_heights(&client, &[&a, &b]).await;
+        wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        for n in 1..=3u64 {
+            a.set_tip(H + n);
+            b.set_tip(H + n);
+            wait_until("the view to take the tip", || {
+                client.pool.chain_check_idle_for_test()
+                    && client.pool.chain_view_for_test().keys().next_back() == Some(&(H + n))
+            })
+            .await;
+        }
+        assert_eq!(events_in(&mut events), 0);
+
+        // Both servers serve the chain 2 from H + 3 and push the new tip.
+        for server in [&a, &b] {
+            serve_chain(server, 2, H + 3, H + 4);
+        }
+        a.set_tip(H + 4);
+        b.set_tip(H + 4);
+        wait_until("the view to take the new chain", || {
+            client.pool.chain_view_for_test().get(&(H + 4)) == Some(&hex::decode(chain_hdr(2, H + 4)).unwrap())
+        })
+        .await;
+        // Both reports have been dealt with.
+        Timer::sleep(0.3).await;
+        wait_until("the checks to end", || client.pool.chain_check_idle_for_test()).await;
+        assert_eq!(events_in(&mut events), 1);
+        if capturing {
+            assert_eq!(warn_lines(ticker), vec![format!(
+                "WARN {ticker}: the Electrum servers report a reorganization of the chain from height {}",
+                H + 3
+            )]);
         }
     });
 }
