@@ -31,6 +31,13 @@ or undo, and every change that needs a step from you.
   - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
     where it used to be ignored.
 
+- **WalletConnect sessions paired with an earlier version must be paired again.** The node now keeps one relay
+  identity across reconnects and restarts. Sessions made by an earlier version were made under a different identity,
+  so the relay refuses requests on them after the upgrade: remove them in the wallet and pair again.
+  - *Browser (WASM) builds:* the WalletConnect store in the browser is upgraded to a new format at the first start.
+    An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
+    in the browser first, then pair again.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
