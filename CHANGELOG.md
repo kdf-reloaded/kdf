@@ -383,7 +383,7 @@ the previous version used. The safe way:
   `additional_info.unreadable_transactions`, with its `tx_hash` and a short `error`. This includes transactions skipped
   because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. Until a later release
   reads ZEC version-6 transactions, they appear in this list. The BCH and SLP history also no longer pauses at a
-  transaction that does not parse; it skips it and stores the rest. Detail: PR #NNN; CRD ch.39 D39.11.4V.1.
+  transaction that does not parse; it skips it and stores the rest. Detail: PR #415; CRD ch.39 D39.11.4V.1.
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
   served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
@@ -543,7 +543,7 @@ the previous version used. The safe way:
   (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
-  unreadable transactions (PR #NNN); the coins entry follows. Z1–Z8 done.
+  unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
