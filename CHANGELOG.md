@@ -350,7 +350,7 @@ the previous version used. The safe way:
   and SLP. Now a row is removed when two successful listings in a row, at least one block apart, from servers that are
   up to date, do not contain it. All rows of one transaction go together. A failed or cut-off listing, a listing from
   a server that is behind, and any listing while the servers disagree about the chain remove nothing. One log line
-  reports each removal. A transaction listed at another height takes that height and its block's time. Detail: PR #N;
+  reports each removal. A transaction listed at another height takes that height and its block's time. Detail: PR #408;
   CRD ch.38 §38.5C, D38.5C.1 and D38.5C.2.
 - **The transaction history reacts to a reorganization of the chain at once.** Each coin's Electrum client now notices
   when the chain its servers follow changes: on every new block it compares the recent block headers of an up-to-date

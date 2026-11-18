@@ -315,6 +315,7 @@ pub trait Qrc20NativeOps {
     ) -> UtxoRpcFut<Vec<TxReceipt>>;
 }
 
+#[cfg_attr(test, mockable)]
 impl Qrc20NativeOps for NativeClient {
     fn call_contract(&self, contract_addr: &H160Json, data: BytesJson) -> RpcRes<ContractCallResult> {
         rpc_func!(self, "callcontract", contract_addr, data)
