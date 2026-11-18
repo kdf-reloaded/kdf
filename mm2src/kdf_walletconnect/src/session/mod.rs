@@ -349,6 +349,14 @@ impl SessionManager {
         }
     }
 
+    /// Runs `read` on the live session registered for `topic` and returns its result, or `None` when no session is
+    /// registered for the topic. The session is borrowed under the index lock, so `read` copies out what it needs and
+    /// returns; a coin integration uses this to read the namespaces and key records of the session without this
+    /// crate knowing the chain family.
+    pub fn with_session<R>(&self, topic: &Topic, read: impl FnOnce(&Session) -> R) -> Option<R> {
+        self.sessions.lock().get(topic).map(read)
+    }
+
     /// Resolves the topic of a settled session whose negotiated namespaces grant
     /// the given CAIP-2 chain id (e.g. `eip155:1`).
     ///

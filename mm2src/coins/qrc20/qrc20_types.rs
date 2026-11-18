@@ -99,6 +99,44 @@ pub struct Qrc20CoinFields {
     pub contract_address: H160,
     pub swap_contract_address: H160,
     pub fallback_swap_contract: Option<H160>,
+    /// Ends the history collector of this instance at once when the token is disabled (CRD ch.38 D38.6.4Q.5 status
+    /// note, R38.6.4Q.10 item 1).
+    pub(crate) history_abort: HistoryAbort,
+}
+
+/// The abort of the history collector of one token instance. The collector is started once per instance
+/// ([`HistoryAbort::take_registration`] gives its registration out once), and [`HistoryAbort::abort`] ends it wherever
+/// it is: in a wait, in a request or in the middle of a pass. An abort that comes before the collector started is not
+/// lost.
+#[derive(Debug)]
+pub(crate) struct HistoryAbort {
+    handle: futures::future::AbortHandle,
+    registration: std::sync::Mutex<Option<futures::future::AbortRegistration>>,
+}
+
+impl HistoryAbort {
+    pub(crate) fn new() -> HistoryAbort {
+        let (handle, registration) = futures::future::AbortHandle::new_pair();
+        HistoryAbort {
+            handle,
+            registration: std::sync::Mutex::new(Some(registration)),
+        }
+    }
+
+    /// The registration the collector runs under; `None` when this instance's collector was started already.
+    pub(crate) fn take_registration(&self) -> Option<futures::future::AbortRegistration> {
+        self.registration
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+
+    pub(crate) fn abort(&self) { self.handle.abort(); }
+}
+
+impl Qrc20Coin {
+    /// Ends the history collector of this instance (the disable of the token, CRD ch.38 D38.6.4Q.5 status note).
+    pub(crate) fn end_history_collector(&self) { self.history_abort.abort(); }
 }
 
 #[derive(Clone, Debug)]

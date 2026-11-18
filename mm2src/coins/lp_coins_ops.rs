@@ -776,6 +776,11 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     match coins.remove(ticker) {
         Some(removed) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
+            // A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's
+            // Electrum client closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
+            if let MmCoinEnum::Qrc20Coin(token) = &removed {
+                token.end_history_collector();
+            }
             forget_token_records(&coins, &removed, ticker);
             Ok(())
         },

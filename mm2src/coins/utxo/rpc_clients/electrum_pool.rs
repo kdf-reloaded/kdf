@@ -392,7 +392,8 @@ pub(super) fn call_budget_of_caller(default: Duration) -> Duration {
 }
 
 /// The Electrum methods whose request is a read-only query in the sense of CRD ch.38 R38.6.4a item 1: balance,
-/// unspent-list, history, header, block-count, transaction-get, fee-estimate and relay-fee requests. The list
+/// unspent-list, history, header, block-count, transaction-get, fee-estimate and relay-fee requests, and, for
+/// Reloaded, the three Qtum contract reads of [`ERROR_FAILOVER_METHODS`] (D38.6.4Q.2 status note, item 3). The list
 /// is closed: a method that is not on it keeps the priority routing.
 ///
 /// The block-count read of this client is the one-shot `blockchain.headers.subscribe` request (its answer is
@@ -400,6 +401,9 @@ pub(super) fn call_budget_of_caller(default: Duration) -> Duration {
 /// The other subscriptions (`blockchain.scripthash.subscribe`, `blockchain.contract.event.subscribe`) are not
 /// on the list.
 const READ_ONLY_METHODS: &[&str] = &[
+    "blockchain.contract.call",
+    "blockchain.contract.event.get_history",
+    "blochchain.transaction.get_receipt",
     "blockchain.scripthash.get_balance",
     "blockchain.scripthash.listunspent",
     "blockchain.scripthash.get_history",
@@ -434,6 +438,32 @@ pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
             !batch.is_empty() && batch.methods().all(|method| READ_ONLY_METHODS.contains(&method))
         },
     }
+}
+
+/// The three Qtum contract reads whose JSON-RPC error answer moves the request on to the next server instead of ending
+/// it (CRD ch.38 D38.6.4Q.2 status note, item 1). The third method is spelled as the server spells it.
+const ERROR_FAILOVER_METHODS: &[&str] = &[
+    "blockchain.contract.call",
+    "blockchain.contract.event.get_history",
+    "blochchain.transaction.get_receipt",
+];
+
+/// The failure of a server that answered `request` with a JSON-RPC error, when that answer moves the request on
+/// (D38.6.4Q.2 status note): `request` is a single request of [`ERROR_FAILOVER_METHODS`], `response` is an error
+/// answer, and the error is not exactly `{"code": 1, "message": "history too large"}`, which is final (item 2).
+/// `None` for everything else: a result, an answer that cannot be read (the pool does not judge shapes), and every
+/// other method, whose error answer ends the request as before (R38.6.4f item 1).
+fn error_answer_failure(request: &JsonRpcRequestEnum, response: &JsonRpcResponseEnum) -> Option<String> {
+    let (JsonRpcRequestEnum::Single(request), JsonRpcResponseEnum::Single(response)) = (request, response) else {
+        return None;
+    };
+    if !ERROR_FAILOVER_METHODS.contains(&request.method.as_str())
+        || response.error.is_null()
+        || crate::utxo::utxo_common::HISTORY_TOO_LARGE_ERROR.eq(&response.error)
+    {
+        return None;
+    }
+    Some(format!("the server answered with an error: {}", response.error))
 }
 
 /// The Electrum method of an unspent-list request (R38.6.4a item 1 and its amendment of 2026-11-15).
@@ -652,12 +682,37 @@ pub(super) struct OpenedConnections {
 
 pub(super) type OpenedByCall = Arc<StdMutex<OpenedConnections>>;
 
-/// The failures of a call, one per server tried (CRD ch.38 R38.6.4i).
+/// The failures of a call, one per server tried (CRD ch.38 R38.6.4i), and which of those servers answered with a
+/// JSON-RPC error answer instead of failing by transport (D38.6.4Q.2 status note).
 #[derive(Default)]
-struct Failures(Vec<(String, String)>);
+struct Failures(Vec<(String, String)>, HashSet<String>);
+
+/// The headline of the failure of a call whose every server tried answered with an error answer. The history collector
+/// of a QRC20 token counts only such failures towards the end of its collector (CRD ch.38, amendment after R38.6.4Q.6,
+/// "Counting"); a failure with any transport failure among the servers carries the ordinary headline.
+pub(super) const EVERY_SERVER_ANSWERED_AN_ERROR: &str =
+    "every Electrum server tried answered the request with an error";
+
+/// Whether `failure`, the text of a failed call of the coin `ticker`, says that every server tried answered with an
+/// error answer (see [`EVERY_SERVER_ANSWERED_AN_ERROR`]). The text starts with the ticker, which no server controls.
+pub(crate) fn every_server_answered_an_error(ticker: &str, failure: &str) -> bool {
+    failure.starts_with(&format!("{ticker}: {EVERY_SERVER_ANSWERED_AN_ERROR} ("))
+}
 
 impl Failures {
+    /// A server that failed by transport (or timed out).
     fn record(&mut self, addr: &str, error: String) {
+        self.1.remove(addr);
+        self.store(addr, error);
+    }
+
+    /// A server that answered with an error answer.
+    fn record_error_answer(&mut self, addr: &str, error: String) {
+        self.1.insert(addr.to_owned());
+        self.store(addr, error);
+    }
+
+    fn store(&mut self, addr: &str, error: String) {
         match self.0.iter_mut().find(|(known, _)| known == addr) {
             Some(entry) => entry.1 = error,
             None => self.0.push((addr.to_owned(), error)),
@@ -665,7 +720,13 @@ impl Failures {
     }
 
     fn describe(&self, ticker: &str, note: &str) -> String {
-        self.describe_as(ticker, "the request failed on every Electrum server tried", note)
+        let every_answered = !self.0.is_empty() && self.0.iter().all(|(addr, _)| self.1.contains(addr));
+        let headline = if every_answered {
+            EVERY_SERVER_ANSWERED_AN_ERROR
+        } else {
+            "the request failed on every Electrum server tried"
+        };
+        self.describe_as(ticker, headline, note)
     }
 
     fn describe_as(&self, ticker: &str, headline: &str, note: &str) -> String {
@@ -908,6 +969,10 @@ pub(super) struct PoolShared {
     /// Counts the connections that ended; a change tells a subscriber its subscription may be lost.
     session_epoch: AtomicU64,
     resubscribe_pending: AtomicBool,
+    /// The contract-event subscriptions are to be placed again, once (D38.6.4Q.3 status note). Set when a maintained
+    /// connection ends and when a connection joins an empty maintained set, taken separately from
+    /// `resubscribe_pending`, and never set again by a failed attempt, so a refusal is not repeated.
+    contract_resubscribe_pending: AtomicBool,
     trigger_tx: futures_mpsc::UnboundedSender<Wake>,
     trigger_rx: StdMutex<Option<futures_mpsc::UnboundedReceiver<Wake>>>,
 }
@@ -957,6 +1022,7 @@ impl PoolShared {
             next_request_id: AtomicU64::new(0),
             session_epoch: AtomicU64::new(0),
             resubscribe_pending: AtomicBool::new(false),
+            contract_resubscribe_pending: AtomicBool::new(false),
             trigger_tx,
             trigger_rx: StdMutex::new(Some(trigger_rx)),
         }
@@ -1093,7 +1159,19 @@ impl PoolShared {
         let _ = self.trigger_tx.unbounded_send(Wake::Resubscribe);
     }
 
+    /// Asks for the contract-event subscriptions to be placed again, once, over a maintained connection (CRD ch.38
+    /// D38.6.4Q.3 status note). It is asked for when a maintained connection ends and when the maintained set was empty
+    /// and a connection joined it, so at most once for each newly maintained connection, whatever the outcome.
+    pub(super) fn request_contract_resubscribe(&self) {
+        self.contract_resubscribe_pending.store(true, AtomicOrdering::Relaxed);
+        let _ = self.trigger_tx.unbounded_send(Wake::Resubscribe);
+    }
+
     fn take_resubscribe_pending(&self) -> bool { self.resubscribe_pending.swap(false, AtomicOrdering::Relaxed) }
+
+    fn take_contract_resubscribe_pending(&self) -> bool {
+        self.contract_resubscribe_pending.swap(false, AtomicOrdering::Relaxed)
+    }
 
     #[cfg(test)]
     pub(super) fn snapshot(&self) -> Vec<ServerStateSnapshot> {
@@ -1346,19 +1424,24 @@ impl PoolShared {
     /// maintained set fell below the floor (R38.6.4c item 1). Ending the same connection twice is harmless.
     fn session_ended(&self, id: usize, session_id: u64) {
         let Some(slot) = self.slot_by_id(id) else { return };
-        {
+        let was_maintained = {
             let mut state = slot.state();
             if state.session.as_ref().map(|session| session.id()) != Some(session_id) {
                 return;
             }
+            let was_maintained = state.maintained;
             state.session = None;
             state.maintained = false;
             state
                 .suspension
                 .on_failure(now_float(), self.timings.suspension_base, self.timings.suspension_cap);
-        }
+            was_maintained
+        };
         self.session_epoch.fetch_add(1, AtomicOrdering::Relaxed);
         self.request_resubscribe();
+        if was_maintained {
+            self.request_contract_resubscribe();
+        }
         if self.maintained_count() < self.floor() {
             self.trigger();
         }
@@ -1432,6 +1515,7 @@ impl PoolShared {
         self.signal_measure();
         if was_empty {
             self.resubscribe_pending.store(true, AtomicOrdering::Relaxed);
+            self.contract_resubscribe_pending.store(true, AtomicOrdering::Relaxed);
         }
         let maintained = self.maintained_slots();
         if maintained.len() > self.ceiling() {
@@ -3332,6 +3416,9 @@ impl PoolShared {
         // the connections still to try are counted as before.
         let maintained = self.in_turn_for(request, maintained);
         let mut tried: Vec<usize> = Vec::new();
+        // The servers that answered this request with an error answer: not asked again within the request, the retry
+        // included (D38.6.4Q.2 status note, item 1).
+        let mut error_answered: HashSet<usize> = HashSet::new();
         for (i, slot) in maintained.iter().enumerate() {
             let remaining = secs_left(deadline);
             if remaining.is_zero() {
@@ -3348,7 +3435,15 @@ impl PoolShared {
             tried.push(slot.id);
             let attempt_timeout = round.min(timings.request).min(remaining);
             match self.request_on(slot, &session, request, attempt_timeout).await {
-                Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                // An error answer to one of the three contract reads moves the request on and closes nothing
+                // (D38.6.4Q.2 status note).
+                Ok(response) => match error_answer_failure(request, &response) {
+                    Some(failure) => {
+                        failures.record_error_answer(&slot.label, failure);
+                        error_answered.insert(slot.id);
+                    },
+                    None => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                },
                 Err(e) => failures.record(&slot.label, e),
             }
         }
@@ -3357,7 +3452,11 @@ impl PoolShared {
         // tried come first. As soon as an attempt ends without an answer, the next server starts (D38.6.4j.1), so one
         // attempt that is slow to fail never holds back a server that could answer. The budget of an attempt is
         // derived from the servers not yet started, this one included (R38.6.4j item 2).
-        let usable = self.usable_slots();
+        let usable: Vec<Arc<ServerSlot>> = self
+            .usable_slots()
+            .into_iter()
+            .filter(|slot| !error_answered.contains(&slot.id))
+            .collect();
         let (untried, retried): (Vec<_>, Vec<_>) = usable.into_iter().partition(|slot| !tried.contains(&slot.id));
         let order: Vec<Arc<ServerSlot>> = untried.into_iter().chain(retried).collect();
         let mut next = 0;
@@ -3388,7 +3487,10 @@ impl PoolShared {
                 return None;
             };
             match result {
-                Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                Ok(response) => match error_answer_failure(request, &response) {
+                    Some(failure) => failures.record_error_answer(&slot.label, failure),
+                    None => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                },
                 Err(e) => failures.record(&slot.label, e),
             }
         }
@@ -3523,12 +3625,17 @@ async fn maintenance_loop(client: Weak<ElectrumClientImpl>, mut trigger_rx: futu
         }
         // The subscriptions are placed over a maintained connection (R38.6.4h); while there is none,
         // the request stays pending until a pass has made one.
+        let client = ElectrumClient(client);
         if pool.maintained_count() > 0 && pool.take_resubscribe_pending() {
-            let client = ElectrumClient(client);
             if !client.resubscribe_watched_scripthashes().await {
                 pool.resubscribe_pending.store(true, AtomicOrdering::Relaxed);
                 next_pass_at = next_pass_at.min(now_float() + pool.timings.short_repass.as_secs_f64());
             }
+        }
+        // The contract-event subscriptions get one attempt each per newly maintained session, whatever the outcome
+        // (D38.6.4Q.3 status note, item 2): a failed attempt neither sets the flag again nor shortens the pass delay.
+        if pool.maintained_count() > 0 && pool.take_contract_resubscribe_pending() {
+            client.resubscribe_watched_contract_events().await;
         }
     }
 }

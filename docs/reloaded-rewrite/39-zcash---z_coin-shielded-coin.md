@@ -6896,6 +6896,18 @@ plan `zec-v5-transactions` settles the rate Reloaded uses.
 > §39.11.4V ("a transparent transaction pays more than ZIP 317's conventional
 > fee") holds for these shapes only.
 
+> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; passed the KDF Dirty
+> Gate with §39.11.4W):* a fee below the per-kilobyte estimate also meets the
+> counterparty checks of §39.11.4W. At the rows of R39.11.4V.1 a reference peer
+> refuses it only in a version-two swap with the coin as the taker coin: in
+> the funding-spend preimage this software builds as maker (a band of 0.9 to
+> 1.1 on the ratio of the peer's estimate to the fee paid, every DEX-fee arm),
+> and in the taker-payment-spend preimage it builds as taker under `NoFee`
+> (exact equality). A refusal ends the swap in refunds on both sides; no peer
+> is banned and no order is marked. Legacy swaps, their DEX fee transaction
+> and the watchers check no network fee. The remedy point of R39.11.4V.10 is
+> unchanged; its choice now has these two version-two cases to account for.
+
 D39.11.4V.1 *(Open.)* *A transaction of a version the history cannot read.*
 Reproducing the reference (R39.11.4V.8) leaves such a transaction out of the
 legacy history without a signal, and keeps the version-two history in progress
@@ -6905,6 +6917,25 @@ the reference; (b) skip such a transaction so that the rest of the history is
 complete, and report its identifier through the history's sync status or error
 channel; (c) add a row from the backend's listing alone (identifier and height,
 amounts unknown). Recommendation: (b).
+
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision as option (b), for every UTXO coin. Both history collectors of this
+> repository skip a transaction they cannot read and go on with the rest of
+> the pass, as R38.5A.9 already required for the cases it names. The version-two
+> collector of BCH and SLP now also skips a transaction, or a transaction whose
+> input transaction, does not parse, where it used to pause and start again. The
+> skip is now reported: while a pass runs and when it ends, `sync_status`
+> carries `additional_info.unreadable_transactions`, a list of the skipped
+> transactions with `tx_hash` and a short `error`, for example
+> `{"state": "Finished", "additional_info": {"unreadable_transactions":
+> [{"tx_hash": "...", "error": "the transaction cannot be parsed: ..."}]}}`.
+> A transaction skipped because one of its input transactions cannot be read,
+> or because an input spends an output that does not exist, is reported with
+> that reason. The list is rebuilt on every pass, so a transaction that reads
+> later leaves it. A pass that skips nothing answers exactly as before
+> (`{"state": "Finished"}`). A backend or transport failure is not reported as
+> unreadable; its handling is unchanged. Until the Zcash library upgrade of
+> D39.11.4V.3, a version-6 ZEC transaction is reported this way.
 
 D39.11.4V.2 *(Open.)* *An entry whose version this software cannot build.*
 Reproducing the reference (R39.11.4V.5) accepts any `txversion`, gives version 5
@@ -7021,6 +7052,179 @@ chapter states.
 T39.11.4V.12 *Fee.* With `txfee` `r` and no `dingo_fee`, a withdraw's fee is
 `floor(r × s / 1000)` for the size `s` of the answered bytes, with no adjustment
 toward ZIP 317 (parity; the plan's fee point sets Reloaded's result).
+
+### 39.11.4W Counterparty fee checks on transparent UTXO transactions (reference)
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.03 (attestation in §39.9).**
+> This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-14) under the two-team procedure of chapter 01 §1.4A, from the
+> reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A, with the row `main (as of 2026-10-07)` compared against
+> `v3.0.0-beta` (only the read-me differs), and from this repository's own
+> tree. It edits no sentence of this chapter. It answers, for R39.11.4V.10 and
+> the fee point of plan `zec-v5-transactions`, one question: does a reference
+> peer refuse or penalize a swap, ban the peer or mark an order, when the
+> network fee its counterparty chose for a transparent UTXO transaction is
+> below the reference's own per-kilobyte estimate? Numbering: R39.11.4W.1 --
+> R39.11.4W.7 and T39.11.4W.1 -- T39.11.4W.6.
+
+*Scope and terms.* The section covers every transparent UTXO coin, the
+transparent Zcash-family coins of §39.11.4V included; it does not cover the
+shielded coin of this chapter. `S` is the spend-fee estimate of chapter 16
+R14A: the coin's fee policy applied to the 496-byte reference spend size. For
+ZEC at the coins-file `txfee` of 70000 per kilobyte, `S` is 34,720 zatoshi.
+*Maker* and *taker* are the swap roles; the *taker coin* is the coin the taker
+pays in.
+
+**R39.11.4W.1** *Reference states.* The rows `v2.6.0-beta` and `v3.0.0-beta`
+agree on every point of R39.11.4W.2 -- R39.11.4W.7 except the watcher-reward
+band of R39.11.4W.6, which differs as stated there. The row `main (as of
+2026-10-07)` does not differ from `v3.0.0-beta` in any source file.
+
+**R39.11.4W.2** *Two checks, both in the version-two protocol, both on the
+taker coin.* At both rows, a node compares a network fee chosen by its
+counterparty for a transparent UTXO transaction with its own estimate in
+exactly two places, the two preimage validations of the version-two protocol:
+
+| Preimage | Fee chosen by | Checked by | Applies under | Rule | On refusal |
+| --- | --- | --- | --- | --- | --- |
+| Funding spend (chapter 15 R21 -- R23) | the maker, as its own `S` at the time it builds the preimage | the taker, against its own `S` | every DEX-fee arm (`Standard`, `WithBurn`, `NoFee`) | the ratio of the taker's `S` to the preimage's fee (the funding output's value minus the preimage's single output value) must lie in [0.9, 1.1], both ends included; the preimage is then rebuilt with that fee and must match exactly | the taker moves to `TakerFundingRefundRequired` with the reason *funding-spend preimage validation failure* (chapter 52 R29, R36) |
+| Taker-payment spend (chapter 16 R14A, R17) | the taker, as its own `S`, through the maker's payout output | the maker, against its own `S` | `WithBurn` and `NoFee` only | the rebuilt preimage must equal the received one exactly; a fee that differs in either direction changes the maker's payout and is refused | the maker moves to `MakerPaymentRefundRequired` with the reason *taker payment-spend preimage invalid* (chapter 52 R19, R22) |
+
+For the funding spend, the band is a band on the counterparty's fee, not on
+the output value: with the taker's `S` at 34,720 zatoshi, the accepted fees
+are 31,564 to 38,577 zatoshi inclusive. Under the `Standard` arm the
+taker-payment-spend preimage holds no maker output, the maker sets the fee of
+the final spend itself, and nothing is compared.
+
+**R39.11.4W.3** *What follows a refusal.* Neither check bans the peer, marks
+or cancels an order, or records anything outside the swap's own state; the
+version-two machines carry no penalty (chapter 52 R45). A refused funding
+spend leaves the taker refunding its funding and the maker, whose payment is
+already broadcast, refunding its payment once the funding is not spent in
+time (chapter 52 R18, R21). A refused taker-payment spend leaves the maker
+refunding its payment and the taker, which then sees no spend of its payment,
+refunding its payment after the payment's lock time (chapter 52 R31). No
+funds are lost; both sides wait for their lock times.
+
+**R39.11.4W.4** *Version two has no other fee check.* The maker payment and
+the funding transaction are validated by output script and exact output value
+only (chapter 15 R17; chapter 52 R29 step 1). The spend of the maker payment
+and every refund are built and broadcast by one party alone and are not
+validated by the other. No version-two swap message carries a fee or a fee
+rate.
+
+**R39.11.4W.5** *The legacy protocol (version one) has no fee check.* At both
+rows, no node running a legacy swap compares a network fee chosen by its
+counterparty with its own estimate:
+
+- *DEX fee transaction.* The maker checks who signed it, that it was not
+  confirmed before the swap's start bound, that the bytes it received match
+  the transaction its node returns, and the script and minimum value of the
+  DEX-fee output (and of the burn output where the arm has one, chapter 08).
+  The transaction's network fee is not examined.
+- *Payments.* Each side checks the counterparty's payment by comparing the
+  bytes it received with its node's copy, by HTLC script and by exact output
+  value (plus a watcher reward where one is carried, R39.11.4W.6). The network
+  fee is not examined.
+- *Spends and refunds.* Each is built and broadcast by one party alone; the
+  other only searches for it on chain, to learn the secret or the outcome.
+- *Penalty.* The one-hour penalty of chapter 51 R40 fires only on the events
+  listed there. The validations behind `TakerFeeValidateFailed`,
+  `TakerPaymentValidateFailed` and `MakerPaymentValidateFailed` do not look at
+  a network fee, and the other two events concern negotiation and a missing
+  spend, not a fee value; a lower fee therefore does not trigger the penalty by
+  itself.
+- No legacy swap message carries a fee or a fee rate; the DEX-fee message
+  carries the DEX fee transaction itself.
+
+**R39.11.4W.6** *Watchers.* A legacy watcher of a UTXO swap checks the DEX fee
+transaction (signer, start bound, age, the DEX-fee output's script) and the
+taker payment (signer, HTLC script, and that the refund preimage it was given
+carries the same redeem script). It does not examine the network fee of the
+payment or of the spend and refund preimages it was handed, and broadcasts
+those as given. A *watcher reward* is a separate amount, not a network fee: a
+UTXO payment carries one only when the other coin of the swap is an
+Ethereum-family coin and the node runs with a process-environment switch,
+off by default, that enables rewards; its expected amount is derived from the
+Ethereum coin's gas price and the trade's price, never from the UTXO coin's
+fee rate. Where one is carried, the receiving node accepts it within a band
+around its own expectation: at `v2.6.0-beta` from 0.9 to 1.1 times the
+expectation (each bound rounded down), at `v3.0.0-beta` at least 0.9 times the
+expectation, with no upper bound. A lower UTXO network fee does not reach
+this check.
+
+**R39.11.4W.7** *Orders and volume floors.* `S` also enters the coin's minimum
+trading volume (chapter 60 row U1: ten times `S` for a fixed-rate coin, at
+least ten times the dust amount). The reference applies that floor to the
+node's own orders and requests and uses it as the default `min_volume` of its
+own orders; it does not check a received order or request against its own
+floor, and orders carry no fee information.
+
+> *Consequence for a ZEC fee below `S` (informative).* Against a reference
+> peer, a ZEC network fee lower than the peer's `S` is refused in exactly two
+> cases, both in version-two swaps with ZEC as the taker coin: (1) whenever
+> this software is the **maker**, because it builds the funding-spend preimage
+> and a reference taker applies the band of R39.11.4W.2, under every DEX-fee
+> arm and on either network; (2) when this software is the **taker** under the
+> `NoFee` arm, because a reference maker requires its own `S` exactly. ZEC as a
+> version-two taker coin takes `NoFee` when the other coin is KMD on netid 8762
+> (chapter 16 R12B) or under the burn-key waiver (chapter 16 R7), and
+> `Standard` otherwise; at neither row does a UTXO coin other than KMD take
+> `WithBurn`. ZIP 317's conventional fee for a one-input, one-output spend of
+> this kind is 10,000 or 15,000 zatoshi (ZIP 317 counts a transparent input by
+> its byte size in units of 150 bytes, with a minimum of two actions), well
+> below the band's lower end of 31,564. The exact-equality rule of chapter 16
+> R17 binds this software's maker too, so a changed `S` for ZEC would also make
+> this software refuse a reference taker's `NoFee` preimage. Legacy swaps
+> (R39.11.4W.5) and watchers (R39.11.4W.6) accept any fee the network relays.
+
+> **Compatibility (this repository on dev, 2026-11-18; its own code, not the
+> reference).** Reloaded's version-two machines have the same division of
+> roles: the maker builds and signs the funding-spend preimage and the taker
+> validates it; the taker builds the taker-payment-spend preimage and the
+> maker validates it. Reloaded's taker applies the value-relative band of
+> chapter 15 R22 (the preimage's output value within one tenth of the expected
+> output value), which accepts a reference maker's fee whenever the swap amount
+> is large against the fee. Reloaded's maker applies the exact rebuild of
+> chapter 16 R17. Both builders and both validators take `S` from the 496-byte
+> estimate of chapter 16 R14A. Nothing else of Reloaded's behavior was checked
+> for this section.
+
+*Not established.* (1) Nothing was run against a reference binary. (2) Fee
+checks of non-UTXO coin families were not traced. (3) Whether a node operator
+can change `S` for a coin without changing `txfee` was not examined beyond the
+fee policy of chapter 16 R14A.
+
+*Acceptance rows.* Each row runs a version-two or legacy swap between this
+software and a reference-behaving peer on a mock UTXO backend, with ZEC (or a
+UTXO test coin with a fixed per-kilobyte `txfee`) as the coin named. *Parity*
+is the reference behavior of R39.11.4W.2 -- R39.11.4W.7.
+
+T39.11.4W.1 *Funding-spend band.* With the taker's `S` at 34,720, a
+funding-spend preimage whose fee is 31,564 or 38,577 is accepted and one whose
+fee is 31,563, 38,578, 15,000 or 10,000 is refused, the taker recording
+`TakerFundingRefundRequired` with the funding-spend preimage validation reason.
+
+T39.11.4W.2 *Funding-spend band under every arm.* T39.11.4W.1 gives the same
+results under `Standard`, `WithBurn` and `NoFee`.
+
+T39.11.4W.3 *Taker-payment spend, `NoFee`.* A taker-payment-spend preimage
+whose maker output is one zatoshi higher or lower than the maker's rebuild is
+refused, the maker recording `MakerPaymentRefundRequired` with the reason
+*taker payment-spend preimage invalid*; both sides end refunded.
+
+T39.11.4W.4 *Taker-payment spend, `Standard`.* The maker finalizes with its own
+fee whatever the taker's `S` was; nothing is refused.
+
+T39.11.4W.5 *Legacy swap.* A legacy swap in which the DEX fee transaction, the
+payments, the spends and the refunds pay 10,000 zatoshi each runs to
+completion against a reference peer whose `S` is 34,720, and no penalty is
+listed by `list_banned_pubkeys` afterwards.
+
+T39.11.4W.6 *No penalty in version two.* After a refusal of either kind in
+T39.11.4W.1 or T39.11.4W.3, `list_banned_pubkeys` on both nodes is empty.
 
 ### 39.11.5 Swap-path transparent queries: reference contract and the Light-mode failure policy
 
@@ -8700,7 +8904,53 @@ entries in its list cannot be told apart. Passing the position to the fallback c
 - *Status note added 2026-11-17 -- under R39.11.4V.10.* Reloaded-original,
   clean side: it records that Reloaded computes the fee over the version-5 size;
   no forbidden-class input, chapter 01 R38 not engaged.
+- *Status note added 2026-11-18 -- after D39.11.4V.1.* Reloaded-original,
+  clean side: it records the maintainer's resolution of 2026-11-18 and what this
+  repository builds for it; no forbidden-class input, chapter 01 R38 not
+  engaged.
 - *Clean-context addition (2026-11-17), §39.8.0.3:* R39.8.0bc, T39.8.0j and the status
   note after R39.8.0ba are Reloaded-original, clean side, written from this repository's
   own code and the public SQLite documentation of `VACUUM INTO`; no forbidden-class input,
   chapter 01 R38 not engaged.
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-14) -- §39.11.4W
+  (R39.11.4W.1 -- R39.11.4W.7, the consequence note, the compatibility note,
+  the not-established paragraph and T39.11.4W.1 -- T39.11.4W.6), the status
+  note of 2026-11-18 under R39.11.4V.10, and the status notes of the same date
+  after chapter 15 R22 and chapter 16 D5; no other text of this chapter or of
+  those chapters was changed.* **KDF Dirty Gate: PASS on 2026-11-18, measure
+  0.03, no findings** (chapter 01 R40; the attestation closes this item).
+  *Inputs:*
+  (1) the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  chapter 02 §2.15A, read read-only from the tags themselves, with the row
+  `main (as of 2026-10-07)` compared against `v3.0.0-beta` by tree difference
+  (only the read-me differs), consulted **only** to establish: which
+  validations of the version-one and version-two swap protocols, of the
+  watcher and of order handling compare a network fee chosen by the
+  counterparty for a transparent UTXO transaction with the node's own
+  estimate; which role builds and which validates each version-two preimage;
+  the threshold of each comparison; the state each refusal leads to; whether
+  any refusal bans a peer or marks an order; how a watcher reward on a UTXO
+  payment is enabled, priced and bounded at each row; and which DEX-fee arms a
+  UTXO taker coin takes in version two. Behavior, public state and event
+  names, coins-file field names and RPC names only; no private identifier,
+  function body, helper decomposition, error, log, comment or test text was
+  reproduced, and no value was taken from the reference's tests. (2) The
+  public ZIP 317, for the conventional-fee arithmetic of the consequence
+  note. (3) This repository's tree on the dev branch as of 2026-11-18, for
+  the compatibility note. The acceptance rows and the consequence note are
+  original to this subsection. No row was added to chapter 02 §2.15A: every
+  state read already had one, and each row's identifier was confirmed, by
+  read-only inspection of the historical record's reference metadata, to be
+  the commit compared. *Scope of the edit:* additions only; no sentence that
+  the Dirty Gate cleared is edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.03, no leak findings. *Extent:* the building and validation of
+  transparent UTXO swap transactions in the version-one and version-two
+  protocols, including the watcher validations and the bound on a watcher
+  reward; the version-two maker and taker state machines, for the roles of
+  the preimages; and the order volume floor. About six files were read at
+  each of the rows `v2.6.0-beta` and `v3.0.0-beta`; `main (as of
+  2026-10-07)` was compared by tree difference (only the read-me differs).
+  *Method:* reading, plus token searches for identifiers, numeric values
+  and band constants across both tag trees; the figures of the acceptance
+  rows do not occur in the corpus. *Measure:* 0.03.

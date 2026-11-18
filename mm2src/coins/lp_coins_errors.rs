@@ -143,6 +143,11 @@ pub enum PrivKeyNotAllowed {
     /// node signs with, so every path that would sign is refused with this error.
     #[display(fmt = "The coin is watch-only and holds no signing key")]
     WatchOnlyCoin,
+    /// The coin was activated with a WalletConnect session (CRD ch.36 R36.14.13 -- R36.14.15): the paired wallet
+    /// signs and this node holds no key, so every path that would sign with a node-held key is refused with this
+    /// error.
+    #[display(fmt = "The coin signs through a WalletConnect wallet and holds no signing key")]
+    WalletConnectCoin,
 }
 #[derive(Debug, Display, PartialEq, Serialize)]
 pub enum UnexpectedDerivationMethod {
@@ -404,6 +409,11 @@ pub enum DelegationError {
     InvalidPayload { reason: String },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// CRD ch.36 D36.15 (b): the external wallet that signs the transaction did not sign it (a refusal, no answer
+    /// within the request's time-to-live, a session that is gone or no longer grants the chain, an echoed document
+    /// that differs from the requested one). HTTP 500.
+    #[display(fmt = "Signing error: {}", _0)]
+    SigningError(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -476,7 +486,9 @@ impl From<ScriptHashTypeNotSupported> for DelegationError {
 impl HttpStatusCode for DelegationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            DelegationError::Transport(_) | DelegationError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DelegationError::Transport(_) | DelegationError::SigningError(_) | DelegationError::InternalError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             _ => StatusCode::BAD_REQUEST,
         }
     }
@@ -616,6 +628,11 @@ pub enum WithdrawError {
     /// block base fee. Its `error_data` carries the amounts in wei as decimal strings.
     #[display(fmt = "{}", _0)]
     FeeCapBelowBaseFee(FeeCapBelowBaseFee),
+    /// CRD ch.36 D36.15 (b): the external wallet that signs the transaction did not sign it (a refusal, no answer
+    /// within the request's time-to-live, a session that is gone or no longer grants the chain, an echoed document
+    /// that differs from the requested one). HTTP 500.
+    #[display(fmt = "Signing error: {}", _0)]
+    SigningError(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
     /// CRD ch.49 R49.27a: the one shared arm of every "unsupported operation" refusal of a withdraw; there is no
@@ -674,9 +691,9 @@ impl HttpStatusCode for WithdrawError {
             // CRD ch.43 R43.1D.2: a failure of the backend the coin talks to is a bad gateway.
             WithdrawError::Transport(_) => StatusCode::BAD_GATEWAY,
             // A node's verdict on a fee the daemon chose, transient by nature: not a fault of the request.
-            WithdrawError::FeeCapBelowBaseFee(_) | WithdrawError::InternalError(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
+            WithdrawError::FeeCapBelowBaseFee(_)
+            | WithdrawError::SigningError(_)
+            | WithdrawError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -975,6 +992,26 @@ mod withdraw_error_wire_tests {
             WithdrawError::InternalError("x".to_owned()).status_code(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    /// CRD ch.36 D36.15 (b): the external wallet did not sign. `SigningError` answers HTTP 500 with `error_type`
+    /// `SigningError` and `error_data` a plain JSON string, for the `withdraw` set and the staking set alike. The
+    /// test compares the discriminant, the JSON type of `error_data` and the status only, never its text.
+    #[test]
+    fn signing_error_wire_form_is_an_internal_server_error() {
+        let withdraw = WithdrawError::SigningError("x".to_owned());
+        assert_eq!(withdraw.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = serde_json::to_value(&withdraw).unwrap();
+        assert_eq!(json["error_type"], "SigningError");
+        assert!(json["error_data"].is_string());
+        assert_eq!(json.as_object().unwrap().len(), 2);
+
+        let delegation = DelegationError::SigningError("x".to_owned());
+        assert_eq!(delegation.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = serde_json::to_value(&delegation).unwrap();
+        assert_eq!(json["error_type"], "SigningError");
+        assert!(json["error_data"].is_string());
+        assert_eq!(json.as_object().unwrap().len(), 2);
     }
 
     /// CRD ch.43 R43.1D.2: every hardware-wallet condition that has a name in the hardware RPC error vocabulary is the

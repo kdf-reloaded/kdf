@@ -676,6 +676,17 @@ builds. Once R14A is implemented, a reference maker accepts the
 project's preimage. Aligning the tolerance itself is deferred as
 non-blocking. It is recorded in UPSTREAM-PARITY-GAPS #6.
 
+> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; passed the KDF
+> Dirty Gate with chapter 39 §39.11.4W):* the funding-spend preimage is
+> built by the maker and validated by the taker at the reference rows
+> `v2.6.0-beta` and `v3.0.0-beta` (chapter 52 R17, R29; status note under
+> chapter 15 R22). Read with the roles in that order, D5 says: this project's
+> taker accepts every preimage a reference maker builds, and a reference taker
+> accepts this project's preimage while the fee in it lies within the band
+> around the taker's own `S`. The `NoFee` and `WithBurn` exact-equality check
+> of R14A and R17 above is unaffected. Chapter 39 §39.11.4W lists both checks
+> and what a fee below `S` meets.
+
 > **Implementation obligations (for the Coder; clean terms).**
 > - *Dex-fee factory and V2 dex-fee selection:* the pubkey-aware
 >   factory in the coins crate's fee-descriptor types module MUST
@@ -866,3 +877,11 @@ chapter 15 R26–R28 and R40 now defer to this chapter.
     discretionary expression fails a candidate irrespective of volume. The
     measured set was empty, so the PASS rests on that and not on a numeric
     margin.
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-14) -- the status
+  note after D5.* It records the role order of the funding-spend preimage at
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A (`main (as of
+  2026-10-07)` compared, no difference) and restates D5 in that order. The
+  forbidden corpus was consulted for this note only, read-only, for behavior.
+  **Passed the KDF Dirty Gate** with chapter 39 §39.11.4W on 2026-11-18,
+  measure 0.03, no findings; the attestation is in chapter 39 §39.9. D5 and
+  every other rule are unchanged.

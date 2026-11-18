@@ -10,6 +10,7 @@
 //!   `pub use tendermint_token::*;`
 
 use super::tendermint_types::*;
+use super::wc_integration::read_wallet_connect_activation;
 use super::TendermintPublicKey;
 use crate::node_url::{host_only, scrub_node_url, scrub_urls_in_text};
 use crate::rpc_command::get_my_address::PathToAddress;
@@ -17,6 +18,7 @@ use crate::utxo::utxo_builder::derive_activated_hd_secret;
 use crate::PrivKeyPolicy;
 use crypto::privkey::key_pair_from_secret;
 use crypto::GlobalHDAccountArc;
+use kdf_walletconnect::Topic;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use serde_json::Value as Json;
@@ -71,6 +73,9 @@ enum ActivationKey<'a> {
         public_key: TendermintPublicKey,
         is_ledger_connection: bool,
     },
+    /// A WalletConnect session topic (CRD ch.36 R36.1.3 forms 2 and 3, R36.14.13): the account, its public key and
+    /// the Ledger flag are read from the session, no private key is held.
+    WalletConnect { session_topic: &'a str },
 }
 
 /// Build a [`TendermintCoin`] from coin configuration and an activation request.
@@ -83,8 +88,8 @@ enum ActivationKey<'a> {
 /// account id from the given single private key, and assembles the coin.
 ///
 /// Under an HD login use [`tendermint_coin_from_conf_and_request_with_global_hd`], for a public key
-/// [`tendermint_coin_from_conf_and_request_with_public_key`]. The WalletConnect and hardware policies are not
-/// built here.
+/// [`tendermint_coin_from_conf_and_request_with_public_key`], for a WalletConnect session
+/// [`tendermint_coin_from_conf_and_request_with_wallet_connect`]. The hardware policies are not built here.
 pub async fn tendermint_coin_from_conf_and_request(
     ctx: &MmArc,
     ticker: String,
@@ -149,6 +154,28 @@ pub async fn tendermint_coin_from_conf_and_request_with_public_key(
     build_tendermint_coin(ctx, ticker, conf, nodes, key, get_balances).await
 }
 
+/// Build a [`TendermintCoin`] signed by a WalletConnect wallet (CRD ch.36 R36.1.3 forms 2 and 3, R36.14.13 --
+/// R36.14.15). The account and its public key are read from the live session `session_topic` for the coin's chain
+/// (R36.14.14, D36.16 (b)); the node's own login plays no part and no private key is held. The coin signs every
+/// transaction through the wallet and refuses every path that would sign with a node-held key.
+///
+/// # Errors
+///
+/// The failures of [`tendermint_coin_from_conf_and_request`], and [`TendermintInitErrorKind::WalletConnect`] when
+/// the session, its chain grant, its account or its key cannot be read, or the key does not give the session's
+/// account.
+pub async fn tendermint_coin_from_conf_and_request_with_wallet_connect(
+    ctx: &MmArc,
+    ticker: String,
+    conf: &Json,
+    nodes: Vec<RpcNode>,
+    session_topic: &str,
+    get_balances: bool,
+) -> MmResult<TendermintCoin, TendermintInitError> {
+    let key = ActivationKey::WalletConnect { session_topic };
+    build_tendermint_coin(ctx, ticker, conf, nodes, key, get_balances).await
+}
+
 async fn build_tendermint_coin(
     ctx: &MmArc,
     ticker: String,
@@ -199,6 +226,8 @@ async fn build_tendermint_coin(
         Ok(TendermintKeyPair::new(key_pair.private().secret, *key_pair.public()))
     };
 
+    // Set by the WalletConnect arm, which validates the nodes before it contacts the wallet.
+    let mut early_rpc_clients = None;
     let (account_id, activation_policy) = match key {
         ActivationKey::Single(priv_key) => {
             let account_id = account_id_from_privkey(priv_key, &protocol_info.account_prefix).mm_err(&init_err)?;
@@ -239,9 +268,32 @@ async fn build_tendermint_coin(
                 TendermintActivationPolicy::with_public_key(public_key, is_ledger_connection),
             )
         },
+        ActivationKey::WalletConnect { session_topic } => {
+            // CRD ch.36 R36.1.4 step 3: the node set is validated before the wallet is contacted.
+            early_rpc_clients = Some(init_rpc_clients(&nodes).mm_err(&init_err)?);
+            let session_key = read_wallet_connect_activation(
+                ctx,
+                session_topic,
+                protocol_info.chain_id.as_ref(),
+                &protocol_info.account_prefix,
+            )
+            .await
+            .map_to_mm(|e| init_err(TendermintInitErrorKind::WalletConnect(e)))?;
+            (
+                session_key.account_id,
+                TendermintActivationPolicy::with_wallet_connect(
+                    Topic::from(session_topic.to_owned()),
+                    session_key.public_key,
+                    session_key.is_ledger_connection,
+                ),
+            )
+        },
     };
 
-    let rpc_clients = init_rpc_clients(&nodes).mm_err(&init_err)?;
+    let rpc_clients = match early_rpc_clients {
+        Some(rpc_clients) => rpc_clients,
+        None => init_rpc_clients(&nodes).mm_err(&init_err)?,
+    };
 
     let coin_impl = TendermintCoinImpl::new(
         ticker,
