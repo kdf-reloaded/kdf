@@ -8,6 +8,9 @@
 //! whose servers do not disagree about the chain. A collector passes a listing here only then, together with the tip
 //! height of the answering server; any other listing neither sets nor clears a mark.
 
+use crate::utxo::rpc_clients::UtxoRpcClientEnum;
+use futures::channel::mpsc::UnboundedReceiver;
+use futures::StreamExt;
 use rpc::v1::types::H256 as H256Json;
 use std::collections::{HashMap, HashSet};
 
@@ -68,6 +71,62 @@ pub(crate) fn removed_rows_line(ticker: &str, removed: usize) -> String {
     )
 }
 
+/// The chain-changed events of a coin's Electrum client, as one history collector sees them (CRD ch.38 §38.5C, D38.5C.2
+/// status note, amendment of 2026-11-18). An event makes the collector run a pass at once, whatever its need-to-run
+/// test says; the pass then applies the rules of the absence marks and of the changed height unchanged.
+///
+/// A coin without an Electrum client has no events: [`Self::wait`] never resolves and [`Self::take`] is always `false`.
+#[derive(Default)]
+pub(crate) struct ChainChangeWatch {
+    events: Option<UnboundedReceiver<()>>,
+    /// An event [`Self::wait`] received that no pass has taken yet.
+    seen: bool,
+}
+
+impl ChainChangeWatch {
+    /// Subscribes to the chain-changed events of `rpc_client`, if it is an Electrum client.
+    pub(crate) fn of(rpc_client: &UtxoRpcClientEnum) -> ChainChangeWatch {
+        ChainChangeWatch {
+            events: match rpc_client {
+                UtxoRpcClientEnum::Electrum(electrum) => Some(electrum.subscribe_chain_changes()),
+                _ => None,
+            },
+            seen: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_receiver(events: UnboundedReceiver<()>) -> ChainChangeWatch {
+        ChainChangeWatch {
+            events: Some(events),
+            seen: false,
+        }
+    }
+
+    /// Whether an event came since the last call. A burst of events counts once.
+    pub(crate) fn take(&mut self) -> bool {
+        let mut any = std::mem::take(&mut self.seen);
+        if let Some(events) = self.events.as_mut() {
+            while events.try_recv().is_ok() {
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// Resolves when an event arrives, and keeps it for the next [`Self::take`]. Never resolves for a coin that has no
+    /// events.
+    pub(crate) async fn wait(&mut self) {
+        if let Some(events) = self.events.as_mut() {
+            if events.next().await.is_some() {
+                self.seen = true;
+                return;
+            }
+        }
+        futures::future::pending::<()>().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +180,28 @@ mod tests {
         marks.judge(100, &set(&[]), stored(&[7]));
         marks.judge(101, &set(&[]), stored(&[]));
         assert!(!marks.any());
+    }
+
+    #[test]
+    fn a_chain_change_event_is_taken_once_and_a_burst_counts_once() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let mut watch = ChainChangeWatch::from_receiver(rx);
+        assert!(!watch.take());
+        tx.unbounded_send(()).unwrap();
+        tx.unbounded_send(()).unwrap();
+        assert!(watch.take());
+        assert!(!watch.take());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_event_that_wait_received_is_kept_for_the_next_take() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let mut watch = ChainChangeWatch::from_receiver(rx);
+        tx.unbounded_send(()).unwrap();
+        common::block_on(watch.wait());
+        assert!(watch.take());
+        assert!(!watch.take());
     }
 
     #[test]

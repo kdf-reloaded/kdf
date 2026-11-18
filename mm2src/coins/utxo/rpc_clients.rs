@@ -83,6 +83,9 @@ pub use electrum_types::*;
 #[path = "rpc_clients/electrum_measure.rs"]
 pub(crate) mod electrum_measure;
 
+#[path = "rpc_clients/electrum_chain_view.rs"]
+pub(crate) mod electrum_chain_view;
+
 #[path = "rpc_clients/electrum_pool.rs"]
 pub(crate) mod electrum_pool;
 pub use electrum_pool::{with_call_budget, ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};

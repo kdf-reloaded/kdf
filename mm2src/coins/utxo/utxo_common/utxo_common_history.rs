@@ -1,7 +1,7 @@
 // utxo_common_history — transaction history processing, KMD rewards
 
 use super::*;
-use crate::history_absence::{removed_rows_line, AbsenceMarks};
+use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
 use std::collections::HashSet;
 
 lazy_static! {
@@ -71,10 +71,16 @@ fn remove_unlisted_rows(
     to_remove.len()
 }
 
-/// Whether the legacy collector's need-to-run test is true: a stored row needs an update, or a row carries an absence
-/// mark so that the second listing does not wait for a balance change (the balance part is the loop's).
-fn history_needs_pass(history_map: &HashMap<H256Json, TransactionDetails>, absence: &AbsenceMarks) -> bool {
-    history_map.iter().any(|(_, tx)| tx.should_update()) || absence.any()
+/// Whether the legacy collector's need-to-run test is true: a stored row needs an update, a row carries an absence
+/// mark so that the second listing does not wait for a balance change (the balance part is the loop's), or a
+/// chain-changed event of the coin's client came and no pass has run since (`chain_changed`, CRD ch.38 §38.5C
+/// amendment of 2026-11-18, item 3).
+fn history_needs_pass(
+    history_map: &HashMap<H256Json, TransactionDetails>,
+    absence: &AbsenceMarks,
+    chain_changed: bool,
+) -> bool {
+    chain_changed || history_map.iter().any(|(_, tx)| tx.should_update()) || absence.any()
 }
 
 /// What a listing says about the height of a stored row (CRD ch.38 D38.5C.2 status note, item 1).
@@ -344,6 +350,9 @@ where
     let mut success_iteration = 0i32;
     // The absence rule (CRD ch.38 §38.5C): memory only, so a restart starts counting again.
     let mut absence = AbsenceMarks::default();
+    // The chain-changed events of the coin's client: one makes the next pass run at once (amendment of 2026-11-18).
+    let mut chain_changes = ChainChangeWatch::of(&coin.as_ref().rpc_client);
+    let mut chain_changed = false;
     // A repeating failure of one source is logged once and then summarized, and a failing history
     // request backs the loop off (CRD ch.38 R38.6.5 decision 8). The two sources are independent.
     let mut balance_failures = FailureThrottle::default();
@@ -382,7 +391,8 @@ where
             },
         };
 
-        let need_update = history_needs_pass(&history_map, &absence);
+        chain_changed |= chain_changes.take();
+        let need_update = history_needs_pass(&history_map, &absence, chain_changed);
         match (&my_balance, &actual_balance) {
             (Some(prev_balance), Some(actual_balance)) if prev_balance == actual_balance && !need_update => {
                 // Balance unchanged, so there is nothing to reload yet. Wait for
@@ -400,7 +410,10 @@ where
                 futures::pin_mut!(idle);
                 let woken = futures::StreamExt::next(&mut wake_rx);
                 futures::pin_mut!(woken);
-                if let futures::future::Either::Right(_) = futures::future::select(idle, woken).await {
+                let chain = chain_changes.wait();
+                futures::pin_mut!(chain);
+                let either = futures::future::select(woken, chain);
+                if let futures::future::Either::Right(_) = futures::future::select(idle, either).await {
                     // Collapse a burst into one pass.
                     while wake_rx.try_recv().is_ok() {}
                 }
@@ -415,6 +428,8 @@ where
                 // Only a successful history request resets the backoff. A successful balance read
                 // does not: a server can answer the balance and still fail the history.
                 history_failures.record_success(&ctx, &coin.as_ref().conf.ticker, "history request");
+                // The pass the event asked for has its listing.
+                chain_changed = false;
                 // The removal comes first, before any detail request of the pass (R38.5C.1 item 2).
                 if let Some(tip) = qualifying_tip {
                     let removed = remove_unlisted_rows(&mut absence, &mut history_map, tip, &tx_ids);
@@ -1451,10 +1466,21 @@ mod absence_tests {
         let mut map = map_of(vec![row(90, 0xb2)]);
         let mut marks = AbsenceMarks::default();
         // With no mark and a settled row, the test is false.
-        assert!(!history_needs_pass(&map, &marks));
+        assert!(!history_needs_pass(&map, &marks, false));
         assert_eq!(remove_unlisted_rows(&mut marks, &mut map, 800, &[]), 0);
         assert_eq!(map.len(), 1);
-        assert!(history_needs_pass(&map, &marks));
+        assert!(history_needs_pass(&map, &marks, false));
+    }
+
+    /// CRD ch.38 §38.5C amendment of 2026-11-18, item 3: a chain-changed event makes the pass run whatever the rest of
+    /// the test says.
+    #[test]
+    fn a_chain_changed_event_forces_the_need_to_run_test() {
+        let map = map_of(vec![row(90, 0xb2)]);
+        let marks = AbsenceMarks::default();
+        assert!(!history_needs_pass(&map, &marks, false));
+        assert!(history_needs_pass(&map, &marks, true));
+        assert!(history_needs_pass(&HashMap::new(), &marks, true));
     }
 
     #[test]
@@ -1474,7 +1500,7 @@ mod absence_tests {
         assert_eq!(remove_unlisted_rows(&mut marks, &mut map, 800, &[]), 0);
         assert_eq!(remove_unlisted_rows(&mut marks, &mut map, 801, &[(h(0xb2), 90)]), 0);
         assert!(!marks.any());
-        assert!(!history_needs_pass(&map, &marks));
+        assert!(!history_needs_pass(&map, &marks, false));
         // Counting starts again: one absence is not enough.
         assert_eq!(remove_unlisted_rows(&mut marks, &mut map, 802, &[]), 0);
         assert_eq!(map.len(), 1);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::history_absence::{removed_rows_line, AbsenceMarks};
+use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
 use crate::utxo::{RequestTxHistoryResult, UtxoFeeDetails};
 use crate::{CoinsContext, TxFeeDetails, TxHistoryResult};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -105,6 +105,10 @@ impl Qrc20Coin {
         let mut history_failures = utxo_common::FailureThrottle::default();
         // The absence rule (CRD ch.38 §38.5C): memory only, so a restart starts counting again.
         let mut absence = AbsenceMarks::default();
+        // The chain-changed events of the coin's client: one makes the next pass run at once (CRD ch.38 §38.5C
+        // amendment of 2026-11-18, item 3).
+        let mut chain_changes = ChainChangeWatch::of(&self.utxo.rpc_client);
+        let mut chain_changed = false;
         loop {
             if ctx.is_stopping() {
                 break;
@@ -136,15 +140,26 @@ impl Qrc20Coin {
                 },
             };
 
-            let need_update =
-                self.check_if_history_update_is_needed(&history_map, &my_balance, &actual_balance, &absence);
+            chain_changed |= chain_changes.take();
+            let need_update = self.check_if_history_update_is_needed(
+                &history_map,
+                &my_balance,
+                &actual_balance,
+                &absence,
+                chain_changed,
+            );
             if !need_update {
                 // The balance read worked and nothing is pending, so the server answers again: end a
                 // history backoff quietly (the balance source logs its own recovery). While the
                 // balance differs or an update is pending this branch is not taken, so a server that
                 // answers the balance and fails the history keeps its backoff.
                 history_failures.reset();
-                Timer::sleep(30.).await;
+                // An event of the chain-changed channel ends the wait; the next round takes it.
+                let idle = Timer::sleep(30.);
+                futures::pin_mut!(idle);
+                let event = chain_changes.wait();
+                futures::pin_mut!(event);
+                futures::future::select(idle, event).await;
                 continue;
             }
 
@@ -153,6 +168,8 @@ impl Qrc20Coin {
             let tx_ids = match self.request_tx_history(metrics).await {
                 RequestTxHistoryResult::Ok(tx_ids, qualifying_tip) => {
                     history_failures.record_success(&ctx, &self.utxo.conf.ticker, "history request");
+                    // The pass the event asked for has its listing.
+                    chain_changed = false;
                     // The removal comes first, before any detail request of the pass (R38.6.4Q.6, D38.5C.1).
                     if let Some(tip) = qualifying_tip {
                         removed_rows = self.remove_unlisted_rows(&mut absence, &mut history_map, tip, &tx_ids);
@@ -420,11 +437,13 @@ impl Qrc20Coin {
         last_balance: &Option<CoinBalance>,
         actual_balance: &CoinBalance,
         absence: &AbsenceMarks,
+        chain_changed: bool,
     ) -> bool {
-        let need_update = history
-            .iter()
-            .flat_map(|(_, txs)| txs)
-            .any(|(_, tx)| tx.should_update_timestamp() || tx.should_update_block_height());
+        let need_update = chain_changed
+            || history
+                .iter()
+                .flat_map(|(_, txs)| txs)
+                .any(|(_, tx)| tx.should_update_timestamp() || tx.should_update_block_height());
         match last_balance {
             // A mark of the absence rule keeps the test true: the second listing does not wait for a balance change.
             Some(last_balance) if last_balance == actual_balance && !need_update && !absence.any() => {
