@@ -6,6 +6,7 @@
 //! task variant.
 
 use crate::context::{lock_activation, CoinsActivationContext};
+use crate::eth_with_tokens_activation::tron::tron_activation_available;
 use crate::init_token::{InitTokenActivationOps, InitTokenError, InitTokenInProgressStatus, InitTokenTaskHandle,
                         InitTokenTaskManagerShared};
 use crate::platform_coin_with_tokens::{CustomTokenError, InitTokensAsMmCoinsError, RegisterTokenInfo};
@@ -13,6 +14,7 @@ use crate::prelude::*;
 use crate::token::{EnableTokenError, TokenDerivationError, TokenProtocolParams};
 use async_trait::async_trait;
 use coins::coin_balance::{coin_balance_map_for_ticker, CoinBalanceMap, HDWalletBalance};
+use coins::eth::tron::{parse_trc20_contract, TronAddress};
 use coins::eth::{addr_from_str, checksum_address, derive_eth_hd_activation_key, find_active_erc20_by_contract,
                  valid_addr_from_str, Erc20BuildError, EthCoin};
 use coins::nft::{fetch_and_store_owned_nfts, Chain, ChainTicker, EnableNftError, EnableNftResponse, NftCtx,
@@ -20,7 +22,7 @@ use coins::nft::{fetch_and_store_owned_nfts, Chain, ChainTicker, EnableNftError,
 use coins::rpc_command::get_my_address::PathToAddress;
 use coins::rpc_command::get_token_info::config_ticker_for_contract;
 use coins::{coin_conf, lp_coinfind, lp_coinfind_or_err, BalanceError, CoinBalance, CoinProtocol, CoinsContext,
-            DerivationMethod, MarketCoinOps, MmCoin, MmCoinEnum};
+            DerivationMethod, MarketCoinOps, MmCoin, MmCoinEnum, TRON_NOT_AVAILABLE};
 use common::Future01CompatExt;
 use crypto::{CryptoCtx, KeyPairPolicy};
 use mm2_core::mm_ctx::MmArc;
@@ -35,8 +37,9 @@ impl TryPlatformCoinFromMmCoinEnum for EthCoin {
         Self: Sized,
     {
         match coin {
-            // A token is an `EthCoin` too, but only the native gas coin of an EVM chain is a platform coin.
-            MmCoinEnum::EthCoin(coin) if coin.is_evm_platform_coin() => Some(coin),
+            // A token is an `EthCoin` too, but only the native coin of an EVM chain or of a TRON chain is a
+            // platform coin. Whether the platform is of the token's family is checked by the token route.
+            MmCoinEnum::EthCoin(coin) if coin.is_evm_platform_coin() || coin.is_tron_platform_coin() => Some(coin),
             _ => None,
         }
     }
@@ -62,10 +65,13 @@ pub struct Erc20Protocol {
     pub contract_address: String,
     /// The token comes from an inline `protocol` rather than from the coins configuration.
     pub custom: bool,
+    /// The token is a TRC20 token of a TRON platform (CRD ch.21 R21.10B.2), not an ERC-20 token.
+    pub tron: bool,
 }
 
 impl TryFromCoinProtocol for Erc20Protocol {
-    /// A configured contract address is accepted only in the exact EIP-55 checksummed form (CRD R35.5.1).
+    /// A configured contract address is accepted only in the exact EIP-55 checksummed form (CRD R35.5.1). A TRC20
+    /// contract is accepted in either form of CRD ch.21 R-AD1.
     fn try_from_coin_protocol(proto: CoinProtocol) -> Result<Self, MmError<CoinProtocol>>
     where
         Self: Sized,
@@ -78,6 +84,16 @@ impl TryFromCoinProtocol for Erc20Protocol {
                 platform_coin_ticker: platform,
                 contract_address,
                 custom: false,
+                tron: false,
+            }),
+            CoinProtocol::TRC20 {
+                platform,
+                contract_address,
+            } if parse_trc20_contract(&contract_address).is_ok() => Ok(Erc20Protocol {
+                platform_coin_ticker: platform,
+                contract_address,
+                custom: false,
+                tron: true,
             }),
             proto => MmError::err(proto),
         }
@@ -193,7 +209,29 @@ fn custom_erc20_protocol(
         platform_coin_ticker: platform,
         contract_address,
         custom: true,
+        tron: false,
     })
+}
+
+/// The protocol of a configured TRC20 token: its contract address must be one of the two forms of CRD ch.21 R-AD1
+/// and not zero, else the configuration is a protocol parse failure (R21.10B.2).
+fn trc20_protocol(
+    ticker: &str,
+    platform: String,
+    contract_address: String,
+) -> Result<Erc20Protocol, ProtocolResolveError> {
+    match parse_trc20_contract(&contract_address) {
+        Ok(_) => Ok(Erc20Protocol {
+            platform_coin_ticker: platform,
+            contract_address,
+            custom: false,
+            tron: true,
+        }),
+        Err(error) => Err(ProtocolResolveError::ProtocolParseError {
+            ticker: ticker.to_owned(),
+            error,
+        }),
+    }
 }
 
 /// Resolves the protocol of an ERC-20 token for the platform activation and the token task: the inline
@@ -220,7 +258,12 @@ pub(crate) fn resolve_erc20_protocol(
                 platform_coin_ticker: platform,
                 contract_address,
                 custom: false,
+                tron: false,
             }),
+            CoinProtocol::TRC20 {
+                platform,
+                contract_address,
+            } => trc20_protocol(ticker, platform, contract_address),
             protocol => Err(ProtocolResolveError::UnexpectedProtocol {
                 ticker: ticker.to_owned(),
                 protocol,
@@ -253,7 +296,12 @@ fn resolve_evm_token_protocol(
             platform_coin_ticker: platform,
             contract_address,
             custom: false,
+            tron: false,
         })),
+        CoinProtocol::TRC20 {
+            platform,
+            contract_address,
+        } => trc20_protocol(ticker, platform, contract_address).map(EvmTokenProtocol::Erc20),
         protocol => Err(ProtocolResolveError::UnexpectedProtocol {
             ticker: ticker.to_owned(),
             protocol,
@@ -307,7 +355,28 @@ impl From<Erc20TokenError> for InitTokenError {
     }
 }
 
-/// Builds an ERC-20 token on top of an activated platform coin (CRD R35.2.2).
+/// The 20-byte contract address of a token: the EVM form of an ERC-20 token, either TRON form of a TRC20 token.
+fn token_address(protocol: &Erc20Protocol) -> Result<ethereum_types::Address, String> {
+    if protocol.tron {
+        parse_trc20_contract(&protocol.contract_address)
+    } else {
+        addr_from_str(&protocol.contract_address).map_err(|e| format!("Invalid ERC20 contract address: {}", e))
+    }
+}
+
+/// The contract address as the result of a token activation reports it: lower-case hex for an ERC-20 token (CRD
+/// R35.2.3), base58check for a TRC20 token (CRD ch.21 R21.10B.5).
+fn reported_contract_address(protocol: &Erc20Protocol, token_addr: ethereum_types::Address) -> String {
+    if protocol.tron {
+        TronAddress::from_evm_address(token_addr).to_base58()
+    } else {
+        format!("{:#x}", token_addr)
+    }
+}
+
+/// Builds an ERC-20 token on top of an activated platform coin (CRD R35.2.2). A TRC20 token (`protocol.tron`) is
+/// built on a TRX platform by the same steps, its decimals read through the TRON node API when its configuration
+/// has none (CRD ch.21 R21.10B.2).
 ///
 /// The decimals come from the token configuration and are read from the contract when the configuration lacks
 /// them. The swap confirmations are the requested ones, else the token configuration's, else the platform's.
@@ -319,8 +388,7 @@ pub(crate) async fn build_erc20_token(
     protocol: &Erc20Protocol,
     requested_confirmations: Option<u64>,
 ) -> Result<EthCoin, MmError<Erc20TokenError>> {
-    let token_addr = addr_from_str(&protocol.contract_address)
-        .map_to_mm(|e| Erc20TokenError::Internal(format!("Invalid ERC20 contract address: {}", e)))?;
+    let token_addr = token_address(protocol).map_to_mm(Erc20TokenError::Internal)?;
 
     if protocol.custom {
         if let Some(active_ticker) =
@@ -339,15 +407,21 @@ pub(crate) async fn build_erc20_token(
         .or_else(|| coin_conf(ctx, ticker)["required_confirmations"].as_u64())
         .unwrap_or_else(|| platform_coin.required_confirmations());
 
-    platform_coin
-        .erc20_token_from_conf_or_contract(ticker.to_owned(), token_addr, required_confirmations, protocol.custom)
-        .await
-        .mm_err(|e| match e {
-            Erc20BuildError::Transport(e) => Erc20TokenError::Transport(e),
-            Erc20BuildError::UnsupportedDecimals(e) => Erc20TokenError::UnsupportedDecimals(e),
-            Erc20BuildError::InvalidConfig(e) => Erc20TokenError::InvalidConfig(e),
-            Erc20BuildError::Internal(e) => Erc20TokenError::Internal(e),
-        })
+    let built = if protocol.tron {
+        platform_coin
+            .trc20_token_from_conf_or_contract(ticker.to_owned(), token_addr, required_confirmations)
+            .await
+    } else {
+        platform_coin
+            .erc20_token_from_conf_or_contract(ticker.to_owned(), token_addr, required_confirmations, protocol.custom)
+            .await
+    };
+    built.mm_err(|e| match e {
+        Erc20BuildError::Transport(e) => Erc20TokenError::Transport(e),
+        Erc20BuildError::UnsupportedDecimals(e) => Erc20TokenError::UnsupportedDecimals(e),
+        Erc20BuildError::InvalidConfig(e) => Erc20TokenError::InvalidConfig(e),
+        Erc20BuildError::Internal(e) => Erc20TokenError::Internal(e),
+    })
 }
 
 impl RegisterTokenInfo<EthCoin> for EthCoin {
@@ -425,21 +499,33 @@ impl From<EnableNftError> for EnableTokenError {
     }
 }
 
-/// The platform coin of a single-token request, active and EVM (CRD R35.2.6).
+/// The platform coin of a single-token request, active and of the token's family (CRD R35.2.6): an EVM platform for
+/// an ERC-20 token, a TRON platform for a TRC20 token (`tron`). An active EVM-family platform of the other family is
+/// `PlatformCoinMismatch` (CRD ch.21 R21.10B.2), except for an NFT (`nft`), which a TRON platform does not support.
 async fn evm_platform_coin(
     ctx: &MmArc,
     platform_ticker: &str,
     token_ticker: &str,
+    tron: bool,
+    nft: bool,
 ) -> MmResult<EthCoin, EnableTokenError> {
     let platform_coin = lp_coinfind_or_err(ctx, platform_ticker)
         .await
         .mm_err(|_| EnableTokenError::PlatformCoinIsNotActivated(platform_ticker.to_owned()))?;
-    <EthCoin as TryPlatformCoinFromMmCoinEnum>::try_from_mm_coin(platform_coin).or_mm_err(|| {
-        EnableTokenError::UnsupportedPlatformCoin {
-            platform_coin_ticker: platform_ticker.to_owned(),
-            token_ticker: token_ticker.to_owned(),
-        }
-    })
+    let unsupported = || EnableTokenError::UnsupportedPlatformCoin {
+        platform_coin_ticker: platform_ticker.to_owned(),
+        token_ticker: token_ticker.to_owned(),
+    };
+    let platform_coin =
+        <EthCoin as TryPlatformCoinFromMmCoinEnum>::try_from_mm_coin(platform_coin).or_mm_err(&unsupported)?;
+    if platform_coin.is_tron_platform_coin() != tron {
+        return if nft {
+            MmError::err(unsupported())
+        } else {
+            MmError::err(EnableTokenError::PlatformCoinMismatch)
+        };
+    }
+    Ok(platform_coin)
 }
 
 /// `enable_erc20` and its alias `enable_nft` (CRD R35.2.4): one handler that selects the token kind from the
@@ -466,6 +552,10 @@ pub async fn enable_evm_token(
     let protocol =
         resolve_evm_token_protocol(&ctx, &req.ticker, req.protocol.as_ref()).map_to_mm(EnableTokenError::from)?;
     match protocol {
+        // While TRON is switched off no TRC20 token is built, whatever the platform state (CRD ch.21 §21.4).
+        EvmTokenProtocol::Erc20(protocol) if protocol.tron && !tron_activation_available(&ctx) => {
+            MmError::err(EnableTokenError::Internal(TRON_NOT_AVAILABLE.to_owned()))
+        },
         EvmTokenProtocol::Erc20(protocol) => enable_erc20_token(&ctx, req, protocol)
             .await
             .map(EvmTokenActivationResult::Erc20),
@@ -489,7 +579,8 @@ async fn enable_erc20_token(
         }
     }
 
-    let platform_coin = evm_platform_coin(ctx, &protocol.platform_coin_ticker, &req.ticker).await?;
+    let platform_coin =
+        evm_platform_coin(ctx, &protocol.platform_coin_ticker, &req.ticker, protocol.tron, false).await?;
     let token = build_erc20_token(
         ctx,
         &platform_coin,
@@ -540,8 +631,7 @@ async fn enable_erc20_token(
             flatten_hd_report(&req.ticker, report)?
         },
     };
-    let token_addr = addr_from_str(&protocol.contract_address)
-        .map_to_mm(|e| EnableTokenError::Internal(format!("Invalid ERC20 contract address: {}", e)))?;
+    let token_addr = token_address(&protocol).map_to_mm(EnableTokenError::Internal)?;
 
     let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(EnableTokenError::Internal)?;
     coins_ctx
@@ -555,8 +645,9 @@ async fn enable_erc20_token(
         balances,
         platform_coin: platform_coin.ticker().to_owned(),
         // Lower-case hex, as in the public docs example and `v2.6.0-beta`. `v3.0.0-beta` renders the EIP-55
-        // checksummed form; the uncontradicted docs example governs (CRD ch.35 R35.2.3).
-        token_contract_address: format!("{:#x}", token_addr),
+        // checksummed form; the uncontradicted docs example governs (CRD ch.35 R35.2.3). A TRC20 token reports
+        // base58check (CRD ch.21 R21.10B.5).
+        token_contract_address: reported_contract_address(&protocol, token_addr),
         required_confirmations: token.required_confirmations(),
     })
 }
@@ -603,7 +694,7 @@ async fn enable_nft_token(
         }
     }
 
-    let platform_coin = evm_platform_coin(ctx, platform, &req.ticker).await?;
+    let platform_coin = evm_platform_coin(ctx, platform, &req.ticker, false, true).await?;
     if !matches!(platform_coin.derivation_method, DerivationMethod::Iguana(_)) {
         return MmError::err(EnableTokenError::UnexpectedDerivationMethod(
             TokenDerivationError::ExpectedSingleAddress,
@@ -713,7 +804,12 @@ impl InitTokenActivationOps for EthCoin {
         ticker: &str,
         inline_protocol: Option<&CoinProtocol>,
     ) -> Result<Self::ProtocolInfo, InitTokenError> {
-        resolve_erc20_protocol(ctx, ticker, inline_protocol).map_err(InitTokenError::from)
+        let protocol = resolve_erc20_protocol(ctx, ticker, inline_protocol).map_err(InitTokenError::from)?;
+        // While TRON is switched off no TRC20 token task starts (CRD ch.21 §21.4).
+        if protocol.tron && !tron_activation_available(ctx) {
+            return Err(InitTokenError::Internal(TRON_NOT_AVAILABLE.to_owned()));
+        }
+        Ok(protocol)
     }
 
     async fn init_token(
@@ -724,6 +820,11 @@ impl InitTokenActivationOps for EthCoin {
         protocol_info: &Erc20Protocol,
         task_handle: &InitTokenTaskHandle<Self>,
     ) -> Result<(Self, Erc20TaskResult), MmError<InitTokenError>> {
+        // A token of the other family than its active platform names another platform than the activated one
+        // (CRD ch.21 R21.10B.2).
+        if protocol_info.tron != platform_coin.is_tron_platform_coin() {
+            return MmError::err(InitTokenError::PlatformCoinMismatch);
+        }
         // A hardware-wallet platform needs the device context it was activated with.
         if platform_coin.uses_hardware_signer()
             && CryptoCtx::from_ctx(ctx)
@@ -771,7 +872,11 @@ impl InitTokenActivationOps for EthCoin {
                     .await
                     .mm_err(InitTokenError::from_balance_error)?;
                 Erc20WalletBalance::Iguana {
-                    address: checksum_address(&format!("{:#x}", address)),
+                    address: if protocol_info.tron {
+                        TronAddress::from_evm_address(*address).to_base58()
+                    } else {
+                        checksum_address(&format!("{:#x}", address))
+                    },
                     balance: coin_balance_map_for_ticker(ticker, balance),
                 }
             },
@@ -787,7 +892,11 @@ impl InitTokenActivationOps for EthCoin {
         let result = Erc20TaskResult {
             ticker: ticker.to_owned(),
             platform_coin: platform_coin.ticker().to_owned(),
-            token_contract_address: checksum_address(&format!("{:#x}", token_info.token_addr)),
+            token_contract_address: if protocol_info.tron {
+                reported_contract_address(protocol_info, token_info.token_addr)
+            } else {
+                checksum_address(&format!("{:#x}", token_info.token_addr))
+            },
             current_block,
             required_confirmations: token.required_confirmations(),
             wallet_balance,

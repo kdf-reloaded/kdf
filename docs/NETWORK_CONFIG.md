@@ -468,14 +468,21 @@ pin).
 ### TRON node list and API key
 
 TRON is switched off in this build, so nothing below has an effect yet. When TRON returns, the
-`urls` array of its activation request lists the TRON full-node HTTP API endpoints, and each entry
-takes one of two forms:
+node list of its activation request names the TRON full-node HTTP API endpoints. The mmrpc 2.0
+methods (`enable_eth_with_tokens`, `task::enable_eth::init`) read it from `nodes`, as the EVM
+family does: each entry is an object with `url`, an optional `komodo_proxy` (read, and, as on the
+EVM route, requests are not signed with it) and an optional `headers` object of request headers
+for that node only. The legacy `enable` and `electrum` methods read it from `urls`, where each
+entry takes one of two forms:
 
 - a plain URL string, `"https://api.trongrid.io"`;
 - an object with the URL and request headers for that node only,
   `{"url": "https://tron.example.org", "headers": {"X-Provider-Key": "value"}}`.
 
-The two forms can be mixed in one list. A header name must be a valid HTTP header name and a value a
+The two forms can be mixed in one `urls` list. On the mmrpc route an empty or absent `nodes` list is
+refused with `AtLeastOneNodeRequired`, and a URL that does not parse or has a scheme other than
+`http` or `https` with `InvalidPayload`, before any node is contacted. `tron_api_key` and the
+`headers` rules below apply to the entries of both lists. A header name must be a valid HTTP header name and a value a
 valid HTTP header value; an invalid entry refuses the activation with an error that does not repeat
 the header. A key in the object other than `url` and `headers` is refused too, so a misspelled
 `headers` is not silently dropped.
@@ -490,8 +497,10 @@ host of the same list, so a list can mix TronGrid with other providers. A header
 Header values and `tron_api_key` are secrets. No log line, error text, RPC answer or debug output
 shows them, they go to no other host, and no peer sees them. A request is not redirected: a node
 that answers with a redirect counts as failed, so the headers never reach another host. A URL that
-carries a key in its path is shown host-only everywhere. A key in the query string does not work
-today, because the endpoint path is appended to the URL as given; use a `headers` entry instead.
+carries a key in its path is shown host-only everywhere. A key in the query string works: the
+endpoint path is appended to the path of the URL and the query stays at the end, so
+`https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1` (a fragment is dropped, and a trailing slash on the URL is ignored). A
+`headers` entry is the other way to send a key.
 
 The node list is put into a random order once, when the coin is activated, and only `http://` and
 `https://` URLs are accepted.
@@ -500,10 +509,12 @@ The node that answers a request is tried first by the next one; a node that fail
 status outside 2xx, with something that is not the expected JSON, or does not answer within 10
 seconds is skipped for that request. Several requests of one coin can run at the same time.
 
-> **Compatibility:** Komodo DeFi Framework and GLEEC KDF ignore the object form and `tron_api_key`;
-> a client written for them never sends either. See [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
+> **Compatibility:** Komodo DeFi Framework and GLEEC KDF ignore the object form, the `headers` member
+> of a `nodes` entry and `tron_api_key`; a client written for them never sends any of them. GLEEC KDF
+> activates TRON only through the mmrpc 2.0 methods, so a client written for it never uses `urls`.
+> See [GLEEC compatibility](GLEEC_COMPATIBILITY.md).
 
-Read more: CRD chapter 21, §21.9 (R-N3 to R-N9).
+Read more: CRD chapter 21, §21.4 (status note of 2026-11-17) and §21.9 (R-N3 to R-N9), R21.10B.2.
 
 ## Adding a New Network
 

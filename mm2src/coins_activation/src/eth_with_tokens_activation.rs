@@ -10,6 +10,7 @@ use crate::platform_coin_with_tokens::*;
 use crate::prelude::*;
 use async_trait::async_trait;
 use coins::coin_balance::{EnableCoinBalance, EnableCoinBalanceError, EnableCoinScanPolicy, HDWalletBalanceOps};
+use coins::eth::tron::{Network as TronNetwork, TronAddress};
 use coins::eth::{eth_coin_from_params_with_global_hd, eth_coin_from_params_with_priv_key, EthCoin,
                  EthCoinActivationParams, EthCoinBuildError, GasStationPricePolicy, SwapGasFeePolicy, SwapV2Contracts,
                  ETH_DEFAULT_GAP_LIMIT};
@@ -41,6 +42,8 @@ use std::fmt;
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
 use std::time::Duration;
 
+pub(crate) mod tron;
+
 use crate::init_platform_coin_with_tokens::{InitPlatformCoinWithTokensActivationOps, InitPlatformCoinWithTokensTask};
 
 type ActivationErr = EnablePlatformCoinWithTokensError;
@@ -63,14 +66,22 @@ pub struct EthNode {
     #[serde(default)]
     #[allow(dead_code)]
     pub komodo_proxy: bool,
+    /// The request headers of this node, for a TRON platform only (CRD ch.21 R-N9): an object of header names and
+    /// values, kept raw so that an EVM request that carries one is unchanged. A secret: never rendered.
+    #[serde(default)]
+    headers: Json,
 }
 
-/// The debug form names the node by its host-only form (CRD ch.35 R35.1.17).
+/// The debug form names the node by its host-only form and never renders a header (CRD ch.35 R35.1.17).
 impl fmt::Debug for EthNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EthNode")
             .field("url", &host_only(&self.url))
             .field("komodo_proxy", &self.komodo_proxy)
+            .field(
+                "headers",
+                &format_args!("{}", if self.headers.is_null() { "<none>" } else { "<set>" }),
+            )
             .finish()
     }
 }
@@ -138,13 +149,101 @@ impl NftReq {
     }
 }
 
+/// A swap contract address of the request (CRD R35.1.1; CRD ch.21 R21.10B.2, R21.B2, D21.B7). The EVM `0x`
+/// 20-byte hex form is read exactly as before. A TRON platform also takes the base58check `T...` form and the hex
+/// wire form `41...`, a documented extension of the reference's hex-only decoding, and normalizes them to the 20
+/// bytes; an EVM platform refuses such a value at activation ([`Self::evm`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwapContractAddr {
+    address: Address,
+    tron_form: bool,
+}
+
+impl SwapContractAddr {
+    /// The 20-byte address for a TRON platform: any accepted form.
+    fn tron(self) -> Address { self.address }
+
+    /// The 20-byte address for an EVM platform: only the `0x` 20-byte form.
+    fn evm(self, member: &str) -> Result<Address, MmError<ActivationErr>> {
+        if self.tron_form {
+            return MmError::err(ActivationErr::InvalidPayload(format!(
+                "{member} must be a 0x-prefixed 20-byte hex address for an EVM platform"
+            )));
+        }
+        Ok(self.address)
+    }
+}
+
+impl<'de> Deserialize<'de> for SwapContractAddr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::value::StrDeserializer;
+        use serde::de::{Error, IntoDeserializer};
+        let text = String::deserialize(deserializer)?;
+        // The EVM form goes through the decoder it always went through.
+        let evm: StrDeserializer<'_, D::Error> = text.as_str().into_deserializer();
+        if let Ok(address) = Address::deserialize(evm) {
+            return Ok(SwapContractAddr {
+                address,
+                tron_form: false,
+            });
+        }
+        match TronAddress::parse(&text) {
+            Ok(parsed) => Ok(SwapContractAddr {
+                address: parsed.to_evm_address(),
+                tron_form: true,
+            }),
+            Err(_) => Err(D::Error::custom("not a valid swap contract address")),
+        }
+    }
+}
+
+/// The swap-contract members of an EVM-family activation request, read exactly as an EVM platform reads them: the
+/// `0x` 20-byte form only. A TRON platform (by the `protocol` of `params["ticker"]`) takes the wider forms of
+/// [`SwapContractAddr`] and passes unchecked. The dispatcher calls this before decoding the request, so an EVM
+/// platform given a `T...` or `41...` value fails request decoding (`InvalidRequest`, HTTP 400) as it always did,
+/// whatever the widened decoder accepts.
+///
+/// # Errors
+///
+/// The `serde_json` error of the first member that is not an EVM address, for a platform that is not a TRON one.
+pub fn evm_swap_contract_members_strict(ctx: &MmArc, params: &Json) -> Result<(), serde_json::Error> {
+    let is_tron = params["ticker"]
+        .as_str()
+        .map(|ticker| coins::coin_conf(ctx, ticker))
+        .and_then(|conf| CoinProtocol::from_conf_json(conf["protocol"].clone()).ok())
+        .is_some_and(|protocol| matches!(protocol, CoinProtocol::TRX { .. }));
+    if is_tron {
+        return Ok(());
+    }
+    for key in ["swap_contract_address", "fallback_swap_contract"] {
+        if let Some(value) = params.get(key) {
+            serde_json::from_value::<Option<Address>>(value.clone())?;
+        }
+    }
+    if let Some(contracts) = params.get("swap_v2_contracts").and_then(Json::as_object) {
+        for key in [
+            "maker_swap_v2_contract",
+            "taker_swap_v2_contract",
+            "nft_maker_swap_v2_contract",
+        ] {
+            if let Some(value) = contracts.get(key) {
+                serde_json::from_value::<Address>(value.clone())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The v2 swap contracts of the request (CRD R35.1.1 `swap_v2_contracts`). The docs link the member table to one
 /// copied from TokensRequest; the members here are those of the docs example and the reference (erratum (c)).
 #[derive(Clone, Debug, Deserialize)]
 pub struct SwapV2ContractsRequest {
-    maker_swap_v2_contract: Address,
-    taker_swap_v2_contract: Address,
-    nft_maker_swap_v2_contract: Address,
+    maker_swap_v2_contract: SwapContractAddr,
+    taker_swap_v2_contract: SwapContractAddr,
+    nft_maker_swap_v2_contract: SwapContractAddr,
 }
 
 /// Deserializes an optional field, treating a malformed value as absent (CRD R35.1.1a).
@@ -170,9 +269,9 @@ pub struct EthWithTokensActivationRequest {
     // absence, so Reloaded does too, a superset of the documented requests. A trading-capable coin without a swap
     // contract is still `InvalidPayload` (CRD ch.35 R35.1.1, erratum (h)).
     #[serde(default)]
-    swap_contract_address: Option<Address>,
+    swap_contract_address: Option<SwapContractAddr>,
     #[serde(default)]
-    fallback_swap_contract: Option<Address>,
+    fallback_swap_contract: Option<SwapContractAddr>,
     #[serde(default)]
     swap_v2_contracts: Option<SwapV2ContractsRequest>,
     /// Whether the v1 swap contract supports the watcher protocol. The EVM coin has no watcher gate that reads it.
@@ -250,22 +349,29 @@ impl EthWithTokensActivationRequest {
     }
 }
 
-/// EVM platform protocol info resolved from coin configuration.
-pub struct EthProtocolInfo {
-    chain_id: Option<u64>,
+/// EVM-family platform protocol info resolved from coin configuration: an EVM chain, or a TRON network (CRD ch.21
+/// §21.4).
+pub enum EthProtocolInfo {
+    Evm { chain_id: Option<u64> },
+    Tron { network: TronNetwork },
 }
 
 impl EthProtocolInfo {
-    /// The coin protocol handed to the EVM coin builder. An EVM platform protocol without an integer
+    /// The coin protocol handed to the coin builder. An EVM platform protocol without an integer
     /// `chain_id` is a protocol parse failure (CRD R35.1.2 phase 3).
     fn coin_protocol(&self, ticker: &str) -> Result<CoinProtocol, MmError<ActivationErr>> {
-        match self.chain_id {
-            Some(chain_id) => Ok(CoinProtocol::ETH {
+        match self {
+            EthProtocolInfo::Evm {
                 chain_id: Some(chain_id),
+            } => Ok(CoinProtocol::ETH {
+                chain_id: Some(*chain_id),
             }),
-            None => MmError::err(ActivationErr::CoinProtocolParseError {
+            EthProtocolInfo::Evm { chain_id: None } => MmError::err(ActivationErr::CoinProtocolParseError {
                 ticker: ticker.to_owned(),
                 error: "the EVM platform protocol needs an integer chain_id".to_owned(),
+            }),
+            EthProtocolInfo::Tron { network } => Ok(CoinProtocol::TRX {
+                network: network.clone(),
             }),
         }
     }
@@ -277,7 +383,8 @@ impl TryFromCoinProtocol for EthProtocolInfo {
         Self: Sized,
     {
         match proto {
-            CoinProtocol::ETH { chain_id } => Ok(EthProtocolInfo { chain_id }),
+            CoinProtocol::ETH { chain_id } => Ok(EthProtocolInfo::Evm { chain_id }),
+            CoinProtocol::TRX { network } => Ok(EthProtocolInfo::Tron { network }),
             proto => MmError::err(proto),
         }
     }
@@ -348,10 +455,12 @@ impl TokenAsMmCoinInitializer for Erc20TokenInitializer {
             protocols.push(protocol);
         }
 
-        if protocols
-            .iter()
-            .any(|protocol| protocol.platform_coin_ticker != self.platform_coin.ticker())
-        {
+        // A token of the other family (an ERC-20 on a TRON platform, a TRC20 on an EVM one) names another platform
+        // than the activated one, whatever its `platform` string says (CRD ch.21 R21.10B.2).
+        let platform_is_tron = self.platform_coin.is_tron_platform_coin();
+        if protocols.iter().any(|protocol| {
+            protocol.platform_coin_ticker != self.platform_coin.ticker() || protocol.tron != platform_is_tron
+        }) {
             return MmError::err(InitTokensAsMmCoinsError::PlatformCoinMismatch);
         }
 
@@ -464,11 +573,45 @@ fn nfts_infos_from_inventory(owned: Vec<NftInfo>) -> HashMap<String, NftInfo> {
 
 /// The request fields of an EVM coin activation that reach the coin builder, validated (CRD R35.1.2 phase 4:
 /// the swap-contract validation).
+///
+/// `tron` is whether the platform is a TRON platform, which takes the TRON forms of a swap contract address (see
+/// [`SwapContractAddr`]) and the same wallet-only rule (CRD ch.21 R21.10B.2, F21.B3).
 fn activation_params(
     ctx: &MmArc,
     platform_conf: &Json,
     request: &EthWithTokensActivationRequest,
+    tron: bool,
 ) -> Result<EthCoinActivationParams, MmError<ActivationErr>> {
+    let address_of = |member: &str, addr: SwapContractAddr| -> Result<Address, MmError<ActivationErr>> {
+        if tron {
+            Ok(addr.tron())
+        } else {
+            addr.evm(member)
+        }
+    };
+    let swap_contract_address = request
+        .swap_contract_address
+        .map(|addr| address_of("swap_contract_address", addr))
+        .transpose()?;
+    let fallback_swap_contract = request
+        .fallback_swap_contract
+        .map(|addr| address_of("fallback_swap_contract", addr))
+        .transpose()?;
+    let swap_v2_contracts = request
+        .swap_v2_contracts
+        .as_ref()
+        .map(
+            |contracts| -> Result<(SwapV2Contracts, Address), MmError<ActivationErr>> {
+                Ok((
+                    SwapV2Contracts {
+                        maker_swap_v2_contract: address_of("maker_swap_v2_contract", contracts.maker_swap_v2_contract)?,
+                        taker_swap_v2_contract: address_of("taker_swap_v2_contract", contracts.taker_swap_v2_contract)?,
+                    },
+                    address_of("nft_maker_swap_v2_contract", contracts.nft_maker_swap_v2_contract)?,
+                ))
+            },
+        )
+        .transpose()?;
     let wallet_only = is_wallet_only_conf(platform_conf);
     if !wallet_only && request.swap_v2_contracts.is_none() && ctx.conf["use_trading_proto_v2"].as_bool() == Some(true) {
         return MmError::err(ActivationErr::InvalidPayload(
@@ -480,16 +623,10 @@ fn activation_params(
         coins::eth::resolve_swap_gas_fee_policy(request.swap_gas_fee_policy, platform_conf);
     let params = EthCoinActivationParams {
         urls: request.nodes.iter().flatten().map(|node| node.url.clone()).collect(),
-        swap_contract_address: request.swap_contract_address,
-        fallback_swap_contract: request.fallback_swap_contract,
-        swap_v2_contracts: request.swap_v2_contracts.as_ref().map(|contracts| SwapV2Contracts {
-            maker_swap_v2_contract: contracts.maker_swap_v2_contract,
-            taker_swap_v2_contract: contracts.taker_swap_v2_contract,
-        }),
-        nft_swap_v2_contract: request
-            .swap_v2_contracts
-            .as_ref()
-            .map(|contracts| contracts.nft_maker_swap_v2_contract),
+        swap_contract_address,
+        fallback_swap_contract,
+        swap_v2_contracts: swap_v2_contracts.as_ref().map(|(contracts, _)| *contracts),
+        nft_swap_v2_contract: swap_v2_contracts.as_ref().map(|(_, nft_contract)| *nft_contract),
         required_confirmations: request.required_confirmations,
         default_required_confirmations: coins::eth::V2_EVM_REQUIRED_CONFIRMATIONS,
         tx_history: request.tx_history(),
@@ -539,6 +676,10 @@ impl PlatformWithTokensActivationOps for EthCoin {
         protocol_conf: Self::PlatformProtocolInfo,
         _priv_key: &[u8],
     ) -> Result<Self, MmError<Self::ActivationError>> {
+        // A TRON platform has its own builder and its own key-policy rules (CRD ch.21 R21.10B.4).
+        if let EthProtocolInfo::Tron { network } = &protocol_conf {
+            return tron::enable_tron_platform_coin(&ctx, &ticker, &platform_conf, &activation_request, network).await;
+        }
         let protocol = protocol_conf.coin_protocol(&ticker)?;
         let policy = activation_request.priv_key_policy();
         if let Some(error) = unsupported_policy_error(&policy) {
@@ -558,7 +699,7 @@ impl PlatformWithTokensActivationOps for EthCoin {
             None
         };
 
-        let params = activation_params(&ctx, &platform_conf, &activation_request)?;
+        let params = activation_params(&ctx, &platform_conf, &activation_request, false)?;
 
         // On WASM the rpc mode and the signing policy are both MetaMask or neither (CRD R35.1.4a).
         #[cfg(target_arch = "wasm32")]
@@ -660,11 +801,17 @@ impl PlatformWithTokensActivationOps for EthCoin {
 
         // The docs document `Transport` for a chain-height read that gets no usable answer, which is explicit.
         // The reference release answers `Internal` there. Reloaded follows the docs (CRD ch.35 R35.1.6).
-        let current_block = self
-            .current_block()
-            .compat()
-            .await
-            .map_to_mm(ActivationErr::Transport)?;
+        //
+        // A TRON platform follows the reference: no node yielding the head block is `Internal` (CRD ch.21
+        // R21.10B.2).
+        let is_tron = self.is_tron_platform_coin();
+        let current_block = self.current_block().compat().await.map_to_mm(|e| {
+            if is_tron {
+                ActivationErr::Internal(e)
+            } else {
+                ActivationErr::Transport(e)
+            }
+        })?;
 
         match &self.derivation_method {
             coins::DerivationMethod::Iguana(_) => {
@@ -695,6 +842,9 @@ impl PlatformWithTokensActivationOps for EthCoin {
             },
         }
     }
+
+    /// A TRON platform has no history source yet: `tx_history` is ignored (CRD ch.21 R21.10B.2, R21.10B.6).
+    fn history_supported(&self) -> bool { !self.is_tron_platform_coin() }
 
     fn on_platform_registered(ctx: &MmArc, ticker: &str, activation_request: &Self::ActivationRequest) {
         if activation_request.nft_req.is_none() {
@@ -852,6 +1002,20 @@ impl InitPlatformCoinWithTokensActivationOps for EthCoin {
         priv_key: &[u8],
         task_handle: &RpcTaskHandle<InitPlatformCoinWithTokensTask<Self>>,
     ) -> Result<Self, MmError<ActivationErr>> {
+        // A TRON platform never drives a device: its own key-policy checks (the Trezor policy among them) run
+        // before any device exchange, and every other policy builds as in the one-shot activator.
+        if matches!(protocol_conf, EthProtocolInfo::Tron { .. }) {
+            let _ = task_handle;
+            return <Self as PlatformWithTokensActivationOps>::enable_platform_coin(
+                ctx,
+                ticker,
+                coin_conf,
+                activation_request,
+                protocol_conf,
+                priv_key,
+            )
+            .await;
+        }
         // The Trezor policy sources the coin's address / account public key from the connected device,
         // driving the interaction through `task_handle` (R50.1 / R50.4). Every other policy is
         // non-interactive and builds the coin exactly as the one-shot activator (R48.6.1).
@@ -911,7 +1075,7 @@ async fn enable_eth_platform_coin_trezor(
         )));
     }
 
-    let params = activation_params(&ctx, &platform_conf, &activation_request)?;
+    let params = activation_params(&ctx, &platform_conf, &activation_request, false)?;
 
     let processor = eth_activation_trezor_connect_processor(task_handle);
     coins::eth::eth_coin_activate_with_trezor_hd(

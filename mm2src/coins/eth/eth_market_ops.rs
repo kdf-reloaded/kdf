@@ -1,8 +1,9 @@
 //! MarketCoinOps trait implementation for EthCoin.
 
 use super::*;
+use crate::eth::tron::balance::trx_balance_sun;
 use crate::eth::tron::broadcast::broadcast_raw_tx;
-use crate::eth::tron::TronAddress;
+use crate::eth::tron::{TronAddress, TRX_DECIMALS};
 use crate::one_smallest_unit;
 
 #[cfg_attr(test, mockable)]
@@ -50,7 +51,7 @@ impl MarketCoinOps for EthCoin {
             .sign_message_hash(message)
             .ok_or(VerificationError::PrefixNotFound)?;
         let address = self
-            .address_from_str(address)
+            .evm_address_from_str(address)
             .map_err(VerificationError::AddressDecodingError)?;
         let signature = Signature::from_str(signature.strip_prefix("0x").unwrap_or(signature))?;
         let is_verified = verify_address(&address, &signature, &H256::from(message_hash))?;
@@ -70,6 +71,17 @@ impl MarketCoinOps for EthCoin {
     }
 
     fn base_coin_balance(&self) -> BalanceFut<BigDecimal> {
+        // A TRON coin (TRX, or the platform of a TRC20) reads its TRX balance from the TRON node API, at 6
+        // decimals (CRD ch.21 R-WP1).
+        if let Some(api) = self.tron_api.clone() {
+            let owner = TronAddress::from_evm_address(self.my_address);
+            let fut = async move {
+                let sun = trx_balance_sun(&api, &owner).await.map_to_mm(BalanceError::from)?;
+                let balance = u256_to_big_decimal(sun, TRX_DECIMALS).mm_err(BalanceError::from)?;
+                Ok::<_, MmError<BalanceError>>(balance)
+            };
+            return Box::new(fut.boxed().compat());
+        }
         Box::new(
             self.eth_balance()
                 .and_then(move |result| Ok(u256_to_big_decimal(result, 18).mm_err(Into::into)?)),
@@ -277,6 +289,17 @@ impl MarketCoinOps for EthCoin {
     }
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> {
+        // A TRON coin asks the head block of the TRON node API (`getnowblock`), not an EVM node (CRD ch.21
+        // R21.10B.5).
+        if let Some(api) = self.tron_api.clone() {
+            let fut = async move {
+                api.get_now_block()
+                    .await
+                    .map(|block| block.block_header.raw_data.number)
+                    .map_err(|e| e.to_string())
+            };
+            return Box::new(fut.boxed().compat());
+        }
         // LP-17: alloy `Provider::get_block_number` returns `u64`
         // directly (no `U256 -> u64` conversion needed). Underlying
         // wire RPC method `eth_blockNumber` is unchanged.
