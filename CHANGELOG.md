@@ -53,6 +53,12 @@ or undo, and every change that needs a step from you.
     An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
     in the browser first, then pair again.
 
+- **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
+  handler produced them. A client that decoded those entities itself to get the original text must stop doing so,
+  or it will now change text that really contains such a sequence.
+  - *What you see:* URLs with query strings, memos, error texts and labels in answers arrive with their plain
+    characters.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
@@ -258,6 +264,11 @@ the previous version used. The safe way:
   device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
   answer `Internal` (500). Detail: PR #386; CRD ch.05 §5.9B R35c.
 
+- **RPC answers are sent as the handler produced them.** `<`, `>` and `&` in answer strings are no longer replaced
+  with `&lt;`, `&gt;` and `&amp;`, for every method including the `wc_*` ones. The visible effect: URLs with query
+  strings, memos, error texts and labels reach the client with their plain characters. A request body that
+  contains `<`, `>` or `&` is still refused, as before.
+
 #### Shielded coins
 
 - **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
@@ -365,9 +376,9 @@ the previous version used. The safe way:
 #### WalletConnect
 
 - **The pairing link of `wc_new_connection` is usable by a wallet.** Every `&` after the first was
-  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The `wc_*` answers now
-  carry the characters as JSON escapes that a client decodes to the plain characters. Detail: PR #393;
-  CRD ch.22 §22.2.
+  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The link now arrives
+  with plain `&` separators, as every RPC answer does (see "RPC answers are sent as the handler produced them"
+  under Changed). Detail: PR #393; CRD ch.22 §22.2.
 - **The node reconnects to the WalletConnect relay.** The relay closes the connection about every ten
   minutes; the node did not reopen it, and a new connection request failed until a restart. It now
   reconnects with a growing wait and subscribes again to its pairings and sessions. Detail: PR #393;
