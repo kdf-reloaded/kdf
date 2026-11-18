@@ -201,6 +201,20 @@ the previous version used. The safe way:
   changes a public type that the Zcash wallet library constructs itself, which kept that library from
   compiling with its Orchard feature on. Transactions are built exactly as before.
   Detail: PR #375; CRD ch.39 status note of 2026-11-15, ch.34 ledger entry of 2026-11-15.
+- **The backup a shielded wallet database gets before a schema upgrade is now consistent, checked and
+  space-aware.** Until now the backup was a plain file copy, which could miss recent changes that were
+  still waiting in the database's log file, and it was neither checked nor limited in number. Now the
+  node first checks the disk has room for two copies of the database plus 16 MiB and, if not,
+  refuses to activate the coin with an error that gives the bytes needed and available, without
+  writing a backup. It then writes a consistent copy named `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak`
+  and checks it (SQLite integrity check, same table layout as the original); a copy that fails is
+  deleted and the activation fails, with the wallet database's content unchanged (opening it may
+  recover an interrupted write, and closing it may fold its log file into it). The upgrade itself runs on a
+  second copy made from the checked backup. After a successful upgrade only the newest
+  `.pre-upgrade` backup is kept; `shielded_db_upgrade_backups` in `MM2.json` sets that number
+  (default 1, lowest 1). Other `.bak` files are left alone. To go back to an older build, put the
+  backup over the wallet database file as described in `RELOADED_VS_GLEEC.md`.
+  Detail: PR #407; CRD ch.39 R39.8.0bc, T39.8.0j.
 
 #### Tendermint (Cosmos) coins
 

@@ -1035,6 +1035,38 @@ deleted or treated as an empty wallet. Manual intervention is required only for
 that explicit unknown/corrupt-file error, not for ordinary switching between
 Reloaded and GLEEC KDF.
 
+#### Upgrade of a shielded wallet database and its backup
+
+When a new KDF Reloaded build needs a newer wallet-database schema than the one a
+`<TICKER>_RELOADED_WALLET.db` was created with, the first activation of that coin upgrades the
+file. Before it changes anything, the node:
+
+- checks that the disk holding the database has room for the backup and for the working copy:
+  twice the size of the wallet database plus 16 MiB. If not, the activation fails with an error that
+  gives the bytes needed and the bytes available, and no backup is written. Free some space and
+  activate again;
+- writes a consistent copy of the database next to it, named
+  `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<milliseconds>.bak`, in the same data directory. It is
+  about as large as the wallet database;
+- checks the copy (SQLite integrity check, same table layout as the original). If the check fails,
+  the copy is deleted, the wallet database's content stays as it was, and the activation fails with an error
+  naming the check.
+
+The upgrade then runs on a second copy made from the verified backup, and replaces the wallet
+database only when the result checks out. If the upgrade itself fails, the original is set aside as
+`.upgrade-failed.<milliseconds>.bak` and a fresh wallet is scanned from the chain, as before.
+
+*Going back to an older KDF Reloaded build:* stop the node, copy the `.pre-upgrade.<milliseconds>.bak`
+file over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal` and
+`<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start the older build. The older build then
+sees the wallet as it was before the upgrade.
+
+*How many backups stay:* after a successful upgrade the node keeps only the newest
+`.pre-upgrade` backup of that wallet and deletes older ones. The top-level `MM2.json` key
+`shielded_db_upgrade_backups` (a whole number, default `1`, lowest effective value `1`) changes the
+number; the backup just made is always kept. Other `.bak` files, such as `.upgrade-failed` and
+`.legacy-v2`, are never deleted by the node.
+
 ## Forward-compatibility commitment
 
 KDF Reloaded commits to following GLEEC KDF's evolution:
