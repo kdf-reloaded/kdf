@@ -434,6 +434,30 @@ the previous version used. The safe way:
   answer before it has seen the send, and a token that lists other servers than QTUM does not share
   its first server. A shared connection and a shared record of spent coins for QTUM and its tokens
   are planned. Detail: PR #368; CRD ch.38 R38.6.4a.
+- **A QRC20 token keeps working when one of its Electrum servers answers a contract request with an
+  error.** Some public QTUM servers answer the token balance, history and receipt requests with an
+  internal error. One such answer used to fail the activation, the balance read or the history
+  request, although another listed server would have answered. The request now moves on to the next
+  server, without dropping the connection, and fails only when every server tried has answered with
+  an error. These three requests now also take turns among the servers, as other reads do. Detail:
+  PR #N; CRD ch.38 D38.6.4Q.2.
+- **QRC20 token history no longer misses a transfer whose details a server failed to deliver.** Such
+  a transfer was left out, and the history was not asked for again until the token balance changed.
+  The history is now asked for again after a short delay, which grows while details keep failing.
+  Detail: PR #N; CRD ch.38 R38.6.4Q.6.
+- **QRC20 token history now stops with a clear status when no listed server serves it.** When three
+  history passes in a row get an error answer from every server tried, the token's history stops,
+  and `my_tx_history` reports it in `sync_status` with code `-2`. Activating the token again starts
+  it again. Passes that fail because a server cannot be reached never count, so a node that is
+  offline keeps its history. Detail: PR #N; CRD ch.38 amendment after R38.6.4Q.6.
+- **A QRC20 token's balance subscription is placed again after a reconnect.** With the balance
+  stream on, the token's subscription was lost when its server connection dropped, and the token
+  fell back to polling. It is now placed again once on the new connection; a server that refuses it
+  changes nothing else. Detail: PR #N; CRD ch.38 D38.6.4Q.3.
+- **Disabling a QRC20 token now ends its history work at once.** The token's history kept running
+  for up to about 40 s after `disable_coin`, and enabling the token again within that time left two
+  of them running. It now ends when the token is disabled, and exactly one runs after the token is
+  enabled again. Detail: PR #N; CRD ch.38 D38.6.4Q.5.
 
 ### Tests
 

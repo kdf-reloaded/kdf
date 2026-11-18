@@ -774,8 +774,13 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
-        Some(_) => {
+        Some(coin) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
+            // A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's
+            // Electrum client closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
+            if let MmCoinEnum::Qrc20Coin(token) = &coin {
+                token.end_history_collector();
+            }
             Ok(())
         },
         None => ERR!("{} is disabled already", ticker),

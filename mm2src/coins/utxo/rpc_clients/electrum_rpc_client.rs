@@ -507,6 +507,10 @@ pub struct ElectrumClientImpl {
     /// connection silently loses it. Nothing may assume a subscription
     /// survived.
     watched_script_hashes: AsyncMutex<HashSet<String>>,
+    /// Contract events this client has asked its servers to watch, as the three parameters of
+    /// `blockchain.contract.event.subscribe`: the address, the contract and the topic (CRD ch.38 D38.6.4Q.3 status
+    /// note). Held so each can be placed again once over a newly maintained connection, as the script hashes are.
+    watched_contract_events: AsyncMutex<Vec<[Json; 3]>>,
 }
 
 impl fmt::Debug for PoolShared {
@@ -1112,6 +1116,50 @@ impl ElectrumClient {
         all_placed
     }
 
+    /// Asks the servers to notify this client when the contract event (`address`, `contract`, `topic`) is logged, and
+    /// remembers the subscription (once the answer is in) so that it is placed again over a newly maintained
+    /// connection (CRD ch.38 D38.6.4Q.3 status note, item 1; R38.6.4h for the script-hash ones).
+    ///
+    /// A failure is the caller's to ignore: nothing here retries, and a subscription that failed is not remembered.
+    pub async fn subscribe_contract_event(
+        &self,
+        address: Json,
+        contract: Json,
+        topic: String,
+    ) -> Result<Json, JsonRpcError> {
+        let epoch = self.pool.session_epoch();
+        let answer: Json = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &address, &contract, &topic)
+            .compat()
+            .await?;
+        {
+            let mut watched = self.watched_contract_events.lock().await;
+            let entry = [address, contract, Json::String(topic)];
+            if !watched.contains(&entry) {
+                watched.push(entry);
+            }
+        }
+        // The connection that carried the subscription may have ended before it was remembered.
+        if self.pool.session_epoch() != epoch {
+            self.pool.request_contract_resubscribe();
+        }
+        Ok(answer)
+    }
+
+    /// Places every remembered contract-event subscription again, once, over a maintained connection (D38.6.4Q.3
+    /// status note, items 1 and 2). An error answer, a refusal or a failure is logged and not repeated: the pool asks
+    /// for this once for each newly maintained session, and nothing here retries or fails anything else.
+    pub async fn resubscribe_watched_contract_events(&self) {
+        let events = self.watched_contract_events.lock().await.clone();
+        for [address, contract, topic] in events {
+            let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &address, &contract, &topic)
+                .compat()
+                .await;
+            if let Err(e) = res {
+                common::log::debug!("Could not place the contract-event subscription {} again: {}", topic, e);
+            }
+        }
+    }
+
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-headers-subscribe
     pub fn blockchain_headers_subscribe(&self) -> RpcRes<ElectrumBlockHeader> {
         rpc_func!(self, "blockchain.headers.subscribe")
@@ -1548,6 +1596,7 @@ impl ElectrumClientImpl {
             get_balance_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
             list_unspent_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
             watched_script_hashes: AsyncMutex::new(HashSet::new()),
+            watched_contract_events: AsyncMutex::new(Vec::new()),
         }
     }
 
