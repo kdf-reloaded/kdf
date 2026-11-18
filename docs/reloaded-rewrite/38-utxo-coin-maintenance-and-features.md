@@ -13,14 +13,13 @@ extensions). Mixed treatment -- see §38.0.
 > event streaming, the fixed-fee policy with its fee-derived minimum trading
 > volume, and FIRO Spark verbose tx).
 
-> **Status note (2026-11-18; Spec Reader round 0.5.0-12; pending the KDF
-> Dirty Gate).** §38.6.10 is new. It records how the reference reads
+> **Status note (2026-11-18; Spec Reader round 0.5.0-12; passed the KDF
+> Dirty Gate on 2026-11-18, measure 0.03).** §38.6.10 is new. It records how the reference reads
 > Dash-layout special transactions (a 16-bit type beside a 16-bit version
 > and an extra payload after the lock-time) for every UTXO coin, DASH and
 > Kerrigan included, what that means for history, balances and swaps, and a
 > gap in this repository's reader. No sentence above or below it is changed.
-> Until the gate clears it, §38.6.10 MUST NOT be relied on or implemented from
-> (chapter 01 R40). *(pending gate)*
+>
 
 ## 38.0 Treatment & scope split
 
@@ -5201,21 +5200,19 @@ decided that such an error carries the daemon's error code and message and
 the body's size only, as R38.6.9b item 4 now states. Chapter 20 R-N3 states
 the same for the Sia wallet daemon.
 
-### 38.6.10 Dash-layout special transactions (Spec Reader round 0.5.0-12; pending the KDF Dirty Gate)
+### 38.6.10 Dash-layout special transactions
 
-> **Provenance status: pending the KDF Dirty Gate.** This section is a
-> candidate under chapter 01 R40: until the gate clears it and this marker is
-> replaced by the clearance record, it MUST NOT be relied on as a statement of
-> required behavior and MUST NOT be implemented from. It was written by the
-> dirty-side specification author on 2026-11-18 (Spec Reader round 0.5.0-12)
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.03 (attestation in §38.9).**
+> This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-12)
 > under the two-team procedure of chapter 01 §1.4A, from the reference lineage
 > at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of 2026-10-07)` and
 > `add-krgn-chain-variant (as of 2026-04-18)` of chapter 02 §2.15A (read
 > read-only), the published Dash special-transaction format (R3: DIP-2) and
 > the Kerrigan source (R3, MIT, main branch as of 2026-10-19), the public coins
 > file, and this repository's own tree. It edits no sentence of this chapter.
-> Numbering: R38.6.10.1 -- R38.6.10.6 and T38.6.10.1 -- T38.6.10.4. Every
-> passage below is marked *(pending gate)* until cleared.
+> Numbering: R38.6.10.1 -- R38.6.10.6 and T38.6.10.1 -- T38.6.10.4.
 
 *Public format (R3).* A Dash-layout transaction starts with a 32-bit word whose
 low 16 bits are the version and whose high 16 bits are the type. Inputs,
@@ -5228,11 +5225,11 @@ transactions), 5 (the coinbase special transaction carried by every block),
 8 (asset lock) and 9 (asset unlock, no inputs). Kerrigan uses the same layout
 and the same types and adds type 10, a Sapling transaction whose shielded part
 travels in the payload, and type 11; its ordinary transactions are version 2.
-Dash has no witness serialization. *(pending gate)*
+Dash has no witness serialization.
 
 **R38.6.10.1** *Reference states.* The rows `v2.6.0-beta`, `v3.0.0-beta`,
 `main (as of 2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)` agree
-on every point of R38.6.10.2 -- R38.6.10.4. *(pending gate)*
+on every point of R38.6.10.2 -- R38.6.10.4.
 
 **R38.6.10.2** *How the reference reads such a transaction.* No coin-entry key
 is involved (chapter 45 §45.3A): the same reading applies to every UTXO coin,
@@ -5247,7 +5244,6 @@ does to compute the identifier, it writes the word unchanged and then the
 payload with its length prefix, so the identifier of a special transaction with
 inputs is the chain's transaction id. A payload of length zero, which the Dash
 rules do not produce for a special type, is read but not written back.
-*(pending gate)*
 
 **R38.6.10.3** *Special transactions with no inputs.* The reference takes an
 empty input list at the start of a non-overwintered transaction as the marker
@@ -5257,7 +5253,7 @@ its other readings accepts such a transaction first, in a wrong shape, depends
 on the bytes: the case at risk is an asset unlock with exactly one output,
 because the output count then equals the witness flag. This pass did not
 establish the outcome on real transactions. A Kerrigan Sapling transaction
-with no transparent inputs falls under the same case. *(pending gate)*
+with no transparent inputs falls under the same case.
 
 **R38.6.10.4** *History, balances and swaps under the reference.*
 
@@ -5278,7 +5274,7 @@ with no transparent inputs falls under the same case. *(pending gate)*
   entry) with type 0, so it is never a special transaction. Validating a
   counterparty's payment reads it with the same reader and checks its outputs;
   nothing in validation looks at the type or a payload. In a swap between two
-  reference nodes, no swap transaction is special. *(pending gate)*
+  reference nodes, no swap transaction is special.
 
 **R38.6.10.5** *Requirement.* The project shall read and write a transaction
 whose leading word has its top bit clear, a version (low 16 bits) of 3 or
@@ -5290,7 +5286,7 @@ marker. A type-0 transaction and every transaction with the top bit set keep
 their present reading. On every transaction the Dash and Kerrigan chains carry,
 this matches R38.6.10.2. It differs only where the reference's outcome is not
 established (R38.6.10.3) and for a zero-length payload, which the chains do not
-produce. The payload is not interpreted. *(pending gate)*
+produce. The payload is not interpreted.
 
 > **Code-quality finding (informative; this repository's own code).** This
 > repository's transaction reader has no payload step, and it accepts a reading
@@ -5303,30 +5299,29 @@ produce. The payload is not interpreted. *(pending gate)*
 > wallet that shields or unshields, would get a history row whose identifier
 > the chain does not know. R38.6.10.5 is the fix. Whether the reader should
 > also refuse bytes left over after a complete reading is a wider question,
-> left to the orchestrator. *(pending gate)*
+> left to the orchestrator.
 
 **R38.6.10.6** *Kerrigan headers are not this section's subject.* How the
 reference reads Kerrigan's headers, the median-time-past and the HTLC
-lock-times is recorded in chapter 37 §37.5.11. *(pending gate)*
+lock-times is recorded in chapter 37 §37.5.11.
 
 **T38.6.10.1** *Real-chain vectors.* Pinned from the public chains: a DASH
 coinbase special transaction (type 5), a DASH provider registration (type 1), a
 DASH asset unlock (type 9, no inputs, one output), a DASH version-3 type-0
 transaction, and a Kerrigan Sapling transaction (type 10). Each one is read,
 written back byte-exact, and its computed identifier equals the chain's
-transaction id. *(pending gate)*
+transaction id.
 
 **T38.6.10.2** *Unchanged readings.* An overwintered version-3 transaction (the
 low 16 bits of its leading word are also 3) and a segwit transaction keep their
-present results. *(pending gate)*
+present results.
 
 **T38.6.10.3** *History identifier.* A history row built from a special
 transaction carries the chain's transaction id as its hash and internal id.
-*(pending gate)*
 
 **T38.6.10.4** *Truncated payload.* A special transaction whose payload length
 prefix is longer than the remaining bytes is refused as malformed; it is not
-read as a transaction without a payload. *(pending gate)*
+read as a transaction without a payload.
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
@@ -6167,3 +6162,17 @@ R38.8.6 **Tests (two-direction, observable).**
   server.* Written by a session that never read the forbidden corpus. The input
   is this repository's code and its tests. It takes no forbidden-class input,
   so chapter 01 R38 is not engaged and no gate pass is required.
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-12) -- §38.6.10 (R38.6.10.1 -- R38.6.10.6, the code-quality finding and
+  T38.6.10.1 -- T38.6.10.4) and the status note at the head of this
+  chapter; cleared together with chapter 37 §37.5.11. No other text of this
+  chapter was changed.*
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.03, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* as the clearance
+  block of the section states them.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.03, no leak findings. *Extent:* the UTXO header reads for every family,
+  the transaction reader and writer including the special-transaction
+  payload, the choice of lock-time and sequence for claims and refunds, the
+  median-time query, refund readiness and the errors of the version-two
+  history, at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of
+  2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)`.
