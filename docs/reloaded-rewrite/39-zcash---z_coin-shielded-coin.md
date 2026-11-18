@@ -1707,7 +1707,7 @@ Its script signature is the signature over the transparent signature hash with t
 script code and `SIGHASH_ALL`, then the selector or the secret (push-only data supplied by the
 caller), then the redeem script as one push. The input carries the sequence number the caller
 chooses. The signature is accepted only when the public key of the signing key occurs in the redeem
-script, so a key that is not the contract's cannot produce a spend. Transparent outputs given as
+script, so a key that is not the contract's cannot produce a spend. A redeem script of more than 520 bytes, the consensus limit of one script push, is refused with a typed error before anything is built. Transparent outputs given as
 they are keep their count, order, value and script. The legacy lock time is the one the caller sets
 (zero by default).
 

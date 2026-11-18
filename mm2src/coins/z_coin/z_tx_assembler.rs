@@ -56,6 +56,9 @@ const SIGHASH_ALL_BYTE: u8 = 0x01;
 /// (the same bound the published transparent builder uses).
 const MAX_SIGNATURE_WITH_HASH_TYPE: usize = 72 + 1;
 
+/// The consensus limit on one script push, and so on a redeem script.
+const MAX_REDEEM_SCRIPT_SIZE: usize = 520;
+
 /// Size of an outpoint, and of a sequence number, in a serialized input.
 const PREVOUT_SIZE: usize = 32 + 4;
 const SEQUENCE_SIZE: usize = 4;
@@ -281,6 +284,12 @@ impl<P: Parameters> TxAssembler<P> {
         let mut input_sizes = Vec::with_capacity(p2sh_inputs.len());
         let mut transparent_builder = TransparentBuilder::empty();
         for input in p2sh_inputs {
+            if input.redeem_script.len() > MAX_REDEEM_SCRIPT_SIZE {
+                return Err(AssemblerError::Transparent(format!(
+                    "the redeem script is {} bytes; the most a script push can carry is {MAX_REDEEM_SCRIPT_SIZE}",
+                    input.redeem_script.len()
+                )));
+            }
             let redeem = RedeemScript::parse(&ScriptCode(input.redeem_script.clone()))
                 .map_err(|e| AssemblerError::Transparent(format!("redeem script: {e:?}")))?;
             ScriptSigData::parse(&ScriptCode(input.script_data.clone()))
@@ -474,9 +483,9 @@ impl<P: Parameters> TxAssembler<P> {
                     }
                     let mut signature = signed.der;
                     signature.push(SIGHASH_ALL_BYTE);
-                    let mut script_sig = push_data(&signature);
+                    let mut script_sig = push_data(&signature)?;
                     script_sig.extend_from_slice(&spec.script_data);
-                    script_sig.extend(push_data(&spec.redeem_script));
+                    script_sig.extend(push_data(&spec.redeem_script)?);
                     vin.push(TxIn::from_parts(
                         spec.outpoint.clone(),
                         Script(ScriptCode(script_sig)),
@@ -570,9 +579,11 @@ fn make_data<A: Authorization>(
 }
 
 /// A canonical (minimal) data push of `data`.
-fn push_data(data: &[u8]) -> Vec<u8> {
+fn push_data(data: &[u8]) -> Result<Vec<u8>, AssemblerError> {
+    let len = u16::try_from(data.len())
+        .map_err(|_| AssemblerError::Transparent(format!("a push of {} bytes does not fit", data.len())))?;
     let mut out = Vec::with_capacity(data.len() + 3);
-    match data.len() {
+    match len {
         n if n < 0x4c => out.push(n as u8),
         n if n <= 0xff => {
             out.push(0x4c);
@@ -580,11 +591,20 @@ fn push_data(data: &[u8]) -> Vec<u8> {
         },
         n => {
             out.push(0x4d);
-            out.extend_from_slice(&(n as u16).to_le_bytes());
+            out.extend_from_slice(&n.to_le_bytes());
         },
     }
     out.extend_from_slice(data);
-    out
+    Ok(out)
+}
+
+/// The bytes a push of `len` bytes takes: the data and its length prefix.
+fn push_len(len: usize) -> usize {
+    len + match len {
+        0..=0x4b => 1,
+        0x4c..=0xff => 2,
+        _ => 3,
+    }
 }
 
 /// The CompactSize length prefix of `len`.
@@ -601,9 +621,7 @@ fn compact_size_len(len: usize) -> usize {
 /// script signature (a signature of the largest size, the script data, the pushed redeem script) and
 /// the sequence number. Pass it to the fee rule as [`InputSize::Known`].
 pub fn kdf_p2sh_input_size(redeem_script_len: usize, script_data_len: usize) -> usize {
-    let script_sig_len = push_data(&[0u8; MAX_SIGNATURE_WITH_HASH_TYPE]).len()
-        + script_data_len
-        + push_data(&vec![0u8; redeem_script_len]).len();
+    let script_sig_len = push_len(MAX_SIGNATURE_WITH_HASH_TYPE) + script_data_len + push_len(redeem_script_len);
     PREVOUT_SIZE + compact_size_len(script_sig_len) + script_sig_len + SEQUENCE_SIZE
 }
 
@@ -625,11 +643,19 @@ mod tests {
 
     #[test]
     fn a_push_is_minimal_for_every_length_class() {
-        assert_eq!(push_data(&[7; 5])[..1], [5]);
-        assert_eq!(push_data(&[7; 0x4b])[..1], [0x4b]);
-        assert_eq!(push_data(&[7; 0x4c])[..2], [0x4c, 0x4c]);
-        assert_eq!(push_data(&[7; 107])[..2], [0x4c, 107]);
-        assert_eq!(push_data(&[7; 256])[..3], [0x4d, 0x00, 0x01]);
+        assert_eq!(push_data(&[7; 5]).unwrap()[..1], [5]);
+        assert_eq!(push_data(&[7; 0x4b]).unwrap()[..1], [0x4b]);
+        assert_eq!(push_data(&[7; 0x4c]).unwrap()[..2], [0x4c, 0x4c]);
+        assert_eq!(push_data(&[7; 107]).unwrap()[..2], [0x4c, 107]);
+        assert_eq!(push_data(&[7; 256]).unwrap()[..3], [0x4d, 0x00, 0x01]);
+        for len in [0usize, 5, 0x4b, 0x4c, 0xff, 0x100, 520] {
+            assert_eq!(push_len(len), push_data(&vec![7; len]).unwrap().len(), "length {len}");
+        }
+        // Never truncated: a push above 0xffff bytes is refused.
+        assert!(matches!(
+            push_data(&vec![7; 0x1_0000]),
+            Err(AssemblerError::Transparent(_))
+        ));
     }
 
     #[test]
@@ -938,6 +964,40 @@ mod tests {
         };
         let refused = build_spend(IRONWOOD_HEIGHT + 10, &spend, key(0x33)).unwrap_err();
         assert!(matches!(refused, AssemblerError::Signing(_)), "{refused}");
+    }
+
+    /// A redeem script above the 520-byte consensus limit of one push is refused with a typed error before
+    /// anything is built.
+    #[test]
+    fn a_redeem_script_over_520_bytes_is_refused() {
+        let redeem = vec![0x51u8; 521];
+        let mut assembler = TxAssembler::new(
+            params(Some(IRONWOOD_HEIGHT)),
+            300u32.into(),
+            sapling::Anchor::empty_tree(),
+        );
+        assembler.add_kdf_p2sh_input(KdfP2shInput {
+            outpoint: OutPoint::new([5; 32], 0),
+            coin: p2sh_coin(&redeem, 100_000),
+            redeem_script: redeem,
+            script_data: vec![0x51],
+            sequence: 0xffff_fffe,
+            signer: signer(key(0x11)),
+        });
+        assembler.add_transparent_output_raw(p2pkh_output(99_000, 4));
+        let err = assembler
+            .build(
+                crate::z_coin::os_rng(),
+                &[],
+                &NoProver,
+                &NoProver,
+                &FixedFeeRule::non_standard(Zatoshis::const_from_u64(1_000)),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, AssemblerError::Transparent(m) if m.contains("521") && m.contains("520")),
+            "{err}"
+        );
     }
 
     /// The transaction must balance to the fee the rule names, and a shortfall or surplus is a typed error

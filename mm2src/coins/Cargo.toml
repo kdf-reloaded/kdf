@@ -232,15 +232,17 @@ webpki-roots = { version = "1.0" }
 # `getrandom`'s `SysRng` behind `UnwrapErr` (see `z_coin::os_rng`). `rand` 0.8 stays for the rest of the crate.
 rand_core = "0.10"
 getrandom = { version = "0.4", features = ["sys_rng"] }
-# CRD ch.39 R39.6.5a--R39.6.5e: the Pirate1 (Ironwood) payment address type and the empty-tree Ironwood anchor
-# of a withdrawal. Already in the tree (same version) through zcash_primitives, whose transaction builder takes
-# this crate's `Address` and `Anchor`. Native only: a WASM build refuses to activate a shielded coin.
+# CRD ch.39 R39.6.5a--R39.6.5e: the Pirate1 (Ironwood) payment address type, and the builder of the output-only
+# Ironwood bundle with the empty-tree anchor of a withdrawal, both driven by this crate's own transaction
+# assembler (`z_coin/z_tx_assembler.rs`). Already in the tree (same version) through zcash_primitives. Native
+# only: a WASM build refuses to activate a shielded coin.
 orchard = { version = "=0.16.0", default-features = false }
 # Classic Bech32 (BIP 173) for the Pirate1 address; the Bech32m checksum is refused (R39.6.5a). Already in
 # the tree at this version.
 bech32 = "0.11"
-# 0.24 makes `orchard` a default feature; Ironwood actions live behind it and
-# we neither read nor build that bundle, so default features stay off.
+# 0.25 makes `orchard` a default feature. This crate leaves it off here; `zcash_client_sqlite` below turns it
+# on (the wallet database must record a sent transaction that carries an Ironwood bundle, R39.6.5g), and the
+# assembler builds the output-only Ironwood bundle of a Pirate1 withdrawal itself.
 zcash_client_backend = { version = "=0.25.0", default-features = false, features = ["transparent-inputs", "zcash_proofs"] }
 zcash_client_sqlite = { version = "=0.23.0", default-features = false, features = ["multicore", "orchard", "transparent-inputs"] }
 sapling = { package = "sapling-crypto", version = "=0.9.0" }
