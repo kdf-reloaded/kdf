@@ -530,6 +530,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
     details could not be read, asks for the history again after a retry delay
     (10 s, doubling up to 300 s). GLEEC KDF asks again only when the balance
     changes or the token is activated anew.
+
   The contract-event subscription that KDF Reloaded's balance stream places for
   a token is placed again after a reconnect, at most once per new session; GLEEC
   KDF has no balance stream for tokens and places no such subscription.
