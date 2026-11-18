@@ -207,6 +207,9 @@ impl BchCoin {
         self.slp_tokens_infos.lock().unwrap().insert(ticker, info);
     }
 
+    /// Forgets the token recorded by [`Self::add_slp_token_info`]; a ticker that is not recorded is ignored.
+    pub fn remove_slp_token_info(&self, ticker: &str) { self.slp_tokens_infos.lock().unwrap().remove(ticker); }
+
     pub fn get_slp_tokens_infos(&self) -> MutexGuard<'_, HashMap<String, SlpTokenInfo>> {
         self.slp_tokens_infos.lock().unwrap()
     }

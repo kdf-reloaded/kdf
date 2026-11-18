@@ -2,6 +2,7 @@ use super::*;
 use crate::activation_locks::{ActivationGuard, ActivationLocks};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 use crate::rpc_command::get_my_address::PathToAddress;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -136,10 +137,53 @@ impl MmCoinEnum {
         }
     }
 }
+/// The registry of the activated coins: the coins by ticker, and for each platform coin the tickers of its
+/// dependent tokens and layer-two coins (CRD ch.43 R43.1E.5 item 1).
+///
+/// Reads go through `Deref` to the map of coins. Every change goes through the methods below, so the two parts
+/// stay consistent; the map has no `DerefMut`.
+#[derive(Default)]
+pub(crate) struct CoinRegistry {
+    entries: HashMap<String, MmCoinEnum>,
+    dependents: HashMap<String, BTreeSet<String>>,
+}
+impl std::ops::Deref for CoinRegistry {
+    type Target = HashMap<String, MmCoinEnum>;
+    fn deref(&self) -> &Self::Target { &self.entries }
+}
+impl CoinRegistry {
+    /// Registers a coin that joins no platform's dependent set: a platform or standalone coin, or a token of
+    /// the legacy `enable`/`electrum` (R43.1E.5 item 1).
+    pub(crate) fn insert(&mut self, ticker: String, coin: MmCoinEnum) -> Option<MmCoinEnum> {
+        self.entries.insert(ticker, coin)
+    }
+    /// Registers a token or layer-two coin and records it as a dependent of `platform`.
+    pub(crate) fn insert_dependent(&mut self, platform: &str, ticker: String, coin: MmCoinEnum) {
+        self.dependents
+            .entry(platform.to_owned())
+            .or_default()
+            .insert(ticker.clone());
+        self.entries.insert(ticker, coin);
+    }
+    /// Removes a coin. The coin leaves the dependent set of its platform, and a platform loses its own set: its
+    /// tokens stay registered (CRD ch.43 §43.1E compatibility note item 2).
+    pub(crate) fn remove(&mut self, ticker: &str) -> Option<MmCoinEnum> {
+        let removed = self.entries.remove(ticker)?;
+        self.dependents.remove(ticker);
+        self.dependents.retain(|_, set| {
+            set.remove(ticker);
+            !set.is_empty()
+        });
+        Some(removed)
+    }
+    /// The tickers of the dependents of `platform`.
+    pub(crate) fn dependents_of(&self, platform: &str) -> BTreeSet<String> {
+        self.dependents.get(platform).cloned().unwrap_or_default()
+    }
+}
 pub struct CoinsContext {
-    /// A map from a currency ticker symbol to the corresponding coin.
-    /// Similar to `LP_coins`.
-    pub(crate) coins: AsyncMutex<HashMap<String, MmCoinEnum>>,
+    /// The activated coins by ticker, with the dependent set of each platform. Similar to `LP_coins`.
+    pub(crate) coins: AsyncMutex<CoinRegistry>,
     /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
     activation_locks: ActivationLocks,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
@@ -171,7 +215,7 @@ impl CoinsContext {
             // A node whose top-level setting is invalid does not start; this only keeps the guard.
             explicit_fee_estimate_cache_secs(&ctx.conf)?;
             Ok(CoinsContext {
-                coins: AsyncMutex::new(HashMap::new()),
+                coins: AsyncMutex::new(CoinRegistry::default()),
                 activation_locks: ActivationLocks::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
@@ -213,6 +257,30 @@ impl CoinsContext {
         Ok(())
     }
 
+    /// Registers a token or layer-two coin of `platform_ticker` and records it in that platform's dependent set
+    /// (CRD ch.43 R43.1E.5 item 1). Refuses a registered ticker like [`Self::add_coin`].
+    pub async fn add_token(
+        &self,
+        platform_ticker: &str,
+        coin: MmCoinEnum,
+    ) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
+        let mut coins = self.coins.lock().await;
+        if coins.contains_key(coin.ticker()) {
+            return MmError::err(CoinIsAlreadyActivatedErr {
+                ticker: coin.ticker().into(),
+            });
+        }
+
+        self.fee_estimate_cache.forget_coin(coin.ticker());
+        coins.insert_dependent(platform_ticker, coin.ticker().into(), coin);
+        Ok(())
+    }
+
+    /// The tickers of the dependent tokens and layer-two coins of `platform_ticker`.
+    pub async fn dependents_of(&self, platform_ticker: &str) -> BTreeSet<String> {
+        self.coins.lock().await.dependents_of(platform_ticker)
+    }
+
     pub async fn add_platform_with_tokens(
         &self,
         platform: MmCoinEnum,
@@ -225,13 +293,14 @@ impl CoinsContext {
             });
         }
 
-        self.fee_estimate_cache.forget_coin(platform.ticker());
-        coins.insert(platform.ticker().into(), platform);
+        let platform_ticker = platform.ticker().to_owned();
+        self.fee_estimate_cache.forget_coin(&platform_ticker);
+        coins.insert(platform_ticker.clone(), platform);
 
         // Tokens can't be activated without platform coin so we can safely insert them without checking prior existence
         for token in tokens {
             self.fee_estimate_cache.forget_coin(token.ticker());
-            coins.insert(token.ticker().into(), token);
+            coins.insert_dependent(&platform_ticker, token.ticker().into(), token);
         }
         Ok(())
     }

@@ -284,6 +284,9 @@ impl TendermintCoin {
         });
     }
 
+    /// Forgets the token recorded by [`Self::add_activated_token_info`]; a ticker that is not recorded is ignored.
+    pub fn remove_activated_token_info(&self, ticker: &str) { self.tokens_info.lock().remove(ticker); }
+
     /// Whether activation should report balances in its result (the
     /// `get_balances` activation flag captured at coin creation).
     pub fn activation_get_balances(&self) -> bool { self.get_balances }

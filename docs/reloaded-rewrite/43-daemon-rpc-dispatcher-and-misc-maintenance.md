@@ -1472,6 +1472,26 @@ chapter's to state (chapter 40 §40.6B.5 records them for Solana).
 >    no reference counterpart (R43.1E.1).
 >
 
+> *Reloaded status (clean side, 2026-11-18; Reloaded-original, its own code):*
+> the first part of the passive-platform work of chapter 55 D55.6, with no
+> change of any answer.
+>
+> 1. Reloaded now keeps, under the registry's lock, a dependent set per
+>    platform coin, with the joining rule of R43.1E.5 item 1: the tokens of a
+>    platform-with-tokens activation, and the token and layer-two coins of the
+>    token and layer-two activation methods, join their platform's set; a token
+>    registered by the legacy `enable` or `electrum` does not.
+> 2. A disabled token is taken out of its platform's set and out of the
+>    platform's own records of its tokens (EVM and TRON, BCH and SLP,
+>    Tendermint, Solana). A second removal, or a removal while the platform is
+>    not registered, changes nothing. Single-token Solana activation now records
+>    the token on its platform, as the with-tokens activation does.
+> 3. A platform with dependents is still removed by every successful call, its
+>    dependent set is dropped with it, and its tokens stay registered: item 2 of
+>    the compatibility note above is unchanged until the passive state is
+>    built.
+>
+
 **D43.1E.1** *(Open, 2026-11-16.)* **Which members a refused `disable_coin`
 carries.** A client written from the documentation reads `swaps`; a client
 written against the reference reads `active_swaps` and expects `orders` and
