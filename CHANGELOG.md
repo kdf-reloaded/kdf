@@ -330,6 +330,19 @@ the previous version used. The safe way:
 
 #### Solana coins
 
+- **Solana withdraws send the right amounts and say what they cost.** An SPL withdraw with `max` now
+  sends the whole token balance (it used to move the requested amount while the answer showed the
+  whole balance). Creating the recipient's token account is paid in SOL: the rent is checked against
+  the SOL balance together with the fee, a short balance answers the new error
+  `NotSufficientPlatformBalanceForFee` naming SOL, and `fee_details` shows `fee_amount`,
+  `rent_amount` and `total_amount` for SOL and SPL withdraws alike, instead of a single `amount`.
+  A token balance is read from the wallet's own token account for that token, and is zero when the
+  wallet has none. A recipient that is a token account rather than a wallet address is refused. An
+  amount below the coin's minimum transaction amount answers `AmountTooLow`. Activation now checks
+  that the token's mint belongs to its token program, so a node failure while an inline token is
+  checked answers `Transport`; a Token-2022 token is refused at activation until it is supported.
+  Solana stays switched off in this build. Detail: PR #N; CRD ch.40 R40.6B.9-R40.6B.12,
+  D40.6B.2-D40.6B.6; ch.43 R43.1D.2.
 - **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
   are removed and can be activated again; a removed token no longer stays in its platform's token
   records. A platform with active tokens is handled as for every other family: the platform is
@@ -628,7 +641,9 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
+  S6 in PR #N; new package S6c (a rent-exempt guard for SOL withdraws); switch-on lab rows for
+  `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

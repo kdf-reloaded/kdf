@@ -581,6 +581,19 @@ pub enum WithdrawError {
         available: BigDecimal,
         required: BigDecimal,
     },
+    /// CRD ch.40 R40.6B.10, ch.43 R43.1D.2: a token withdrawal whose fee (plus the rent of a created recipient
+    /// token account) exceeds the SOL balance. `coin` is the platform ticker, `required` is fee plus rent.
+    #[display(
+        fmt = "Not enough {} to pay the fee of the withdrawal: available {}, required at least {}",
+        coin,
+        available,
+        required
+    )]
+    NotSufficientPlatformBalanceForFee {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+    },
     /// CRD ch.39 D39.8.0e: the withdrawal is short only because notes it would spend are committed
     /// to an earlier transaction of this daemon that is not confirmed yet. Distinct from
     /// `NotSufficientBalance` so the cause reaches the user: with the balance showing, a bare
@@ -672,6 +685,7 @@ impl HttpStatusCode for WithdrawError {
             WithdrawError::CoinDoesntSupportInitWithdraw { .. }
             | WithdrawError::UnexpectedUserAction { .. }
             | WithdrawError::NotSufficientBalance { .. }
+            | WithdrawError::NotSufficientPlatformBalanceForFee { .. }
             | WithdrawError::BalanceLockedByUnconfirmedTransaction { .. }
             | WithdrawError::ChainDisagreement(_)
             | WithdrawError::ZeroBalanceToWithdrawMax

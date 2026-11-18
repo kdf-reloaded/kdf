@@ -15,13 +15,6 @@ pub trait SolanaCommonOps {
     fn rpc(&self) -> &SolanaRpcPool;
 
     fn is_token(&self) -> bool;
-
-    async fn check_balance_and_prepare_transfer(
-        &self,
-        max: bool,
-        amount: BigDecimal,
-        fees: u64,
-    ) -> Result<PrepareTransferData, MmError<SufficientBalanceError>>;
 }
 
 impl From<RpcError> for BalanceError {
@@ -54,6 +47,18 @@ impl From<ParsePubkeyError> for WithdrawError {
 
 impl From<ProgramError> for WithdrawError {
     fn from(e: ProgramError) -> Self { WithdrawError::InternalError(format!("{:?}", e)) }
+}
+
+/// Why the mint of a token was refused at activation (CRD ch.40 R40.2.2). Both answer the surface's `Transport`
+/// row (R40.2.4, R40.3.4, R40.3A.3).
+#[derive(Debug, Display)]
+pub enum MintOwnerError {
+    /// The node failed while the mint account was read; the text names the node host-only.
+    #[display(fmt = "Could not read the mint account: {}", _0)]
+    Node(String),
+    /// The mint account exists and another program than the token's `program_id` owns it.
+    #[display(fmt = "The mint account of the token is owned by another program than the token's `program_id`")]
+    WrongOwner,
 }
 
 #[derive(Debug)]
@@ -328,7 +333,30 @@ impl Deref for SolanaCoin {
     fn deref(&self) -> &SolanaCoinImpl { &*self.0 }
 }
 
+/// The `fee_details` of a Solana withdraw, for the platform coin and for a token alike (CRD ch.40 R40.6B.12,
+/// D40.6B.5): with the `type` member `Solana` that the enum tag adds, exactly `fee_amount`, `rent_amount` and
+/// `total_amount`, decimal strings in SOL. `total_amount` is `fee_amount` plus `rent_amount`.
+///
+/// The three members are all required when a stored entry is read back (`TxFeeDetails` reads untagged, by shape):
+/// no other family's fee object has `fee_amount`, which is what keeps the two apart.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SolanaFeeDetails {
-    pub amount: BigDecimal,
+    /// The network fee.
+    pub fee_amount: BigDecimal,
+    /// The rent of a recipient token account the withdraw creates; zero when none is created.
+    pub rent_amount: BigDecimal,
+    /// `fee_amount` plus `rent_amount`.
+    pub total_amount: BigDecimal,
+}
+
+impl SolanaFeeDetails {
+    /// The details of a withdraw that pays `fee` and `rent` (both in SOL); the total is their sum.
+    pub fn new(fee: BigDecimal, rent: BigDecimal) -> SolanaFeeDetails {
+        let total_amount = &fee + &rent;
+        SolanaFeeDetails {
+            fee_amount: fee,
+            rent_amount: rent,
+            total_amount,
+        }
+    }
 }

@@ -46,4 +46,6 @@ pub use token::enable_token;
 mod activation_serialization_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod solana_config_forms_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_mint_check_tests;
 #[cfg(test)] mod tests;

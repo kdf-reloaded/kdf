@@ -1,58 +1,79 @@
 // solana_mm_coin — MmCoin trait implementation and withdraw logic.
 
 use super::*;
+use crate::solana::solana_common::{amount_to_units, truncate_amount, units_to_amount};
 
-async fn withdraw_base_coin_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult {
-    let (hash, fees) = coin.estimate_withdraw_fees().await.mm_err(Into::into)?;
-    let res = coin
-        .check_balance_and_prepare_transfer(req.max, req.amount.clone(), fees)
-        .await
-        .mm_err(Into::into)?;
-    let to = Pubkey::from_str(&req.to).map_err(|e| WithdrawError::InvalidAddress(format!("{:?}", e)))?;
-    let tx = solana_system_transaction::transfer(&coin.key_pair, &to, res.lamports_to_send, hash);
+/// `withdraw` of SOL (CRD ch.40 R40.6B.9). `fee`, `memo`, `from` and `broadcast` change nothing.
+async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult {
+    let to = solana_common::parse_recipient(&req.to)?;
+    let (hash, fee) = coin.estimate_withdraw_fees().await.mm_err(Into::into)?;
+    let balance = coin.rpc().get_balance(&coin.key_pair.pubkey()).await?;
+    let decimals = coin.decimals;
+    let fee_amount = units_to_amount(fee, decimals);
+    let balance_amount = units_to_amount(balance, decimals);
+    let threshold = coin.min_tx_amount();
+
+    let lamports = if req.max {
+        // The balance less the fee; when that is nothing the amount is too low.
+        match balance.checked_sub(fee) {
+            Some(lamports) if lamports > 0 => lamports,
+            other => {
+                return MmError::err(WithdrawError::AmountTooLow {
+                    amount: units_to_amount(other.unwrap_or(0), decimals),
+                    threshold,
+                })
+            },
+        }
+    } else {
+        let amount = truncate_amount(&req.amount, decimals);
+        if amount <= BigDecimal::from(0) {
+            return MmError::err(WithdrawError::AmountTooLow { amount, threshold });
+        }
+        let required = &amount + &fee_amount;
+        if required > balance_amount {
+            return MmError::err(WithdrawError::NotSufficientBalance {
+                coin: coin.ticker.clone(),
+                available: balance_amount,
+                required,
+            });
+        }
+        amount_to_units(&amount, decimals).mm_err(Into::into)?
+    };
+
+    let tx = solana_system_transaction::transfer(&coin.key_pair, &to, lamports, hash);
     let serialized_tx = serialize(&tx).map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
-    let total_amount = lamports_to_sol(res.lamports_to_send);
-    let received_by_me = if req.to == coin.my_address {
+    let tx_hash = tx
+        .signatures
+        .first()
+        .map(ToString::to_string)
+        .or_mm_err(|| WithdrawError::InternalError("The transaction carries no signature".to_string()))?;
+    let total_amount = units_to_amount(lamports, decimals);
+    let received_by_me = if to == coin.key_pair.pubkey() {
         total_amount.clone()
     } else {
         0.into()
     };
-    let spent_by_me = &total_amount + &res.sol_required;
+    let spent_by_me = &total_amount + &fee_amount;
     Ok(TransactionDetails {
         unsigned: None,
         tx_json: None,
         tx_hex: serialized_tx.into(),
-        tx_hash: tx.signatures[0].to_string(),
+        internal_id: tx_hash.as_bytes().to_vec().into(),
+        tx_hash,
         from: vec![coin.my_address.clone()],
         to: vec![req.to],
-        total_amount: spent_by_me.clone(),
+        total_amount,
         my_balance_change: &received_by_me - &spent_by_me,
         spent_by_me,
         received_by_me,
         block_height: 0,
         timestamp: now_ms() / 1000,
-        fee_details: Some(
-            SolanaFeeDetails {
-                amount: res.sol_required,
-            }
-            .into(),
-        ),
+        fee_details: Some(SolanaFeeDetails::new(fee_amount, 0.into()).into()),
         coin: coin.ticker.clone(),
-        internal_id: vec![].into(),
         kmd_rewards: None,
         transaction_type: TransactionType::StandardTransfer,
         memo: None,
     })
-}
-
-async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult {
-    let validate_address_result = coin.validate_address(&*req.to);
-    if !validate_address_result.is_valid {
-        return MmError::err(WithdrawError::InvalidAddress(
-            validate_address_result.reason.unwrap_or_else(|| "Unknown".to_string()),
-        ));
-    }
-    withdraw_base_coin_impl(coin, req).await
 }
 
 #[allow(forgetting_references, forgetting_copy_types, invalid_reference_casting)]
