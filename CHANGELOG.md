@@ -253,8 +253,8 @@ the previous version used. The safe way:
   in the source tree are gone. Transactions are built by the node's own assembler over the libraries' public interface.
   A shielded transaction expires after the same 40 blocks as before, and the Zcash network upgrade NU7 is known to the
   node, so a transparent-only Zcash transaction under its branch identifier is read by both of the node's readers. The
-  wallet database is migrated once; read "The shielded (ARRR, Pirate) wallet database is migrated irreversibly" under "Breaking changes and
-  upgrade notes" above.
+  wallet database is migrated once; read "The shielded (ARRR, Pirate) wallet database is migrated irreversibly" under
+  "Breaking changes and upgrade notes" above.
   Detail: PR #411; CRD ch.39 status notes of 2026-11-18, ch.34 ledger entry of 2026-11-18.
 - **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
   change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer

@@ -1707,9 +1707,10 @@ Its script signature is the signature over the transparent signature hash with t
 script code and `SIGHASH_ALL`, then the selector or the secret (push-only data supplied by the
 caller), then the redeem script as one push. The input carries the sequence number the caller
 chooses. The signature is accepted only when the public key of the signing key occurs in the redeem
-script, so a key that is not the contract's cannot produce a spend. A redeem script of more than 520 bytes, the consensus limit of one script push, is refused with a typed error before anything is built. Transparent outputs given as
-they are keep their count, order, value and script. The legacy lock time is the one the caller sets
-(zero by default).
+script, so a key that is not the contract's cannot produce a spend. A redeem script of more than 520
+bytes, the consensus limit of one script push, is refused with a typed error before anything is
+built. Transparent outputs given as they are keep their count, order, value and script. The legacy
+lock time is the one the caller sets (zero by default).
 
 R39.6.5l **The output-only Ironwood bundle.** An Ironwood output is added to a bundle built with
 spends disabled, outputs enabled, cross-address transfers as the Ironwood version defines, the
@@ -1738,7 +1739,10 @@ transaction, read back from their bytes with the script signature `<signature> <
 signature verifies against a signature hash recomputed from the bytes independently of the
 assembler. A key that is not in the redeem script is refused. A deficit and a surplus are refused
 with their amounts. The fee of the ZIP 317 rule for the contract-spending shape is the expected
-figure. The four contract spends (refund and claim, as version 4 and as version 6) are byte-identical to the transactions the previous vendored builder produced for the same inputs, keys and heights, recorded once from the base commit of the upgrade; they have no shielded part and their signatures are deterministic, so the comparison is exact.
+figure. The four contract spends (refund and claim, as version 4 and as version 6) are
+byte-identical to the transactions the previous vendored builder produced for the same inputs, keys
+and heights, recorded once from the base commit of the upgrade; they have no shielded part and their
+signatures are deterministic, so the comparison is exact.
 
 T39.6.5g *The recorded shapes.* With the Sapling parameters present: a contract spend with two raw
 outputs and a Sapling output, and a Sapling spend paying into an output-only Ironwood bundle with
@@ -1757,7 +1761,8 @@ upgrade are the reference for the fixed fields.
 > that is not in the assembler's output: the published builder's default expiry delta, which the
 > assembler replaces with the explicit value of R39.6.5m.
 
-### 39.6.6 Reference behavior: Sapling parameter provisioning and shielded coins in the browser build
+### 39.6.6 Reference behavior: Sapling parameter provisioning and shielded coins in the browser
+build
 
 > **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
 > measure 0.01 (attestation in §39.9).**
