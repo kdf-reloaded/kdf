@@ -236,3 +236,48 @@ fn eth_address_from_secret(secret: &Secp256k1Secret) -> Result<String, MmError<G
 
     Ok(checksum_address(&format!("{:#x}", eth_address)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::block_on;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use serde_json::json;
+
+    /// CRD ch.21 R21.10B.8 / T21.10B.14: TRX and TRC20 are refused with `CoinIsNotSupported`, HTTP 400.
+    #[test]
+    fn get_my_address_refuses_tron_coins() {
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({
+                "coins": [
+                    { "coin": "TRX", "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
+                    {
+                        "coin": "USDT-TRC20",
+                        "protocol": {
+                            "type": "TRC20",
+                            "protocol_data": {
+                                "platform": "TRX",
+                                "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+                            }
+                        }
+                    }
+                ]
+            }))
+            .into_mm_arc();
+        for coin in ["TRX", "USDT-TRC20"] {
+            let request = GetMyAddressRequest {
+                coin: coin.to_owned(),
+                path_to_address: None,
+            };
+            let err = match block_on(get_my_address_rpc(ctx.clone(), request)) {
+                Ok(_) => panic!("a TRON coin must be refused"),
+                Err(err) => err,
+            };
+            assert!(
+                matches!(err.get_inner(), GetMyAddressError::CoinIsNotSupported(t) if t == coin),
+                "{err}"
+            );
+            assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        }
+    }
+}

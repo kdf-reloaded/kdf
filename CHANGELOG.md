@@ -157,6 +157,11 @@ the previous version used. The safe way:
   `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
   answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
   ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+- **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
+  `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
+  address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
+  `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: PR #412;
+  CRD ch.21 R21.10B.8, D21.10B.2.
 
 #### Tendermint (Cosmos) coins
 

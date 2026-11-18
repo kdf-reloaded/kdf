@@ -482,6 +482,141 @@ fn validate_address_of_an_evm_coin_is_unchanged() {
     assert!(!MmCoin::validate_address(&coin, &my_tron_form()).is_valid);
 }
 
+/// The EVM `0x` form of the address of the test key (secret = 1), the one a TRON coin must refuse.
+const KEY_ONE_EVM: &str = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf";
+
+#[test]
+fn validate_address_of_a_tron_coin_pins_the_four_forms_of_t21_10b_14() {
+    let node = StubNode::start(|_, _| Reply::status(404, "{}"));
+    block_on(async {
+        for (_ctx, coin) in [trx_coin(&node.url()).await, trc20_coin(&node.url()).await] {
+            for valid in [
+                my_tron_form(),
+                KEY_ONE_WIRE_HEX.to_owned(),
+                format!("0x{KEY_ONE_WIRE_HEX}"),
+            ] {
+                assert!(MmCoin::validate_address(&coin, &valid).is_valid, "{valid}");
+            }
+            let evm = MmCoin::validate_address(&coin, KEY_ONE_EVM);
+            assert!(!evm.is_valid);
+            assert!(evm.reason.is_some());
+            let lower = MmCoin::validate_address(&coin, &KEY_ONE_EVM.to_lowercase());
+            assert!(!lower.is_valid);
+            assert!(lower.reason.is_some());
+        }
+    });
+}
+
+#[test]
+fn convertaddress_of_a_tron_coin_converts_between_base58_and_hex() {
+    let node = StubNode::start(|_, _| Reply::status(404, "{}"));
+    let base58 = my_tron_form();
+    block_on(async {
+        for (_ctx, coin) in [trx_coin(&node.url()).await, trc20_coin(&node.url()).await] {
+            let to_hex = json!({ "format": "hex" });
+            let to_base58 = json!({ "format": "base58" });
+            assert_eq!(
+                coin.convert_to_address(&base58, to_hex.clone()),
+                Ok(KEY_ONE_WIRE_HEX.to_owned())
+            );
+            assert_eq!(
+                coin.convert_to_address(KEY_ONE_WIRE_HEX, to_base58.clone()),
+                Ok(base58.clone())
+            );
+            // `0x41...` is an input form too; the output never carries `0x`.
+            assert_eq!(
+                coin.convert_to_address(&format!("0x{KEY_ONE_WIRE_HEX}"), to_hex.clone()),
+                Ok(KEY_ONE_WIRE_HEX.to_owned())
+            );
+            assert_eq!(
+                coin.convert_to_address(&format!("0x{KEY_ONE_WIRE_HEX}"), to_base58.clone()),
+                Ok(base58.clone())
+            );
+            // Identity conversions.
+            assert_eq!(coin.convert_to_address(&base58, to_base58), Ok(base58.clone()));
+            assert_eq!(
+                coin.convert_to_address(KEY_ONE_WIRE_HEX, to_hex),
+                Ok(KEY_ONE_WIRE_HEX.to_owned())
+            );
+        }
+    });
+}
+
+#[test]
+fn convertaddress_of_a_tron_coin_refuses_the_evm_form_and_the_evm_format_values() {
+    let node = StubNode::start(|_, _| Reply::status(404, "{}"));
+    block_on(async {
+        let (_ctx, coin) = trx_coin(&node.url()).await;
+        // An EVM `0x` 20-byte input is refused in both TRON formats.
+        for format in ["base58", "hex"] {
+            for evm in [KEY_ONE_EVM.to_owned(), KEY_ONE_EVM.to_lowercase()] {
+                assert!(
+                    coin.convert_to_address(&evm, json!({ "format": format })).is_err(),
+                    "{evm}"
+                );
+            }
+        }
+        // A damaged checksum and garbage are refused.
+        let mut damaged = my_tron_form();
+        damaged.pop();
+        damaged.push('1');
+        for bad in [damaged.as_str(), "not-an-address", ""] {
+            assert!(
+                coin.convert_to_address(bad, json!({ "format": "hex" })).is_err(),
+                "{bad}"
+            );
+        }
+        // The EVM format values, an unknown value and a missing one are no TRON formats.
+        for format in [
+            json!({ "format": "mixedcase" }),
+            json!({ "format": "singlecase" }),
+            json!({ "format": "cashaddress" }),
+            json!({}),
+            json!("hex"),
+        ] {
+            let err = coin
+                .convert_to_address(&my_tron_form(), format.clone())
+                .expect_err("a non-TRON format value is refused");
+            assert!(err.contains("base58"), "{format}: {err}");
+        }
+    });
+}
+
+#[test]
+fn convertaddress_of_an_evm_coin_is_unchanged_and_takes_no_tron_format() {
+    let (_ctx, coin) =
+        crate::eth::eth_tests::eth_coin_for_test(EthCoinType::Eth, vec!["http://127.0.0.1:1".to_owned()], None);
+    let lower = KEY_ONE_EVM.to_lowercase();
+    assert_eq!(
+        coin.convert_to_address(&lower, json!({ "format": "mixedcase" })),
+        Ok(crate::eth::checksum_address(&lower))
+    );
+    assert!(coin
+        .convert_to_address(&lower, json!({ "format": "singlecase" }))
+        .is_err());
+    // The TRON format values are not EVM formats.
+    assert!(coin.convert_to_address(&lower, json!({ "format": "base58" })).is_err());
+    assert!(coin.convert_to_address(&lower, json!({ "format": "hex" })).is_err());
+    // A TRON address is not an EVM input.
+    assert!(coin
+        .convert_to_address(&my_tron_form(), json!({ "format": "mixedcase" }))
+        .is_err());
+}
+
+#[test]
+fn show_priv_key_of_a_tron_coin_is_the_evm_form_of_the_key() {
+    let node = StubNode::start(|_, _| Reply::status(404, "{}"));
+    // Secret = 1: `0x` and 64 lowercase hex digits.
+    let expected = format!("0x{}01", "0".repeat(62));
+    block_on(async {
+        for (_ctx, coin) in [trx_coin(&node.url()).await, trc20_coin(&node.url()).await] {
+            let shown = MarketCoinOps::display_priv_key(&coin).expect("a local key is shown");
+            assert_eq!(shown, expected);
+            assert_eq!(shown.len(), 66);
+        }
+    });
+}
+
 /// The base58 TRON address of the test key.
 fn my_tron_form() -> String {
     TronAddress::from_hex(KEY_ONE_WIRE_HEX)

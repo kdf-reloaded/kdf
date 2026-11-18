@@ -24,7 +24,7 @@ mod wallet_path_tests;
 
 pub use activation::{parse_trc20_contract, tron_coin_from_conf_and_request, tron_coin_from_params,
                      tron_required_confirmations, TronCoinParams};
-pub use address::TronAddress;
+pub use address::{TronAddress, TronAddressFormat};
 
 use serde::{Deserialize, Serialize};
 

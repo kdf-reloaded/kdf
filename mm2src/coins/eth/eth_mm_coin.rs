@@ -100,6 +100,17 @@ impl MmCoin for EthCoin {
     fn decimals(&self) -> u8 { self.decimals }
 
     fn convert_to_address(&self, from: &str, to_address_format: Json) -> Result<String, String> {
+        // CRD ch.21 D21.10B.2 (c): a TRON coin converts between the base58check and the `41...` hex form under
+        // its own format values; the EVM `0x` form and the EVM format values are refused.
+        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+            let format: crate::eth::tron::TronAddressFormat = json::from_value(to_address_format).map_err(|e| {
+                ERRL!(
+                    "Error on parse TRON address format, expected {{\"format\":\"base58\"}} or {{\"format\":\"hex\"}}: {:?}",
+                    e
+                )
+            })?;
+            return crate::eth::tron::TronAddress::convert(from, format).map_err(|e| ERRL!("{}", e));
+        }
         let to_address_format: EthAddressFormat =
             json::from_value(to_address_format).map_err(|e| ERRL!("Error on parse ETH address format {:?}", e))?;
         match to_address_format {
