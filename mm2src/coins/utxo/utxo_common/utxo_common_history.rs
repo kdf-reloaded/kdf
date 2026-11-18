@@ -638,6 +638,9 @@ where
             )
         },
         UtxoRpcClientEnum::Native(client) => {
+            // The tip must belong to the listing: the block count is read before and after the listing, and a
+            // listing during which it moved qualifies for nothing (CRD ch.38 §38.5C).
+            let tip_before = client.get_block_count().compat().await.ok();
             let mut from = 0;
             let mut all_transactions = vec![];
             loop {
@@ -666,9 +669,10 @@ where
             mm_counter!(metrics, "tx.history.response.total_length", all_transactions.len() as u64,
                 "coin" => coin.as_ref().conf.ticker.clone(), "client" => "native", "method" => "listtransactions");
 
-            // The daemon is the single server: no up-to-date or disagreement test, only its tip. A tip that
-            // cannot be read leaves the complete listing unjudged for the absence rule.
-            let tip = client.get_block_count().compat().await.ok();
+            // The daemon is the single server: no up-to-date or disagreement test. A tip that cannot be read, or
+            // that differs before and after the listing, leaves the complete listing unjudged for the absence rule.
+            let tip_after = client.get_block_count().compat().await.ok();
+            let tip = tip_before.filter(|before| Some(*before) == tip_after);
 
             let tx_ids: Vec<(H256Json, u64)> = all_transactions
                 .into_iter()
@@ -1685,6 +1689,60 @@ mod absence_loop_tests {
     }
 
     fn present(rows: &[TransactionDetails], h: &str) -> bool { rows.iter().any(|r| r.tx_hash == h) }
+
+    /// The native listing's tip with the block count answering `counts` in turn (the last one for ever): the count
+    /// is read before and after the listing.
+    fn native_listing_tip(counts: Vec<u64>) -> Option<u64> {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let coin = software_coin_for_test("ABSENCETIP");
+        let my_address = match &coin.as_ref().derivation_method {
+            DerivationMethod::Iguana(a) => a.display_address().unwrap(),
+            _ => unreachable!(),
+        };
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        NativeClientImpl::get_block_count.mock_safe(move |_client| {
+            let n = counter.fetch_add(1, AtomicOrdering::SeqCst);
+            let count = counts[n.min(counts.len() - 1)];
+            MockResult::Return(Box::new(futures01::future::ok(count)))
+        });
+        NativeClientImpl::list_transactions.mock_safe(move |_client, _count, from| {
+            let items = if from == 0 {
+                vec![ListTransactionsItem {
+                    address: my_address.clone(),
+                    category: "receive".into(),
+                    txid: H256Json::from([A; 32]),
+                    blockheight: Some(100),
+                    ..Default::default()
+                }]
+            } else {
+                vec![]
+            };
+            MockResult::Return(Box::new(futures01::future::ok(items)))
+        });
+        match block_on(request_tx_history(&coin, ctx.metrics.clone())) {
+            RequestTxHistoryResult::Ok(ids, tip) => {
+                assert_eq!(ids.len(), 1, "the listing itself is used whatever the tip says");
+                assert_eq!(
+                    reads.load(AtomicOrdering::SeqCst),
+                    2,
+                    "once before and once after the listing"
+                );
+                tip
+            },
+            _ => panic!("the listing is a success"),
+        }
+    }
+
+    #[test]
+    fn a_native_listing_with_the_same_block_count_before_and_after_carries_that_tip() {
+        assert_eq!(native_listing_tip(vec![800, 800]), Some(800));
+    }
+
+    #[test]
+    fn a_native_listing_during_which_a_block_arrived_carries_no_tip() {
+        assert_eq!(native_listing_tip(vec![800, 801]), None);
+    }
 
     #[test]
     fn a_first_absence_changes_nothing_in_the_file() {

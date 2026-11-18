@@ -764,7 +764,10 @@ mod absence_tests {
 
     /// The BCH row of the transaction `byte`; its `internal_id` is the hash text.
     fn bch_row(ticker: &str, byte: u8, height: u64) -> crate::TransactionDetails {
-        let id = text_of(byte);
+        bch_row_with_text(ticker, &text_of(byte), height)
+    }
+
+    fn bch_row_with_text(ticker: &str, id: &str, height: u64) -> crate::TransactionDetails {
         serde_json::from_value(json!({
             "tx_hex": "00", "tx_hash": id, "from": ["me"], "to": ["other"],
             "total_amount": "1", "spent_by_me": "0", "received_by_me": "0", "my_balance_change": "0",
@@ -777,8 +780,12 @@ mod absence_tests {
 
     /// The SLP token row of the same transaction: the same `tx_hash`, its own `internal_id`.
     fn slp_row(ticker: &str, byte: u8, height: u64) -> crate::TransactionDetails {
-        let mut row = bch_row(ticker, byte, height);
-        row.internal_id = hex::decode(format!("{}01", text_of(byte))).unwrap().into();
+        slp_row_with_text(ticker, &text_of(byte), height)
+    }
+
+    fn slp_row_with_text(ticker: &str, id: &str, height: u64) -> crate::TransactionDetails {
+        let mut row = bch_row_with_text(ticker, id, height);
+        row.internal_id = hex::decode(format!("{}01", id)).unwrap().into();
         row.transaction_type = crate::TransactionType::TokenTransfer(hex::decode(SLP_TOKEN).unwrap().into());
         row.from = vec!["me-token-form".to_owned()];
         row.to = vec!["other-token-form".to_owned()];
@@ -814,12 +821,18 @@ mod absence_tests {
         /// One pass over `listing`, taken at `tip` (`None`: the listing does not qualify).
         fn pass(&mut self, listing: &[(u8, u64)], tip: Option<u64>) {
             let listing = listing.iter().map(|(byte, height)| (hash_of(*byte), *height)).collect();
+            self.pass_hashes(listing, tip);
+        }
+
+        fn pass_hashes(&mut self, listing: Vec<(H256Json, u64)>, tip: Option<u64>) {
             let state = UpdatingUnconfirmedTxes::<SqliteTxHistoryStorage>::new(listing, tip);
             let _next = block_on(Box::new(state).on_changed(&mut self.ctx));
         }
 
-        fn rows_of(&self, byte: u8) -> Vec<crate::TransactionDetails> {
-            block_on(self.ctx.storage.get_txes_by_hash(&self.ticker, &text_of(byte))).unwrap()
+        fn rows_of(&self, byte: u8) -> Vec<crate::TransactionDetails> { self.rows_of_text(&text_of(byte)) }
+
+        fn rows_of_text(&self, text: &str) -> Vec<crate::TransactionDetails> {
+            block_on(self.ctx.storage.get_txes_by_hash(&self.ticker, text)).unwrap()
         }
 
         fn count(&self, table_suffix: &str) -> i64 {
@@ -985,5 +998,71 @@ mod absence_tests {
         let removed = block_on(fx.ctx.storage.remove_txes_by_hash(&fx.ticker, vec![text_of(0xb2)])).unwrap();
         assert_eq!(removed, 2);
         assert!(fx.rows_of(0xb2).is_empty());
+    }
+
+    /// A hash whose bytes read differently in the two byte orders: `[b; 32]` cannot show a reversal.
+    fn ordered_text() -> String { hex::encode((0u8..32).collect::<Vec<_>>()) }
+
+    /// The stored text and the listed hash relate as in production: the listing parses the displayed text, and prints
+    /// it back byte for byte; the reversed hash is another transaction.
+    fn ordered_listing_hash() -> (H256Json, H256Json) {
+        let text = ordered_text();
+        let listed = H256Json::from_str(&text).unwrap();
+        assert_eq!(format!("{:02x}", listed), text);
+        assert_ne!(listed, listed.reversed());
+        (listed, listed.reversed())
+    }
+
+    fn ordered_rows(ticker: &str) -> Vec<crate::TransactionDetails> {
+        let text = ordered_text();
+        vec![
+            bch_row_with_text(ticker, &text, 100),
+            slp_row_with_text(ticker, &text, 100),
+            bch_row(ticker, 0xa1, 100),
+        ]
+    }
+
+    #[test]
+    fn removal_matches_the_hash_in_the_byte_order_of_the_listing() {
+        let (listed, reversed) = ordered_listing_hash();
+        let text = ordered_text();
+
+        // The listing contains the stored transaction: kept, and no mark.
+        let mut fx = Fixture::new(ordered_rows);
+        fx.pass_hashes(vec![(listed, 100), (hash_of(0xa1), 100)], Some(800));
+        fx.pass_hashes(vec![(listed, 100), (hash_of(0xa1), 100)], Some(801));
+        assert_eq!(fx.rows_of_text(&text).len(), 2);
+        assert!(!fx.ctx.absence.any());
+
+        // The listing contains the reversed hash only, which is another transaction: the stored one is absent twice.
+        let mut fx = Fixture::new(ordered_rows);
+        fx.pass_hashes(vec![(reversed, 100), (hash_of(0xa1), 100)], Some(800));
+        assert_eq!(fx.rows_of_text(&text).len(), 2, "kept after one absence");
+        fx.pass_hashes(vec![(reversed, 100), (hash_of(0xa1), 100)], Some(801));
+        assert!(
+            fx.rows_of_text(&text).is_empty(),
+            "the BCH row and the SLP row went together"
+        );
+        assert_eq!(fx.rows_of(0xa1).len(), 1);
+    }
+
+    #[test]
+    fn a_changed_height_matches_the_hash_in_the_byte_order_of_the_listing() {
+        mock_block_times();
+        let (listed, reversed) = ordered_listing_hash();
+        let text = ordered_text();
+
+        // The reversed hash at another height is another transaction: the stored rows keep their height.
+        let mut fx = Fixture::new(ordered_rows);
+        fx.pass_hashes(vec![(reversed, 95)], None);
+        assert!(fx.rows_of_text(&text).iter().all(|row| row.block_height == 100));
+
+        // The listed hash at another height moves both rows, with that block's time.
+        fx.pass_hashes(vec![(listed, 95)], None);
+        let rows = fx.rows_of_text(&text);
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| row.block_height == 95 && row.timestamp == 1_700_000_095));
     }
 }

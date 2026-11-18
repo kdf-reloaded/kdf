@@ -888,6 +888,9 @@ of the SQLite store it is a recorded departure from R38.5C.4 item 1.
    QRC20 transaction, the BCH row and the SLP token row) are removed together.
    A coin with a single connected server needs two listings from that server,
    at least one block apart.
+   "One block apart" is judged from the chain tips observed with the two
+   listings: for an Electrum server, its last reported tip; for a native
+   daemon, its block count read with the listing.
 2. *What never removes.* A failed listing, a listing cut off by its time
    budget or by a `history too large` answer, a listing from an out-of-date
    server, and any listing while the coin is in the disagreement state of
@@ -899,6 +902,8 @@ of the SQLite store it is a recorded departure from R38.5C.4 item 1.
    change. A listing that contains the hash clears the mark. What holds a
    removal back is named in item 2, plus the absence of a new block. Each ends
    by itself when its cause ends; none needs a user action.
+   The marks are kept in memory only; after a restart of the node the
+   counting starts again, which can delay a removal but never causes one.
 4. *Write and log.* A pass that removed rows writes the history at once
    (R38.5A.3) and logs one INFO line naming the coin and the number of rows
    removed. No line is logged per row.

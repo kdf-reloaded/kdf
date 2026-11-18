@@ -795,9 +795,14 @@ impl BuildTransferHistory for ElectrumClient {
     }
 }
 
-#[async_trait]
-impl BuildTransferHistory for NativeClient {
-    async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, MmError<UtxoRpcError>> {
+impl NativeClient {
+    /// Searches the logs from `params.from_block` up to the block count read at the start and returns the receipts
+    /// with that block count: the listing covers exactly up to it, so it is the tip the listing belongs to (CRD ch.38
+    /// §38.5C), whatever blocks arrive while the search runs.
+    async fn search_logs_up_to_tip(
+        &self,
+        params: TransferHistoryParams,
+    ) -> Result<(Vec<TxReceipt>, u64), MmError<UtxoRpcError>> {
         const SEARCH_LOGS_STEP: u64 = 100;
 
         let token_address = contract_addr_into_rpc_format(&params.token_address);
@@ -832,24 +837,30 @@ impl BuildTransferHistory for NativeClient {
             result.extend(receipts.into_iter());
             from_block += SEARCH_LOGS_STEP;
         }
-        Ok(result)
+        Ok((result, block_count))
+    }
+}
+
+#[async_trait]
+impl BuildTransferHistory for NativeClient {
+    async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, MmError<UtxoRpcError>> {
+        Ok(self.search_logs_up_to_tip(params).await?.0)
     }
 
     async fn build_tx_idents(
         &self,
         params: TransferHistoryParams,
     ) -> Result<(Vec<(H256Json, u64)>, Option<u64>), MmError<UtxoRpcError>> {
-        let receipts = self.build(params).await?;
-        // The daemon is the single server: no up-to-date or disagreement test, only its tip. A tip that cannot be
-        // read leaves the complete listing unjudged for the absence rule.
-        let tip = self.get_block_count().compat().await.ok();
+        // The daemon is the single server: no up-to-date or disagreement test. The tip is the block count that bounded
+        // the search, so the listing belongs to it and a block that arrives meanwhile cannot move it.
+        let (receipts, block_count) = self.search_logs_up_to_tip(params).await?;
         Ok((
             receipts
                 .into_iter()
                 .map(|receipt| (receipt.transaction_hash, receipt.block_number))
                 .unique()
                 .collect(),
-            tip,
+            Some(block_count),
         ))
     }
 }
@@ -916,6 +927,49 @@ mod tests {
     use mm2_metrics::{MetricType, MetricsJson, MetricsOps};
     use mm2_test_helpers::for_tests::find_metrics_in_json;
     use qrc20_tests::qrc20_coin_for_test;
+
+    /// CRD ch.38 §38.5C: the tip of a native listing is the block count that bounded the log search, even when
+    /// blocks arrive while the search runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_listing_tip_is_the_block_count_that_bounded_the_search() {
+        use crate::utxo::rpc_clients::{NativeClient, NativeClientImpl, UtxoRpcClientEnum};
+        use crate::utxo::utxo_tests::utxo_coin_fields_for_test;
+        use mocktopus::mocking::*;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+
+        let client = UtxoRpcClientEnum::Native(NativeClient(Arc::new(NativeClientImpl::default())));
+        let utxo = utxo_coin_fields_for_test(client, None, false);
+        let coin = Qrc20Coin(Arc::new(Qrc20CoinFields {
+            utxo,
+            platform: "QTUM".into(),
+            contract_address: H160::from([7u8; 20]),
+            swap_contract_address: H160::from([8u8; 20]),
+            fallback_swap_contract: None,
+        }));
+
+        // The block count grows with every read; only the first one bounds the search.
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        NativeClientImpl::get_block_count.mock_safe(move |_client| {
+            let n = counter.fetch_add(1, AtomicOrdering::SeqCst) as u64;
+            MockResult::Return(Box::new(futures01::future::ok(250 + n)))
+        });
+        let searches = Arc::new(AtomicUsize::new(0));
+        let search_counter = searches.clone();
+        NativeClient::search_logs.mock_safe(move |_client, _from, _to, _addresses, _topics| {
+            search_counter.fetch_add(1, AtomicOrdering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(vec![])))
+        });
+
+        let (idents, tip) = block_on(TransferHistoryBuilder::new(coin).build_tx_idents()).unwrap();
+        assert!(idents.is_empty());
+        // Blocks 0..=250 in steps of 100: three searches, and the tip is the count the search was bounded by.
+        assert_eq!(searches.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(tip, Some(250));
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "no further block-count read");
+    }
 
     // CRD ch.38 T38.5A.6 (order part): the transfer rows of one transaction stay adjacent, the
     // lower output/event index first, between rows of other transactions at the same height.
