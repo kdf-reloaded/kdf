@@ -72,7 +72,7 @@ cross-check of the v5 serializer in tests.
 | Z1 | **Configuration.** Accept `txversion` 5 with the keys of the shared coins file (`version_group_id` and `consensus_branch_id`, each with or without a `0x` prefix); default the version group id to `0x26A7270A` for version 5 when it is absent; refuse `txversion` 6 or higher, and 5 without `overwintered`, at activation with a clear error. *(Amended 2026-11-17.)* | Done (P2, PR #404) |
 | Z2 | **Withdrawal:** build and sign a version-5 transaction. | Done (P2, PR #404) |
 | Z3 | **Swap path:** the HTLC payment, the spend and the refund, with P2SH inputs under the ZIP-244 digest. | Done (P2, PR #404) |
-| Z4 | **Reading version-5 transactions** in the shared UTXO parser (route A; all three bundles of ZIP 225): history, verification of unspent outputs, validation of swap payments. | Done (P1 parser, P2 wiring); the history reports a transaction it cannot read, such as version 6 until the Zcash library upgrade (P2b, PR #415) |
+| Z4 | **Reading version-5 transactions** in the shared UTXO parser (route A; all three bundles of ZIP 225): history, verification of unspent outputs, validation of swap payments. | Done (P1 parser, P2 wiring); the history reports a transaction it cannot read (P2b, PR #415). *2026-11-18:* version 6 and later are read through the Zcash library reader, version 5 stays on the shared parser (P4, PR #TBD) |
 | Z5 | **The ZIP-244 transaction id**, for the node's own transactions and for incoming ones with Sapling or Orchard parts. | Done (P1, PR #397) |
 | Z6 | **Tests:** the public ZIP-244 test vectors (the zcash-test-vectors repository, MIT) and round trips. | Done (P1, PR #397) |
 | Z7 | **Reference position:** a Spec Reader pass that records in the CRD how the reference implementation handles ZEC after NU7, before the implementation starts. | Done (CRD ch.39 §39.11.4V) |
@@ -91,6 +91,8 @@ cross-check of the v5 serializer in tests.
 - Pull requests: P1 format and digests (Z4 parser, Z5, Z6); P2 ZEC wiring (Z1–Z3, Z4 wiring) with a mainnet withdrawal and a
   ZEC/RIN swap between two KDF Reloaded nodes as READY conditions; P2b the history report of unreadable transactions
   (decision D39.11.4V.1 (b) of 2026-11-18); P3 the coins file (Z9).
+  P4 the version-6 reader (Z-3b): version 6 and later through the Zcash library reader, version 5 on the shared parser
+  (maintainer's decision of 2026-11-18 on D39.11.4V.3).
 
 ## Open points
 

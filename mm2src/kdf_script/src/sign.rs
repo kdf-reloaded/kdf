@@ -373,6 +373,7 @@ impl From<TransactionInputSigner> for Transaction {
             consensus_branch_id,
             sapling_v5: s.sapling_v5,
             orchard: s.orchard,
+            opaque: None,
         }
     }
 }
@@ -567,6 +568,7 @@ impl TransactionInputSigner {
             consensus_branch_id: 0,
             sapling_v5: SaplingBundleV5::default(),
             orchard: OrchardBundle::default(),
+            opaque: None,
         };
 
         let mut s = Stream::default();

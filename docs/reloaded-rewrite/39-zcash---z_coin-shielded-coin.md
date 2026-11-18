@@ -6568,6 +6568,15 @@ R39.11.15 **Version coverage of the two parsers (public facts, for planning).**
 > published `zcash_protocol` 0.11.0 maps `Nu7` to `0x77190AD9` with the mainnet
 > height 3,543,405 (per that crate's source and changelog). The coin wiring for ZEC follows in
 > the plan's next pull request.
+>
+> *Status (2026-11-18, this repository; clean side):* the library family is
+> upgraded (`zcash_primitives` 0.31.1, `zcash_protocol` 0.11.0, which maps `Nu7`
+> to `0x77190AD9`), so the Zcash library reader now reads versions 5 and 6 under
+> the NU7 branch id. The shared UTXO parser keeps version 5 and still refuses an
+> overwintered version above 5; the read entry point of the UTXO coins gives
+> version 6 and later to the library reader (D39.11.4V.3, PR #TBD). The sentence
+> above that says whether incoming version-6 transactions are read was open on
+> 2026-11-17 and is answered: they are.
 
 R39.11.16 **Requirement for Ironwood-era support.** Before a shielded coin may
 transact on a network whose standardness rule requires a transaction version the
@@ -6939,6 +6948,15 @@ read with wrong contents. What each surface does with the refusal:
   reader of plan `zec-v5-transactions`, completing R39.11.15 -- with version 6
   decided by D39.11.4V.3.
 
+> *Reloaded status (clean side, 2026-11-18):* Reloaded reads version 5 (shared
+> parser) and version 6 and later (Zcash library reader, D39.11.4V.3, PR #TBD)
+> on every surface listed above: history and the history of a transaction's
+> input transactions, validation of a counterparty's DEX fee and payments,
+> the spend search over the node and the Electrum backends, secret extraction
+> and the confirmation and spend waits. A transaction that neither reader can
+> read still fails as described, with the history reporting of D39.11.4V.1.
+> The bullets above describe the reference and are unchanged.
+
 **R39.11.4V.9** *`avg_blocktime` (completes R39.11.15).* For a transparent UTXO
 coin the reference reads `avg_blocktime` as a non-negative JSON integer
 (seconds) and uses it in two places only: a Lightning activation requires it on
@@ -7029,6 +7047,13 @@ amounts unknown). Recommendation: (b).
 > (`{"state": "Finished"}`). A backend or transport failure is not reported as
 > unreadable; its handling is unchanged. Until the Zcash library upgrade of
 > D39.11.4V.3, a version-6 ZEC transaction is reported this way.
+>
+> *Reloaded status (clean side, 2026-11-18; later note, the text above is
+> unchanged):* since the version-6 reader of D39.11.4V.3 (PR #TBD), a
+> version-6 ZEC transaction is no longer reported: it is read and gets a row.
+> What stays reported is a transaction the readers cannot read, for example a
+> version-6 transaction cut off in its header (`error` then names the Zcash
+> reader: "the transaction cannot be parsed: Zcash reader: ...").
 
 D39.11.4V.2 *(Open.)* *An entry whose version this software cannot build.*
 Reproducing the reference (R39.11.4V.5) accepts any `txversion`, gives version 5
@@ -7067,6 +7092,29 @@ version coverage R39.11.15 records. Recommendation: (b).
 > from then on versions 5 and 6 are read through that library's reader. The
 > pinned library cannot read an NU7 transaction of either version (status note
 > under R39.11.15). The upgrade is a condition of the 0.5.0 release.
+>
+> *Reloaded status (clean side, 2026-11-18; later note, the text above is
+> unchanged):* the maintainer's decision of 2026-11-18 stages the wording of
+> 2026-11-17 as follows: version 5 stays on the shared UTXO parser, and the
+> Zcash library reader reads version 6 and later. Built (PR #TBD): the read
+> entry point of the UTXO coins, `read_utxo_tx` in `coins`, looks at the header
+> of the bytes. An overwintered transaction of version 6 or above goes to the
+> library reader (`Transaction::read`, with one fixed branch id, which the
+> library uses only for versions below 5); every other transaction goes to the
+> shared parser, and a transaction the shared parser refuses stays refused with the
+> shared parser's error. The threshold is one named
+> constant. The library result becomes the shared transaction type: inputs,
+> outputs, lock time and expiry height are filled in for the call sites, and the
+> transaction carries the bytes as received and the library's transaction
+> identifier (ZIP 244 for version 5, ZIP 229 for version 6); serialization
+> writes those bytes and the identifier is the library's, so the byte comparison
+> of the payment validation and the identifier lookup at the backend work
+> unchanged. Bytes after the transaction are refused, as the shared parser does.
+> The sites that sign or modify a transaction (`sign_raw_utxo_tx`, the V2 swap
+> preimage, the hardware-wallet previous transaction) keep the shared parser,
+> which refuses version 6; the signer refuses a version above 5 in any case. A
+> test reads the ZIP 244 vectors and a library-built version-5 transaction with
+> both readers and requires the same identifier and the same bytes.
 
 *Not established.* (1) Nothing was run against a reference binary or a live
 Zcash node; no node's refusal text is recorded. (2) Whether the WalletConnect
@@ -8824,6 +8872,12 @@ entries in its list cannot be told apart. Passing the position to the fallback c
 - *Status note added 2026-11-17 -- under R39.11.4V.10.* Reloaded-original,
   clean side: it records that Reloaded computes the fee over the version-5 size;
   no forbidden-class input, chapter 01 R38 not engaged.
+- *Status notes added 2026-11-18 -- after D39.11.4V.1, after D39.11.4V.3, after
+  R39.11.4V.8 and after the status note under R39.11.15.* Reloaded-original,
+  clean side: they record the maintainer's resolution of 2026-11-18 for version 6
+  and what this repository builds for it, from this repository's own code and the
+  published `zcash_primitives` 0.31.1 sources; no forbidden-class input, chapter
+  01 R38 not engaged.
 - *Status note added 2026-11-18 -- after D39.11.4V.1.* Reloaded-original,
   clean side: it records the maintainer's resolution of 2026-11-18 and what this
   repository builds for it; no forbidden-class input, chapter 01 R38 not

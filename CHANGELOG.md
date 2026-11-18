@@ -421,7 +421,13 @@ the previous version used. The safe way:
 - **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
   refunds of ZEC are built as version-5 transactions with the version-5 transaction id and signature, as the Zcash
   network requires since NU7. A Trezor refuses a version-5 ZEC transaction with a clear error. Incoming version-5
-  transactions are read; version 6 is not read yet. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+  transactions are read. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+- **Version-6 ZEC transactions are read.** The Zcash network accepts version 6 since NU7. The node now reads an
+  incoming version-6 transaction, with the transaction id of the Zcash library (version 5 stays on the node's own reader,
+  and a test checks that both readers give the same id and bytes). History rows, the input amounts of a transaction that
+  spends a version-6 output, validation of the counterparty's DEX fee and payments, spend detection and secret extraction
+  all work on it, where the transaction was skipped or the step failed before. A transaction that cannot be read by
+  either reader is still reported by the history. Detail: PR #TBD; CRD ch.39 D39.11.4V.3 status note of 2026-11-18.
 - **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
   The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
   and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
@@ -476,8 +482,8 @@ the previous version used. The safe way:
   the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
   as if it were complete. `sync_status` now lists each skipped transaction in
   `additional_info.unreadable_transactions`, with its `tx_hash` and a short `error`. This includes transactions skipped
-  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. Until a later release
-  reads ZEC version-6 transactions, they appear in this list. The BCH and SLP history also no longer pauses at a
+  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. (ZEC version-6
+  transactions were listed here until they became readable, see below.) The BCH and SLP history also no longer pauses at a
   transaction that does not parse; it skips it and stores the rest. Detail: PR #415; CRD ch.39 D39.11.4V.1.
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is

@@ -34,7 +34,7 @@ use mm2_err_handle::prelude::*;
 #[cfg(test)] use mocktopus::macros::*;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
 use serde_json::{self as json, Value as Json};
-use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
+use serialization::{serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
                     SERIALIZE_TRANSACTION_WITNESS};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::Entry;
