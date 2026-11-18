@@ -269,9 +269,12 @@ mod tests {
                 coin: coin.to_owned(),
                 path_to_address: None,
             };
-            let err = block_on(get_my_address_rpc(ctx.clone(), request)).expect_err("a TRON coin is refused");
+            let err = match block_on(get_my_address_rpc(ctx.clone(), request)) {
+                Ok(_) => panic!("a TRON coin must be refused"),
+                Err(err) => err,
+            };
             assert!(
-                matches!(&*err, GetMyAddressError::CoinIsNotSupported(t) if t == coin),
+                matches!(err.get_inner(), GetMyAddressError::CoinIsNotSupported(t) if t == coin),
                 "{err}"
             );
             assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
