@@ -145,8 +145,8 @@ the previous version used. The safe way:
 - **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
   `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
   address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
-  `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: CRD ch.21
-  R21.10B.8, D21.10B.2.
+  `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: PR #412;
+  CRD ch.21 R21.10B.8, D21.10B.2.
 
 #### Tendermint (Cosmos) coins
 
