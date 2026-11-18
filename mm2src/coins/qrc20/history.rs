@@ -825,7 +825,8 @@ impl NativeClient {
         let mut result = Vec::new();
         let mut from_block = params.from_block;
         while from_block <= block_count {
-            let to_block = from_block + SEARCH_LOGS_STEP - 1;
+            // The last window ends at the block count, so the listing covers exactly up to the tip.
+            let to_block = (from_block + SEARCH_LOGS_STEP - 1).min(block_count);
             let mut receipts = self
                 .search_logs(from_block, Some(to_block), vec![token_address], topics.clone())
                 .compat()
@@ -958,8 +959,11 @@ mod tests {
         });
         let searches = Arc::new(AtomicUsize::new(0));
         let search_counter = searches.clone();
-        NativeClient::search_logs.mock_safe(move |_client, _from, _to, _addresses, _topics| {
+        let last_to_block = Arc::new(AtomicUsize::new(0));
+        let to_block_seen = last_to_block.clone();
+        NativeClient::search_logs.mock_safe(move |_client, _from, to, _addresses, _topics| {
             search_counter.fetch_add(1, AtomicOrdering::SeqCst);
+            to_block_seen.store(to.expect("a bounded search") as usize, AtomicOrdering::SeqCst);
             MockResult::Return(Box::new(futures01::future::ok(vec![])))
         });
 
@@ -968,6 +972,8 @@ mod tests {
         // Blocks 0..=250 in steps of 100: three searches, and the tip is the count the search was bounded by.
         assert_eq!(searches.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(tip, Some(250));
+        // The last window ends at the tip, not at the end of its 100 blocks (299).
+        assert_eq!(last_to_block.load(AtomicOrdering::SeqCst), 250);
         assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "no further block-count read");
     }
 
