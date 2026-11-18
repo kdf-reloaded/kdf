@@ -7416,8 +7416,10 @@ its mined height.
 > every per-key file of R39.8.0bd, the active one first. A recorded send that counts (the rule above) in
 > any of them answers "sent", so a swap step whose payment was recorded while another account or key was
 > active is not paid a second time. A file other than the active one that cannot be read is skipped with a
-> log line; an unreadable active file keeps the behavior above. The refusal of R39.8.0bd item 4 covers the
-> case in which that could matter.
+> log line; an unreadable active file keeps the behavior above. The refusal of R39.8.0bd item 6 covers the
+> case in which that could matter. A per-key file that is not active is not scanned, so the mined heights
+> it holds are not rewound when the chain reorganizes; an unmined record in it still falls back to the
+> servers after its expiry (the rule above), so no second payment results.
 
 R39.11.27 **A fresh swap skips the already-sent question for a shielded coin's own
 payment.** *(binding; Reloaded-original, maintainer Decision AK of 2026-10-28;

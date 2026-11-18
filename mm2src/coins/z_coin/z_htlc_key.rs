@@ -258,6 +258,38 @@ mod tests {
         assert_ne!(hd_transparent, transparent);
     }
 
+    /// R39.8.0bd item 5: the HD `account` selects the shielded key only. The transparent key, and with it the
+    /// HTLC key of a swap, is the same for every account, so a change of `account` alone never makes a swap's
+    /// key differ.
+    #[test]
+    fn the_hd_account_changes_the_shielded_key_and_not_the_transparent_or_htlc_key() {
+        let conf = json!({"coin": "ARRR", "derivation_path": "m/44'/141'"});
+        let hd_ctx = ctx_with_policy(true);
+        let internal = internal_secret(&hd_ctx);
+        let info = arrr_protocol_info();
+        let policy = PrivKeyActivationPolicy::ContextPrivKey;
+
+        let transparent = transparent_secret_for_policy(&hd_ctx, &conf, &internal, policy).unwrap();
+        let input = [5u8; 20];
+        let htlc_pub = derive_swap_htlc_key_pair(&key_pair_from_secret(&transparent).unwrap(), &input)
+            .unwrap()
+            .public_slice()
+            .to_vec();
+        let mut shielded_keys = Vec::new();
+        for account in [0u32, 1, 5] {
+            let shielded = shielded_spending_key_for_policy(&hd_ctx, &internal, account, policy, &info).unwrap();
+            shielded_keys.push(spending_key_bytes(&shielded));
+            // The transparent key is read again for every activation: the same secret and the same HTLC key.
+            let again = transparent_secret_for_policy(&hd_ctx, &conf, &internal, policy).unwrap();
+            assert_eq!(again, transparent, "account {account}");
+            let derived = derive_swap_htlc_key_pair(&key_pair_from_secret(&again).unwrap(), &input).unwrap();
+            assert_eq!(derived.public_slice(), htlc_pub.as_slice(), "account {account}");
+        }
+        shielded_keys.sort();
+        shielded_keys.dedup();
+        assert_eq!(shielded_keys.len(), 3, "each account has its own shielded key");
+    }
+
     /// Under a single-key login both values select the iguana key; a hardware value is refused.
     #[test]
     fn single_key_login_ignores_the_policy_value_and_hardware_is_refused() {

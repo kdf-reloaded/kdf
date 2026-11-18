@@ -30,19 +30,28 @@ impl UnfinishedSwapsView for SavedUnfinishedSwapsView {
         let swaps = SavedSwap::load_all_my_swaps_from_db(&self.ctx)
             .await
             .map_err(|e| e.to_string())?;
-        let mut legs = Vec::new();
-        for swap in &swaps {
-            if swap.is_finished() {
-                continue;
-            }
-            let leg = match swap {
-                SavedSwap::Maker(maker) => maker_leg(maker, ticker)?,
-                SavedSwap::Taker(taker) => taker_leg(taker, ticker)?,
-            };
-            legs.extend(leg);
-        }
-        Ok(legs)
+        legs_of_unfinished_swaps(&swaps, ticker)
     }
+}
+
+/// The legs in `ticker` of the swaps that are not finished; a finished swap contributes none.
+///
+/// # Errors
+///
+/// Fails when an unfinished swap cannot be read.
+fn legs_of_unfinished_swaps(swaps: &[SavedSwap], ticker: &str) -> Result<Vec<UnfinishedSwapLeg>, String> {
+    let mut legs = Vec::new();
+    for swap in swaps {
+        if swap.is_finished() {
+            continue;
+        }
+        let leg = match swap {
+            SavedSwap::Maker(maker) => maker_leg(maker, ticker)?,
+            SavedSwap::Taker(taker) => taker_leg(taker, ticker)?,
+        };
+        legs.extend(leg);
+    }
+    Ok(legs)
 }
 
 /// The public half of the private key a swap saved for a leg.
@@ -257,6 +266,24 @@ mod tests {
         register_for_node(&ctx).unwrap();
 
         assert!(coins::unfinished_swaps_view_registered(&ctx).unwrap());
+    }
+
+    /// A finished swap contributes no leg, whatever it holds; an unfinished one of the same coin does.
+    #[test]
+    fn a_finished_swap_is_skipped_and_an_unfinished_one_is_not() {
+        let finished_uuid = Uuid::from_bytes([8; 16]);
+        let open_uuid = Uuid::from_bytes([9; 16]);
+        let finished = maker_swap(maker_started("ARRR", "KMD", finished_uuid), vec![
+            MakerSwapEvent::Finished,
+        ]);
+        let open = maker_swap(maker_started("ARRR", "KMD", open_uuid), vec![]);
+        let swaps = vec![SavedSwap::Maker(finished), SavedSwap::Maker(open)];
+
+        let legs = legs_of_unfinished_swaps(&swaps, "ARRR").unwrap();
+
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].uuid, open_uuid.to_string());
+        assert!(legs_of_unfinished_swaps(&swaps[..1], "ARRR").unwrap().is_empty());
     }
 
     /// A saved private key is reported by its public half.

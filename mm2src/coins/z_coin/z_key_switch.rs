@@ -280,12 +280,12 @@ mod native {
             assert!(run(Ok(vec![leg]), &KEY_B, no_unreadable).is_ok());
         }
 
-        /// A changed HD `account` does not change the transparent key, so it does not change the HTLC key:
-        /// the same secret is given and the activation is allowed.
+        /// A swap started with the key being activated stays allowed when the coin is activated again with it
+        /// (that an HD `account` does not enter the transparent key is shown in `z_htlc_key`).
         #[test]
-        fn the_same_transparent_key_allows_the_activation_whatever_the_account() {
+        fn a_swap_started_with_this_key_stays_allowed_on_every_activation() {
             let leg = leg_started_with(&KEY_A, b"input-one", 1);
-            for _account in 0..2 {
+            for _ in 0..2 {
                 assert!(run(Ok(vec![leg.clone()]), &KEY_A, no_unreadable).is_ok());
             }
         }
