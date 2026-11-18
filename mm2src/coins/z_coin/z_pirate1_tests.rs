@@ -42,7 +42,7 @@ impl Net {
     const ALL: [Net; 3] = [Net::Main, Net::Test, Net::Regtest];
 
     fn sapling_hrp(self) -> &'static str {
-        use zcash_protocol::constants::{mainnet, regtest, testnet};
+        use zcash_address::constants::{mainnet, regtest, testnet};
         match self {
             Net::Main => mainnet::HRP_SAPLING_PAYMENT_ADDRESS,
             Net::Test => testnet::HRP_SAPLING_PAYMENT_ADDRESS,
@@ -51,7 +51,7 @@ impl Net {
     }
 
     fn spending_key_hrp(self) -> &'static str {
-        use zcash_protocol::constants::{mainnet, regtest, testnet};
+        use zcash_keys::constants::{mainnet, regtest, testnet};
         match self {
             Net::Main => mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             Net::Test => testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
@@ -342,7 +342,10 @@ fn t39_6_5b_sapling_strings_keep_their_answers() {
         let params = pool_params(net);
         let sapling = encode_payment_address(
             net.sapling_hrp(),
-            &ExtendedSpendingKey::master(&[99; 32]).default_address().1,
+            &ExtendedSpendingKey::master(&[99; 32])
+                .expect("a valid master key")
+                .default_address()
+                .1,
         );
         assert!(matches!(
             decode_destination(&params, "ARRR", &sapling),

@@ -54,7 +54,7 @@ pub use mnemonic::{decrypt_mnemonic, encrypt_mnemonic, generate_mnemonic, Encryp
 pub use hw_client::TrezorConnectProcessor;
 pub use hw_client::{HwClient, HwError, HwProcessingError, HwResult, HwWalletType};
 pub use hw_common::primitives::{Bip32Error, ChildNumber, DerivationPath, EcdsaCurve, ExtendedPublicKey,
-                                Secp256k1ExtendedPublicKey, XPub};
+                                Secp256k1ExtendedPrivateKey, Secp256k1ExtendedPublicKey, XPub};
 pub use hw_ctx::{HardwareWalletArc, HardwareWalletCtx};
 pub use trezor::HwRpcError;
 

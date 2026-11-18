@@ -311,7 +311,7 @@ pub enum PrivKeyPolicy<T> {
         /// The key pair derived at the user's chosen address path.
         activated_key: T,
         /// The BIP32 root extended private key for deriving additional coin keys.
-        bip39_secp_priv_key: bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
+        bip39_secp_priv_key: crypto::Secp256k1ExtendedPrivateKey,
         /// The `path_to_address` the key was derived at (CRD ch.05 R36 compares it with the address the coin pays from).
         path_to_address: PathToAddress,
     },
@@ -761,7 +761,10 @@ mod coin_protocol_tests {
                 use zcash_protocol::consensus::NetworkConstants;
                 assert!(info.check_point_block.is_some());
                 assert!(info.z_derivation_path.is_some());
-                assert_eq!(info.consensus_params.hrp_sapling_payment_address(), "zs");
+                // The test is of this crate's own implementation of the (deprecated) trait method.
+                #[allow(deprecated)]
+                let hrp = info.consensus_params.hrp_sapling_payment_address();
+                assert_eq!(hrp, "zs");
                 assert_eq!(info.consensus_params.coin_type(), 133);
             },
             other => panic!("expected ZHTLC, got {:?}", other),

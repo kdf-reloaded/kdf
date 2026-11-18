@@ -115,7 +115,7 @@ impl LightCoinFixture {
         fee_sat: u64,
     ) -> Option<LightCoinFixture> {
         let params_dir = sapling_params_dir()?;
-        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let db_dir = test_db_dir("note-lock");
@@ -211,11 +211,17 @@ impl LightCoinFixture {
             &params_dir.join(SAPLING_SPEND_NAME),
             &params_dir.join(SAPLING_OUTPUT_NAME),
         );
-        let to_addr = ExtendedSpendingKey::master(&[99; 32]).default_address().1;
+        let to_addr = ExtendedSpendingKey::master(&[99; 32])
+            .expect("a valid master key")
+            .default_address()
+            .1;
 
         let z_fields = ZCoinFields {
             mode: ZcoinMode::Light,
-            dex_fee_addr: ExtendedSpendingKey::master(&[98; 32]).default_address().1,
+            dex_fee_addr: ExtendedSpendingKey::master(&[98; 32])
+                .expect("a valid master key")
+                .default_address()
+                .1,
             my_z_addr,
             my_z_addr_encoded,
             z_spending_key: extsk.clone(),
@@ -398,7 +404,7 @@ impl LightCoinFixture {
             self.history().wallet_db_path(),
             self.params.clone(),
             zcash_client_sqlite::util::SystemClock,
-            rand::rngs::OsRng,
+            crate::z_coin::os_rng(),
         )
         .unwrap();
         wallet_db
@@ -548,7 +554,7 @@ fn received_note_nullifier(extsk: &ExtendedSpendingKey, rseed_byte: u8, index: u
         NoteValue::from_raw(NOTE_VALUE),
         Rseed::AfterZip212([rseed_byte; 32]),
     );
-    note.nf(&extfvk.fvk.vk.nk, index).0
+    note.nf(&extfvk.fvk().vk.nk(), index).0
 }
 
 fn insufficient(err: &GenTxError) -> Option<&BigDecimal> {

@@ -4,6 +4,7 @@ use super::z_tx_addresses::{AddressSide, TxAddressStore, TxAddresses};
 use super::{CheckPointBlockInfo, ShieldedFetchError, ZCoinBuildError, ZcoinConsensusParams, ZcoinDecryptionParams};
 use crate::node_url::{host_only, lightwalletd_endpoint_url, scrub_node_url, scrub_urls_in_text, UNNAMED_NODE};
 use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
+use crate::z_coin::os_rng;
 use common::mm_number::BigDecimal;
 use common::{calc_total_pages, log, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
@@ -12,7 +13,6 @@ use lazy_static::lazy_static;
 use mm2_err_handle::prelude::*;
 use parking_lot::Mutex;
 use prost_14::Message as ProstMessage;
-use rand::rngs::OsRng;
 use sapling::zip32::ExtendedFullViewingKey;
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -93,7 +93,8 @@ const SAPLING_COMMITMENT_ROOT_LEN: usize = 32;
 const BALANCE_READ_ATTEMPTS: usize = 3;
 
 pub(crate) type LightwalletdClient = z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient<Channel>;
-type ReloadedWalletDb = WalletDb<Connection, ZcoinConsensusParams, SystemClock, OsRng>;
+type ReloadedWalletDb =
+    WalletDb<Connection, ZcoinConsensusParams, SystemClock, rand_core::UnwrapErr<getrandom::SysRng>>;
 
 /// The chain's view of the Sapling tree state at a given height.
 ///
@@ -1597,10 +1598,7 @@ impl ZCoinShieldedHistory {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(
-                params![
-                    target_height,
-                    zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA
-                ],
+                params![target_height, crate::z_coin::z_lightwalletd::BUILDER_EXPIRY_DELTA],
                 |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .map_err(|e| e.to_string())?;
@@ -2178,7 +2176,7 @@ fn chain_state_from_tree_state(
         checkpoint_height,
         sapling_activation,
     )?;
-    Ok(ChainState::new(
+    Ok(chain_state_of_sapling_only_wallet(
         checkpoint_height,
         BlockHash(hash),
         commitment_tree.to_frontier(),
@@ -2272,8 +2270,9 @@ fn convert_compact_output(output: z_coin_grpc::CompactOutput) -> zcash_compact::
 enum WalletDbGeneration {
     AbsentOrEmpty,
     ReferenceLegacy,
-    /// A wallet created by the previous Reloaded build (`zcash_client_sqlite 0.21.1`,
-    /// 48 migrations). The current migrator can bring it forward (R39.8.0ba).
+    /// A wallet created by an earlier Reloaded build (`zcash_client_sqlite 0.21.1` with 48 migrations,
+    /// or `0.22.0` with 71 migrations and no `orchard` feature). The current migrator can bring it
+    /// forward (R39.8.0ba).
     UpgradeablePreviousReloaded,
     SelectedCurrent,
     Unknown,
@@ -2368,13 +2367,21 @@ struct PreviousReloadedWalletGeneration {
 }
 
 /// The generations recognized as upgradeable. The first is the schema of `zcash_client_sqlite 0.21.1`
-/// (`user_version = 8`, 467 canonical records, 48 migrations).
-const PREVIOUS_RELOADED_WALLET_GENERATIONS: [PreviousReloadedWalletGeneration; 1] =
-    [PreviousReloadedWalletGeneration {
+/// (`user_version = 8`, 467 canonical records, 48 migrations); the second is that of `0.22.0` built without
+/// its `orchard` feature (`user_version = 8`, 727 canonical records, 71 migrations), the generation before
+/// the wallet-library upgrade to 0.23.0 with `orchard`.
+const PREVIOUS_RELOADED_WALLET_GENERATIONS: [PreviousReloadedWalletGeneration; 2] = [
+    PreviousReloadedWalletGeneration {
         user_version: 8,
         record_count: 467,
         digest: "dfba9135b6d5ae446e88d83d162e9458730b5b098051d8565fdd91fe6be5bea8",
-    }];
+    },
+    PreviousReloadedWalletGeneration {
+        user_version: 8,
+        record_count: 727,
+        digest: "4ebc85f7ea3516d019b3d0d4680a6cb75ec980bfe81437abb4913d50b3407350",
+    },
+];
 
 const RECOGNIZED_COMPACT_CACHE_SCHEMA: &str = r#"
 CREATE TABLE compactblocks (
@@ -2883,7 +2890,7 @@ fn selected_current_wallet_fingerprint(consensus_params: ZcoinConsensusParams) -
     let mut conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
     db_common::sqlite::rusqlite::vtab::array::load_module(&conn).map_err(|e| e.to_string())?;
     {
-        let mut wallet_db = WalletDb::from_connection(&mut conn, consensus_params, SystemClock, OsRng);
+        let mut wallet_db = WalletDb::from_connection(&mut conn, consensus_params, SystemClock, os_rng());
         init_wallet_db(&mut wallet_db, None).map_err(|e| e.to_string())?;
     }
     schema_fingerprint(&conn)
@@ -3131,7 +3138,7 @@ fn canonical_sql_value(value: ValueRef<'_>) -> String {
 fn quote_sql_identifier(identifier: &str) -> String { format!("\"{}\"", identifier.replace('"', "\"\"")) }
 
 fn open_wallet_db(path: &Path, consensus_params: ZcoinConsensusParams) -> Result<ReloadedWalletDb, String> {
-    WalletDb::for_path(path, consensus_params, SystemClock, OsRng).map_err(|e| e.to_string())
+    WalletDb::for_path(path, consensus_params, SystemClock, os_rng()).map_err(|e| e.to_string())
 }
 
 fn initialize_compact_db(path: &Path) -> Result<(), String> {
@@ -3148,10 +3155,34 @@ fn sapling_ufvk(extfvk: &ExtendedFullViewingKey) -> Result<UnifiedFullViewingKey
     UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk.clone()).map_err(|e| e.to_string())
 }
 
+/// The chain state a sync anchor describes, for a wallet that holds Sapling notes only. The wallet library built
+/// with `orchard` also takes the Orchard and Ironwood commitment-tree frontiers of the anchor; this wallet neither
+/// receives nor spends notes of those pools (R39.6.5g), so it tracks them as empty trees and never reads them back.
+///
+/// This is correct only while two things hold together: `convert_compact_tx` passes no Orchard or Ironwood
+/// actions of a compact block on to the scanner, and `PirateChainMetadataBlockSource` supplies zero Orchard and
+/// Ironwood tree sizes on the first block of every scan batch. The scanner takes the prior sizes of those pools
+/// from the wallet database and the block's metadata, never from this chain state; the empty frontiers only seed
+/// the (empty) Orchard and Ironwood commitment trees of the wallet. If either of the two changes, this helper
+/// must take the real frontiers instead.
+fn chain_state_of_sapling_only_wallet(
+    height: BlockHeight,
+    hash: BlockHash,
+    sapling_frontier: incrementalmerkletree::frontier::Frontier<sapling::Node, { sapling::NOTE_COMMITMENT_TREE_DEPTH }>,
+) -> ChainState {
+    ChainState::new(
+        height,
+        hash,
+        sapling_frontier,
+        incrementalmerkletree::frontier::Frontier::empty(),
+        incrementalmerkletree::frontier::Frontier::empty(),
+    )
+}
+
 fn chain_state_from_checkpoint(check_point: &CheckPointBlockInfo) -> Result<ChainState, String> {
     let commitment_tree: sapling::CommitmentTree = read_commitment_tree(check_point.sapling_tree.as_slice())
         .map_err(|e| format!("Invalid Sapling checkpoint tree: {}", e))?;
-    Ok(ChainState::new(
+    Ok(chain_state_of_sapling_only_wallet(
         BlockHeight::from_u32(check_point.height),
         BlockHash(check_point.hash.0),
         commitment_tree.to_frontier(),
@@ -3186,7 +3217,11 @@ fn wallet_chain_state_before(wallet_db: &mut ReloadedWalletDb, from_height: Bloc
     let sapling_frontier = wallet_db
         .with_sapling_tree_mut(|tree| tree.frontier())
         .map_err(|e| e.to_string())?;
-    Ok(ChainState::new(prior_height, block_hash, sapling_frontier))
+    Ok(chain_state_of_sapling_only_wallet(
+        prior_height,
+        block_hash,
+        sapling_frontier,
+    ))
 }
 
 /// Adapts Pirate lightwalletd's legacy compact-block wire to the modern scanner.
@@ -3377,7 +3412,7 @@ fn validated_cached_block_chain_state(
             initial_sapling_tree_size,
             sapling_frontier.tree_size()
         );
-        Ok(Some(ChainState::new(
+        Ok(Some(chain_state_of_sapling_only_wallet(
             expected_height - 1,
             expected_prev_hash,
             sapling_frontier,
@@ -3566,7 +3601,35 @@ pub(crate) mod tests {
     use super::*;
     use common::log::log_crate::Level;
     use db_common::sqlite::rusqlite::params;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand_core::{TryCryptoRng, TryRng};
+    use std::convert::Infallible;
+
+    /// A deterministic generator for fixtures (SplitMix64); never used for keys of a real wallet.
+    struct FixtureRng(u64);
+
+    impl TryRng for FixtureRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> { Ok(self.try_next_u64()? as u32) }
+
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            Ok(z ^ (z >> 31))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+            for chunk in dst.chunks_mut(8) {
+                let bytes = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for FixtureRng {}
     use sapling::{note_encryption::{sapling_note_encryption, SaplingDomain},
                   value::NoteValue,
                   zip32::ExtendedSpendingKey,
@@ -3592,7 +3655,7 @@ pub(crate) mod tests {
     }
 
     fn test_extfvk(seed: u8) -> ExtendedFullViewingKey {
-        let extsk = ExtendedSpendingKey::master(&[seed; 32]);
+        let extsk = ExtendedSpendingKey::master(&[seed; 32]).expect("a valid master key");
         #[allow(deprecated)]
         extsk.to_extended_full_viewing_key()
     }
@@ -3698,7 +3761,7 @@ pub(crate) mod tests {
         extfvk: &ExtendedFullViewingKey,
         notes: &[(u64, u8, u8)],
     ) -> zcash_compact::CompactBlock {
-        let mut rng = StdRng::from_seed([7; 32]);
+        let mut rng = FixtureRng(7);
         let vtx = notes
             .iter()
             .enumerate()
@@ -3709,7 +3772,7 @@ pub(crate) mod tests {
                     Rseed::AfterZip212([*rseed_byte; 32]),
                 );
                 let encryptor = sapling_note_encryption(
-                    Some(extfvk.fvk.ovk),
+                    Some(extfvk.fvk().ovk),
                     note.clone(),
                     MemoBytes::empty().into_bytes(),
                     &mut rng,
@@ -3718,7 +3781,7 @@ pub(crate) mod tests {
                 let output = zcash_compact::CompactSaplingOutput {
                     cmu: note.cmu().to_bytes().to_vec(),
                     ephemeral_key: SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),
-                    ciphertext: ciphertext[..52].to_vec(),
+                    ciphertext: ciphertext.as_ref()[..52].to_vec(),
                 };
                 zcash_compact::CompactTx {
                     index: index as u64 + 1,
@@ -4684,7 +4747,10 @@ pub(crate) mod tests {
     fn recipient_destinations() -> Vec<String> {
         let sapling = zcash_keys::encoding::encode_payment_address(
             "zs",
-            &ExtendedSpendingKey::master(&[3; 32]).default_address().1,
+            &ExtendedSpendingKey::master(&[3; 32])
+                .expect("a valid master key")
+                .default_address()
+                .1,
         );
         vec![sapling, crate::z_coin::z_pirate1_tests::MAIN_ADDRESS.to_owned()]
     }
@@ -6524,7 +6590,7 @@ pub(crate) mod tests {
     #[test]
     fn t39_8_0i_a_deposit_with_ironwood_actions_scans_to_the_note_the_tree_and_the_balance() {
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let checkpoint = CheckPointBlockInfo {
@@ -6608,7 +6674,7 @@ pub(crate) mod tests {
         use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
 
@@ -6622,7 +6688,7 @@ pub(crate) mod tests {
         let streamed = z_coin_grpc::CompactTx::decode(wire.as_slice()).unwrap();
         assert_field_6_is_dropped(wire.len(), carried.actions.len(), streamed.encoded_len());
 
-        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk().vk.ivk());
         let enforcement = zip212_enforcement(&ZcoinDecryptionParams::new(params.clone()), BlockHeight::from_u32(11));
         let receipts = pending_receipts_in_tx(&ivk, enforcement, &streamed);
         assert_eq!(
@@ -6637,7 +6703,7 @@ pub(crate) mod tests {
 
         // Another wallet's key finds nothing in the same transaction.
         let other = test_extfvk(31);
-        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk.vk.ivk());
+        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk().vk.ivk());
         assert!(pending_receipts_in_tx(&other_ivk, enforcement, &streamed).is_empty());
 
         // It counts as pending while the wallet database has not scanned it, and the mined note
@@ -6674,7 +6740,7 @@ pub(crate) mod tests {
     fn pirate_compact_block_without_chain_metadata_scans_received_note() {
         let db_dir = test_db_dir("pirate-compact-metadata-adapter");
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let checkpoint = CheckPointBlockInfo {
@@ -6985,7 +7051,7 @@ pub(crate) mod tests {
         let paths = ZCoinShieldedHistoryPaths::new("ARRR", db_dir.clone());
         create_legacy_wallet(&paths.wallet_db_path);
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[13; 32]);
+        let extsk = ExtendedSpendingKey::master(&[13; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let checkpoint = CheckPointBlockInfo {
@@ -7419,7 +7485,7 @@ pub(crate) mod tests {
         let migrations: u32 = conn
             .query_row("SELECT COUNT(*) FROM schemer_migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(migrations, 71, "48 previous + 23 new migrations");
+        assert_eq!(migrations, 75, "48 previous + 27 new migrations");
         let accounts: u32 = conn
             .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
             .unwrap();
@@ -7430,6 +7496,91 @@ pub(crate) mod tests {
         assert_is_previous_generation_backup_of_fixture(&backups[0]);
         assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.upgrade-failed.").is_empty());
         assert!(!path_with_suffix(&paths.wallet_db_path, ".upgrade-work").exists());
+    }
+
+    /// A wallet created by the build before the wallet-library upgrade (`zcash_client_sqlite 0.22.0` without
+    /// `orchard`): one account imported from `test_extfvk(8)` at a checkpoint at height 10 (hash
+    /// `deterministic_compact_hash(10)`, empty Sapling tree, time 10), captured by running that build's normal
+    /// initialisation path. It cannot be rebuilt here: the 0.22 migrator is no longer in the tree.
+    const PREVIOUS_022_WALLET_FIXTURE: &[u8] = include_bytes!("test-fixtures/wallet-zcsqlite-0.22.0-checkpointed.db");
+
+    /// T39.8.0k: a wallet of the `0.22.0` generation is recognized, backed up and migrated on its first open, and
+    /// the first blocks scanned afterwards store zero Orchard and Ironwood tree sizes, not NULL (the blocks of
+    /// that generation carry NULL there, and the scanner needs a size for each pool at its first block).
+    #[test]
+    fn previous_022_wallet_is_migrated_and_scans_with_zero_orchard_and_ironwood_sizes() {
+        let db_dir = test_db_dir("schema-previous-022");
+        let params = test_params_with_zip212();
+        let paths = ZCoinShieldedHistoryPaths::new("ARRR", db_dir.clone());
+        std::fs::write(&paths.wallet_db_path, PREVIOUS_022_WALLET_FIXTURE).unwrap();
+        assert_eq!(
+            classify_wallet_db(&paths.wallet_db_path, params.clone()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+
+        let checkpoint = CheckPointBlockInfo {
+            height: 10,
+            hash: rpc::v1::types::H256(deterministic_compact_hash(10).try_into().unwrap()),
+            time: 10,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        };
+        let history = ZCoinShieldedHistory::open_or_create(
+            "ARRR",
+            db_dir.clone(),
+            params.clone(),
+            &test_extfvk(8),
+            Some(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(
+            classify_wallet_db(history.wallet_db_path(), params.clone()),
+            WalletDbGeneration::SelectedCurrent
+        );
+        let backups = backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.pre-upgrade.");
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            classify_wallet_db(&backups[0], params.clone()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+
+        let blocks = (11u64..=12)
+            .map(|height| zcash_compact::CompactBlock {
+                height,
+                hash: deterministic_compact_hash(height),
+                prev_hash: deterministic_compact_hash(height - 1),
+                time: u32::try_from(height).unwrap(),
+                header: Vec::new(),
+                vtx: Vec::new(),
+                chain_metadata: None,
+            })
+            .collect::<Vec<_>>();
+        history.insert_compact_blocks(&blocks).unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(params, 12, 1_000, 0, |_, _| {})
+                .unwrap(),
+            12
+        );
+
+        let conn = Connection::open(history.wallet_db_path()).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT height, orchard_commitment_tree_size, ironwood_commitment_tree_size
+                 FROM blocks WHERE height > 10 ORDER BY height",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![(11, Some(0), Some(0)), (12, Some(0), Some(0))]);
     }
 
     /// Forces the migration attempt to fail before it starts (the working-copy path is
@@ -7753,16 +7904,19 @@ pub(crate) mod tests {
         assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.").is_empty());
     }
 
-    /// R39.8.0bc: the list of recognized previous generations holds the one pinned digest today.
+    /// R39.8.0bc: the list of recognized previous generations holds the pinned digests of the `0.21.1` and the
+    /// `0.22.0` schemas.
     #[test]
-    fn one_previous_generation_is_recognized() {
-        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS.len(), 1);
+    fn two_previous_generations_are_recognized() {
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS.len(), 2);
         assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[0].user_version, 8);
         assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[0].record_count, 467);
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[1].user_version, 8);
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[1].record_count, 727);
     }
 
-    // Re-pinned for zcash_client_sqlite 0.22.0 (was 467 records / 48 migrations on 0.21.1).
-    // Wallet DBs created by the 0.21.1 schema no longer match this fingerprint; they are
+    // Re-pinned for zcash_client_sqlite 0.23.0 with `orchard` (was 727 records / 71 migrations on 0.22.0).
+    // Wallet DBs created by the 0.21.1 or 0.22.0 schema no longer match this fingerprint; they are
     // upgraded by R39.8.0ba (see previous_reloaded_wallet_is_backed_up_and_migrated_in_place).
     #[test]
     fn selected_current_schema_identity_is_pinned() {
@@ -7779,7 +7933,7 @@ pub(crate) mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         db_common::sqlite::rusqlite::vtab::array::load_module(&conn).unwrap();
         {
-            let mut wallet_db = WalletDb::from_connection(&mut conn, test_params(), SystemClock, OsRng);
+            let mut wallet_db = WalletDb::from_connection(&mut conn, test_params(), SystemClock, os_rng());
             init_wallet_db(&mut wallet_db, None).unwrap();
         }
         let mut stmt = conn
@@ -7796,15 +7950,15 @@ pub(crate) mod tests {
             migration_hasher.update(b"\n");
         }
         assert_eq!(fingerprint.user_version, 8);
-        assert_eq!(fingerprint.records.len(), 727);
+        assert_eq!(fingerprint.records.len(), 742);
         assert_eq!(
             hex::encode(hasher.finalize()),
-            "4ebc85f7ea3516d019b3d0d4680a6cb75ec980bfe81437abb4913d50b3407350"
+            "cd761cd6e27b229154defd8dbeba4bb255c653829ae872a8096ea6d22250f9b3"
         );
-        assert_eq!(migration_ids.len(), 71);
+        assert_eq!(migration_ids.len(), 75);
         assert_eq!(
             hex::encode(migration_hasher.finalize()),
-            "1142e14a2d3103f1cabbbcbc2d686000e021bf88bcbcce2d34f7d0a040e2d08b"
+            "27a9d204fdadbcd108dcd56cd3d2a527057454caeb0bb2c0c44dd3ce0cf95bce"
         );
     }
 
@@ -7820,16 +7974,17 @@ pub(crate) mod tests {
     #[test]
     fn pending_receipt_detection_recovers_the_note_value() {
         use sapling::keys::PreparedIncomingViewingKey;
+        use sapling::note_encryption::COMPACT_NOTE_SIZE;
         use sapling::note_encryption::{sapling_note_encryption, try_sapling_compact_note_decryption,
                                        CompactOutputDescription, Zip212Enforcement};
         use sapling::value::NoteValue;
         use sapling::{Note, Rseed};
-        use zcash_note_encryption::{Domain, COMPACT_NOTE_SIZE};
+        use zcash_note_encryption::Domain;
 
         const VALUE: u64 = 123_456_789;
 
-        let mut rng = OsRng;
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0u8; 32]);
+        let mut rng = os_rng();
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0u8; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let (_, payment_address) = extfvk.default_address();
@@ -7846,12 +8001,12 @@ pub(crate) mod tests {
         let compact = CompactOutputDescription {
             ephemeral_key: epk,
             cmu: note.cmu(),
-            enc_ciphertext: enc_ciphertext[..COMPACT_NOTE_SIZE]
+            enc_ciphertext: enc_ciphertext.as_ref()[..COMPACT_NOTE_SIZE]
                 .try_into()
                 .expect("compact prefix is COMPACT_NOTE_SIZE bytes"),
         };
 
-        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk().vk.ivk());
         let (decrypted, _addr) = try_sapling_compact_note_decryption(&ivk, &compact, Zip212Enforcement::On)
             .expect("a wallet-owned output must trial-decrypt with the wallet's own viewing key");
 
@@ -7864,8 +8019,10 @@ pub(crate) mod tests {
         // A different wallet's key must not match, or every mempool output on
         // the network would be reported as an incoming payment.
         #[allow(deprecated)]
-        let other = sapling::zip32::ExtendedSpendingKey::master(&[7u8; 32]).to_extended_full_viewing_key();
-        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk.vk.ivk());
+        let other = sapling::zip32::ExtendedSpendingKey::master(&[7u8; 32])
+            .expect("a valid master key")
+            .to_extended_full_viewing_key();
+        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk().vk.ivk());
         assert!(
             try_sapling_compact_note_decryption(&other_ivk, &compact, Zip212Enforcement::On).is_none(),
             "an output belonging to another wallet must not decrypt"
@@ -7919,7 +8076,7 @@ pub(crate) mod tests {
             let prover = zcash_proofs::prover::LocalTxProver::new(&spend, &output);
 
             let params = test_params_with_zip212();
-            let extsk = ExtendedSpendingKey::master(&[15; 32]);
+            let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
             #[allow(deprecated)]
             let extfvk = extsk.to_extended_full_viewing_key();
             let checkpoint = CheckPointBlockInfo {
@@ -7945,7 +8102,10 @@ pub(crate) mod tests {
             );
             assert_eq!(history.balance(params.clone()).unwrap(), Self::NOTE_VALUE);
 
-            let to_addr = ExtendedSpendingKey::master(&[99; 32]).default_address().1;
+            let to_addr = ExtendedSpendingKey::master(&[99; 32])
+                .expect("a valid master key")
+                .default_address()
+                .1;
             let my_addr = extsk.default_address().1;
             Some(WithdrawFixture {
                 history,
@@ -8518,9 +8678,10 @@ fn pending_receipts_in_tx(
     tx: &z_coin_grpc::CompactTx,
 ) -> Vec<PendingReceipt> {
     use sapling::note::ExtractedNoteCommitment;
+    use sapling::note_encryption::COMPACT_NOTE_SIZE;
     use sapling::note_encryption::{try_sapling_compact_note_decryption, CompactOutputDescription};
     use sapling::Note;
-    use zcash_note_encryption::{EphemeralKeyBytes, COMPACT_NOTE_SIZE};
+    use zcash_note_encryption::EphemeralKeyBytes;
 
     let mut found = Vec::new();
     let txid: [u8; 32] = match tx.hash.as_slice().try_into() {
@@ -8579,7 +8740,7 @@ impl ZCoinShieldedHistory {
         use sapling::keys::PreparedIncomingViewingKey;
         use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 
-        let ivk = PreparedIncomingViewingKey::new(&self.extfvk.fvk.vk.ivk());
+        let ivk = PreparedIncomingViewingKey::new(&self.extfvk.fvk().vk.ivk());
         // Mempool transactions will be mined at the next height at the
         // earliest, so enforcement is evaluated against the tip.
         // Same reason as the scanner: a mempool note from a modern Pirate wallet

@@ -8,7 +8,7 @@ use db_common::sqlite::rusqlite::Error as SqliteError;
 use derive_more::Display;
 use rpc::v1::types::Bytes as BytesJson;
 #[cfg(not(target_arch = "wasm32"))]
-type ZTxBuilderError = zcash_primitives::transaction::builder::Error<std::convert::Infallible>;
+type ZTxBuilderError = super::z_tx_assembler::AssemblerError;
 
 #[derive(Debug, Display)]
 pub enum GenTxError {

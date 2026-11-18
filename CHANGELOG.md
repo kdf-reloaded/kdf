@@ -14,6 +14,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **The shielded (ARRR, Pirate) wallet database is migrated irreversibly on the first start of this version, and an
+  older build cannot open the migrated database.** The Zcash libraries were upgraded (see "Changed"), and the new
+  wallet library changes the layout of the wallet database. On the first activation of a shielded coin the node
+  writes a consistent, checked backup named `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak` next to the wallet
+  database, migrates a copy of it, and replaces the original only when the result checks out. If the migration
+  fails, the original is set aside as `.upgrade-failed.<ms>.bak` and the wallet is scanned again from the chain.
+  - *Upgrade risk:* after the migration an older KDF Reloaded build cannot read the wallet database. The node
+    needs free disk space for two copies of the database plus 16 MiB and refuses to activate the coin, without
+    changing anything, when it is short of it.
+  - *Going back to an older build:* stop the node, copy the `.pre-upgrade.<ms>.bak` file over
+    `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal` and `<TICKER>_RELOADED_WALLET.db-shm` if
+    they exist, and start the older build. Anything the wallet recorded after the upgrade is not in the backup; the
+    older build scans it again. Keep the backup until you are sure you stay on this version
+    (`shielded_db_upgrade_backups` in `MM2.json` sets how many backups the node keeps; the default is 1).
+  - *Before you upgrade:* make your own copy of the wallet database file and of the seed or passphrase as for any
+    upgrade; the steps under "Coins that are no longer visible after an upgrade" below apply if a coin is no longer
+    shown afterwards.
+  Detail: PR #NNN; CRD ch.39 R39.8.0ba, R39.8.0bc and the status note of 2026-11-18; RELOADED_VS_GLEEC.md.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
   coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
   value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
@@ -210,6 +228,13 @@ the previous version used. The safe way:
 
 #### Shielded coins
 
+- **The Zcash libraries are upgraded and no longer carry local patches.** ARRR and the other shielded coins now run on
+  the published releases of the Zcash wallet, transaction and proof libraries, unmodified; the three patched copies kept
+  in the source tree are gone. Transactions are built by the node's own assembler over the libraries' public interface.
+  A shielded transaction expires after the same 40 blocks as before, and the Zcash network upgrade NU7 is known to the
+  node, so a transparent-only Zcash transaction under its branch identifier is read by both of the node's readers. The
+  wallet database is migrated once; read the first item under "Breaking changes and upgrade notes" above.
+  Detail: PR #NNN; CRD ch.39 status notes of 2026-11-18, ch.34 ledger entry of 2026-11-18.
 - **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
   change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer
   changes a public type that the Zcash wallet library constructs itself, which kept that library from

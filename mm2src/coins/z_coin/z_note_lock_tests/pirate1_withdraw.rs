@@ -78,7 +78,7 @@ fn fee_of(details: &TransactionDetails) -> BigDecimal {
 fn own_sapling_notes(fixture: &LightCoinFixture, tx: &ZTransaction) -> Vec<(u64, sapling::PaymentAddress)> {
     #[allow(deprecated)]
     let extfvk = fixture.extsk.to_extended_full_viewing_key();
-    let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+    let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk().vk.ivk());
     tx.sapling_bundle()
         .unwrap()
         .shielded_outputs()
