@@ -1409,6 +1409,15 @@ that target, this item the current tree.
 > nothing, so in this beta Reloaded activates TRON on no path. The decision
 > above stands for when TRON returns, planned for the next beta.
 
+*Status note (2026-11-17), mmrpc 2.0 TRON route built (PR #405).* The sentence
+above that Reloaded has no mmrpc 2.0 TRON activation is superseded:
+`enable_eth_with_tokens`, `task::enable_eth::*`, `enable_erc20` and
+`task::enable_erc20::init` accept the TRON platform (`TRX`) and its TRC20 tokens,
+and the legacy `enable` / `electrum` route stays as the documented extension
+(chapter 21 §21.4 note and D21.B1, decided 2026-11-17). Both routes stay behind
+`TRON_ACTIVATION_AVAILABLE` (`false`), so the beta-availability suspension above
+still holds on every route until the constant is set.
+
 **D55.6** *Re-activation of a passive platform coin.* The reference release
 treats a platform coin that was disabled while dependent tokens stayed active
 (a passive coin) as re-activatable by the platform activation methods

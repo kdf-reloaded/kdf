@@ -213,6 +213,32 @@ public method strings are part of the external API contract
 > legacy route a documented Reloaded extension; chapter 35 R35.1.1's
 > `ticker` row describes the target, not the current tree.
 
+*Status note (2026-11-17), the mmrpc 2.0 route is built (PR #405; D21.B1 (a),
+decided 2026-11-17).* `enable_eth_with_tokens` and `task::enable_eth::init` /
+`status` / `user_action` / `cancel` accept a platform whose protocol is `TRX`,
+with its TRC20 tokens in `erc20_tokens_requests`; `enable_erc20` and
+`task::enable_erc20::init` accept a `TRC20` token on a TRON platform. The
+legacy `enable` and `electrum` routes are kept, as a documented Reloaded
+extension of the reference (which refuses them for TRON). Both routes stay
+behind `TRON_ACTIVATION_AVAILABLE` (`false`); while it is `false` the mmrpc
+route answers the same "TRON support is not available in this build" refusal
+(`PlatformCoinCreationError` on the platform route, `Internal` on the token
+routes) and registers nothing. Built on the route, per R21.10B.2, R21.10B.4
+and R21.10B.5 for the single-key login: the `nodes` list (`url`,
+`komodo_proxy` parsed and, as on the EVM route, not signing requests; the
+per-node `headers` object and `tron_api_key` of R-N9 apply to its entries),
+the swap-contract rule of F21.B3 (base58check and hex forms accepted, see the
+note at D21.B7), `required_confirmations`, `get_balances`, the NFT refusal, the
+key-policy refusals (see the note at D21.10B.3), and the result keyed by the
+base58check address. Not built in this change: the global-HD path (a
+global-HD login is refused with `PrivKeyPolicyNotAllowed` naming TRON HD as not
+yet available, except for `IguanaPrivKey`, which is honored on the node's
+internal key; unreachable while the constant is `false`), transaction
+history (`tx_history` is ignored), `convertaddress`, `get_my_address` and
+`show_priv_key`, and swaps. On `task::enable_erc20::init` a token of the other
+family than its active platform is `PlatformCoinMismatch` inside the task
+status, not at `init`.
+
 > **Binding scope (R36).** The method strings above are dictated
 > public API (R33). The Tron coin is activated by supplying
 > `"ticker": "TRX"`, a `nodes` array whose entries each carry a
@@ -254,6 +280,17 @@ public method strings are part of the external API contract
 5. Build the coin with the native-TRX or TRC20 coin-type case and
    the Tron node client attached, leaving the swap-contract
    binding empty (§21.11).
+
+*Status note (2026-11-17), step 4 (decided with R21.10B.2, PR #405).* Step 4 no
+longer requires the coin config to declare `decimals` for a TRC20 token: a token
+config without `decimals`, or with `decimals` 0, reads the token's `decimals()`
+through `POST /wallet/triggerconstantcontract` at activation and uses the
+answer; a configured value of 1 to 255 is used as it is with no node request. A
+value above 255 or a failed read ends the activation with `Transport` (HTTP
+502), and a configured value above 255 is refused as an invalid payload. This
+holds on both routes (the mmrpc 2.0 route and the legacy `enable` / `electrum`
+route). The zero or empty contract address is still refused. The sentence of
+step 4 above, that the module does not introspect `decimals()`, is superseded.
 
 **R-A2 (HD derivation -- dictated coin type).** When activated
 under an HD-wallet private-key policy, Tron addresses MUST be
@@ -533,6 +570,16 @@ whose first entry is not hex move on. (4) Activation accepts only the `http` and
 (letter case ignored); another scheme is refused, naming the node's position
 only. R-WP2 still governs the top-level `Error` form (any text moves on), and
 R-N8 governs the all-failed error, where R21.10B.3 differs.
+
+*Status note (2026-11-17), request URL of a node (PR #405).* The request URL of an
+endpoint is the node URL with the endpoint path appended to the URL's path and
+the URL's query kept at the end: `https://h/x?key=1` is asked as
+`https://h/x/wallet/getaccount?key=1`; a fragment is dropped, a trailing slash
+on the node URL is ignored (`https://h/` is asked as
+`https://h/wallet/getaccount`), and a URL without a query is asked as before. A key in the query string of a node URL therefore
+works; the node is still named host-only everywhere (R-N1). The `headers` object
+and `tron_api_key` of this rule also apply to the entries of the `nodes` list of
+the mmrpc 2.0 route (R21.10B.2).
 
 > **Binding scope (R36).** The endpoint paths and their JSON
 > request/response shapes are the dictated public Tron node API.
@@ -958,6 +1005,27 @@ address that withdraw then refuses. Options: (a) parity; (b) refuse at
 activation every key policy the TRON withdraw refuses (R21.10B.4), with
 the refusal token of the route.
 
+*Status note (2026-11-17), D21.10B.3 decided: (b).* At activation, both
+routes refuse every key policy the TRON withdraw refuses, with the refusal
+token of the route: the Trezor policy (`UnexpectedDeviceActivationPolicy` on the
+one-shot route, `Internal` in the task status, before any device exchange) and
+the WalletConnect policy (`Internal`), as R21.10B.4 states for the reference,
+and, beyond the reference, the MetaMask `priv_key_policy` and the MetaMask
+`rpc_mode` (`Internal`, with a text naming the reason). MetaMask exists on the
+browser build only, so the refusal is tested on the policy facts it reads. The
+bullet "MetaMask (browser builds only)" of R21.10B.4, which accepts the MetaMask
+policy with the default `rpc_mode`, describes the reference and is not Reloaded's
+rule.
+
+*Status note (2026-11-17), HD interim rule (maintainer decision across the
+coin families).* Under a global-HD login a TRON activation that asks for
+`IguanaPrivKey` is honored: the coin uses the node's internal key
+(`mm2_internal_privkey_secret`), the key the UTXO family uses for that policy
+under an HD login, on both routes, and is a single-address coin. An absent
+policy, `ContextPrivKey` and any HD-wallet policy under a global-HD login stay
+refused with `PrivKeyPolicyNotAllowed` until the TRON HD wallet (R21.10B.4,
+R-A2) is built. Under an iguana login nothing changes.
+
 > **Compatibility (this repository on dev, 2026-11-17; its own code, not
 > the reference).** TRX and TRC20 activate only through legacy `enable`
 > and `electrum`, behind the availability constant (D55.5); the request
@@ -1333,6 +1401,10 @@ keep the legacy route as a documented extension; (b) extend the legacy
 route with the swap-contract fields instead. The umbrella plan
 `docs/plans/tron-support.md` work package 1 is this decision.
 
+*Status note (2026-11-17), D21.B1 decided: (a).* TRON has the mmrpc 2.0 route
+and keeps the legacy route as a documented Reloaded extension (maintainer
+decision of 2026-11-08; built in PR #405, see the note at §21.4).
+
 **D21.B2 -- Contract choice.** No released reference client exists, so
 the contract is Reloaded's to choose: (a) adopt the public MIT Tron-VM
 V1 contract of §21.11B.2 (same source, Reloaded-operated deployments on
@@ -1375,6 +1447,16 @@ token; no tabled state has a behavior.
 what explorers show) or hex (`41...`/`0x`-prefixed payload, what the
 EVM request type otherwise takes). R21.B2 requires both to be accepted;
 the documented form is the decision.
+
+*Status note (2026-11-17), D21.B7 decided.* Reloaded accepts both forms for
+`swap_contract_address`, `fallback_swap_contract` and the `swap_v2_contracts`
+members on a TRON platform (the base58check `T...` form, the hex wire form
+`41...` with or without `0x`, and the EVM `0x` 20-byte form), normalizes each to
+the 20-byte payload, and documents the base58check form. This is a documented
+extension of the reference's hex-only decoding of R21.10B.2. An EVM platform is
+unchanged: it keeps the `0x` 20-byte form only, and another form fails request
+decoding (`InvalidRequest`, HTTP 400) as before; the dispatcher checks the
+members against the platform's protocol before decoding.
 
 **D21.B8 -- Spend discovery and finality.** TRON full nodes expose no
 log filter; discovery of a counterparty spend or refund needs either the

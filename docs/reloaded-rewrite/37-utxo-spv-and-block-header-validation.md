@@ -25,6 +25,15 @@ header-family contract of §37.5, which is only partly implemented -- see
 > version value and knows only a Qtum variant besides the default (§37.5.8).
 > Both are specified behaviourally so they can be implemented and unit-tested.
 
+> **Status note (2026-11-18; Spec Reader round 0.5.0-12; passed the KDF
+> Dirty Gate on 2026-11-18, measure 0.03).** §37.5.11 is new. It records how the reference reads the
+> headers of a chain whose header layout changes with the mining algorithm
+> (Kerrigan, `KRGN`), where it takes the header time, what it does when a
+> list does not fit, and how the lock-time and sequence of every UTXO HTLC
+> claim and refund are chosen, with the newest upstream state that knows the
+> chain; it opens D37.5.11.1 and D37.5.11.2. No sentence above or below it
+> is changed.
+
 ## 37.0 Executive Summary
 
 SPV (Simplified Payment Verification) lets a UTXO coin confirm transactions
@@ -1706,6 +1715,269 @@ default; no switch controls the new steps.
 > existing switch's row in `docs/GLEEC_COMPATIBILITY.md` and in
 > `RELOADED_VS_GLEEC.md`.
 
+### 37.5.11 Kerrigan (KRGN): algorithm-dependent header layouts, the median-time-past window and HTLC lock-times
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.03 (attestation in §37.10).**
+> This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-12)
+> under the two-team procedure of chapter 01 §1.4A, from the reference lineage
+> at the rows `v2.6.0-beta`, `v3.0.0-beta` and `main (as of 2026-10-07)` of
+> chapter 02 §2.15A and the newest state that knows the chain, the row
+> `add-krgn-chain-variant (as of 2026-04-18)` (all read read-only; no untabled
+> state of the historical record was read); from the chain's published source
+> (R3: the Kerrigan repository, MIT-licensed, main branch as of 2026-10-19);
+> from public-network observation on 2026-11-18 of the Electrum server named by
+> the coins-registry pull request "list Kerrigan (KRGN)" (R6); from that pull
+> request's coin entry (R4; cited under chapter 01 R14: repository `GLEECBTC/coins`, pull-request head
+> `9b1f85d43ecb9897a4a7f5306d1f808db7ab49a9`, the pull request's only commit and so
+> the earliest one containing the entry;
+> opened 2026-04-12, open); and
+> from this repository's own chapters and tree. It edits no sentence of this
+> chapter: it completes the *Where the median goes* note under R37.6.2 and
+> §37.5.10, which stay as they are. Numbering: R37.5.11.1 -- R37.5.11.9,
+> D37.5.11.1 -- D37.5.11.2 and T37.5.11.1 -- T37.5.11.5.
+
+*Chain facts (R3, R6).* Kerrigan is a Dash-derived chain mined by four
+algorithms at once. The algorithm is the value of bits 8 to 11 of the header's
+version: 0 X11, 2 KawPoW, 4 Equihash(200,9), 6 Equihash(192,7); the chain's own
+header decoder refuses every other value. The layout depends on the algorithm:
+
+| Algorithm | Layout | Bytes | Time field at |
+| --- | --- | --- | --- |
+| X11 | the standard header | 80 | byte 68 |
+| KawPoW | the standard header with its 32-bit nonce kept (zero), then block height (4), 64-bit nonce (8) and mix hash (32) | 124 | byte 68 |
+| Equihash(200,9) | version, previous hash, Merkle root, a 32-byte reserved field, time, bits, a 256-bit nonce, then the solution with a compact-size length (1344 bytes) | 1487 | byte 100 |
+| Equihash(192,7) | as above, solution of 400 bytes | 543 | byte 100 |
+
+The KawPoW form is four bytes longer than the Ravencoin KawPoW layout of §37.5.2,
+which drops the 32-bit nonce. The chain's identity hash is X11 over the first
+80 bytes (X11 and KawPoW) or the first 140 bytes (Equihash), never a
+double-SHA256. On 2026-11-18 the server (ElectrumX 1.19.0, protocol 1.4, tip
+188838) answered `blockchain.block.headers` with the headers concatenated in
+`hex`, each at its own size. Of the last 2016 headers, 384 were X11, 503 KawPoW,
+557 Equihash(200,9) and 572 Equihash(192,7), and every one of the 1129 Equihash
+headers carried an all-zero reserved field. Four eleven-header windows (at the
+tip, 500 blocks below it, from height 22310 and from height 1000) measured
+8073, 4752, 7147 and 4421 bytes, and each mixed at least three of the four
+sizes. A window of eleven X11 headers is therefore rare, and a window without an
+Equihash header is about one in ten thousand.
+
+**R37.5.11.1** *Reference states.* The rows `v2.6.0-beta`, `v3.0.0-beta` and
+`main (as of 2026-10-07)` agree on every point of R37.5.11.2 -- R37.5.11.7. None
+of them knows Kerrigan. The only tabled state that does is
+`add-krgn-chain-variant (as of 2026-04-18)`: the head of an open pull request
+against the historical record, one commit on top of `v3.0.0-beta`, in no
+release. R37.5.11.8 describes what it changes.
+
+**R37.5.11.2** *How the reference reads a header list, for every family.* The
+answer to `blockchain.block.headers` (a count and one `hex` string) is read as
+that many consecutive headers from the start of `hex`, each under the coin's
+family of §37.5.1 -- §37.5.5. A header is as long as its layout reads. The family
+fixes the layout, and the version value adds the parts R37.5.4 and R37.5.5 name:
+a merged-mining proof (bit 8), the Equihash form (version 4), the KawPoW trailer
+(the exact KawPoW value under `"RVN"`) and the Firo forms. Within those parts,
+lengths come from the bytes' own length prefixes (the Equihash solution, the
+merged-mining coinbase transaction and branches, the Qtum signature). The served
+byte count is never used to split the list, no header boundary is taken from the
+server, and the end of `hex` is not checked (the §37.5.6 finding). The reference
+therefore reads headers of different lengths in one list only where the version
+value announces the extra part in a way one of its families models. A
+multi-algorithm chain whose headers are 80 bytes for every algorithm is read
+correctly by the default family, provided its version values do not collide
+with the version-signalled forms (R37.5.4, R37.5.6). No family of the reference
+reads a layout that depends on the algorithm bits of the version.
+
+**R37.5.11.3** *Where the reference reads the time.* Each header's time is the
+32-bit field at its place in the layout used for that header: byte 68 in the
+standard, merged-mining, KawPoW, Firo, Qtum and PIVX layouts, and byte 100 in
+the Equihash form and the LBRY layout. The median that `get_current_mtp`
+reports (R37.6.2) is the median of the times of the headers the server
+returned. No time is checked against a range, against its neighbors or
+against the clock.
+
+**R37.5.11.4** *When the headers do not fit.* There are two outcomes, and
+neither is repaired within the query:
+
+1. A read that runs past the end of `hex`, or meets a part that does not parse
+   (for instance a merged-mining proof begun on bytes that are not one), fails
+   the whole median query as a backend error. There is no partial median, no
+   second reading under another layout and no fetch of single headers.
+2. A read that takes too few bytes per header succeeds. Its times come from the
+   wrong offsets, and their median is used as it is.
+
+A single header read through the generic entry point (§37.5.6 finding; it
+serves the block-timestamp query) uses the standard layout whatever the
+coin's family is, and requires the read to use up the served bytes exactly.
+A header longer than its standard reading therefore fails that query.
+
+**R37.5.11.5** *Kerrigan under the released reference.* The entry of the registry
+pull request (protocol `UTXO`, with no `chain_variant`, `mtp_block_count`,
+`spv_conf` or `enable_spv_proof`) uses the default family. None of the eight
+values of R37.5.1 describes the chain, and none of the four version values
+sets bit 8, equals 4 or equals the KawPoW value, so the reference reads every
+Kerrigan header as the standard 80 bytes. The first header of a list is read
+correctly. From the first non-X11 header on, every later record starts inside an
+earlier header.
+
+- *Default family, Electrum connection.* The reading of R37.5.11.2 was applied
+  to 400 eleven-header windows taken from the server on 2026-11-18 at
+  five-block steps below the tip. In 387 of them a misaligned record had bit 8
+  set, and there the reference starts a merged-mining proof on bytes that are
+  not one: the list read fails unless those bytes happen to form a complete,
+  well-formed proof. The other 13 read to the end without such a record, and
+  6 of these gave the true median by chance. `get_current_mtp` for the coin
+  therefore fails in nearly every window and is wrong in most of the rest.
+- *`"BTC"`.* A merged-mining proof is never started, so the list always reads
+  to the end and the median comes from the wrong offsets without an error. This
+  is the outcome the §37.5.10 compatibility block observed for an 84-byte chain.
+  None of the other existing values changes the misalignment.
+- *The value `"KRGN"`.* It is not in the reference's set, so activation of the
+  coin is refused (R37.5.1).
+- *Native-daemon connection.* The median is taken from the node and no header
+  is parsed (the third contract detail under R37.5.1), so it is correct.
+- *Block timestamps.* The query of R37.5.11.4 fails for every non-X11 Kerrigan
+  header, about four blocks in five at the tip. In the reference's version-two
+  UTXO transaction history, a failed timestamp read for a confirmed transaction
+  sends the history into its error cooldown, after which the same transaction is
+  tried again. A Kerrigan wallet's version-two history therefore does not
+  advance past its first transaction mined in a non-X11 block.
+
+**R37.5.11.6** *Lock-time and sequence of UTXO HTLC claims and refunds
+(reference; completes the *Where the median goes* note under R37.6.2).* Neither
+value is read from a header directly. The sequence is a constant of the path,
+and the lock-time is either the constant zero or formed from the median of
+R37.6.2:
+
+| Spend | Sequence | Lock-time |
+| --- | --- | --- |
+| Legacy claim with the secret (maker spends the taker payment; taker spends the maker payment) | final (`0xFFFFFFFF`) | the larger of median − 1 and the payment's HTLC lock-time |
+| Legacy refund after the lock-time (maker or taker) | non-final (`0xFFFFFFFE`) | the same rule |
+| Version-two claim of the maker payment with the maker secret; version-two refund of the maker payment with the taker secret; version-two refund of the taker funding with the taker secret | final | the larger of median − 1 and that payment's or funding's HTLC lock-time |
+| Version-two refund after the lock-time (maker payment, taker funding, combined taker payment) | non-final | the same rule |
+| Version-two cooperative spends (funding into taker payment; maker's spend of the taker payment) | final | exactly 0; no median is read |
+
+Komodo is the exception recorded in the note: its lock-time comes from the wall
+clock and not from the median. Wherever the table names the median, it is read
+from the coin's backend each time the spend is built, before anything is signed.
+A failed read aborts the build, so nothing is signed or broadcast. A wrong value
+is used as it is, and since a claim's sequence is final, its lock-time value
+does not affect consensus validity. Before a refund is built, the refund check
+compares the wall clock with the HTLC lock-time and then reads the median
+again: the refund becomes due once the HTLC lock-time is below the median.
+No other header is read, and the sequence never depends on any read.
+
+**R37.5.11.7** *What this means for a Kerrigan swap under the released
+reference on an Electrum connection.* Sending a payment reads no median and
+succeeds. Every median-based claim and refund on Kerrigan (R37.5.11.6) aborts in
+nearly every window (R37.5.11.5). In a legacy swap with Kerrigan as the maker
+coin, the maker's claim of the taker payment on the other coin succeeds and
+reveals the secret, and the taker's claim of the Kerrigan maker payment aborts.
+The taker then enters its refund chain for a payment the maker has already
+spent (chapter 51 R31). With Kerrigan as the taker coin, the maker's claim
+aborts. A retry succeeds only when a later window happens to read. A
+native-daemon connection is not affected. This paragraph is derived from
+R37.5.11.5, R37.5.11.6 and chapter 51; it is not an observation of a swap.
+
+**R37.5.11.8** *The newest upstream state (`add-krgn-chain-variant (as of
+2026-04-18)`).* That state accepts one more `chain_variant` value, `"KRGN"`.
+Under it the layout is chosen for each header from the algorithm bits of its
+version: X11 → the standard 80 bytes; KawPoW → the standard 80 bytes including
+the 32-bit nonce, then the 44-byte KawPoW trailer; either Equihash → the
+Equihash form, with the time at byte 100. With that value a Kerrigan list is
+read header by header as R37.5.11.2 describes, and the median is the chain's.
+The following do not change: the transaction reading of chapter 38 §38.6.10; the
+lock-times and sequences of R37.5.11.6; the missing list-end check; the
+generic single-header read of R37.5.11.4, which still uses the standard layout
+and exact consumption, so the block-timestamp query still fails for non-X11
+Kerrigan headers; and the double-SHA256 identity hash, so `spv_conf` and
+`enable_spv_proof` cannot work for the chain. The registry entry as proposed
+does not set `chain_variant`, so even this state reads it under the default
+family of R37.5.11.5. The entry would have to name `"KRGN"`, a value every
+released reference refuses (chapter 45 R45.3A.3).
+
+> **Upstream divergence (informative).** That state takes the algorithm from
+> bits 9 to 11 and ignores bit 8. The chain refuses a version whose bits 8 to
+> 11 hold an odd value; that state instead reads such a header like its even
+> neighbor and starts a merged-mining proof for it. Real chain data never
+> carries such a version, so nothing a node sees on the network depends on
+> this.
+
+**R37.5.11.9** *Kerrigan under this chapter's rules as they stand (clean-side
+reading of R37.5.1 -- R37.5.10g, informative for D37.5.11.1).* The layout-aware
+read of R37.5.10a step 1 fails exact consumption under the default family and
+under `"BTC"`. The 124-byte KawPoW form is neither the 120-byte KawPoW nor the
+80-byte form of the mixed layout of R37.5.9e, so that fallback does not read it
+either. Step 2 applies only when the byte count divides by eleven. One of the
+four observed windows did (4752 = 11 × 432), and the times read at a 432-byte
+stride fail the range check of R37.5.10d except by coincidence. Step 3 reads X11
+and KawPoW headers correctly at byte 68. For an Equihash header it reads byte 68,
+which lies in the all-zero reserved field, and the range check refuses the zero
+at once. Nearly every window holds an Equihash header, so on an Electrum
+connection Reloaded's median query for the coin fails loudly. Its claims and
+refunds then abort like the reference's: Reloaded's version-two secret-reveal
+spends also form their lock-time from the median, through the same rule of
+R37.5.11.6 with a zero HTLC lock-time argument (chapter 15 R14, R15). The exact
+single-header read (R37.5.6) fails for every non-X11 Kerrigan header. Reloaded
+never yields a silently wrong median for the coin.
+
+> **Reference comparison (informative).** For the three version-two secret
+> spends of R37.5.11.6, Reloaded passes zero as the HTLC lock-time argument,
+> where the reference passes the payment's or funding's HTLC lock-time. The
+> signed lock-time is therefore median − 1 in Reloaded and usually the HTLC
+> lock-time in the reference. The sequence is final, so consensus ignores the
+> value, and no counterparty validates it; both read the median, so both fail
+> together when the median fails.
+
+**D37.5.11.1** *(Open; for the maintainer.)* *How Reloaded reads Kerrigan
+headers.* The options combine:
+
+- (a) a `header_layout` value (R37.5.9) for the Kerrigan layout, chosen for
+  each header from bits 8 to 11 of the version. It is deterministic but
+  belongs to a local coins file only (R37.5.9);
+- (b) a Kerrigan step in the structural fallback of R37.5.9e, keyed on those
+  bits and confirmed by exact consumption. It serves the registry entry without
+  a key. Its risk is that standard chains which signal soft forks on version
+  bits 9 and 10 carry the same values in those bits, so the step has to stay
+  behind the standard reading and exact consumption;
+- (c) widening the time-only read of R37.5.10 step 3 so that it recognizes the
+  Equihash form by its served length (140 bytes, a compact-size length and
+  that many solution bytes) and takes the time at byte 100. This repairs the
+  median and the timestamps, not full headers, and works for any
+  Zcash-shaped header;
+- (d) accepting the `chain_variant` value `"KRGN"` as the newest upstream state
+  does. It only matters for a registry entry that every released reference
+  refuses (chapter 45 R45.3A.3).
+
+Option (c) is the smallest change that makes swaps work. This section does not
+choose.
+
+**D37.5.11.2** *(Open; deferred.)* *SPV for Kerrigan.* Header storage, proofs
+and linkage need the chain's X11 identity hash over the first 80 or 140 bytes
+(R37.5.7, §37.9 D2). No tabled state of the reference has it.
+
+**T37.5.11.1** *Mixed list.* A list of eleven real Kerrigan headers holding all
+four sizes, pinned from the public chain, yields the chain's median under the
+option D37.5.11.1 selects. Without that option, the median query fails with a
+backend error and never returns a value.
+
+**T37.5.11.2** *Equihash time.* A single real Equihash(192,7) header and a
+single real Equihash(200,9) header give their true times (byte 100), never the
+reserved field.
+
+**T37.5.11.3** *Native daemon.* For a coin on a native-daemon connection, the
+median is the node's and no header bytes are read.
+
+**T37.5.11.4** *Lock-time and sequence.* For each row of R37.5.11.6 the built
+spend carries the sequence and lock-time the row names; with a stub median, the
+lock-time is the larger of median − 1 and the HTLC lock-time argument. With a
+failing median query, the build fails and nothing is signed or broadcast; the
+two cooperative version-two spends still build with lock-time 0.
+
+**T37.5.11.5** *No silent median.* For a Kerrigan list read under the default
+family or `"BTC"`, the median query returns either the chain's median or an
+error, never another value.
+
 ## 37.6 Use in swap confirmation & current MTP
 
 R37.6.1 The verified header chain shall back the SPV confirmation path used when
@@ -3049,3 +3321,26 @@ before the wait is deferred.
   because the candidate has no code blocks. *Measure:* 0.02, read against the
   standard that any discretionary finding fails a file; dictated-interop and
   public-surface tokens were excluded from the measured set.
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-12) -- §37.5.11 (R37.5.11.1 -- R37.5.11.9, the upstream-divergence note, the
+  reference comparison, D37.5.11.1 -- D37.5.11.2 and T37.5.11.1 --
+  T37.5.11.5) and the status note at the head of this chapter; cleared
+  together with chapter 38 §38.6.10, chapter 45 §45.3A, the pointer after
+  R15 in chapter 15 §15.5 and the row `add-krgn-chain-variant (as of
+  2026-04-18)` of chapter 02 §2.15A. No other text of this chapter was
+  changed.*
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.03, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* as the clearance
+  block of the section states them.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.03, no leak findings. *Extent:* the UTXO header reads for every family,
+  the transaction reader and writer including the special-transaction
+  payload, the choice of lock-time and sequence for claims and refunds, the
+  median-time query, refund readiness and the errors of the version-two
+  history, at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of
+  2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)`.
+  *Clean-side form edit at clearance, on the gate's advice:* the citation of
+  the coins-registry pull request in the clearance block carries the chapter
+  01 R14 form (repository and earliest commit). No row was added to chapter
+  02 §2.15A for it: a sibling-repository citation under chapter 01 R14 is the
+  second place chapter 02 R13 admits for a sibling commit identifier. No
+  other gated sentence was changed.

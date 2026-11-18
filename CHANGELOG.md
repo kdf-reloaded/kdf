@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
+  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
+  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
+  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
+  servers now report at another height shows that height and its block's time.
+  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
   coins, EVM coins and their tokens, BCH with its SLP tokens, Sia, Lightning and shielded coins such as ARRR.** Until
   now these families ignored the value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed
@@ -38,6 +44,15 @@ or undo, and every change that needs a step from you.
     `priv_key_policy` out or send `ContextPrivKey`. If coins are not visible after the upgrade, read "Coins that are
     no longer visible after an upgrade" below and start the previous version again before you move or spend
     anything. A hardware value fails the request, where it used to be ignored.
+- **ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "77190ad9"`** (the branch id is
+  accepted with or without `0x`). Since the Zcash network upgrade NU7 the network refuses version-4 transactions. This
+  release builds version-5 ZEC transactions when the ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every
+  ZEC send is still refused by the network. With either entry, a lab
+  test of 0.4.0-beta.1 and of the development build before this change activated ZEC and showed its balance, and the
+  network refused the ZEC withdrawal it sent (version-4 entry: "not supported by the network upgrade Nu7"; version-5
+  entry: an invalid consensus branch id).
+  - *Activation:* a Zcash-family (`overwintered`) entry whose `txversion` is not 4 or 5, and a version-5 entry without
+    `consensus_branch_id`, are now refused with an error that names the field.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -151,6 +166,20 @@ the previous version used. The safe way:
   only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
   hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
   so none of this can be used yet. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
+- **TRON has an activation route on the standard platform-with-tokens methods.** `enable_eth_with_tokens`,
+  `task::enable_eth::init` and its status, user-action and cancel calls accept a TRX platform with its TRC20
+  tokens, and `enable_erc20` and `task::enable_erc20::init` accept a TRC20 token, the way GLEEC KDF serves TRON.
+  The node list is read from `nodes` (a `url`, an optional `komodo_proxy` that is read but does not sign
+  requests, and an optional `headers` object); an empty list is refused with `AtLeastOneNodeRequired` and an
+  unparsable URL or a scheme other than `http` and `https` with `InvalidPayload`, before any node is asked.
+  The result lists the balances at the base58check address, with the head block from the TRON node. A TRC20 token
+  whose config has no `decimals` reads them from the contract, on both routes. The Trezor, WalletConnect and MetaMask
+  policies are refused at activation, and so is a global-HD login for now, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key (the other HD forms wait for TRON HD wallets, in a later change).
+  The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
+  TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
+  `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
+  answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
+  ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
 
 #### Tendermint (Cosmos) coins
 
@@ -315,6 +344,17 @@ the previous version used. The safe way:
 
 ### Fixed
 
+#### ZEC
+
+- **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
+  refunds of ZEC are built as version-5 transactions with the version-5 transaction id and signature, as the Zcash
+  network requires since NU7. A Trezor refuses a version-5 ZEC transaction with a clear error. Incoming version-5
+  transactions are read; version 6 is not read yet. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+- **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
+  The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
+  and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
+  swaps run only when a stored version-2 swap is resumed. Detail: PR #404.
+
 #### Browser (WASM) build
 
 - **A cancelled storage request no longer aborts other writes of the same transaction.** In the
@@ -376,6 +416,18 @@ the previous version used. The safe way:
   are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
+- **Stale history rows are removed, and changed heights are taken over.** A stored row whose transaction the servers
+  no longer list was kept forever in the history of UTXO coins, Qtum and QRC20 tokens, and kept once confirmed for BCH
+  and SLP. Now a row is removed when two successful listings in a row, at least one block apart, from servers that are
+  up to date, do not contain it. All rows of one transaction go together. A failed or cut-off listing, a listing from
+  a server that is behind, and any listing while the servers disagree about the chain remove nothing. One log line
+  reports each removal. A transaction listed at another height takes that height and its block's time. Detail: PR #408;
+  CRD ch.38 §38.5C, D38.5C.1 and D38.5C.2.
+- **The transaction history reacts to a reorganization of the chain at once.** Each coin's Electrum client now notices
+  when the chain its servers follow changes: on every new block it compares the recent block headers of an up-to-date
+  server with the ones it already holds. When they differ, the history collectors run at once instead of waiting for a
+  balance change, and one WARN line names the height from which the chain changed. At most one small request is made
+  per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
 
 #### Siacoin
 
@@ -414,6 +466,13 @@ the previous version used. The safe way:
   updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
   updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
   browser tests yet. Detail: PR #373.
+- **The browser tests of `mm2_main` now compile.** `wasm-pack test --firefox --headless mm2src/mm2_main`
+  stopped at 52 compile errors, because test code that only works natively (tests written for the `tokio`
+  runtime, tests that create random identifiers with a function the browser build does not have, and
+  tests that use a native-only database helper) was also built for the browser. That test code is now left
+  out of the browser test build, as is the same kind of test code in `mm2_gui_storage`; only test code
+  changed. The run finds 12 tests: one fails without the `BOB_PASSPHRASE` test setup it asks for, one (`test_qrc20_tx_history`, which starts a node on network id 9998) hangs and is skipped, and the other ten, the storage tests of orders and swaps, all pass; the list by name is in `docs/DEV_ENVIRONMENT.md`. No CI job runs the browser tests yet.
+  Detail: PR #403.
 - **The browser tests of `coins` now compile.** `wasm-pack test --firefox --headless mm2src/coins` stopped at
   compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
   tests that use the SQLite history storage) was also built for the browser, and a test helper
@@ -446,8 +505,19 @@ the previous version used. The safe way:
   Qtum testnet server now run against the stub, offline, in CI. Detail: PR #385; CRD ch.38
   §38.6.4Q.
 
+- **More offline tests pin how QTUM and its tokens share servers and coins.** Fifteen tests cover:
+  - the connections QTUM and two tokens hold;
+  - what disabling a token or QTUM stops;
+  - the token event subscription after a reconnect;
+  - spends of the shared QTUM coins by QTUM and its tokens;
+  - delegation, and the lock that orders withdraws.
+  Some of them wait in real time for the history collector's 30-second cycle. Detail: PR #406; CRD ch.38 §38.6.4Q.
+
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)
+  done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
+  the plan.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
   `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family;
   shielded coins read `priv_key_policy` as well (H7 row note of 2026-11-18).
@@ -484,9 +554,12 @@ the previous version used. The safe way:
   store-served coin family (PR #380).
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
-  headers and an API key; decisions about what lands before TRON is switched back on recorded.
+  headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
+  (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
+  (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
-  the version-5 format and digests in the shared parser are in progress (PR #397).
+  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); history skip of
+  unreadable transactions and the coins entry follow.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

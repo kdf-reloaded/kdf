@@ -1,6 +1,6 @@
 # Plan: ZEC transactions in the version-5 format (Zcash NU7)
 
-**Status:** in progress (0.5.0; route (A) decided 2026-11-17; P1 format and digests in progress) — **Last reviewed:** 2026-11-17
+**Status:** in progress (0.5.0; route (A) decided 2026-11-17; P1 format and digests PR #397; P2 ZEC wiring PR #404) — **Last reviewed:** 2026-11-17
 
 > **Context.** The Zcash network upgrade NU7 activated on mainnet at height 3,543,405 (ZIP 259,
 > consensus branch id `0x77190AD9`). From NU7 on, a transaction's version must be 5 or 6, also for a
@@ -69,9 +69,9 @@ cross-check of the v5 serializer in tests.
 
 | Id | What | State |
 |---|---|---|
-| Z1 | **Configuration.** Accept `txversion` 5 with the keys of the shared coins file (`version_group_id` and `consensus_branch_id`, each with or without a `0x` prefix); default the version group id to `0x26A7270A` for version 5 when it is absent; refuse `txversion` 6 or higher, and 5 without `overwintered`, at activation with a clear error. *(Amended 2026-11-17.)* | Not started (P2) |
-| Z2 | **Withdrawal:** build and sign a version-5 transaction. | Not started (P2) |
-| Z3 | **Swap path:** the HTLC payment, the spend and the refund, with P2SH inputs under the ZIP-244 digest. | Not started (P2) |
+| Z1 | **Configuration.** Accept `txversion` 5 with the keys of the shared coins file (`version_group_id` and `consensus_branch_id`, each with or without a `0x` prefix); default the version group id to `0x26A7270A` for version 5 when it is absent; refuse `txversion` 6 or higher, and 5 without `overwintered`, at activation with a clear error. *(Amended 2026-11-17.)* | In progress (P2, PR #404) |
+| Z2 | **Withdrawal:** build and sign a version-5 transaction. | In progress (P2, PR #404) |
+| Z3 | **Swap path:** the HTLC payment, the spend and the refund, with P2SH inputs under the ZIP-244 digest. | In progress (P2, PR #404) |
 | Z4 | **Reading version-5 transactions** in the shared UTXO parser (route A; all three bundles of ZIP 225): history, verification of unspent outputs, validation of swap payments. | In progress (P1 parser, P2 wiring) |
 | Z5 | **The ZIP-244 transaction id**, for the node's own transactions and for incoming ones with Sapling or Orchard parts. | In progress (P1) |
 | Z6 | **Tests:** the public ZIP-244 test vectors (the zcash-test-vectors repository, MIT) and round trips. | In progress (P1) |

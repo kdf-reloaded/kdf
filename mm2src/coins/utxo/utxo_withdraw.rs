@@ -25,7 +25,8 @@ use std::collections::HashSet;
 use std::iter::once;
 use std::time::Duration;
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
-use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, with_key_pair, UtxoSignTxError};
+use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, refuse_transaction_version_for_hardware_wallet,
+                  with_key_pair, UtxoSignTxError};
 use utxo_signer::{SignPolicy, UtxoSignerOps};
 
 const TREZOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -37,7 +38,8 @@ impl From<UtxoSignTxError> for WithdrawError {
             UtxoSignTxError::TrezorError(trezor) => WithdrawError::from(trezor),
             UtxoSignTxError::Transport(transport) => WithdrawError::Transport(transport),
             UtxoSignTxError::Internal(internal) => WithdrawError::InternalError(internal),
-            sign_err @ UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { .. } => {
+            sign_err @ (UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { .. }
+            | UtxoSignTxError::TransactionVersionNotSupportedByHardwareWallet { .. }) => {
                 WithdrawError::UnsupportedError(sign_err.to_string())
             },
             sign_err => WithdrawError::InternalError(sign_err.to_string()),
@@ -417,6 +419,7 @@ where
             .mm_err(Into::into)?;
 
         let sighash_suffix = unsigned_tx.sighash_suffix;
+        let (overwintered, tx_version) = (unsigned_tx.overwintered, unsigned_tx.version);
         let mut sign_params = UtxoSignTxParamsBuilder::new();
 
         // TODO refactor [`UtxoTxBuilder::build`] to return `SpendingInputInfo` and `SendingOutputInfo` within `AdditionalTxData`.
@@ -460,6 +463,7 @@ where
             PrivKeyPolicy::Trezor => {
                 // CRD ch.61 R61.4.4: refuse before the device is contacted.
                 refuse_sighash_suffix_for_hardware_wallet(sighash_suffix).mm_err(WithdrawError::from)?;
+                refuse_transaction_version_for_hardware_wallet(overwintered, tx_version).mm_err(WithdrawError::from)?;
                 let trezor_client = self.trezor_client(self.coin.as_ref().hw_ctx.as_ref()).await?;
                 SignPolicy::WithTrezor(trezor_client)
             },

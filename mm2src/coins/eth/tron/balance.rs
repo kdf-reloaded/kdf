@@ -35,6 +35,9 @@ pub(crate) enum TronBalanceError {
     /// The `balanceOf` result is not exactly one 32-byte word (a reverted call returns revert data here).
     #[display(fmt = "balanceOf result is {} bytes, expected 32", _0)]
     BadLength(usize),
+    /// The `decimals()` result of a token is above 255 (CRD ch.21 R21.10B.2).
+    #[display(fmt = "decimals() result is above 255")]
+    DecimalsOutOfRange,
     /// The coin carries no TRON node client.
     #[display(fmt = "TRON API client missing on this coin")]
     ClientMissing,
@@ -66,7 +69,8 @@ impl From<TronBalanceError> for BalanceError {
             | TronBalanceError::NegativeBalance
             | TronBalanceError::NoResult
             | TronBalanceError::BadHex(_)
-            | TronBalanceError::BadLength(_) => BalanceError::InvalidResponse(e.to_string()),
+            | TronBalanceError::BadLength(_)
+            | TronBalanceError::DecimalsOutOfRange => BalanceError::InvalidResponse(e.to_string()),
             TronBalanceError::Node(_) => BalanceError::Transport(e.to_string()),
             TronBalanceError::ClientMissing | TronBalanceError::NotTronCoin => BalanceError::Internal(e.to_string()),
         }
@@ -120,6 +124,39 @@ pub(crate) async fn trc20_balance_units(
         return Err(TronBalanceError::BadLength(bytes.len()));
     }
     Ok(U256::from_big_endian(&bytes))
+}
+
+/// The `decimals()` of the TRC20 token at `contract`, read through `/wallet/triggerconstantcontract` with `caller`
+/// as the calling address (CRD ch.21 R21.10B.2, R-A1 step 4). The result must be exactly one 32-byte big-endian
+/// word, as for `balanceOf`, and at most 255.
+///
+/// # Errors
+///
+/// [`TronBalanceError::Node`] when the request fails; [`TronBalanceError::NoResult`],
+/// [`TronBalanceError::BadHex`] or [`TronBalanceError::BadLength`] when the answer carries no usable word;
+/// [`TronBalanceError::DecimalsOutOfRange`] when the value is above 255.
+pub(crate) async fn trc20_decimals(
+    api: &TronApiClient,
+    contract: &TronAddress,
+    caller: &TronAddress,
+) -> Result<u8, TronBalanceError> {
+    let resp = api
+        .trigger_constant_read(caller, contract, "decimals()", "")
+        .await
+        .map_err(TronBalanceError::Node)?;
+    let raw = resp
+        .constant_result
+        .and_then(|results| results.into_iter().next())
+        .ok_or(TronBalanceError::NoResult)?;
+    let bytes = hex::decode(raw).map_err(|e| TronBalanceError::BadHex(e.to_string()))?;
+    if bytes.len() != 32 {
+        return Err(TronBalanceError::BadLength(bytes.len()));
+    }
+    let value = U256::from_big_endian(&bytes);
+    if value > U256::from(u8::MAX) {
+        return Err(TronBalanceError::DecimalsOutOfRange);
+    }
+    Ok(value.low_u32() as u8)
 }
 
 /// The balance of `coin`'s own address in the smallest unit of the coin: SUN for TRX, token units for a
@@ -181,6 +218,7 @@ mod tests {
             TronBalanceError::NoResult,
             TronBalanceError::BadHex("zz".to_owned()),
             TronBalanceError::BadLength(31),
+            TronBalanceError::DecimalsOutOfRange,
         ] {
             assert!(matches!(
                 BalanceError::from(malformed),

@@ -63,7 +63,7 @@ impl HttpStatusCode for ImportSwapsError {
     fn status_code(&self) -> StatusCode { match *self {} }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

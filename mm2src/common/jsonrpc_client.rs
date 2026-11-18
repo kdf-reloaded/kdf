@@ -411,7 +411,7 @@ pub trait JsonRpcMultiClient: JsonRpcClient {
 
 /// Checks if the given `result` is success and contains `JsonRpcResponse`.
 /// Tries to decode the batch response into `T`.
-fn process_transport_single_result<T: DeserializeOwned + Send + 'static>(
+pub fn process_transport_single_result<T: DeserializeOwned + Send + 'static>(
     result: Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String>,
     client_info: String,
     request: JsonRpcRequest,

@@ -11,7 +11,7 @@ use coins::coin_balance::{coin_balance_map_for_ticker, HDAccountBalance, HDAddre
 use coins::hd_wallet::NewAccountCreatingError;
 use coins::utxo::bch::BchActivationRequest;
 use coins::utxo::rpc_clients::ElectrumProtocol;
-use coins::utxo::utxo_builder::UtxoCoinBuildError;
+use coins::utxo::utxo_builder::{UtxoCoinBuildError, UtxoConfError};
 use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
 use coins::{BalanceError, CoinBalance, CoinProtocol, PrivKeyActivationPolicy};
 use common::mm_number::BigDecimal;
@@ -90,6 +90,36 @@ fn unreadable_native_configuration_is_a_coin_creation_error_object() {
         assert_eq!(wire["error_type"], json!("CoinCreationError"));
         assert_eq!(wire["error_data"]["ticker"], json!("RIN"));
         assert!(wire["error_data"]["error"].is_string());
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+/// CRD ch.39 R39.11.4V.2: an overwintered entry whose transaction version this software cannot build is refused
+/// at activation as a coin creation error, like an invalid branch id, and the error text names the field.
+#[test]
+fn a_refused_overwintered_transaction_version_is_a_coin_creation_error_naming_the_field() {
+    for (conf_error, field) in [
+        (
+            UtxoConfError::UnsupportedOverwinteredTxVersion { found: 3 },
+            "'txversion' 3",
+        ),
+        (
+            UtxoConfError::MissingConsensusBranchId { txversion: 5 },
+            "'consensus_branch_id'",
+        ),
+        (
+            UtxoConfError::InvalidConsensusBranchId("invalid length".to_owned()),
+            "invalid length",
+        ),
+    ] {
+        let (wire, status) = wire_of(InitUtxoStandardError::from_build_err(
+            UtxoCoinBuildError::ConfError(conf_error),
+            "ZEC".to_owned(),
+        ));
+        assert_eq!(wire["error_type"], json!("CoinCreationError"));
+        assert_eq!(wire["error_data"]["ticker"], json!("ZEC"));
+        let text = wire["error_data"]["error"].as_str().expect("an error string");
+        assert!(text.contains(field), "{text}");
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

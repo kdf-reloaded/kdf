@@ -85,6 +85,8 @@ struct StubState {
     header_hex: Mutex<String>,
     /// The header (hex) `blockchain.block.header` answers per height; a height without one gets the default.
     block_headers: Mutex<HashMap<u64, String>>,
+    /// The chain the stub serves, header (hex) per height (see [`StubServer::set_chain_header`]).
+    chain: Mutex<HashMap<u64, String>>,
     default_block_header: Mutex<Option<String>>,
     /// How long the stub waits before it answers a method (CRD ch.38 R38.6.4l tests).
     reply_delays: Mutex<HashMap<String, Duration>>,
@@ -139,6 +141,7 @@ impl StubServer {
             tip: Mutex::new(None),
             header_hex: Mutex::new("00".to_owned()),
             block_headers: Mutex::new(HashMap::new()),
+            chain: Mutex::new(HashMap::new()),
             default_block_header: Mutex::new(None),
             reply_delays: Mutex::new(HashMap::new()),
             live: Mutex::new(Vec::new()),
@@ -376,6 +379,14 @@ impl StubServer {
         self.state.block_headers.lock().unwrap().insert(height, hex.to_owned());
     }
 
+    /// Sets the header (hex) of `height` in the chain the stub serves. A header of the chain is what a header
+    /// notification or answer of that height carries, and what `blockchain.block.headers` (`[start, count]`) serves,
+    /// concatenated and with its `count`, up to the first height without one (CRD ch.38 §38.5C amendment of
+    /// 2026-11-18). A height without one carries the bytes of [`Self::set_header_hex`].
+    pub fn set_chain_header(&self, height: u64, hex: &str) {
+        self.state.chain.lock().unwrap().insert(height, hex.to_owned());
+    }
+
     /// Sets the header (hex) `blockchain.block.header` answers for every height that has none of its own.
     pub fn set_default_block_header(&self, hex: &str) {
         *self.state.default_block_header.lock().unwrap() = Some(hex.to_owned());
@@ -391,7 +402,7 @@ impl StubServer {
         let line = json!({
             "jsonrpc": "2.0",
             "method": "blockchain.headers.subscribe",
-            "params": [header_json(height, &self.state.header_hex.lock().unwrap())],
+            "params": [header_json(height, &tip_header_hex(&self.state, height))],
         })
         .to_string();
         for (control, subscribed) in self.state.live.lock().unwrap().iter() {
@@ -464,6 +475,17 @@ impl StubServer {
             .map(|(_, count)| *count)
             .sum()
     }
+}
+
+/// The header bytes (hex) a tip at `height` carries: its header in the chain the stub serves, else the stub's header bytes.
+fn tip_header_hex(state: &StubState, height: u64) -> String {
+    state
+        .chain
+        .lock()
+        .unwrap()
+        .get(&height)
+        .cloned()
+        .unwrap_or_else(|| state.header_hex.lock().unwrap().clone())
 }
 
 /// The header of a tip at `height` with the bytes `hex`, as `blockchain.headers.subscribe` answers and notifies it.
@@ -560,8 +582,27 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed:
         (_, "blockchain.headers.subscribe") if state.tip.lock().unwrap().is_some() => {
             subscribed.store(true, Ordering::SeqCst);
             let height = state.tip.lock().unwrap().unwrap_or_default();
-            let hex = state.header_hex.lock().unwrap().clone();
+            let hex = tip_header_hex(state, height);
             result(header_json(height, &hex))
+        },
+        (_, "blockchain.block.headers")
+            if request["params"][0]
+                .as_u64()
+                .map_or(false, |start| state.chain.lock().unwrap().contains_key(&start)) =>
+        {
+            let start = request["params"][0].as_u64().unwrap_or_default();
+            let wanted = request["params"][1].as_u64().unwrap_or_default();
+            let chain = state.chain.lock().unwrap();
+            let mut hex = String::new();
+            let mut count = 0u64;
+            while count < wanted {
+                let Some(header) = chain.get(&(start + count)) else {
+                    break;
+                };
+                hex.push_str(header);
+                count += 1;
+            }
+            result(json!({"count": count, "hex": hex, "max": 2016}))
         },
         _ => {
             let scripthash = request["params"][0].as_str().unwrap_or_default().to_owned();

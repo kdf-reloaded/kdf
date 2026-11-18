@@ -203,6 +203,15 @@ Trezor/hardware-wallet signing policy and submitted through
 `task::withdraw::init`, the task shall fail with a structured unsupported
 withdrawal error and shall not enter a Trezor signing user-action flow.
 
+*Status note (2026-11-17), `task::withdraw` takes TRON (PR #405).* The EVM-family
+check of `task::withdraw::init` no longer refuses a TRX or TRC20 coin as
+`CoinDoesntSupportInitWithdraw`: for a key-local signing policy the task takes the
+TRON withdraw pipeline of chapter 21 (R21.10B.7 "Routes"). The refusals above
+stay in front of it: a hardware-wallet coin is refused with the unsupported
+withdrawal error before any device exchange (R49.9), and the MetaMask policy
+with the unsupported error of R47.5.6a. TRON coins activate under neither policy
+(chapter 21 D21.10B.3 (b)), so those refusals are defensive.
+
 Implementation status. The EVM Trezor task-withdraw signing path specified by
 R49.6 through R49.9 and T49.8 through T49.11, and the PIN/passphrase user-action
 contract of R49.18/R49.22 (T49.20 through T49.22), are implemented in reloaded
