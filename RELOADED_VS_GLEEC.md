@@ -1067,6 +1067,25 @@ sees the wallet as it was before the upgrade.
 number; the backup just made is always kept. Other `.bak` files, such as `.upgrade-failed` and
 `.legacy-v2`, are never deleted by the node.
 
+#### Shielded wallet files per key, and `priv_key_policy`
+
+The shielded activation request accepts `priv_key_policy` in the shape the other coin families use. This is a
+KDF Reloaded addition: whether GLEEC KDF reads it for a shielded coin has not been established here, and the
+legacy/GLEEC database files are not involved either way. Under a global-HD login `IguanaPrivKey` selects the
+node's single internal key (shielded and transparent); leaving it out keeps the HD key.
+
+Each key keeps its own wallet. `<TICKER>_RELOADED_WALLET.db` (with `<TICKER>_RELOADED_COMPACT_BLOCKS.db` and
+`<TICKER>_RELOADED_TX_ADDRESSES.db`) stays with the key whose account it holds, so a wallet created by an
+earlier build is found unchanged. The default key (the single key, or the HD key of account 0) uses these
+names when no wallet exists yet; any other key uses the same three names with a 16-character fingerprint of
+its viewing key before `.db`, for example `ARRR_RELOADED_WALLET.0123456789abcdef.db`. The fingerprint is a hash;
+the viewing key is not in the name. Balance and history show the active key's wallet only. The backup before a
+schema upgrade (see above) covers every one of these files as it is opened.
+
+An activation is refused, with a message that names the swaps and says what to do, while swaps of the coin that
+are not finished were started with another key, and when a wallet file of the coin cannot be read while a swap
+still has to send its payment or fee. Changing the HD `account` alone is allowed.
+
 ## Forward-compatibility commitment
 
 KDF Reloaded commits to following GLEEC KDF's evolution:

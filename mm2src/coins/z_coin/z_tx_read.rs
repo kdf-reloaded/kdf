@@ -421,7 +421,7 @@ async fn recorded_own_send(coin: &ZCoin, client: &LightwalletdClient, script_pub
     let records = match coin
         .z_fields
         .shielded_history
-        .recorded_transactions_containing(script_pubkey)
+        .recorded_transactions_containing_in_any_wallet(script_pubkey)
     {
         Ok(records) => records,
         Err(e) => {

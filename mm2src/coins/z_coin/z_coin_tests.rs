@@ -59,6 +59,7 @@ fn zombie_coin_send_and_refund_maker_payment() {
         db_dir,
         None,
         z_key,
+        true,
         zombie_protocol_info(),
         ZcoinBackend::Native,
     ))
@@ -117,6 +118,7 @@ fn zombie_coin_send_and_spend_maker_payment() {
         db_dir,
         None,
         z_key,
+        true,
         zombie_protocol_info(),
         ZcoinBackend::Native,
     ))
@@ -177,6 +179,7 @@ fn zombie_coin_send_dex_fee() {
         db_dir,
         None,
         z_key,
+        true,
         zombie_protocol_info(),
         ZcoinBackend::Native,
     ))
@@ -216,6 +219,7 @@ fn prepare_zombie_sapling_cache() {
         db_dir,
         None,
         z_key,
+        true,
         zombie_protocol_info(),
         ZcoinBackend::Native,
     ))
@@ -256,6 +260,7 @@ fn zombie_coin_validate_dex_fee() {
         db_dir,
         None,
         z_key,
+        true,
         zombie_protocol_info(),
         ZcoinBackend::Native,
     ))
