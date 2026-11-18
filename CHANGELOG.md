@@ -290,6 +290,12 @@ the previous version used. The safe way:
 
 #### Solana coins
 
+- **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
+  are removed and can be activated again; a removed token no longer stays in its platform's token
+  records. A platform with active tokens is handled as for every other family: the platform is
+  removed and its tokens stay. A Solana ticker that is not active answers the usual refusal. Solana
+  stays switched off in this build. Detail: PR #N; CRD ch.40 D40.6B.1, T40.6B.20; ch.43 §43.1E.
+
 - **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
   answer an error.** Message signing and verification, address validation, the confirmation settings
   and `show_priv_key` now answer; `validateaddress` accepts every valid Solana address (any base58
@@ -522,7 +528,7 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #401.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #N.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
