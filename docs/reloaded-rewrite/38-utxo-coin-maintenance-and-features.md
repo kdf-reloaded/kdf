@@ -932,6 +932,65 @@ and R38.5C.4 item 2 for both stores.
    the change is this repository's own design, specified when it is built;
    until then, item 1 applies in the passes that run anyway.
 
+*Amendment (2026-11-18, clean side; Reloaded-original; implements item 2 of
+the status note above). How the client sees that its chain changed.*
+1. *The chain view.* Each Electrum client keeps the base headers (the first
+   80 bytes, as compared by item 12 of R38.6.4o, D38.6.4o.14) of the last
+   2*T* + 2 heights of the chain it follows, *T* being the coin's tolerance
+   (R38.6.4o item 1). The view is fed only by header notifications and
+   header answers of up-to-date maintained connections (R38.6.4o item 4), and
+   not at all while the coin is in the disagreement state (item 12). No block
+   identifier is computed: the identifier function differs between header
+   families, and comparing base headers at the same height works for all of
+   them.
+2. *One check per new tip.* When an up-to-date connection first reports a
+   height above the highest in the view, the client sends that connection one
+   directed `blockchain.block.headers` request (R38.6.4g) for the heights from
+   the highest in the view up to the one below the new tip. It compares each
+   returned base header, and the new tip's, with the view at the same height.
+   - All equal: the chain only grew; the view takes the new headers and drops
+     the oldest.
+   - A difference: the chain changed. One more directed request over the
+     whole view finds the lowest height that differs, the height from which
+     the chain changed; a difference at the bottom of the view is reported as
+     "at or below" its lowest height. The view is then replaced by the new
+     chain's headers.
+   - A request that fails or is not answered within the per-request bound
+     concludes nothing; the next tip is checked as usual.
+3. *What a change starts.* The client sends a chain-changed event to every
+   history collector of the coin instance: the legacy UTXO collector, the
+   QRC20 collector and the BCH/SLP collector. The event makes the collector
+   run a pass at once, whatever its need-to-run test says. That pass applies
+   item 1 of the status note above and counts absences under D38.5C.1.
+4. *The log.* One WARN line per change: `<ticker>: the Electrum servers report
+   a reorganization of the chain from height <H>` (or `at or below height
+   <L>`).
+   Nothing is said about consequences. A change back to a chain the view held
+   within the last 2*T* + 2 heights, as in a race of two blocks at the tip, is
+   not reported a second time.
+5. *Cost and bounds.* At most one small directed request per new block per
+   coin instance, plus one when a change is found, always to a connection
+   that is already maintained. A chain that only grows always compares equal,
+   so no header family can make every block look like a change. A single
+   server answering a made-up header can cause at most one extra history pass
+   and one WARN line. It cannot remove a row, which needs two listings under
+   D38.5C.1.
+6. *One connected server.* The same applies to that server's headers alone.
+7. *Edges.*
+   - When the view is empty, or a new tip is more than 2*T* + 2 heights above
+     its highest, the view starts again from the new tip, with no request, no
+     event and no WARN: there is nothing to compare with.
+   - A tip at or below the view's highest height is not checked. A
+     replacement at the same height is therefore seen when the next higher
+     tip arrives.
+   - A header list that cannot be split into equal parts of at least 80 bytes
+     matching the requested count concludes nothing.
+   - A change back to a chain the view held sends the chain-changed event,
+     because the history may differ again, but logs no WARN.
+   - With `electrum_tip_checks` `false` (R38.6.4o item 11) the view is not
+     fed and no change is seen; the history then relies on the passes that
+     run anyway.
+
 *Acceptance rows for a mock backend.* Each row names what the mock answers
 and what the node does. *Parity* is the reference behavior bound above;
 where a D-item would change the expected result, the row says so.
@@ -6032,3 +6091,10 @@ R38.8.6 **Tests (two-direction, observable).**
   corpus, from the maintainer's decisions and this repository's code. It takes
   no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
   is required.
+- *Reloaded-original amendment (2026-11-18), clean side -- after the status
+  note on D38.5C.2: how the client sees that its chain changed (a view of base
+  headers, one directed header request per new tip, a chain-changed event to
+  the history collectors, one WARN line).* Written by a session that never
+  read the forbidden corpus, from the maintainer's decision of 2026-11-16 and
+  this repository's code. It takes no forbidden-class input, so chapter 01 R38
+  is not engaged and no gate pass is required.

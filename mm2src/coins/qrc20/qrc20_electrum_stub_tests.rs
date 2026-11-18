@@ -702,7 +702,8 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
             &history_map,
             &Some(balance.clone()),
             &balance,
-            &AbsenceMarks::default()
+            &AbsenceMarks::default(),
+            false
         ));
         // A changed balance asks for the history again, and so does the first pass.
         let other = CoinBalance {
@@ -713,9 +714,10 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
             &history_map,
             &Some(balance.clone()),
             &other,
-            &AbsenceMarks::default()
+            &AbsenceMarks::default(),
+            false
         ));
-        assert!(coin.check_if_history_update_is_needed(&history_map, &None, &balance, &AbsenceMarks::default()));
+        assert!(coin.check_if_history_update_is_needed(&history_map, &None, &balance, &AbsenceMarks::default(), false));
     });
 }
 
@@ -877,13 +879,15 @@ fn t38_5c_one_absence_or_two_at_the_same_tip_keep_the_row_and_the_mark_keeps_the
             unspendable: BigDecimal::from(0),
         };
         // No mark, an unchanged balance and a settled row: no pass.
-        assert!(!coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence));
+        assert!(!coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, false));
+        // A chain-changed event (CRD ch.38 §38.5C amendment of 2026-11-18, item 3) forces the pass whatever the rest says.
+        assert!(coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, true));
 
         assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
         assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
         assert_eq!(rows_in(&map), 1);
         // The mark: the pass runs although the balance is unchanged.
-        assert!(coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence));
+        assert!(coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, false));
     });
 }
 

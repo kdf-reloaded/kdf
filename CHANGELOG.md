@@ -352,6 +352,11 @@ the previous version used. The safe way:
   a server that is behind, and any listing while the servers disagree about the chain remove nothing. One log line
   reports each removal. A transaction listed at another height takes that height and its block's time. Detail: PR #N;
   CRD ch.38 §38.5C, D38.5C.1 and D38.5C.2.
+- **The transaction history reacts to a reorganization of the chain at once.** Each coin's Electrum client now notices
+  when the chain its servers follow changes: on every new block it compares the recent block headers of an up-to-date
+  server with the ones it already holds. When they differ, the history collectors run at once instead of waiting for a
+  balance change, and one WARN line names the height from which the chain changed. At most one small request is made
+  per new block. Detail: PR #N; CRD ch.38 §38.5C (the amendment after D38.5C.2).
 
 #### Siacoin
 

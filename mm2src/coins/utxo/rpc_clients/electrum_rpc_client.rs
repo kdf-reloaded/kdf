@@ -570,6 +570,12 @@ impl ElectrumClientImpl {
     /// new swaps and withdrawals of the coin are refused with it.
     pub fn chain_disagreement(&self) -> Option<String> { self.pool.chain_disagreement() }
 
+    /// A channel of chain-changed events: one `()` each time the client sees that the chain it follows has changed
+    /// (CRD ch.38 §38.5C, D38.5C.2 status note, amendment of 2026-11-18). The history collectors of the coin subscribe.
+    pub fn subscribe_chain_changes(&self) -> futures::channel::mpsc::UnboundedReceiver<()> {
+        self.pool.subscribe_chain_changes()
+    }
+
     /// Starts the background maintenance of the pool: the first pass connects the servers in the
     /// background and later passes keep the maintained set (CRD ch.38 R38.6.4c). Nothing waits for it.
     /// With `spawn_ping` the maintained connections are pinged on a regular cadence.

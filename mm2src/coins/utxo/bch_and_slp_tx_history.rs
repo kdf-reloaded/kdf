@@ -1,7 +1,7 @@
 /// This module is named bch_and_slp_tx_history temporary. We will most likely use the same approach for every
 /// supported UTXO coin.
 use super::RequestTxHistoryResult;
-use crate::history_absence::{removed_rows_line, AbsenceMarks};
+use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
 use crate::my_tx_history_v2::TxHistoryStorage;
 use crate::utxo::bch::BchCoin;
 use crate::utxo::utxo_common::{self, listed_height_change, HeightChange};
@@ -27,6 +27,9 @@ struct BchAndSlpHistoryCtx<Storage: TxHistoryStorage> {
     current_balance: BigDecimal,
     /// The absence rule (CRD ch.38 §38.5C): memory only, so a restart starts counting again.
     absence: AbsenceMarks,
+    /// The chain-changed events of the coin's client: one ends the wait for the next pass at once (CRD ch.38 §38.5C
+    /// amendment of 2026-11-18, item 3).
+    chain_changes: ChainChangeWatch,
 }
 
 // States have to be generic over storage type because BchAndSlpHistoryCtx is generic over it
@@ -178,7 +181,16 @@ impl<T: TxHistoryStorage> State for WaitForHistoryUpdateTrigger<T> {
 
     async fn on_changed(self: Box<Self>, ctx: &mut BchAndSlpHistoryCtx<T>) -> StateResult<Self::Ctx, Self::Result> {
         loop {
-            Timer::sleep(30.).await;
+            // A chain-changed event runs the pass at once, whatever the tests below say.
+            {
+                let idle = Timer::sleep(30.);
+                futures::pin_mut!(idle);
+                let event = ctx.chain_changes.wait();
+                futures::pin_mut!(event);
+                if let futures::future::Either::Right(_) = futures::future::select(idle, event).await {
+                    return Self::change_state(FetchingTxHashes::new());
+                }
+            }
             match ctx.storage.history_contains_unconfirmed_txes(ctx.coin.ticker()).await {
                 Ok(contains) => {
                     if contains {
@@ -479,6 +491,7 @@ pub async fn bch_and_slp_history_loop(
     metrics: MetricsArc,
     current_balance: BigDecimal,
 ) {
+    let chain_changes = ChainChangeWatch::of(&coin.as_ref().rpc_client);
     let ctx = BchAndSlpHistoryCtx {
         coin,
         mm_ctx,
@@ -486,6 +499,7 @@ pub async fn bch_and_slp_history_loop(
         metrics,
         current_balance,
         absence: AbsenceMarks::default(),
+        chain_changes,
     };
     let state_machine: StateMachine<_, ()> = StateMachine::from_ctx(ctx);
     state_machine.run(Init::new()).await;
@@ -623,6 +637,7 @@ mod tests {
             storage,
             current_balance: BigDecimal::from(0),
             absence: AbsenceMarks::default(),
+            chain_changes: ChainChangeWatch::default(),
         };
         let state = FetchingTransactionsData::<SqliteTxHistoryStorage>::new(vec![(malformed_hash, 0), (valid_hash, 0)]);
         let _next = block_on(Box::new(state).on_changed(&mut ctx));
@@ -680,6 +695,7 @@ mod tests {
             storage,
             current_balance: BigDecimal::from(0),
             absence: AbsenceMarks::default(),
+            chain_changes: ChainChangeWatch::default(),
         };
         let _next = block_on(Box::new(Init::<SqliteTxHistoryStorage>::new()).on_changed(&mut ctx));
 
@@ -732,6 +748,7 @@ mod tests {
             storage,
             current_balance: BigDecimal::from(0),
             absence: AbsenceMarks::default(),
+            chain_changes: ChainChangeWatch::default(),
         };
         // Indirect check only: the state machine gives no hook to name the next state, so this proves that the state
         // does not panic and hands over (a `ChangeState`, not a `Finish`) with the sync state as `Init` set it.
@@ -806,6 +823,7 @@ mod absence_tests {
                     storage,
                     current_balance: BigDecimal::from(0),
                     absence: AbsenceMarks::default(),
+                    chain_changes: ChainChangeWatch::default(),
                 },
                 ticker,
             }
@@ -885,6 +903,24 @@ mod absence_tests {
         assert_eq!(fx.rows_of(0xe5).len(), 2, "the first absence keeps it");
         fx.pass(&[], Some(801));
         assert!(fx.rows_of(0xe5).is_empty());
+    }
+
+    /// CRD ch.38 §38.5C amendment of 2026-11-18, item 3: a chain-changed event ends the wait for the next pass at once
+    /// (the wait is 30 s otherwise), whatever the balance and the marks say.
+    #[test]
+    fn a_chain_changed_event_ends_the_wait_for_the_next_pass_at_once() {
+        let mut fx = Fixture::new(|_| vec![]);
+        let (events, receiver) = futures::channel::mpsc::unbounded();
+        fx.ctx.chain_changes = ChainChangeWatch::from_receiver(receiver);
+        events.unbounded_send(()).unwrap();
+        let started = std::time::Instant::now();
+        let _next =
+            block_on(Box::new(WaitForHistoryUpdateTrigger::<SqliteTxHistoryStorage>::new()).on_changed(&mut fx.ctx));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the wait was not cut short"
+        );
+        assert!(!fx.ctx.absence.any());
     }
 
     #[test]
