@@ -110,6 +110,13 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   every version era. No compat switch: no wire value, signed preimage or RPC
   shape depends on it. Code: `kdf_chain/src/header.rs`.
 
+- **Kerrigan (KRGN) headers through `"chain_variant": "KRGN"`.** Released GLEEC KDF versions refuse the value
+  `"KRGN"` and read Kerrigan headers as standard 80-byte headers, so claims and refunds of a KRGN swap fail over
+  Electrum in nearly every case (CRD ch.37 R37.5.11.5 -- R37.5.11.7). An open proposal for GLEEC KDF adds the same
+  value. Reloaded accepts it and reads each header by its algorithm, so the KRGN entry Reloaded needs is one that
+  such a GLEEC KDF build would also read; released GLEEC KDF versions refuse to activate it. No compat switch: no wire
+  value, signed preimage or RPC shape depends on it. Code: `kdf_chain/src/header.rs`.
+
 - Reloaded-specific Z-coin shielded database names isolate the upgraded stable
   `librustzcash` schema from GLEEC KDF's legacy schema. See
   [Shielded database isolation](#shielded-database-isolation) below.

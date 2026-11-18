@@ -31,6 +31,12 @@ or undo, and every change that needs a step from you.
   - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
     where it used to be ignored.
 
+- **A Kerrigan (KRGN) coin entry needs `"chain_variant": "KRGN"` in its `protocol` object.** Without it, the
+  coin's Electrum headers cannot be read, so its median block time is almost always unknown, and claims and refunds
+  of a KRGN swap fail, as they did before this release. With the value, the headers are read and claims and refunds
+  follow the same lock-time rule as those of any UTXO coin. A KRGN entry with
+  `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
@@ -367,6 +373,16 @@ the previous version used. The safe way:
   are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
+
+#### Kerrigan (KRGN)
+
+- **KRGN swaps can claim and refund over Electrum.** Kerrigan headers are 80, 124, 543 or 1487 bytes long,
+  depending on the mining algorithm, and two of the four layouts carry the block time 32 bytes later than the
+  standard header. The node could not read them, so the median block time a claim or refund needs was almost
+  always unknown, and KRGN claims and refunds failed with an error, including refunds through
+  `recover_funds_of_swap`. With `"chain_variant": "KRGN"` in the coin's entry, each header is now read by its
+  algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #NNN; CRD ch.37
+  §37.5.11.
 
 #### Siacoin
 
