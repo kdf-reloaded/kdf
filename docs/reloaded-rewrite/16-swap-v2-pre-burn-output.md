@@ -676,7 +676,7 @@ builds. Once R14A is implemented, a reference maker accepts the
 project's preimage. Aligning the tolerance itself is deferred as
 non-blocking. It is recorded in UPSTREAM-PARITY-GAPS #6.
 
-> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; pending the KDF
+> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; passed the KDF
 > Dirty Gate with chapter 39 §39.11.4W):* the funding-spend preimage is
 > built by the maker and validated by the taker at the reference rows
 > `v2.6.0-beta` and `v3.0.0-beta` (chapter 52 R17, R29; status note under
@@ -882,6 +882,6 @@ chapter 15 R26–R28 and R40 now defer to this chapter.
   the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A (`main (as of
   2026-10-07)` compared, no difference) and restates D5 in that order. The
   forbidden corpus was consulted for this note only, read-only, for behavior.
-  **Pending the KDF Dirty Gate** with chapter 39 §39.11.4W; the attestation
-  will be recorded in chapter 39 §39.9. D5 and every other rule are
-  unchanged.
+  **Passed the KDF Dirty Gate** with chapter 39 §39.11.4W on 2026-11-18,
+  measure 0.03, no findings; the attestation is in chapter 39 §39.9. D5 and
+  every other rule are unchanged.

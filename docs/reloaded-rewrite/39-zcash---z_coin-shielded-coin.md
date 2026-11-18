@@ -6896,7 +6896,7 @@ plan `zec-v5-transactions` settles the rate Reloaded uses.
 > §39.11.4V ("a transparent transaction pays more than ZIP 317's conventional
 > fee") holds for these shapes only.
 
-> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; pending the KDF Dirty
+> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; passed the KDF Dirty
 > Gate with §39.11.4W):* a fee below the per-kilobyte estimate also meets the
 > counterparty checks of §39.11.4W. At the rows of R39.11.4V.1 a reference peer
 > refuses it only in a version-two swap with the coin as the taker coin: in
@@ -7036,7 +7036,8 @@ toward ZIP 317 (parity; the plan's fee point sets Reloaded's result).
 
 ### 39.11.4W Counterparty fee checks on transparent UTXO transactions (reference)
 
-> **Clearance (chapter 01 R40) — pending the KDF Dirty Gate.**
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.03 (attestation in §39.9).**
 > This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
 > round 0.5.0-14) under the two-team procedure of chapter 01 §1.4A, from the
 > reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
@@ -8893,8 +8894,9 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   the not-established paragraph and T39.11.4W.1 -- T39.11.4W.6), the status
   note of 2026-11-18 under R39.11.4V.10, and the status notes of the same date
   after chapter 15 R22 and chapter 16 D5; no other text of this chapter or of
-  those chapters was changed.* **Pending the KDF Dirty Gate** (chapter 01
-  R40); the clearance and its attestation are to be recorded here. *Inputs:*
+  those chapters was changed.* **KDF Dirty Gate: PASS on 2026-11-18, measure
+  0.03, no findings** (chapter 01 R40; the attestation closes this item).
+  *Inputs:*
   (1) the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of
   chapter 02 §2.15A, read read-only from the tags themselves, with the row
   `main (as of 2026-10-07)` compared against `v3.0.0-beta` by tree difference
@@ -8918,3 +8920,14 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   read-only inspection of the historical record's reference metadata, to be
   the commit compared. *Scope of the edit:* additions only; no sentence that
   the Dirty Gate cleared is edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.03, no leak findings. *Extent:* the building and validation of
+  transparent UTXO swap transactions in the version-one and version-two
+  protocols, including the watcher validations and the bound on a watcher
+  reward; the version-two maker and taker state machines, for the roles of
+  the preimages; and the order volume floor. About six files were read at
+  each of the rows `v2.6.0-beta` and `v3.0.0-beta`; `main (as of
+  2026-10-07)` was compared by tree difference (only the read-me differs).
+  *Method:* reading, plus token searches for identifiers, numeric values
+  and band constants across both tag trees; the figures of the acceptance
+  rows do not occur in the corpus. *Measure:* 0.03.

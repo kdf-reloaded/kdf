@@ -398,7 +398,7 @@ is deferred as non-blocking (chapter 16 D5). Interoperability with
 a reference maker depends on this project's taker using the R14A
 fee estimate.
 
-> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; pending the KDF
+> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; passed the KDF
 > Dirty Gate with chapter 39 §39.11.4W):* the roles in R21 and R22 read
 > reversed against the reference rows `v2.6.0-beta` and `v3.0.0-beta`. There
 > the **maker** builds the funding-spend preimage, paying its own spend-fee
@@ -1005,5 +1005,6 @@ non-participation noted in chapter 16 R23.
   funding-spend preimage at the rows `v2.6.0-beta` and `v3.0.0-beta` of
   chapter 02 §2.15A (`main (as of 2026-10-07)` compared, no difference), and
   this repository's matching order. Behavior and public state names only.
-  **Pending the KDF Dirty Gate** with chapter 39 §39.11.4W; the attestation
-  will be recorded in chapter 39 §39.9. R21 -- R23 are unchanged.
+  **Passed the KDF Dirty Gate** with chapter 39 §39.11.4W on 2026-11-18,
+  measure 0.03, no findings; the attestation is in chapter 39 §39.9. R21 --
+  R23 are unchanged.
