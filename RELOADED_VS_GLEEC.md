@@ -508,6 +508,36 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Contract: [CRD ch.37 §37.5.1](docs/reloaded-rewrite/37-utxo-spv-and-block-header-validation.md)
   (the key-absent row and the port note under §37.5.8). Code:
   `coins/utxo/header_layout_fallback.rs`, `coins/utxo/utxo_builder/utxo_conf_builder.rs`.
+- **QRC20 token history: an error answer moves on, and the collector can
+  end.** No switch. Three differences, all for QRC20 tokens:
+  - *Error answers.* An error answer to `blockchain.contract.call`,
+    `blockchain.contract.event.get_history` or
+    `blochchain.transaction.get_receipt` moves the request on to the coin's
+    next Electrum server; the session stays open and the server is not
+    demoted. The exact error `{"code": 1, "message": "history too large"}` and
+    unreadable answers stay final. The three reads are also spread over the
+    connected servers like other read-only queries. GLEEC KDF takes any error
+    answer as the final answer.
+  - *End state.* When three history passes in a row fail with an error answer
+    from every server tried, the collector stops and `my_tx_history` reports
+    `sync_status` with code `-2` and the message "No listed Electrum server
+    answers the contract-event history. History is not available". Activating
+    the token again starts it anew. A transport failure does not count, so a
+    node that is offline keeps retrying. GLEEC KDF repeats a failed history
+    request every 10 s without limit; its only end state is "history too
+    large", code `-1`, which is unchanged.
+  - *Incomplete pass.* A pass that left a listed transaction out, because its
+    details could not be read, asks for the history again after a retry delay
+    (10 s, doubling up to 300 s). GLEEC KDF asks again only when the balance
+    changes or the token is activated anew.
+
+  The contract-event subscription that KDF Reloaded's balance stream places for
+  a token is placed again after a reconnect, at most once per new session; GLEEC
+  KDF has no balance stream for tokens and places no such subscription.
+  Contract: [CRD ch.38 §38.6.4Q](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md)
+  (status notes after D38.6.4Q.2 and D38.6.4Q.3, and after the
+  code-quality finding of R38.6.4Q.6). Code: `coins/utxo/rpc_clients/electrum_pool.rs`,
+  `coins/utxo/rpc_clients/electrum_rpc_client.rs`, `coins/qrc20/history.rs`.
 - **A seed that is already connected is not dialed again.** A node short of relays dials each
   address at most once per 5 minutes, as GLEEC KDF does. GLEEC KDF also dials a seed that has
   connected to it by itself, because it compares addresses only, and the extra connection closes

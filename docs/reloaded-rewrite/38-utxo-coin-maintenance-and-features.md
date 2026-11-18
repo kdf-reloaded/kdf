@@ -4061,6 +4061,37 @@ servers, and when.
 > incomplete, and the next pass asks for the history again after the retry
 > delay, whatever the balance.
 
+*Status note (2026-11-17, clean side; decision within the lane). The
+code-quality finding above is fixed as proposed:* a pass that left a listed
+transaction out, because a detail request failed, counts as incomplete. The
+next pass asks for the history again after the retry delay, whatever the
+balance. The delay doubles while passes stay incomplete, up to the cap of the
+failed-request delay, and is reset by a complete pass.
+
+*Amendment (2026-11-17, clean side; Reloaded-original; maintainer decision).
+The history collector's end state when no server serves the history.* When
+three passes in a row end because every server tried answered the history
+request of R38.6.4Q.6 item 2 with an error, the collector stops:
+
+- the token's history state becomes an error with code `-2` that names the
+  cause: no listed server answers the contract-event history; `my_tx_history`
+  reports it as `sync_status`;
+- the collector starts again when the token is activated again;
+- `history too large` keeps its own end state, code `-1` (R38.6.4Q.6 item 4).
+
+*Counting (2026-11-18, clean side; decision within the lane).* A pass counts
+only when every server tried answered with an error answer. A pass that gets a
+history answer, an unreadable answer or `history too large` resets the count.
+A pass in which a server failed by transport neither counts nor resets it, so
+a node that is offline never reaches this end state.
+
+This is a recorded divergence from R38.6.4Q.6 item 4, under which a failed
+history request is repeated without limit.
+
+Basis: on 2026-11-17 the four `cipig.net` QTUM servers answered every
+contract-event history request with an internal error, so a token listing only
+them never got a history.
+
 R38.6.4Q.7 **Ordering and remembering spends of the shared QTUM outputs.**
 (Reference-bound at both rows; also the baseline's behaviour. §38.5B binds
 the standard UTXO path; this rule states how the QTUM family differs from
@@ -4304,6 +4335,30 @@ history as long as one listed server answers the contract methods correctly.
 and no peer observes it; because that item is reference-bound text, the
 departure needs a maintainer decision.
 
+*Status note (2026-11-17, clean side; maintainer decision). D38.6.4Q.2 is
+decided:* option (b), with one narrowing, together with the spreading of
+R38.6.4a. It is a recorded departure from R38.6.4f item 1 for three methods.
+
+1. *Failover.* A JSON-RPC error answer to `blockchain.contract.call`,
+   `blockchain.contract.event.get_history` or
+   `blochchain.transaction.get_receipt` moves the request to the next session,
+   then to the retry of R38.6.4f item 2, exactly as a transport failure does.
+   Unlike a transport failure, it does not close the session, and a server
+   that answered the request with an error is not asked again within the same
+   request. A connection the retry opened is released as after any answer. If
+   every server tried answers with an error, the request fails with the
+   failures of R38.6.4i, within the budget of R38.6.4j.
+2. *What stays final.* The exact answer
+   `{"code": 1, "message": "history too large"}` (R38.6.4Q.6 item 4), and an
+   answer that cannot be read as the expected shape. The second is the
+   narrowing of option (b): it can only be judged by the caller, after the
+   pool has returned.
+3. *Spreading.* The three methods join the read-only queries of R38.6.4a
+   item 1. They take turns among the near sessions and try up-to-date sessions
+   first (R38.6.4o item 5). This amends R38.6.4a item 1 for Reloaded.
+4. *Later.* A per-server mark "does not serve the contract methods" is decided
+   only after measurements show that its repeated cost matters.
+
 D38.6.4Q.3 *(Open, 2026-11-15.)* **The contract-event subscription after a
 reconnect.** Parity asks for nothing here, because the reference has no such
 subscription (R38.6.4Q.5). This tree places it when a client enables the
@@ -4316,6 +4371,23 @@ reference does. Under every option an error answer, or no answer, to the
 subscription leaves the token active and polling, and a server that does not
 know the method fails neither activation nor balance nor history.
 *Recommendation:* (b).
+
+*Status note (2026-11-17, clean side; maintainer decision). D38.6.4Q.3 is
+decided:* option (b). The contract-event subscription that the balance stream
+places for a token (§38.6.5 decision 2) is kept, and polling stays.
+
+1. *Placed again.* After a disconnect, the subscription is placed again on a
+   maintained session, as R38.6.4h binds for a script-hash subscription, with
+   one difference: a placement that fails is not retried (item 2). This amends
+   the last sentence of R38.6.4h for Reloaded.
+2. *Answers.* A server that refuses the subscription or answers it with an
+   error breaks neither activation, nor balance, nor history, and the
+   subscription is not asked again in a loop: at most once per newly
+   maintained session.
+3. *Measured basis (2026-11-17, this project's own probes).* The public Qtum
+   servers `s1`, `s3`, `s4` and `s8.electrum.qtum.site` accept the
+   subscription. Servers without the contract-event index answer it with an
+   internal error.
 
 D38.6.4Q.4 *(Open, 2026-11-15.)* **One record and one ordering for the shared
 QTUM outputs.** The reference keeps a record per instance, records nothing for
@@ -4347,6 +4419,16 @@ today); (c) both. The observable requirement: once `disable_coin` has
 answered, the token sends no further request to any server, and after a
 disable and an enable exactly one collector and one client serve it.
 *Recommendation:* (a), with (b) wherever work cannot be ended at once.
+
+*Status note (2026-11-16, clean side; decision within the maintainer's lane
+plan). D38.6.4Q.5 is decided:* option (c), that is (a) and (b).
+
+1. Disabling a token ends its history collector and its client at once.
+2. A collector's registry check also compares the coin instance, not only the
+   ticker, so the collector of a disabled instance ends even if the token was
+   enabled again.
+3. After a disable and an enable, exactly one collector and one client serve
+   the token.
 
 *Acceptance rows for a mock Electrum server.* Each row names what the mock
 has to answer and what the node does. *Parity* is the reference behavior
@@ -6298,3 +6380,11 @@ R38.8.6 **Tests (two-direction, observable).**
   median-time query, refund readiness and the errors of the version-two
   history, at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of
   2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)`.
+- *Maintainer decisions (2026-11-16 to 2026-11-18), clean side -- status notes
+  after D38.6.4Q.2, D38.6.4Q.3 and D38.6.4Q.5 and after the code-quality
+  finding of R38.6.4Q.6, and the Reloaded-original amendment after it (the
+  history collector's end state, with its counting).* Written by a session
+  that never read the forbidden corpus, from the maintainer's decisions, this
+  project's own probes of public servers and this repository's code. It takes
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.

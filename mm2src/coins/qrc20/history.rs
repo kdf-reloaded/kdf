@@ -1,7 +1,8 @@
 use super::*;
 use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
+use crate::utxo::rpc_clients::electrum_pool::every_server_answered_an_error;
 use crate::utxo::{RequestTxHistoryResult, UtxoFeeDetails};
-use crate::{CoinsContext, TxFeeDetails, TxHistoryResult};
+use crate::{CoinsContext, MmCoinEnum, TxFeeDetails, TxHistoryResult};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use common::jsonrpc_client::JsonRpcErrorType;
 use common::log::info;
@@ -12,6 +13,47 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use utxo_common::{HISTORY_TOO_LARGE_ERROR, HISTORY_TOO_LARGE_ERR_CODE};
+
+/// The code of the history state error of a collector that ended because no listed server answers the contract-event
+/// history (CRD ch.38 amendment of 2026-11-17 after R38.6.4Q.6). `history too large` has [`HISTORY_TOO_LARGE_ERR_CODE`].
+const HISTORY_NO_SERVER_ANSWERS_ERR_CODE: i64 = -2;
+/// How many passes in a row have to fail their history request on every server tried to end the collector.
+const ALL_ERROR_PASSES_LIMIT: u32 = 3;
+
+/// How the history request of a pass ended, as far as the end state of the collector counts it (the amendment after
+/// R38.6.4Q.6, "Counting").
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HistoryPassKind {
+    /// Every server tried answered with an error answer: the pass counts.
+    EveryServerAnsweredAnError,
+    /// A server failed by transport (or no server could be tried): the pass neither counts nor resets.
+    TransportFailure,
+    /// Anything else: an answer, an unreadable answer, `history too large`, a failure that is not the servers'.
+    Other,
+}
+
+/// The passes in a row whose history request got an error answer from every server tried (the amendment after
+/// R38.6.4Q.6). A pass that gets any other outcome of the request that is not a transport failure resets the count; a
+/// pass in which a server failed by transport, a failed balance read and an idle pass change nothing.
+#[derive(Debug, Default)]
+struct AllErrorPasses(u32);
+
+impl AllErrorPasses {
+    /// Takes the kind of one pass; `true` when that pass ends the collector.
+    fn pass(&mut self, kind: HistoryPassKind) -> bool {
+        match kind {
+            HistoryPassKind::EveryServerAnsweredAnError => {
+                self.0 += 1;
+                self.0 >= ALL_ERROR_PASSES_LIMIT
+            },
+            HistoryPassKind::TransportFailure => false,
+            HistoryPassKind::Other => {
+                self.0 = 0;
+                false
+            },
+        }
+    }
+}
 
 type TxTransferMap = HashMap<TxInternalId, TransactionDetails>;
 type HistoryMapByHash = HashMap<H256Json, TxTransferMap>;
@@ -83,7 +125,17 @@ enum ProcessCachedTransferMapResult {
 }
 
 impl Qrc20Coin {
+    /// Runs the history collector of this instance until it ends of itself or the token is disabled: the disable aborts
+    /// it wherever it is (CRD ch.38 D38.6.4Q.5 status note, R38.6.4Q.10 item 1), and the instance's client closes with
+    /// the last handle of it. One instance has one collector: a second start of the same instance returns at once.
     pub async fn history_loop(self, ctx: MmArc) {
+        let Some(registration) = self.history_abort.take_registration() else {
+            return;
+        };
+        let _ended_by_abort = futures::future::Abortable::new(self.history_loop_body(ctx), registration).await;
+    }
+
+    async fn history_loop_body(&self, ctx: MmArc) {
         let mut history_map = match self.try_load_history_from_file(&ctx).await {
             Ok(history) => history,
             Err(e) => {
@@ -99,6 +151,11 @@ impl Qrc20Coin {
         let mut my_balance: Option<CoinBalance> = None;
         let mut success_iteration = 0i32;
         let mut history_retry_delay_secs = HISTORY_RETRY_INITIAL_DELAY_SECS;
+        // A pass that left a listed transaction out, because a detail request failed, is incomplete: the next pass asks
+        // for the history again after the retry delay, whatever the balance (code-quality finding after R38.6.4Q.6).
+        let mut incomplete_pass = false;
+        let mut incomplete_retry_delay_secs = HISTORY_RETRY_INITIAL_DELAY_SECS;
+        let mut all_error_passes = AllErrorPasses::default();
         // A repeating failure of one source is logged once and then summarized (the retry delays
         // below are this loop's own and stay as they are). The two sources are independent.
         let mut balance_failures = utxo_common::FailureThrottle::default();
@@ -116,7 +173,13 @@ impl Qrc20Coin {
             {
                 let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
                 let coins = coins_ctx.coins.lock().await;
-                if !coins.contains_key(&self.utxo.conf.ticker) {
+                // The ticker has to be registered, and registered as this instance: the token may have been disabled
+                // and enabled again (CRD ch.38 D38.6.4Q.5 status note, item 2).
+                let registered = matches!(
+                    coins.get(&self.utxo.conf.ticker),
+                    Some(MmCoinEnum::Qrc20Coin(registered)) if Arc::ptr_eq(&registered.0, &self.0)
+                );
+                if !registered {
                     ctx.log
                         .log("", &[&"tx_history", &self.utxo.conf.ticker], "Loop stopped");
                     break;
@@ -146,7 +209,7 @@ impl Qrc20Coin {
                 &my_balance,
                 &actual_balance,
                 &absence,
-                chain_changed,
+                chain_changed || incomplete_pass,
             );
             if !need_update {
                 // The balance read worked and nothing is pending, so the server answers again: end a
@@ -165,7 +228,23 @@ impl Qrc20Coin {
 
             let metrics = ctx.metrics.clone();
             let mut removed_rows = false;
-            let tx_ids = match self.request_tx_history(metrics).await {
+            let (history_outcome, pass_kind) = self.request_tx_history_counted(metrics).await;
+            if all_error_passes.pass(pass_kind) {
+                ctx.log.log(
+                    "😟",
+                    &[&"tx_history", &self.utxo.conf.ticker],
+                    &ERRL!(
+                        "{} passes in a row got only error answers to the history request, stopping further attempts to retrieve it",
+                        ALL_ERROR_PASSES_LIMIT
+                    ),
+                );
+                *self.utxo.history_sync_state.lock().unwrap() = HistorySyncState::Error(json!({
+                    "code": HISTORY_NO_SERVER_ANSWERS_ERR_CODE,
+                    "message": "No listed Electrum server answers the contract-event history. History is not available",
+                }));
+                break;
+            }
+            let tx_ids = match history_outcome {
                 RequestTxHistoryResult::Ok(tx_ids, qualifying_tip) => {
                     history_failures.record_success(&ctx, &self.utxo.conf.ticker, "history request");
                     // The pass the event asked for has its listing.
@@ -206,7 +285,10 @@ impl Qrc20Coin {
             history_retry_delay_secs = HISTORY_RETRY_INITIAL_DELAY_SECS;
 
             // Rows removed above are written even when nothing else changed.
+            let listed: Vec<H256Json> = tx_ids.iter().map(|(hash, _)| *hash).collect();
             let updated = self.process_tx_ids(&ctx, &mut history_map, tx_ids).await || removed_rows;
+            // A listed transaction that is not stored after the pass was left out because its details could not be read.
+            let left_out = listed.iter().any(|hash| !history_map.contains_key(hash));
             if success_iteration == 0 {
                 ctx.log.log(
                     "😅",
@@ -217,8 +299,20 @@ impl Qrc20Coin {
 
             my_balance = Some(actual_balance);
             success_iteration += 1;
+            incomplete_pass = left_out;
+            // The next pass of an incomplete one comes after the retry delay; consecutive incomplete passes back off
+            // like failed history requests do, and a complete pass starts the delay again.
+            let wait_after_pass_secs = incomplete_retry_delay_secs;
+            incomplete_retry_delay_secs = if left_out {
+                next_history_retry_delay(incomplete_retry_delay_secs)
+            } else {
+                HISTORY_RETRY_INITIAL_DELAY_SECS
+            };
 
             if !updated {
+                if left_out {
+                    Timer::sleep(wait_after_pass_secs as f64).await;
+                }
                 continue;
             }
 
@@ -238,6 +332,9 @@ impl Qrc20Coin {
                     &ERRL!("Error {} on 'save_history_to_file', stop the history loop", e),
                 );
                 return;
+            }
+            if left_out {
+                Timer::sleep(wait_after_pass_secs as f64).await;
             }
         }
     }
@@ -388,7 +485,15 @@ impl Qrc20Coin {
         Ok(details)
     }
 
+    #[cfg(test)]
     async fn request_tx_history(&self, metrics: MetricsArc) -> RequestTxHistoryResult {
+        self.request_tx_history_counted(metrics).await.0
+    }
+
+    /// The outcome of the history request and its [`HistoryPassKind`]. Only a call that failed with every server tried
+    /// answering an error answer counts towards the end of the collector; the pool says so in the text of its failure
+    /// (the amendment after R38.6.4Q.6, "Counting").
+    async fn request_tx_history_counted(&self, metrics: MetricsArc) -> (RequestTxHistoryResult, HistoryPassKind) {
         mm_counter!(metrics, "tx.history.request.count", 1,
                     "coin" => self.utxo.conf.ticker.clone(), "client" => "electrum", "method" => "blockchain.contract.event.get_history");
         let history_res = TransferHistoryBuilder::new(self.clone()).build_tx_idents().await;
@@ -399,26 +504,51 @@ impl Qrc20Coin {
                     match json_rpc_e.error {
                         JsonRpcErrorType::Response(_addr, err) => {
                             return if HISTORY_TOO_LARGE_ERROR.eq(&err) {
-                                RequestTxHistoryResult::HistoryTooLarge
+                                (RequestTxHistoryResult::HistoryTooLarge, HistoryPassKind::Other)
                             } else {
-                                RequestTxHistoryResult::Retry {
-                                    error: ERRL!("Error {:?} on blockchain_contract_event_get_history", err),
-                                }
+                                (
+                                    RequestTxHistoryResult::Retry {
+                                        error: ERRL!("Error {:?} on blockchain_contract_event_get_history", err),
+                                    },
+                                    HistoryPassKind::Other,
+                                )
                             }
                         },
-                        JsonRpcErrorType::InvalidRequest(err)
-                        | JsonRpcErrorType::Transport(err)
-                        | JsonRpcErrorType::Parse(_, err) => {
-                            return RequestTxHistoryResult::Retry {
-                                error: ERRL!("Error {} on blockchain_contract_event_get_history", err),
+                        // The pool reports a call that failed on every server it tried as a transport failure.
+                        JsonRpcErrorType::Transport(err) => {
+                            let kind = match self.utxo.rpc_client {
+                                UtxoRpcClientEnum::Electrum(_)
+                                    if every_server_answered_an_error(&self.utxo.conf.ticker, &err) =>
+                                {
+                                    HistoryPassKind::EveryServerAnsweredAnError
+                                },
+                                UtxoRpcClientEnum::Electrum(_) => HistoryPassKind::TransportFailure,
+                                _ => HistoryPassKind::Other,
                             };
+                            return (
+                                RequestTxHistoryResult::Retry {
+                                    error: ERRL!("Error {} on blockchain_contract_event_get_history", err),
+                                },
+                                kind,
+                            );
+                        },
+                        JsonRpcErrorType::InvalidRequest(err) | JsonRpcErrorType::Parse(_, err) => {
+                            return (
+                                RequestTxHistoryResult::Retry {
+                                    error: ERRL!("Error {} on blockchain_contract_event_get_history", err),
+                                },
+                                HistoryPassKind::Other,
+                            );
                         },
                     }
                 },
                 UtxoRpcError::InvalidResponse(e) | UtxoRpcError::Internal(e) => {
-                    return RequestTxHistoryResult::Retry {
-                        error: ERRL!("Error {} on blockchain_contract_event_get_history", e),
-                    }
+                    return (
+                        RequestTxHistoryResult::Retry {
+                            error: ERRL!("Error {} on blockchain_contract_event_get_history", e),
+                        },
+                        HistoryPassKind::Other,
+                    )
                 },
             },
         };
@@ -428,7 +558,10 @@ impl Qrc20Coin {
         mm_counter!(metrics, "tx.history.response.total_length", history.len() as u64,
                     "coin" => self.utxo.conf.ticker.clone(), "client" => "electrum", "method" => "blockchain.contract.event.get_history");
 
-        RequestTxHistoryResult::Ok(history, qualifying_tip)
+        (
+            RequestTxHistoryResult::Ok(history, qualifying_tip),
+            HistoryPassKind::Other,
+        )
     }
 
     fn check_if_history_update_is_needed(
@@ -437,9 +570,10 @@ impl Qrc20Coin {
         last_balance: &Option<CoinBalance>,
         actual_balance: &CoinBalance,
         absence: &AbsenceMarks,
-        chain_changed: bool,
+        must_ask: bool,
     ) -> bool {
-        let need_update = chain_changed
+        // `must_ask`: the chain changed since the last listing, or the last pass was incomplete.
+        let need_update = must_ask
             || history
                 .iter()
                 .flat_map(|(_, txs)| txs)
@@ -967,6 +1101,7 @@ mod tests {
             contract_address: H160::from([7u8; 20]),
             swap_contract_address: H160::from([8u8; 20]),
             fallback_swap_contract: None,
+            history_abort: HistoryAbort::new(),
         }));
 
         // The block count grows with every read; only the first one bounds the search.
