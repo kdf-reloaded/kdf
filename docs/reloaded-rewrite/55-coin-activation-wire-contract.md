@@ -225,13 +225,15 @@ risk.
 > KDF Dirty Gate on 2026-11-08), which also records that a versioned request for a
 > legacy-only method answers `NoSuchMethod` in the reference as it does here.
 
-> **Status note (2026-11-18, Reloaded-original; informative).** By maintainer
-> decision LT (a), Reloaded no longer HTML-escapes answer bodies: every answer
-> is written as the handler produced it, so `<`, `>` and `&` in answer strings
-> (URLs with query strings, memos, error texts, labels) reach the client
-> unchanged. The cross-cutting difference that the "Reloaded status" note above
-> names is closed. The request-side refusal of a request body that contains
-> `<`, `>` or `&` remains, unchanged and not decided.
+> **Status note (2026-11-18, Reloaded-original; informative).** By the
+> maintainer's decision of 2026-11-18, Reloaded no longer HTML-escapes answer
+> bodies: every answer is written as the handler produced it, so `<`, `>` and
+> `&` in answer strings (URLs with query strings, memos, error texts, labels)
+> reach the client unchanged. The cross-cutting difference that the "Reloaded
+> status" note above names is closed. The request-side refusal of a request body
+> that contains `<`, `>` or `&` remains, unchanged and not decided.
+> Every answer now carries `X-Content-Type-Options: nosniff`, and
+> `Content-Type: application/json` where the method set no content type.
 
 ---
 

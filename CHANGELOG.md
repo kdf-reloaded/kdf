@@ -58,6 +58,7 @@ or undo, and every change that needs a step from you.
   or it will now change text that really contains such a sequence.
   - *What you see:* URLs with query strings, memos, error texts and labels in answers arrive with their plain
     characters.
+  - Detail: PR #421; CRD ch.55 status note of 2026-11-18.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -267,7 +268,8 @@ the previous version used. The safe way:
 - **RPC answers are sent as the handler produced them.** `<`, `>` and `&` in answer strings are no longer replaced
   with `&lt;`, `&gt;` and `&amp;`, for every method including the `wc_*` ones. The visible effect: URLs with query
   strings, memos, error texts and labels reach the client with their plain characters. A request body that
-  contains `<`, `>` or `&` is still refused, as before.
+  contains `<`, `>` or `&` is still refused, as before. Every answer now carries `X-Content-Type-Options: nosniff`, and
+  `Content-Type: application/json` where the method set no content type. Detail: PR #421; CRD ch.55 status note of 2026-11-18.
 
 #### Shielded coins
 

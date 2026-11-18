@@ -19,7 +19,10 @@ pub async fn handle_sse(req: http::request::Parts, ctx_h: u32) -> hyper::Respons
         Err(e) => {
             return hyper::Response::builder()
                 .status(500)
-                .body(super::full_body(format!("No context: {}", e)))
+                .body(super::full_body(common::err_to_rpc_json_string(&format!(
+                    "No context: {}",
+                    e
+                ))))
                 .unwrap();
         },
     };

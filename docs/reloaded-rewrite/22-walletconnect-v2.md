@@ -152,9 +152,9 @@ delivered verbatim to the consumer (a GUI, a CLI, a deep link).
 
 > **Status note (2026-11-18, Reloaded-original; informative).** The JSON escape
 > of `<`, `>` and `&` for the `wc_*` answers described in the 2026-11-17 note
-> above is superseded: by maintainer decision LT (a), every answer, the `wc_*`
-> answers included, is now sent unescaped, so the pairing URI reaches the client
-> with its plain separators as the handler produced it.
+> above is superseded: by the maintainer's decision of 2026-11-18, every
+> answer, the `wc_*` answers included, is now sent unescaped, so the pairing
+> URI reaches the client with its plain separators as the handler produced it.
 
 ## 22.3 The Integration Trait
 

@@ -29,6 +29,8 @@ use derive_more::Display;
 use dispatcher_legacy::LegacyOutcome;
 use futures::future::join_all;
 use http::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN};
+#[cfg(not(target_arch = "wasm32"))]
+use http::header::{CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use http::request::Parts;
 use http::{Method, Request, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
@@ -444,8 +446,26 @@ type RpcBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
 #[cfg(not(target_arch = "wasm32"))]
 fn full_body(data: impl Into<Bytes>) -> RpcBody { Full::new(data.into()).boxed_unsync() }
 
+/// Applies the headers every answer of the native HTTP server carries: `X-Content-Type-Options: nosniff`, and
+/// `Content-Type: application/json` when the answer has no content type yet (an answer that set its own keeps it).
+#[cfg(not(target_arch = "wasm32"))]
+fn with_standard_answer_headers<B>(mut response: Response<B>) -> Response<B> {
+    let headers = response.headers_mut();
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    if !headers.contains_key(CONTENT_TYPE) {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
+    response
+}
+
+/// The single exit of the native HTTP server: every answer, including the SSE endpoint's, passes through here.
 #[cfg(not(target_arch = "wasm32"))]
 async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> Response<RpcBody> {
+    with_standard_answer_headers(rpc_service_answer(req, ctx_h, client).await)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn rpc_service_answer(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> Response<RpcBody> {
     /// Unwraps a result or propagates its error 500 response with the specified headers (if they are present).
     macro_rules! try_sf {
         ($value: expr $(, $header_key:expr => $header_val:expr)*) => {
@@ -2347,5 +2367,41 @@ mod answer_unescaped_tests {
         assert_eq!(wire, body.as_bytes());
         let parsed: Json = json::from_slice(&wire).unwrap();
         assert_eq!(parsed["error"], "a&b<c>d'e");
+    }
+
+    #[test]
+    fn answer_without_content_type_gets_json_and_nosniff() {
+        let response = with_standard_answer_headers(Response::builder().body(full_body(b"{}".to_vec())).unwrap());
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+    }
+
+    #[test]
+    fn answer_with_own_content_type_keeps_it_and_gets_nosniff() {
+        for own in ["text/event-stream", "text/plain"] {
+            let response = with_standard_answer_headers(
+                Response::builder()
+                    .header(CONTENT_TYPE, own)
+                    .body(full_body(b"x".to_vec()))
+                    .unwrap(),
+            );
+            assert_eq!(response.headers()[CONTENT_TYPE], own);
+            assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+        }
+    }
+
+    #[test]
+    fn error_answer_of_the_500_path_gets_both_headers() {
+        // The shape the `try_sf!` 500 path and the SSE "No context" answer build: status 500, JSON error body, no
+        // headers of their own.
+        let response = with_standard_answer_headers(
+            Response::builder()
+                .status(500)
+                .body(full_body(err_to_rpc_json_string("boom")))
+                .unwrap(),
+        );
+        assert_eq!(response.status(), 500);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
     }
 }
