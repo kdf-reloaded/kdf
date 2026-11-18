@@ -157,6 +157,11 @@ the previous version used. The safe way:
   `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
   answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
   ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+- **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
+  `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
+  address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
+  `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: PR #412;
+  CRD ch.21 R21.10B.8, D21.10B.2.
 
 #### Tendermint (Cosmos) coins
 
@@ -289,6 +294,12 @@ the previous version used. The safe way:
   status note of 2026-11-17.
 
 #### Solana coins
+
+- **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
+  are removed and can be activated again; a removed token no longer stays in its platform's token
+  records. A platform with active tokens is handled as for every other family: the platform is
+  removed and its tokens stay. A Solana ticker that is not active answers the usual refusal. Solana
+  stays switched off in this build. Detail: PR #413; CRD ch.40 D40.6B.1, T40.6B.20; ch.43 §43.1E.
 
 - **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
   answer an error.** Message signing and verification, address validation, the confirmation settings
@@ -546,7 +557,7 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #401.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

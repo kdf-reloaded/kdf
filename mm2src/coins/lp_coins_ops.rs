@@ -774,12 +774,18 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
-        Some(coin) => {
+        Some(removed) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
             // A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's
             // Electrum client closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
-            if let MmCoinEnum::Qrc20Coin(token) = &coin {
+            if let MmCoinEnum::Qrc20Coin(token) = &removed {
                 token.end_history_collector();
+            }
+            // A disabled SPL token leaves the record its platform keeps of its tokens, so that the platform no
+            // longer reports it (CRD ch.40 T40.6B.20). The platform and its other tokens are untouched.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let MmCoinEnum::SplToken(token) = &removed {
+                token.platform_coin.remove_spl_token_info(ticker);
             }
             Ok(())
         },

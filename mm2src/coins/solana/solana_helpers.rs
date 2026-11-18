@@ -69,6 +69,9 @@ impl SolanaCoin {
         self.spl_tokens_infos.lock().unwrap().insert(ticker, info);
     }
 
+    /// Forgets the token recorded by [`Self::add_spl_token_info`]; a ticker that is not recorded is ignored.
+    pub fn remove_spl_token_info(&self, ticker: &str) { self.spl_tokens_infos.lock().unwrap().remove(ticker); }
+
     pub fn get_spl_tokens_infos(&self) -> HashMap<String, SplTokenInfo> {
         let guard = self.spl_tokens_infos.lock().unwrap();
         (*guard).clone()
