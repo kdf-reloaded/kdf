@@ -1515,7 +1515,7 @@ What this section leaves open for that build -- re-activation, requested
 tokens that are already registered, token and layer-two activations while a
 platform is passive, the NFT chain, the standard UTXO platform with a
 Lightning coin, and what the methods that need an active coin answer -- is
-§43.1F (candidate, clearance pending). No sentence of this section is
+§43.1F (passed the KDF Dirty Gate on 2026-11-18). No sentence of this section is
 changed by it.
 
 *Not established.* (1) What ending a coin's background work covers was not
@@ -1579,19 +1579,18 @@ reference; from Reloaded it answers the form of §43.1R.
 
 ## 43.1F Passive platform coins: re-activation, token activation and what a passive coin answers (reference behavior)
 
-> **Clearance (chapter 01 R40) -- PENDING.** This section is a candidate
-> written on 2026-11-18 by the KDF Spec Reader (Spec Reader round
-> 0.5.0-13) under the two-team procedure of chapter 01 §1.4A. It has **not**
-> yet passed the KDF Dirty Gate: until the scoped-addition item for it in
-> §43.7 records a PASS, nothing here may be relied on as a statement of
-> required behavior or implemented from. It was written from two inputs: the
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.02 (attestation in §43.7).**
+> This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-13) under the two-team procedure of chapter 01 §1.4A. It was
+> written from two inputs: the
 > reference lineage at the rows `v2.6.0-beta`, `v3.0.0-beta` and
 > `main (as of 2026-10-07)` of chapter 02 §2.15A (read read-only; no untabled
 > state was read), and this repository's own tree (for the compatibility
 > note). It edits no sentence of §43.1A -- §43.1E or of §43.1R; it
 > **completes R43.1E.6** (items 1, 3 and 6) and **chapter 55 D55.6**, and where
 > a statement here is more exact than the sentence it completes, the
-> statement here governs once cleared. Numbering: R43.1F.1 -- R43.1F.12,
+> statement here governs. Numbering: R43.1F.1 -- R43.1F.12,
 > D43.1F.1 -- D43.1F.5 and T43.1F.1 -- T43.1F.12.
 
 *Status note (2026-11-18).* The maintainer decided that Reloaded builds the
@@ -2801,9 +2800,9 @@ shall be wound down as part of shutdown rather than abandoned.
   (R43.1F.1 -- R43.1F.12 with their tables, the two code-quality findings,
   the compatibility note, D43.1F.1 -- D43.1F.5, the not-established
   paragraph, T43.1F.1 -- T43.1F.12) and the status note after D43.1E.2; no
-  other text of this chapter was changed.* **KDF Dirty Gate: PENDING**
-  (chapter 01 R40: until this item records a PASS with its attestation, the
-  addition is a candidate). *Inputs:* (1) the forbidden corpus at the rows
+  other text of this chapter was changed.* **KDF Dirty Gate: PASS on
+  2026-11-18, measure 0.02, no findings** (chapter 01 R40; the attestation
+  closes this item). *Inputs:* (1) the forbidden corpus at the rows
   `v2.6.0-beta`, `v3.0.0-beta` and `main (as of 2026-10-07)` of chapter 02
   §2.15A, read read-only and consulted **only** to establish: how a
   platform-with-tokens activation (one-shot and task forms, every family that
@@ -2829,5 +2828,18 @@ shall be wound down as part of shutdown rather than abandoned.
   are Reloaded-original. No row was added to chapter 02 §2.15A: all three
   states read already had one, and each row's identifier was confirmed by
   read-only inspection of the historical record's reference metadata.
-  *Dirty Gate clearance:* not yet given; the extent, method and measure of
-  the gate's attestation are to be recorded here when it passes.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.02, no findings. *Extent:* the platform-with-tokens activation in its
+  one-shot and task forms, including the re-activation of a passive
+  platform; the coin registry and its passive flag; dependent registration
+  (tokens, the NFT chain, the layer-two coin); the standalone, NFT,
+  layer-two and legacy activations; the not-found and error answers this
+  section lists; the EVM swap gas-fee policy look-up; and the reference's
+  tests of the passive scenario. About 15 files were read at
+  `v3.0.0-beta`, the primary state; the governing files were cross-checked
+  at `v2.6.0-beta` (identical), and `main (as of 2026-10-07)` differs only
+  in a read-me notice. *Method:* reading, plus a mechanical five- and
+  four-word sequence comparison against comments and literals (no
+  five-word match, two generic four-word matches), a per-token
+  forced-versus-free test, and a scan for pull-request numbers and commit
+  identifiers. *Measure:* 0.02.

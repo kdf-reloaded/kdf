@@ -1432,7 +1432,7 @@ requested tokens that are already registered, token and layer-two
 activations while the platform is passive, and what the standalone and
 legacy activations do for a passive ticker -- is stated in chapter 43
 §43.1F (R43.1F.2 -- R43.1F.9, with D43.1F.1, D43.1F.2, D43.1F.4 and
-D43.1F.5 open), a candidate whose clearance is pending. This note binds
+D43.1F.5 open), which passed the KDF Dirty Gate on 2026-11-18. This note binds
 nothing of its own.
 
 **D55.7** *Inline NFT activation and the activation lock (deferred past the
@@ -1454,7 +1454,7 @@ registration is deferred.
 
 *Status note (2026-11-18), passive state.* Once the passive state of D55.6 is
 built, a passive platform stays registered, and chapter 43 R43.1F.10 item 2
-(candidate, clearance pending) keeps its history collection running while it
+(passed the KDF Dirty Gate on 2026-11-18) keeps its history collection running while it
 is passive. The per-pass check this item describes has to count a passive
 platform as registered, or the platform's history stops when it becomes
 passive. Whether a re-activation starts a collector is chapter 43 R43.1F.3
@@ -1679,5 +1679,5 @@ R55.4.5 and the error body of R55.1.10.
   the consequence of chapter 43 R43.1F.10 item 2 for this repository's EVM
   history loop. Neither states reference behavior of its own; both are
   written by the Spec Reader and travel with chapter 43 §43.1F for the KDF
-  Dirty Gate. **KDF Dirty Gate: PENDING**, as recorded for §43.1F in chapter
+  Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
   43's provenance footer.

@@ -231,8 +231,8 @@ answers (multi-node failover); a subset of unresponsive nodes is not an error.
 
 *Pointer (2026-11-18).* A `ticker` that is registered but passive (chapter 43
 R43.1E.6), and a requested token that is already registered, are the
-subject of chapter 43 §43.1F (R43.1F.2 -- R43.1F.5; candidate, clearance
-pending); the token and NFT activations of §35.2 against a passive platform
+subject of chapter 43 §43.1F (R43.1F.2 -- R43.1F.5; passed the KDF Dirty
+Gate on 2026-11-18); the token and NFT activations of §35.2 against a passive platform
 are its R43.1F.6 and R43.1F.8. This pointer binds nothing of its own.
 
 ### 35.1.C Success result
@@ -2857,5 +2857,5 @@ is decided together with this item.
 - *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
   R35.1.2.* It names chapter 43 R43.1F.2 -- R43.1F.6 and R43.1F.8 and states
   no behavior of its own; it travels with chapter 43 §43.1F for the KDF
-  Dirty Gate. **KDF Dirty Gate: PENDING**, as recorded for §43.1F in chapter
+  Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
   43's provenance footer.

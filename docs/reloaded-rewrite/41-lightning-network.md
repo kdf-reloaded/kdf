@@ -131,7 +131,7 @@ The full set of `error_type` values that `init` and the task status can carry is
 platform in the sense of chapter 43 R43.1E.5; what that means when the
 platform is disabled without `force_disable`, and how `init` answers while
 the platform is passive, is stated in chapter 43 R43.1F.6 and R43.1F.9
-(candidate, clearance pending). This pointer binds nothing of its own.
+(passed the KDF Dirty Gate on 2026-11-18). This pointer binds nothing of its own.
 
 ### `task::enable_lightning::status`
 
@@ -702,5 +702,5 @@ list records the resulting deviations.
 - *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
   R41.2.6.* It names chapter 43 R43.1F.6 and R43.1F.9 and states no behavior
   of its own; it travels with chapter 43 §43.1F for the KDF Dirty Gate.
-  **KDF Dirty Gate: PENDING**, as recorded for §43.1F in chapter 43's
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter 43's
   provenance footer.

@@ -373,7 +373,7 @@ R55.5.7 states the same rule for the standalone family).
 *Pointer (2026-11-18).* How `init` and the task treat a platform ticker that
 is registered but passive (chapter 43 R43.1E.6), and how
 `task::enable_erc20::init` treats a passive platform, is stated in chapter
-43 §43.1F (R43.1F.2 and R43.1F.6; candidate, clearance pending). This
+43 §43.1F (R43.1F.2 and R43.1F.6; passed the KDF Dirty Gate on 2026-11-18). This
 pointer binds nothing of its own.
 
 R48.7.3 A cancelled or failed task shall not leave the platform coin in a
@@ -602,5 +602,5 @@ activation stays (Chapter 55 R55.2.14, R55.5.8).
 - *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
   R48.7.2.* It names chapter 43 R43.1F.2 and R43.1F.6 and states no behavior
   of its own; it travels with chapter 43 §43.1F for the KDF Dirty Gate.
-  **KDF Dirty Gate: PENDING**, as recorded for §43.1F in chapter 43's
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter 43's
   provenance footer.
