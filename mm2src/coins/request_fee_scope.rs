@@ -1103,6 +1103,30 @@ mod tests {
         assert!(!fetched(&cache, &now, ESTIMATE, "SLOW", 599, 7));
     }
 
+    /// CRD ch.39 T39.11.4V.11 (this repository's part): a block time of 25 seconds, the Zcash spacing from ZIP 218,
+    /// is a positive number inside the bounds of 2 to 600, so the adaptive lifetime of the coin starts at 25 seconds
+    /// and doubles from there while fresh readings repeat.
+    #[test]
+    fn t39_11_4v_11_a_block_time_of_25_gives_the_start_value_25() {
+        assert_eq!(lifetime(json!({}), json!({"avg_blocktime": 25})), 25);
+        let node = json!({"coins": [{"coin": "ZXY", "overwintered": 1, "txversion": 5, "avg_blocktime": 25}]});
+        assert_eq!(adaptive_start_secs_of(&node, "ZXY"), 25);
+        assert_eq!(fee_estimate_lifetime_of(&node, "ZXY"), Ok(FeeLifetime::Adaptive));
+
+        let (cache, now) = adaptive_cache(adaptive_start_secs_of(&node, "ZXY"));
+        assert!(fetched(&cache, &now, ESTIMATE, "ZXY", 0, 7));
+        for lifetime in [25, 50, 100] {
+            assert!(
+                !fetched(&cache, &now, ESTIMATE, "ZXY", lifetime - 1, 7),
+                "still young one second before {lifetime} s"
+            );
+            assert!(
+                fetched(&cache, &now, ESTIMATE, "ZXY", 1, 7),
+                "fetched again at {lifetime} s"
+            );
+        }
+    }
+
     #[test]
     fn a_fixed_lifetime_does_not_adapt() {
         // A per-coin key and an explicit global value are fixed; a global 0 disables an `avg_blocktime` coin.

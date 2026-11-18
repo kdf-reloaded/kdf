@@ -98,8 +98,8 @@ use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
 use utxo_signer::with_key_pair::sign_tx_with_p2pk;
 use utxo_signer::with_trezor::TrezorTxSigner;
-use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, TxProvider, TxProviderError, UtxoSignTxError,
-                  UtxoSignTxResult};
+use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, refuse_transaction_version_for_hardware_wallet,
+                  TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult};
 
 use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest, EstimateFeeMethod, EstimateFeeMode,
                         NativeClient, UnspentInfo, UnspentMap, UtxoRpcClientEnum, UtxoRpcError, UtxoRpcFut,
@@ -2138,6 +2138,9 @@ fn map_utxo_sign_error(ticker: &str, error: UtxoSignTxError) -> String {
         sign_error @ UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { .. } => {
             format!("hardware_wallet:unsupported_sighash_suffix: {}", sign_error)
         },
+        sign_error @ UtxoSignTxError::TransactionVersionNotSupportedByHardwareWallet { .. } => {
+            format!("hardware_wallet:unsupported_transaction_version: {}", sign_error)
+        },
         UtxoSignTxError::TrezorError(trezor) => map_trezor_error(trezor),
         UtxoSignTxError::InvalidSignParam { param, description } => format!(
             "hardware_wallet:missing_derivation_metadata: invalid Trezor signing parameter '{}': {}",
@@ -2236,6 +2239,8 @@ where
     })?;
     // CRD ch.61 R61.4.4: refuse before the device is contacted.
     refuse_sighash_suffix_for_hardware_wallet(unsigned.sighash_suffix)
+        .map_err(|e| TransactionErr::Plain(map_utxo_sign_error(&fields.conf.ticker, e.into_inner())))?;
+    refuse_transaction_version_for_hardware_wallet(unsigned.overwintered, unsigned.version)
         .map_err(|e| TransactionErr::Plain(map_utxo_sign_error(&fields.conf.ticker, e.into_inner())))?;
     let hw_ctx = fields.hw_ctx.as_ref().ok_or_else(|| {
         TransactionErr::Plain(

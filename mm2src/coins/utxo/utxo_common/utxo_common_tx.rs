@@ -383,6 +383,14 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
             None
         };
 
+        // Every input spends an output of the sender's own address, whose scriptPubKey is the change script:
+        // the ZIP 244 digest of a version 5 transaction commits to the scriptPubKey of every input. A signer
+        // that knows better for an input (a pay-to-public-key output) overrides it.
+        let spent_script_pubkey: Script = change_script_pubkey.clone().into();
+        for input in self.tx.inputs.iter_mut() {
+            input.script_pubkey.get_or_insert_with(|| spent_script_pubkey.clone());
+        }
+
         let data = AdditionalTxData {
             fee_amount: self.tx_fee,
             received_by_me,
@@ -490,7 +498,9 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
             },
             amount: prev_transaction.outputs[0].value,
             witness: Vec::new(),
-            script_pubkey: None,
+            // The spent output is the payment's P2SH output; ZIP 244 commits to its scriptPubKey, not to the
+            // redeem script.
+            script_pubkey: Some(prev_transaction.outputs[0].script_pubkey.clone().into()),
         }],
         outputs: outputs.clone(),
         expiry_height: 0,

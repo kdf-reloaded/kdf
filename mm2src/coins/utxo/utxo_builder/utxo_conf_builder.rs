@@ -22,6 +22,20 @@ use std::sync::Arc;
 /// The `signature_version` values the `SignatureVersion` enum deserializes; keep in step with it.
 const ACCEPTED_SIGNATURE_VERSIONS: &str = "\"base\", \"witness_v0\", \"fork_id\", \"fork_id_rxd\"";
 
+/// The version group id of the version 5 (ZIP 225) transaction format, the default of an overwintered
+/// coin with `txversion` 5 (ZIP 2003).
+const ZIP225_VERSION_GROUP_ID: u32 = 0x26a7_270a;
+
+/// Refuses an overwintered coin whose `txversion` has no transaction layout here (CRD ch.39 R39.11.4V.2):
+/// the layouts are the Sapling one of version 4 and the ZIP 225 one of version 5. A coin that is not
+/// overwintered builds the Bitcoin layout and takes any `txversion`.
+fn check_overwintered_tx_version(tx_version: i32, overwintered: bool) -> UtxoConfResult<()> {
+    if overwintered && !matches!(tx_version, 4 | 5) {
+        return MmError::err(UtxoConfError::UnsupportedOverwinteredTxVersion { found: tx_version });
+    }
+    Ok(())
+}
+
 /// The coin-configuration key of the sighash suffix (CRD ch.61 R61.3.1).
 const SIGHASH_SUFFIX_KEY: &str = "sighash_suffix";
 
@@ -92,6 +106,25 @@ pub enum UtxoConfError {
     ErrorDeserializingDerivationPath(String),
     InvalidConsensusBranchId(String),
     InvalidVersionGroupId(String),
+    /// An overwintered (Zcash-family) entry whose `txversion` has no transaction layout in this software
+    /// (CRD ch.39 §39.11.4V, R39.11.4V.2).
+    #[display(
+        fmt = "Invalid 'txversion' {} for an overwintered coin: only the transaction versions 4 and 5 have a layout \
+               in this software",
+        found
+    )]
+    UnsupportedOverwinteredTxVersion {
+        found: i32,
+    },
+    /// An overwintered entry with `txversion` 5 that names no `consensus_branch_id`: version 5 has no default.
+    #[display(
+        fmt = "Missing 'consensus_branch_id' for an overwintered coin with 'txversion' {}: this version has no \
+               default branch id; set a hexadecimal string such as \"0x77190ad9\"",
+        txversion
+    )]
+    MissingConsensusBranchId {
+        txversion: i32,
+    },
     /// The coin's own `fee_estimate_cache_secs` is not an integer from 0 to 600 (CRD ch.38 R38.6.6k item 1).
     InvalidFeeEstimateCacheSecs(String),
     #[display(
@@ -288,10 +321,11 @@ impl<'a> UtxoConfBuilder<'a> {
         let asset_chain = self.asset_chain();
         let tx_version = self.tx_version();
         let overwintered = self.overwintered();
+        check_overwintered_tx_version(tx_version, overwintered)?;
 
         let tx_fee_volatility_percent = self.tx_fee_volatility_percent();
         let version_group_id = self.version_group_id(tx_version, overwintered)?;
-        let consensus_branch_id = self.consensus_branch_id(tx_version)?;
+        let consensus_branch_id = self.consensus_branch_id(tx_version, overwintered)?;
         let fork_id = self.fork_id()?;
         let signature_version = self.signature_version(fork_id, &mut warnings)?;
         let sighash_suffix = self.sighash_suffix()?;
@@ -459,6 +493,9 @@ impl<'a> UtxoConfBuilder<'a> {
                     0x03c4_8270
                 } else if tx_version == 4 && overwintered {
                     0x892f_2085
+                } else if tx_version == 5 && overwintered {
+                    // The version group id of the ZIP 225 transaction format (ZIP 2003).
+                    ZIP225_VERSION_GROUP_ID
                 } else {
                     0
                 }
@@ -467,12 +504,16 @@ impl<'a> UtxoConfBuilder<'a> {
         Ok(version_group_id)
     }
 
-    fn consensus_branch_id(&self, tx_version: i32) -> UtxoConfResult<u32> {
+    fn consensus_branch_id(&self, tx_version: i32, overwintered: bool) -> UtxoConfResult<u32> {
         let consensus_branch_id = match self.conf["consensus_branch_id"].as_str() {
             Some(s) => parse_hex_encoded_u32(s).mm_err(UtxoConfError::InvalidConsensusBranchId)?,
             None => match tx_version {
                 3 => 0x5ba8_1b19,
                 4 => 0x76b8_09bb,
+                // The branch id changes with every network upgrade, so a version 5 entry has to name it.
+                5 if overwintered => {
+                    return MmError::err(UtxoConfError::MissingConsensusBranchId { txversion: tx_version })
+                },
                 _ => 0,
             },
         };
@@ -1174,5 +1215,239 @@ mod tests {
         // A reader of the address fields only never signs and is not warned.
         let (_, warnings) = warnings_of("BC2", json!({"coin": "BC2"}), UnrecognisedEnumPolicy::NotUsed);
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    // --- CRD ch.39 §39.11.4V: the transaction version fields of an overwintered coin ---
+
+    fn overwintered_conf(txversion: i64, extra: Json) -> Json {
+        let mut conf = json!({"coin": "ZXY", "overwintered": 1, "txversion": txversion});
+        for (key, value) in extra.as_object().expect("an object").iter() {
+            conf[key] = value.clone();
+        }
+        conf
+    }
+
+    /// T39.11.4V.1: entries that differ only in how the two hexadecimal fields are written (with and without
+    /// `0x`, lower and upper case) activate with the same values.
+    #[test]
+    fn t39_11_4v_1_hexadecimal_forms_activate_with_the_same_values() {
+        for (group, branch) in [
+            ("0x26a7270a", "0x77190ad9"),
+            ("26a7270a", "77190ad9"),
+            ("0x26A7270A", "0x77190AD9"),
+            ("26A7270A", "77190AD9"),
+            ("0x26a7270A", "77190aD9"),
+        ] {
+            let conf = build(
+                "ZXY",
+                overwintered_conf(5, json!({"version_group_id": group, "consensus_branch_id": branch})),
+            )
+            .unwrap();
+            assert_eq!(conf.version_group_id, 0x26a7_270a, "{group}");
+            assert_eq!(conf.consensus_branch_id, 0x77190ad9, "{branch}");
+        }
+    }
+
+    /// T39.11.4V.1: seven or nine hexadecimal digits (and other malformed strings) in either field fail the
+    /// activation, each under its own error.
+    #[test]
+    fn t39_11_4v_1_a_field_that_is_not_eight_hexadecimal_digits_fails() {
+        for bad in [
+            "0x26a7270",
+            "26a7270",
+            "0x26a7270a0",
+            "26a7270a0",
+            "",
+            "0x",
+            "zzzzzzzz",
+            "0x26a7270g",
+        ] {
+            let err = build(
+                "ZXY",
+                overwintered_conf(5, json!({"version_group_id": bad, "consensus_branch_id": "0x77190ad9"})),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("version_group_id {bad:?} must fail"))
+            .into_inner();
+            assert!(
+                matches!(err, UtxoConfError::InvalidVersionGroupId(_)),
+                "{bad:?}: {err:?}"
+            );
+
+            let err = build(
+                "ZXY",
+                overwintered_conf(5, json!({"version_group_id": "0x26a7270a", "consensus_branch_id": bad})),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("consensus_branch_id {bad:?} must fail"))
+            .into_inner();
+            assert!(
+                matches!(err, UtxoConfError::InvalidConsensusBranchId(_)),
+                "{bad:?}: {err:?}"
+            );
+        }
+    }
+
+    /// T39.11.4V.1: a JSON number for either field is not refused for its form: it is read as absent. For the
+    /// version group id the default of the version applies; for the branch id of version 4 too, and for version 5,
+    /// which has no default, the entry is refused as one that names none.
+    #[test]
+    fn t39_11_4v_1_a_json_number_is_read_as_absent() {
+        let conf = build(
+            "ZXY",
+            overwintered_conf(
+                4,
+                json!({"version_group_id": 2301567109u64, "consensus_branch_id": 1992820155u64}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(conf.version_group_id, 0x892f_2085);
+        assert_eq!(conf.consensus_branch_id, 0x76b8_09bb);
+
+        let conf = build(
+            "ZXY",
+            overwintered_conf(5, json!({"version_group_id": 7, "consensus_branch_id": "0x77190ad9"})),
+        )
+        .unwrap();
+        assert_eq!(conf.version_group_id, 0x26a7_270a);
+
+        let err = build(
+            "ZXY",
+            overwintered_conf(
+                5,
+                json!({"version_group_id": "0x26a7270a", "consensus_branch_id": 1999999961u64}),
+            ),
+        )
+        .err()
+        .expect("a number names no branch id")
+        .into_inner();
+        assert!(
+            matches!(err, UtxoConfError::MissingConsensusBranchId { txversion: 5 }),
+            "{err:?}"
+        );
+    }
+
+    /// T39.11.4V.2: the defaults of versions 4 and 5. Version 4 takes both ids as before; version 5 takes the
+    /// version group id `0x26A7270A` and has no branch id default, so an entry without one is refused with an
+    /// error that names the field, with or without a given version group id.
+    #[test]
+    fn t39_11_4v_2_defaults_of_versions_4_and_5() {
+        let conf = build("ZXY", overwintered_conf(4, json!({}))).unwrap();
+        assert_eq!(conf.tx_version, 4);
+        assert_eq!(conf.version_group_id, 0x892f_2085);
+        assert_eq!(conf.consensus_branch_id, 0x76b8_09bb);
+
+        let conf = build(
+            "ZXY",
+            overwintered_conf(5, json!({"consensus_branch_id": "0x77190ad9"})),
+        )
+        .unwrap();
+        assert_eq!(conf.tx_version, 5);
+        assert!(conf.overwintered);
+        assert_eq!(conf.version_group_id, 0x26a7_270a);
+        assert_eq!(conf.consensus_branch_id, 0x7719_0ad9);
+
+        // The expected shared entry of the coins file: both ids given.
+        let conf = build(
+            "ZXY",
+            overwintered_conf(
+                5,
+                json!({"version_group_id": "0x26a7270a", "consensus_branch_id": "0x77190ad9"}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            (conf.version_group_id, conf.consensus_branch_id),
+            (0x26a7_270a, 0x7719_0ad9)
+        );
+
+        for conf in [
+            overwintered_conf(5, json!({})),
+            overwintered_conf(5, json!({"version_group_id": "0x26a7270a"})),
+            overwintered_conf(5, json!({"consensus_branch_id": null})),
+        ] {
+            let err = build("ZXY", conf)
+                .err()
+                .expect("version 5 needs a branch id")
+                .into_inner();
+            assert!(
+                matches!(err, UtxoConfError::MissingConsensusBranchId { txversion: 5 }),
+                "{err:?}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("'consensus_branch_id'") && message.contains("'txversion' 5"),
+                "{message}"
+            );
+        }
+    }
+
+    /// T39.11.4V.2 (decision): an overwintered entry whose `txversion` has no layout in this software is refused
+    /// at activation, under every policy, with an error that names the field and the value. 3 is refused too.
+    #[test]
+    fn t39_11_4v_2_an_overwintered_version_without_a_layout_is_refused() {
+        for policy in [
+            UnrecognisedEnumPolicy::Fail,
+            UnrecognisedEnumPolicy::WarnAndFallBack,
+            UnrecognisedEnumPolicy::NotUsed,
+        ] {
+            for version in [3i64, 6, 7, 2, 0, -1, 2147483647] {
+                let err = build_with("ZXY", overwintered_conf(version, json!({})), policy)
+                    .err()
+                    .unwrap_or_else(|| panic!("overwintered txversion {version} must fail under {policy:?}"))
+                    .into_inner();
+                assert!(
+                    matches!(err, UtxoConfError::UnsupportedOverwinteredTxVersion { found } if i64::from(found) == version),
+                    "{version}: {err:?}"
+                );
+                let message = err.to_string();
+                assert!(message.contains("'txversion'"), "{message}");
+                assert!(message.contains(&version.to_string()), "{message}");
+            }
+        }
+
+        // An overwintered entry without `txversion` takes the default 1, which has no layout either.
+        let err = build("ZXY", json!({"coin": "ZXY", "overwintered": 1}))
+            .err()
+            .expect("an overwintered entry without 'txversion' must fail")
+            .into_inner();
+        assert!(
+            matches!(err, UtxoConfError::UnsupportedOverwinteredTxVersion { found: 1 }),
+            "{err:?}"
+        );
+    }
+
+    /// T39.11.4V.2: a coin that is not overwintered is untouched: any `txversion` activates, the Bitcoin layout is
+    /// used, and the ids keep their defaults (no refusal for a missing branch id of version 5).
+    #[test]
+    fn t39_11_4v_2_a_coin_that_is_not_overwintered_is_untouched() {
+        for conf in [
+            json!({"coin": "XYZ", "txversion": 5}),
+            json!({"coin": "XYZ", "txversion": 5, "overwintered": 0}),
+            json!({"coin": "XYZ", "txversion": 6}),
+            json!({"coin": "XYZ", "txversion": 3}),
+            json!({"coin": "XYZ", "txversion": 2}),
+            json!({"coin": "XYZ"}),
+        ] {
+            let built = build("XYZ", conf.clone()).unwrap_or_else(|e| panic!("{conf} must activate: {e}"));
+            assert!(!built.overwintered, "{conf}");
+            assert_eq!(built.version_group_id, 0, "{conf}");
+        }
+        let conf = build("XYZ", json!({"coin": "XYZ", "txversion": 5})).unwrap();
+        assert_eq!((conf.tx_version, conf.consensus_branch_id), (5, 0));
+        let conf = build("XYZ", json!({"coin": "XYZ", "txversion": 4})).unwrap();
+        assert_eq!(conf.consensus_branch_id, 0x76b8_09bb);
+        let conf = build("XYZ", json!({"coin": "XYZ", "txversion": 3})).unwrap();
+        assert_eq!(conf.consensus_branch_id, 0x5ba8_1b19);
+    }
+
+    /// T39.11.4V.3: the `overwintered` selector is unchanged: only the JSON integer 1 selects the Zcash-family
+    /// format, so the boolean `true` is not overwintered and is not refused.
+    #[test]
+    fn t39_11_4v_3_the_overwintered_selector_is_unchanged() {
+        for flag in [json!(true), json!("1"), json!(0), json!(2)] {
+            let conf = build("XYZ", json!({"coin": "XYZ", "txversion": 5, "overwintered": flag})).unwrap();
+            assert!(!conf.overwintered, "{flag}");
+        }
     }
 }

@@ -48,6 +48,15 @@ or undo, and every change that needs a step from you.
     `IguanaPrivKey`.
   - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
     where it used to be ignored.
+- **ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "77190ad9"`** (the branch id is
+  accepted with or without `0x`). Since the Zcash network upgrade NU7 the network refuses version-4 transactions. This
+  release builds version-5 ZEC transactions when the ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every
+  ZEC send is still refused by the network. With either entry, a lab
+  test of 0.4.0-beta.1 and of the development build before this change activated ZEC and showed its balance, and the
+  network refused the ZEC withdrawal it sent (version-4 entry: "not supported by the network upgrade Nu7"; version-5
+  entry: an invalid consensus branch id).
+  - *Activation:* a Zcash-family (`overwintered`) entry whose `txversion` is not 4 or 5, and a version-5 entry without
+    `consensus_branch_id`, are now refused with an error that names the field.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -331,6 +340,17 @@ the previous version used. The safe way:
 
 ### Fixed
 
+#### ZEC
+
+- **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
+  refunds of ZEC are built as version-5 transactions with the version-5 transaction id and signature, as the Zcash
+  network requires since NU7. A Trezor refuses a version-5 ZEC transaction with a clear error. Incoming version-5
+  transactions are read; version 6 is not read yet. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+- **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
+  The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
+  and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
+  swaps run only when a stored version-2 swap is resumed. Detail: PR #404.
+
 #### Browser (WASM) build
 
 - **A cancelled storage request no longer aborts other writes of the same transaction.** In the
@@ -521,7 +541,8 @@ the previous version used. The safe way:
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
   (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
-  the version-5 format and digests in the shared parser are in progress (PR #397).
+  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); history skip of
+  unreadable transactions and the coins entry follow.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
