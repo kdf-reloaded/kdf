@@ -15,13 +15,14 @@
 //! Every duration is held in [`ElectrumPoolTimings`]; production uses [`ElectrumPoolTimings::default`],
 //! tests build the pool with millisecond values.
 
+use super::electrum_chain_view::{base_of, split_header_list, ChainView, TipPlan};
 use super::electrum_measure::{agreed_tip, block_interval_from_conf, common_height, eligible_servers,
                               first_reports_above, header_differences, is_beyond_tolerance, is_far_ahead, is_slow,
                               lag, lead, near_sessions, next_round_at, note_first_reports, out_of_date_states,
                               pick_replacement, rank_after_round, rank_with_replacement, remeasure_gap,
                               round_agreed_tip, same_block, shuffle, signed_lag, stale_limit, stuck_period,
                               tolerance_blocks, Draw, Measurement, Measuring, OutOfDate, PoorReason, RoundServer,
-                              ServerQuality, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
+                              ServerQuality, BASE_HEADER_LEN, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, HeaderSource, ServerSpec, Session,
                                  SessionEnded, TlsNotice};
 use super::*;
@@ -410,6 +411,20 @@ const READ_ONLY_METHODS: &[&str] = &[
     "blockchain.relayfee",
 ];
 
+/// The decision of [`PoolShared::listing_tip_of`] over its inputs: whether the coin is in the disagreement state,
+/// whether the answering server is a maintained connection that is up to date (`None`: it is not a maintained
+/// connection, so it was not judged), and its tip. Only an up-to-date maintained server on a coin whose servers agree
+/// gives a tip.
+pub(super) fn qualifying_listing_tip(disagreement: bool, up_to_date: Option<bool>, tip: Option<u64>) -> Option<u64> {
+    if disagreement {
+        return None;
+    }
+    match up_to_date {
+        Some(true) => tip,
+        _ => None,
+    }
+}
+
 /// Whether `request` is a read-only query: a single request whose method is on [`READ_ONLY_METHODS`], or a
 /// non-empty batch of which every element is (R38.6.4a item 1, R38.6.3a batches).
 pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
@@ -756,6 +771,25 @@ struct Comparison {
     diverged_since: Option<f64>,
 }
 
+/// The tip report that the per-tip check of the chain view takes next (CRD ch.38 §38.5C amendment, item 2): a height
+/// above the highest of the view, reported by an up-to-date maintained connection, with its base header.
+struct TipReport {
+    session_id: u64,
+    server: usize,
+    addr: String,
+    height: u64,
+    base: Vec<u8>,
+}
+
+/// The newest tip report waiting for the per-tip check, and whether the task that checks runs. At most one check is
+/// in flight per pool; a report that arrives meanwhile replaces the waiting one, since the check of the newer tip
+/// covers the heights in between.
+#[derive(Default)]
+struct ChainFeed {
+    pending: Option<TipReport>,
+    running: bool,
+}
+
 /// What the pool knows about the servers' agreement about the chain (R38.6.4o item 12).
 #[derive(Default)]
 struct DisagreementState {
@@ -846,6 +880,12 @@ pub(super) struct PoolShared {
     /// maintained connections was first reported by one of them (R38.6.4o item 4, amendment of 2026-11-15); at most
     /// `2 * tolerance + 1` heights, see [`note_first_reports`].
     first_reports: StdMutex<BTreeMap<u64, f64>>,
+    /// The chain view of the client (CRD ch.38 §38.5C, D38.5C.2 status note, amendment of 2026-11-18).
+    chain_view: StdMutex<ChainView>,
+    /// The tip report waiting for the per-tip check, and whether the check task runs.
+    chain_feed: StdMutex<ChainFeed>,
+    /// The history collectors that want to know when the chain changed.
+    chain_subscribers: StdMutex<Vec<futures_mpsc::UnboundedSender<()>>>,
     /// The activation probe has ended, its measured rank applied.
     probe_ended: AtomicBool,
     disagreement: StdMutex<DisagreementState>,
@@ -898,6 +938,9 @@ impl PoolShared {
             tolerance: tolerance_blocks(options.block_interval),
             tip_checks: options.tip_checks,
             first_reports: StdMutex::new(BTreeMap::new()),
+            chain_view: StdMutex::new(ChainView::new(tolerance_blocks(options.block_interval))),
+            chain_feed: StdMutex::new(ChainFeed::default()),
+            chain_subscribers: StdMutex::new(Vec::new()),
             probe_ended: AtomicBool::new(false),
             disagreement: StdMutex::new(DisagreementState::default()),
             comparing: AtomicUsize::new(0),
@@ -1900,6 +1943,21 @@ impl PoolShared {
             .clone()
     }
 
+    /// The tip of the server that answered a listing from `addr`, when that answer may serve the absence rule of the
+    /// history collectors (CRD ch.38 §38.5C, D38.5C.1 status note): the server is a maintained connection, is up to
+    /// date at this moment (R38.6.4o item 4), reports a tip, and the coin is not in the disagreement state (item 12).
+    /// `None` otherwise. The state is judged anew, as a routed request judges it.
+    pub(super) fn listing_tip_of(&self, addr: &str) -> Option<u64> {
+        let states = self.refresh_out_of_date();
+        let disagreement = self.chain_disagreement().is_some();
+        let slot = self.slot_by_addr(addr)?;
+        let up_to_date = states
+            .iter()
+            .find(|(other, _)| other.id == slot.id)
+            .map(|(_, state)| state.is_none());
+        qualifying_listing_tip(disagreement, up_to_date, Self::tip_height(&slot))
+    }
+
     /// Notes the pairs of a measurement round that answered different base headers at one height (item 7).
     fn note_header_differences(&self, round: &[RoundServer]) { self.add_pending(header_differences(round)); }
 
@@ -2296,13 +2354,14 @@ impl PoolShared {
     /// A header notification of the height `height` arrived over the connection `session_id` of server `id`
     /// (R38.6.4l items 2 and 6, R38.6.4o item 4): under a measured order the count of P1 with several maintained
     /// connections moves, and the maintained connections are judged again for being out of date.
-    fn header_notified(&self, id: usize, session_id: u64, height: u64, source: HeaderSource) {
+    fn header_notified(self: &Arc<Self>, id: usize, session_id: u64, height: u64, source: HeaderSource) {
         let Some(slot) = self.slot_by_id(id) else { return };
         self.record_first_reports(now_float());
         if source == HeaderSource::Answer {
             // A header answer moves the connection's height and nothing else (R38.6.4o item 4): the connections are
             // judged again.
-            self.refresh_out_of_date();
+            let states = self.refresh_out_of_date();
+            self.offer_chain_tip(&slot, session_id, height, &states);
             if self.tip_checks {
                 self.signal_measure();
             }
@@ -2332,10 +2391,217 @@ impl PoolShared {
             // A notification can end the silence of a connection or make another one stuck (R38.6.4o item 4).
             wake = stale || self.tip_checks;
         }
-        self.refresh_out_of_date();
+        let states = self.refresh_out_of_date();
+        self.offer_chain_tip(&slot, session_id, height, &states);
         if wake {
             self.signal_measure();
         }
+    }
+
+    // ---- the chain view: how the client sees that its chain changed (CRD ch.38 §38.5C amendment) ----------------
+
+    /// Tests: the base headers of the chain view, by height.
+    #[cfg(test)]
+    pub(super) fn chain_view_for_test(&self) -> BTreeMap<u64, Vec<u8>> {
+        self.chain_view.lock().unwrap_or_else(|p| p.into_inner()).snapshot()
+    }
+
+    /// Tests: no per-tip check runs or waits.
+    #[cfg(test)]
+    pub(super) fn chain_check_idle_for_test(&self) -> bool {
+        let feed = self.chain_feed.lock().unwrap_or_else(|p| p.into_inner());
+        feed.pending.is_none() && !feed.running
+    }
+
+    /// A history collector's channel of chain-changed events: one `()` for each change the client sees (item 3).
+    pub(super) fn subscribe_chain_changes(&self) -> futures_mpsc::UnboundedReceiver<()> {
+        let (tx, rx) = futures_mpsc::unbounded();
+        self.chain_subscribers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(tx);
+        rx
+    }
+
+    /// Whether the connection `session_id` of server `id` may feed the chain view now: it is a maintained connection
+    /// that is up to date in `states`, and the coin is not in the disagreement state (item 1).
+    fn may_feed_chain_view(&self, id: usize, session_id: u64, states: &[(Arc<ServerSlot>, Option<OutOfDate>)]) -> bool {
+        let up_to_date = states
+            .iter()
+            .any(|(slot, state)| slot.id == id && state.is_none() && Self::session_id_of(slot) == Some(session_id));
+        up_to_date
+            && self
+                .disagreement
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .current
+                .is_none()
+    }
+
+    fn session_id_of(slot: &ServerSlot) -> Option<u64> { slot.state().session.as_ref().map(|session| session.id()) }
+
+    /// A connection reported the height `height` (a header notification or a header answer). When the connection may
+    /// feed the view and the height is above the highest of the view, the per-tip check is started, or queued when one
+    /// is running (item 2).
+    fn offer_chain_tip(
+        self: &Arc<Self>,
+        slot: &Arc<ServerSlot>,
+        session_id: u64,
+        height: u64,
+        states: &[(Arc<ServerSlot>, Option<OutOfDate>)],
+    ) {
+        if !self.tip_checks || !self.may_feed_chain_view(slot.id, session_id, states) {
+            return;
+        }
+        // The header bytes that came with this height; a header shorter than a base header is no UTXO header.
+        let Some(base) = slot
+            .state()
+            .session
+            .as_ref()
+            .filter(|session| session.id() == session_id)
+            .and_then(|session| session.headers().last_header())
+            .filter(|(held, bytes)| *held == height && bytes.len() >= BASE_HEADER_LEN)
+            .map(|(_, bytes)| base_of(&bytes))
+        else {
+            return;
+        };
+        if self.chain_view.lock().unwrap_or_else(|p| p.into_inner()).plan(height) == TipPlan::Nothing {
+            return;
+        }
+        {
+            let mut feed = self.chain_feed.lock().unwrap_or_else(|p| p.into_inner());
+            feed.pending = Some(TipReport {
+                session_id,
+                server: slot.id,
+                addr: slot.addr.clone(),
+                height,
+                base,
+            });
+            if feed.running {
+                return;
+            }
+            feed.running = true;
+        }
+        let pool = self.clone();
+        spawn(async move { pool.run_chain_checks().await });
+    }
+
+    /// Runs the per-tip checks one after the other until no report waits.
+    async fn run_chain_checks(self: Arc<Self>) {
+        loop {
+            let next = {
+                let mut feed = self.chain_feed.lock().unwrap_or_else(|p| p.into_inner());
+                match feed.pending.take() {
+                    Some(report) => report,
+                    None => {
+                        feed.running = false;
+                        return;
+                    },
+                }
+            };
+            self.check_chain(next).await;
+        }
+    }
+
+    /// Whether the connection of `report` may still feed the view, judged anew (the state can change while a request
+    /// is out).
+    fn chain_report_still_feeds(&self, report: &TipReport) -> bool {
+        let states = self.refresh_out_of_date();
+        self.may_feed_chain_view(report.server, report.session_id, &states)
+    }
+
+    /// `count` consecutive base headers from `from`, asked of the server at `addr` with one directed
+    /// `blockchain.block.headers` request (R38.6.4g). `None` when the request failed or was not answered within the
+    /// request bound, or the answer is not a list of `count` headers that splits at an even stride: nothing is
+    /// concluded from it.
+    async fn directed_base_headers(self: &Arc<Self>, addr: &str, from: u64, count: u64) -> Option<Vec<Vec<u8>>> {
+        let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: self.fresh_request_id(),
+            method: "blockchain.block.headers".into(),
+            params: vec![json::json!(from), json::json!(count)],
+        });
+        let Ok((_, JsonRpcResponseEnum::Single(single))) = self.route_directed(request, addr).await else {
+            return None;
+        };
+        if !single.error.is_null() || single.result["count"].as_u64() != Some(count) {
+            return None;
+        }
+        let bytes = hex::decode(single.result["hex"].as_str()?).ok()?;
+        split_header_list(&bytes, count)
+    }
+
+    /// The per-tip check of the chain view (item 2) for the tip of `report`.
+    async fn check_chain(self: &Arc<Self>, report: TipReport) {
+        let plan = self
+            .chain_view
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .plan(report.height);
+        let (from, count) = match plan {
+            TipPlan::Nothing => return,
+            TipPlan::Restart => {
+                if self.chain_report_still_feeds(&report) {
+                    self.chain_view
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .restart(report.height, report.base);
+                }
+                return;
+            },
+            TipPlan::Request { from, count } => (from, count),
+        };
+        let Some(mut headers) = self.directed_base_headers(&report.addr, from, count).await else {
+            return;
+        };
+        if !self.chain_report_still_feeds(&report) {
+            return;
+        }
+        let (differs, lowest) = {
+            let view = self.chain_view.lock().unwrap_or_else(|p| p.into_inner());
+            (view.lowest_difference(from, &headers).is_some(), view.lowest())
+        };
+        headers.push(report.base.clone());
+        if !differs {
+            self.chain_view
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .extend(from, headers);
+            return;
+        }
+        // The chain changed: one more request over the whole view finds the lowest height that differs.
+        let Some(low) = lowest else { return };
+        let Some(mut whole) = self.directed_base_headers(&report.addr, low, report.height - low).await else {
+            return;
+        };
+        if !self.chain_report_still_feeds(&report) {
+            return;
+        }
+        whole.push(report.base);
+        let first = {
+            let mut view = self.chain_view.lock().unwrap_or_else(|p| p.into_inner());
+            // The server may have changed its answer meanwhile: then nothing is concluded.
+            let Some(first) = view.lowest_difference(low, &whole) else {
+                return;
+            };
+            view.replace(low, whole);
+            first
+        };
+        if first == low {
+            warn!(
+                "{}: the Electrum servers report a reorganization of the chain at or below height {}",
+                self.ticker, first
+            );
+        } else {
+            warn!(
+                "{}: the Electrum servers report a reorganization of the chain from height {}",
+                self.ticker, first
+            );
+        }
+        self.chain_subscribers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|subscriber| subscriber.unbounded_send(()).is_ok());
     }
 
     /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6): the larger of 3

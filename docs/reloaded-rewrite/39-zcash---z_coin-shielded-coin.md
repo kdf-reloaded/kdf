@@ -2961,6 +2961,84 @@ failure of R39.8.0x. This rule does not extend to wallets older than the
 previous Reloaded generation; the reference legacy generation still follows the
 never-migrated rule of R39.8.0x.
 
+> **Status note (2026-11-17, Reloaded-original).** Item 1 above, "a byte-for-byte copy ... after
+> folding its WAL into the main file", is realized by the consistent copy of R39.8.0bc, which
+> replaces the checkpoint and file copy: the backup is a logical copy of the same database, not
+> the same bytes, and the working copy of item 2 is made from the verified backup. The other items
+> are unchanged. The `.pre-upgrade` backup named in T39.8.0f is likewise the consistent copy; the
+> test of R39.8.0bc (T39.8.0j) checks its content instead of its bytes.
+
+R39.8.0bc **Consistent, verified backup before a schema upgrade.** The upgrade of
+R39.8.0ba runs these steps before its working copy is made, all inside the
+wallet-database serialization of R39.8.0ad. The same steps apply to every
+previous Reloaded generation the classifier recognizes; the recognized
+generations are a list, one entry today, and a later change of the wallet schema
+adds an entry. An unknown or corrupt schema stays refused (R39.8.0x).
+
+1. **Free space first.** Before anything is written, the free space of the
+   filesystem that holds the wallet database is compared with
+   `2 x page_count x page_size` of the database plus a margin of 16 MiB: one
+   database-sized copy for the backup, one for the working copy, and the margin
+   for journals, page padding and concurrent use of the disk. The figure used is
+   the space available to the user running the node. If it is smaller, activation
+   fails with the typed error `InsufficientDiskSpace` carrying the path, the
+   needed bytes and the available bytes, and no backup or working copy has been
+   written. If the free space cannot be read, activation fails with the typed
+   schema error, also before any backup or working copy is written. The wallet
+   database's content is unchanged in both cases. The free-space source is
+   replaceable in tests.
+2. **Consistent backup.** The backup is taken with SQLite's `VACUUM INTO` on the
+   first connection this activation opens to the wallet database, while the
+   serialization of R39.8.0ad is held. That connection is read-write: opening
+   the database may recover an interrupted transaction, and closing the
+   connection may fold the write-ahead log into the main file; neither changes
+   the database's content. The copy contains every committed
+   transaction, including content that is still in the write-ahead log, as one
+   statement; a checkpoint that a reader blocks cannot make it incomplete. It is
+   written to a fresh `<file>.pre-upgrade.<ms>.bak` name (a sequence number is
+   added when the name is taken). It is a logical copy: tables, indexes,
+   `user_version` and the migration records are carried, the bytes are not.
+3. **Verify.** The backup is opened read-only and must report `ok` for
+   `PRAGMA integrity_check` and have the same schema fingerprint as the source.
+   If a check fails, the backup is deleted, the original's content is unchanged
+   and it is not moved or renamed, and activation fails with the typed error
+   `ShieldedDbBackupVerification` naming the backup and the failed check (`open`,
+   `integrity_check` or `schema fingerprint`). It does not fall back to the
+   rebuild of R39.8.0ba item 4: a backup that cannot be trusted means the upgrade
+   is not attempted.
+4. **Working copy from the backup.** The migration of R39.8.0ba item 2 runs on a
+   private copy made from the verified backup with the same `VACUUM INTO`, never
+   from the live file. After the replacement of R39.8.0ba item 3 the original's
+   sidecars are removed as before; the working copy already carries the committed
+   content they held.
+5. **Retention.** After a successful upgrade, the `<file>.pre-upgrade.*.bak`
+   backups of that wallet database (with their sidecars) beyond the newest N are
+   deleted. The backup just made is always kept and counts towards N. N is the
+   node-configuration key `shielded_db_upgrade_backups` (`MM2.json`, top level),
+   a whole number, default 1 (only the backup just made); `0` or a negative number is read as 1, and a value
+   that is not a whole number is ignored with a warning. Backups of other kinds
+   (`.upgrade-failed`, `.legacy-v2`, rebuild and checkpoint backups) are not
+   touched, and a failure to delete is logged and does not fail the activation.
+   After a failed migration that fell back to the rebuild nothing is pruned.
+
+T39.8.0j *Backup before upgrade (R39.8.0bc).* Unit tests with a replaceable
+free-space source shall prove: (a) rows committed to a write-ahead-logged
+database but not checkpointed, while a reader holds a snapshot, are in the
+backup; (b) a backup made unreadable after it is written refuses the upgrade
+with `ShieldedDbBackupVerification`, deletes it, and leaves the original
+unchanged in content and still classified as the previous generation; a backup whose
+schema fingerprint differs from the source fails the fingerprint check; (c) too
+little free space yields `InsufficientDiskSpace` with the needed and the
+available figures, the needed figure equal to `2 x page_count x page_size` plus
+the margin, and no backup or working copy written (the directory listing shows
+no new file); an unreadable free-space figure
+also refuses; (d) with more than N `.pre-upgrade` backups the newest N remain
+(the one just made among them), their older siblings and sidecars are gone, and
+other `.bak` kinds are untouched; the key is read as specified; (e) a wallet
+database that is already current is opened without a backup and without asking
+for free space; (f) the tests of R39.8.0ba (T39.8.0f) stay green, their backup
+check being the content check described in the status note above.
+
 R39.8.0y The public modern candidates form two coherent, non-interchangeable
 dependency generations as of the reference date:
 
@@ -6803,6 +6881,21 @@ outputs, not in bytes, so whether a per-kilobyte rate meets it depends on the
 rate and on the transaction's shape. Remedy: the open point on ZIP 317 fees in
 plan `zec-v5-transactions` settles the rate Reloaded uses.
 
+> *Reloaded status (clean side, 2026-11-17):* for a version-5 transaction
+> Reloaded computes the per-kilobyte fee over the size of the version-5 bytes it
+> sends, not over a version-4 layout: a transparent version-5 transaction is
+> about 4 bytes shorter (a four-byte branch id field in the header, a 3-byte
+> empty tail instead of 11 bytes), so the fee is marginally lower than the same
+> rate over the version-4 layout. The policy of chapter 38 R38.6.6a --
+> R38.6.6b is otherwise unchanged. With the ZEC rate of the coins file (70000
+> per kilobyte) the fee stays above ZIP 317's conventional fee for the transparent
+> shapes this software builds (at most three outputs per transaction); a
+> transaction with five or more outputs per input would fall below it, because
+> ZIP 317 counts 5000 zatoshi per logical action while an output costs about
+> 2380 zatoshi by size. The earlier note after the compatibility note of
+> §39.11.4V ("a transparent transaction pays more than ZIP 317's conventional
+> fee") holds for these shapes only.
+
 D39.11.4V.1 *(Open.)* *A transaction of a version the history cannot read.*
 Reproducing the reference (R39.11.4V.8) leaves such a transaction out of the
 legacy history without a signal, and keeps the version-two history in progress
@@ -6825,12 +6918,31 @@ a version that has no default; (c) as (b), and also refuse an `overwintered`
 value other than the integers `0` and `1`. Recommendation: (b), which is the
 plan's configuration step; (c) only after a check of the coins files in use.
 
+> *Reloaded status (clean side, 2026-11-17):* resolved by the maintainer's
+> decision as option (b). Activation refuses, with a typed error naming the
+> field and the value, an overwintered entry whose `txversion` is not 4 or 5
+> (version 3 included, and an absent `txversion`, which reads as 1), and an
+> overwintered entry with `txversion` 5 that names no `consensus_branch_id`.
+> For version 5 the `version_group_id` defaults to `0x26A7270A`. The
+> task-managed activation answers `CoinCreationError` with the ticker and the
+> error text, as for an invalid branch id. Entries that are not overwintered
+> and the `overwintered` selector are unchanged; option (c) was not taken.
+
 D39.11.4V.3 *(Open.)* *Version 6 on the transparent coin's read path.* The
 network accepts versions 5 and 6 (the status note under R39.11.15); the plan's
 reading step names version 5. Options: (a) read version 5 only, and treat a
 version-6 transaction as unreadable under D39.11.4V.1 and in the swap steps of
 R39.11.4V.8; (b) read versions 5 and 6 through the Zcash library reader, whose
 version coverage R39.11.15 records. Recommendation: (b).
+
+> *Reloaded status (clean side, 2026-11-17):* resolved by the maintainer's
+> decision as a staged form of (b): the shared UTXO parser reads version 5
+> (status note of 2026-11-17 under R39.11.15); a version-6 transaction stays
+> unreadable, under D39.11.4V.1 and in the swap steps of R39.11.4V.8, until the
+> Zcash library family is upgraded to a release that knows the NU7 branch id;
+> from then on versions 5 and 6 are read through that library's reader. The
+> pinned library cannot read an NU7 transaction of either version (status note
+> under R39.11.15). The upgrade is a condition of the 0.5.0 release.
 
 *Not established.* (1) Nothing was run against a reference binary or a live
 Zcash node; no node's refusal text is recorded. (2) Whether the WalletConnect
@@ -8581,3 +8693,14 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   code differs from and agrees with R39.11.4V.2 -- R39.11.4V.10; no
   forbidden-class input beyond the cleared section it cites, chapter 01 R38 not
   engaged.
+- *Status notes added 2026-11-17 -- after D39.11.4V.2 and D39.11.4V.3.*
+  Reloaded-original, clean side: they record the maintainer's resolutions of
+  2026-11-17 and what this repository builds for them; no forbidden-class
+  input, chapter 01 R38 not engaged.
+- *Status note added 2026-11-17 -- under R39.11.4V.10.* Reloaded-original,
+  clean side: it records that Reloaded computes the fee over the version-5 size;
+  no forbidden-class input, chapter 01 R38 not engaged.
+- *Clean-context addition (2026-11-17), §39.8.0.3:* R39.8.0bc, T39.8.0j and the status
+  note after R39.8.0ba are Reloaded-original, clean side, written from this repository's
+  own code and the public SQLite documentation of `VACUUM INTO`; no forbidden-class input,
+  chapter 01 R38 not engaged.

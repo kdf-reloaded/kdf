@@ -774,8 +774,14 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
-        Some(_) => {
+        Some(_removed) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
+            // A disabled SPL token leaves the record its platform keeps of its tokens, so that the platform no
+            // longer reports it (CRD ch.40 T40.6B.20). The platform and its other tokens are untouched.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let MmCoinEnum::SplToken(token) = &_removed {
+                token.platform_coin.remove_spl_token_info(ticker);
+            }
             Ok(())
         },
         None => ERR!("{} is disabled already", ticker),

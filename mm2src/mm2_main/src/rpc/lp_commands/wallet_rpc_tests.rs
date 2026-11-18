@@ -1333,3 +1333,153 @@ fn legacy_shaped_body_with_an_mmrpc_key_answers_invalid_request_for_every_method
         assert_eq!(body["id"], 3, "{method}: id");
     }
 }
+
+// ----- `disable_coin` for a Solana coin and an SPL token (CRD ch.40 T40.6B.20, ch.43 T43.1E) -----
+
+/// A Solana platform coin built offline from its activation parameters (the node pool contacts nothing until a request
+/// is made), and an SPL token of it.
+fn offline_solana_and_token() -> (coins::SolanaCoin, coins::SplToken) {
+    let params = json::from_value(json!({
+        "confirmation_commitment": "finalized",
+        "client_url": "http://127.0.0.1:1",
+    }))
+    .expect("the activation parameters parse");
+    let platform = block_on(coins::solana_coin_from_conf_and_params(
+        "SOL",
+        &json!({}),
+        params,
+        &[7_u8; 32],
+    ))
+    .expect("the offline platform coin is built");
+    let mint = coins::solana::spl::SPL_TOKEN_PROGRAM_ID;
+    let token = coins::SplToken::new(6, "USDC".to_owned(), mint, mint, platform.clone());
+    (platform, token)
+}
+
+fn register_in(ctx: &MmArc, coin: MmCoinEnum) {
+    block_on(CoinsContext::from_ctx(ctx).unwrap().add_coin(coin)).expect("the coin is registered");
+}
+
+fn enabled_tickers(ctx: &MmArc) -> Vec<String> {
+    let body: Json = json::from_str(&legacy_success(ctx, "get_enabled_coins", json!({}))).unwrap();
+    let mut tickers: Vec<String> = body["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["ticker"].as_str().unwrap().to_owned())
+        .collect();
+    tickers.sort();
+    tickers
+}
+
+/// T40.6B.20: a token answers and leaves `get_enabled_coins`, on both surfaces; the platform stays and the token can be
+/// registered again.
+#[test]
+fn t40_6b_20_disable_coin_on_an_spl_token_answers_on_both_surfaces() {
+    let (platform, token) = offline_solana_and_token();
+    let ctx = bare_node();
+    register_in(&ctx, platform.clone().into());
+    register_in(&ctx, token.clone().into());
+    platform.add_spl_token_info("USDC".to_owned(), token.get_info());
+    assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned(), "USDC".to_owned()]);
+
+    let expected = json::to_string(&json!({ "result": { "coin": "USDC", "cancelled_orders": [] } })).unwrap();
+    same(
+        &legacy_success(&ctx, "disable_coin", json!({ "coin": "USDC" })),
+        &expected,
+        "the legacy token body",
+    );
+    assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned()]);
+    assert!(
+        platform.get_spl_tokens_infos().is_empty(),
+        "the platform no longer records the token"
+    );
+
+    register_in(&ctx, token.clone().into());
+    platform.add_spl_token_info("USDC".to_owned(), token.get_info());
+    let result = versioned_result(
+        versioned(&ctx, "disable_coin", Some(json!({ "coin": "USDC" })), 201),
+        201,
+    );
+    same(
+        &result,
+        &json!({ "coin": "USDC", "cancelled_orders": [] }),
+        "the versioned token result",
+    );
+    assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned()]);
+}
+
+/// T40.6B.20: a platform without tokens answers and is removed, on both surfaces; it can be registered again.
+#[test]
+fn t40_6b_20_disable_coin_on_a_solana_platform_without_tokens_answers_on_both_surfaces() {
+    let (platform, _) = offline_solana_and_token();
+    let ctx = bare_node();
+    register_in(&ctx, platform.clone().into());
+
+    let expected = json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [] } })).unwrap();
+    same(
+        &legacy_success(&ctx, "disable_coin", json!({ "coin": "SOL" })),
+        &expected,
+        "the legacy platform body",
+    );
+    assert!(enabled_tickers(&ctx).is_empty());
+
+    register_in(&ctx, platform.into());
+    let result = versioned_result(
+        versioned(&ctx, "disable_coin", Some(json!({ "coin": "SOL" })), 202),
+        202,
+    );
+    same(
+        &result,
+        &json!({ "coin": "SOL", "cancelled_orders": [] }),
+        "the versioned platform result",
+    );
+    assert!(enabled_tickers(&ctx).is_empty());
+}
+
+/// T40.6B.20 under the current rule (CRD ch.43 §43.1E "Compatibility" item 2, ch.55 D55.6 open): the platform answers
+/// and is removed as for the other families, the token stays registered, and the platform can be registered again.
+#[test]
+fn t40_6b_20_disable_coin_on_a_solana_platform_with_a_token_follows_the_other_families() {
+    let (platform, token) = offline_solana_and_token();
+    let ctx = bare_node();
+    register_in(&ctx, platform.clone().into());
+    register_in(&ctx, token.clone().into());
+    platform.add_spl_token_info("USDC".to_owned(), token.get_info());
+
+    let expected = json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [] } })).unwrap();
+    same(
+        &legacy_success(&ctx, "disable_coin", json!({ "coin": "SOL" })),
+        &expected,
+        "the legacy platform-with-token body",
+    );
+    assert_eq!(enabled_tickers(&ctx), vec!["USDC".to_owned()]);
+
+    register_in(&ctx, platform.into());
+    assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned(), "USDC".to_owned()]);
+}
+
+/// T43.1E (coin not active) for the Solana tickers: the extended refusal body with empty lists, HTTP 500, legacy; the
+/// typed `NoSuchCoin`, versioned. A token and a platform that were disabled already answer the same.
+#[test]
+fn t40_6b_20_disable_coin_on_a_solana_ticker_that_is_not_active_is_the_not_active_refusal() {
+    let (platform, token) = offline_solana_and_token();
+    let ctx = bare_node();
+    register_in(&ctx, platform.into());
+    register_in(&ctx, token.into());
+    for ticker in ["USDC", "SOL"] {
+        legacy_success(&ctx, "disable_coin", json!({ "coin": ticker }));
+        let answer = run(&ctx, legacy_request("disable_coin", json!({ "coin": ticker })))
+            .unwrap_or_else(|_| panic!("the legacy not-active answer is a response"));
+        assert_eq!(answer.status().as_u16(), 500);
+        let body: Json = json::from_slice(answer.body()).unwrap();
+        assert!(body["error"].is_string(), "the error member");
+        assert_eq!(body["orders"], json!({ "matching": [], "cancelled": [] }));
+        assert_eq!(body["active_swaps"], json!([]));
+        assert_eq!(body["swaps"], json!([]));
+
+        let answer = versioned(&ctx, "disable_coin", Some(json!({ "coin": ticker })), 203);
+        assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 203);
+        assert_data_member(&answer, "coin", json!(ticker));
+    }
+}

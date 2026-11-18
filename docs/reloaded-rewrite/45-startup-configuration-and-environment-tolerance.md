@@ -27,6 +27,13 @@ behaviour for launch success, and resolves it toward upstream compatibility.
 > Private helper names, accessor decomposition, diagnostic text, and module
 > layout are non-normative and are intentionally omitted.
 
+> **Status note (2026-11-18; Spec Reader round 0.5.0-12; passed the KDF
+> Dirty Gate on 2026-11-18, measure 0.03).** §45.3A is new. It lists which coin-entry keys tell the
+> reference about the byte format of a UTXO coin's headers and transactions,
+> and how a Kerrigan (`KRGN`) entry can and cannot use them, at the released
+> rows and at the newest upstream state that knows the chain. No sentence of
+> this chapter is changed.
+
 ## 45.1 Executive Summary
 
 A graphical wallet, an integration harness, or an operator launches the binary
@@ -159,6 +166,79 @@ Reloaded shall preserve this tolerance exactly. A typed coins-entry schema
 introduced under D45.1 shall be permissive about unknown members by
 construction; making it strict would be a silent compatibility break against
 every shared coins file that is newer than the binary reading it.
+
+## 45.3A Coin-entry keys that describe a UTXO coin's byte formats
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.03 (attestation in §45.12).**
+> This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-12)
+> under the two-team procedure of chapter 01 §1.4A, from the reference lineage
+> at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of 2026-10-07)` and
+> `add-krgn-chain-variant (as of 2026-04-18)` of chapter 02 §2.15A (read
+> read-only), the public coins file, the Kerrigan entry of the coins-registry
+> pull request "list Kerrigan (KRGN)" (cited under chapter 01 R14:
+> repository `GLEECBTC/coins`, pull-request head
+> `9b1f85d43ecb9897a4a7f5306d1f808db7ab49a9`, the pull request's only commit and so
+> the earliest one containing the entry; open), and this
+> repository's chapters. It edits no sentence of this chapter. Numbering:
+> R45.3A.1 -- R45.3A.4.
+
+**R45.3A.1** *The keys, at the released rows.* The rows `v2.6.0-beta`,
+`v3.0.0-beta` and `main (as of 2026-10-07)` agree. The coin-entry keys that
+tell the reference how a UTXO coin's headers or transactions are laid out
+or signed are these, and each is bound where named:
+
+| Key | What it selects | Bound in |
+| --- | --- | --- |
+| `protocol.chain_variant` | the header family, from a closed set of eight values | chapter 37 R37.5.1 |
+| `txversion`, `overwintered`, `version_group_id`, `consensus_branch_id` | the version and layout of the transactions the coin builds, and the Zcash-family digest | chapter 39 R39.11.4V.2 |
+| `isPoS`, `isPoSV` | the time field of proof-of-stake transactions the coin builds; reading does not depend on them | chapter 38 §38.6.1 (which names `isPoS` only) |
+| `signature_version`, `fork_id` | the signature-hash algorithm and its sighash byte | chapter 58 §58.2 |
+
+Reloaded adds keys of its own that the reference ignores (R45.3.7), among them
+`header_layout` (chapter 37 R37.5.9) and `sighash_suffix` (chapter 61).
+
+Two further keys shape header use without describing a layout:
+`mtp_block_count` sets the size of the median-time-past window (chapter 37
+R37.6.2), and `spv_conf` / `enable_spv_proof` switch the proof machinery on
+(chapter 37 §37.1, R37.6.1). A few format behaviors are tied to the ticker
+itself rather than to a key; Komodo's lock-time (chapter 37, the note under
+R37.6.2) is one. No key describes a Dash-layout special transaction: the
+reference reads those for every coin without a setting (chapter 38 §38.6.10).
+No key describes an algorithm-dependent header layout, a header size or a
+block identity hash.
+
+**R45.3A.2** *A Kerrigan entry at the released rows.* The proposed entry is
+protocol `UTXO` with addresses, fees, confirmations, block time, message prefix
+and derivation path, and none of the keys of R45.3A.1. Nothing in that set can
+describe the chain's headers:
+
+- without `chain_variant`, the list read of the median fails in nearly every
+  window (chapter 37 R37.5.11.5);
+- `"BTC"` turns the failure into a silently wrong median;
+- every other existing value misreads the headers the same way.
+
+The transaction side needs no key, because the special transactions are read
+by version (chapter 38 R38.6.10.2). With no `txversion`, the coin's own
+transactions are built as version 1, type 0.
+
+**R45.3A.3** *A new value of a recognized key is not tolerated.* R45.3.7
+tolerates an unrecognized key, and that is all it tolerates.
+`chain_variant` is a recognized key, so an entry that names a value outside the
+reference's set (`"KRGN"`, for instance) refuses the activation of that coin.
+The launch still succeeds, but the coin cannot be activated, at every released
+row and in Reloaded (chapter 37 R37.5.1). A shared registry entry that names
+`"KRGN"` would therefore take the coin away from every released reference
+node, and from Reloaded unless D37.5.11.1 (d) is chosen. A Reloaded-only
+`header_layout` value (chapter 37 R37.5.9) does not have that effect: the
+reference ignores the unknown key (R45.3.7).
+
+**R45.3A.4** *The newest upstream state.* `add-krgn-chain-variant (as of
+2026-04-18)` adds the one value `"KRGN"` to the accepted `chain_variant` set
+(chapter 37 R37.5.11.8). It adds no key and changes no transaction-format key.
+The proposed registry entry does not name the value, so that state too reads
+the entry under the default family.
 
 ## 45.4 Identity Resolution and Passphrase Tolerance
 
@@ -1246,3 +1326,23 @@ crate is deferred until it drops that dependency.
     category -- no private identifier, no body or control-flow transcription,
     no error or log literal, no internal module tree, and no internal test
     identifier.
+
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-12) -- §45.3A (R45.3A.1 -- R45.3A.4) and the status note at the head of this
+  chapter; cleared together with chapter 37 §37.5.11. No other text of this
+  chapter was changed.*
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.03, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* as the clearance
+  block of the section states them.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.03, no leak findings. *Extent:* the UTXO header reads for every family,
+  the transaction reader and writer including the special-transaction
+  payload, the choice of lock-time and sequence for claims and refunds, the
+  median-time query, refund readiness and the errors of the version-two
+  history, at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of
+  2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)`.
+  *Clean-side form edit at clearance, on the gate's advice:* the citation of
+  the coins-registry pull request in the clearance block carries the chapter
+  01 R14 form (repository and earliest commit). No row was added to chapter
+  02 §2.15A for it: a sibling-repository citation under chapter 01 R14 is the
+  second place chapter 02 R13 admits for a sibling commit identifier. No
+  other gated sentence was changed.

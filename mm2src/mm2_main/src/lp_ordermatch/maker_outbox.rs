@@ -546,7 +546,7 @@ pub(crate) struct MakerOutbox {
     pub(crate) in_flight: AtomicUsize,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::mm2::lp_ordermatch::{new_protocol, OrderConfirmationsSettings, H64};

@@ -40,6 +40,12 @@ pub enum UtxoSignTxError {
         suffix
     )]
     SighashSuffixNotSupportedByHardwareWallet { suffix: u32 },
+    #[display(
+        fmt = "Transaction version {} is not supported by hardware wallets: the device signs the digest of the \
+               versions it knows, not the ZIP 244 digest of this version",
+        version
+    )]
+    TransactionVersionNotSupportedByHardwareWallet { version: i32 },
     #[display(fmt = "Trezor client error: {}", _0)]
     TrezorError(TrezorError),
     #[display(fmt = "Encountered invalid parameter '{}': {}", param, description)]
@@ -81,6 +87,22 @@ pub fn refuse_sighash_suffix_for_hardware_wallet(sighash_suffix: u32) -> UtxoSig
         return Ok(());
     }
     MmError::err(UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { suffix: sighash_suffix })
+}
+
+/// A hardware wallet signs the digest of the transaction versions its firmware knows. The Zcash version 5
+/// transaction (ZIP 225) has the ZIP 244 digest, which the signing request cannot carry, so a hardware signing
+/// request for an overwintered transaction of version 5 or higher must fail with this error before anything is
+/// sent to the device, instead of producing a transaction the network rejects.
+///
+/// # Errors
+///
+/// [`UtxoSignTxError::TransactionVersionNotSupportedByHardwareWallet`] when `overwintered` is set and
+/// `version` is 5 or higher.
+pub fn refuse_transaction_version_for_hardware_wallet(overwintered: bool, version: i32) -> UtxoSignTxResult<()> {
+    if overwintered && version >= 5 {
+        return MmError::err(UtxoSignTxError::TransactionVersionNotSupportedByHardwareWallet { version });
+    }
+    Ok(())
 }
 
 impl From<TrezorError> for UtxoSignTxError {
@@ -175,6 +197,35 @@ pub trait UtxoSignerOps {
                 .mm_err(Into::into)?;
                 Ok(signed)
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod transaction_version_tests {
+    use super::*;
+
+    /// A hardware wallet refuses an overwintered transaction of version 5 or higher, with an error that names the
+    /// version; the versions 3 and 4 and a transaction that is not overwintered pass.
+    #[test]
+    fn a_hardware_wallet_refuses_an_overwintered_version_5() {
+        for (overwintered, version) in [(true, 3), (true, 4), (false, 1), (false, 2), (false, 5), (false, 6)] {
+            assert!(
+                refuse_transaction_version_for_hardware_wallet(overwintered, version).is_ok(),
+                "overwintered {overwintered} version {version}"
+            );
+        }
+        for version in [5, 6] {
+            let err = refuse_transaction_version_for_hardware_wallet(true, version)
+                .unwrap_err()
+                .into_inner();
+            assert!(matches!(
+                err,
+                UtxoSignTxError::TransactionVersionNotSupportedByHardwareWallet { version: found } if found == version
+            ));
+            let message = err.to_string();
+            assert!(message.contains(&format!("Transaction version {version}")), "{message}");
+            assert!(message.contains("hardware wallet"), "{message}");
         }
     }
 }

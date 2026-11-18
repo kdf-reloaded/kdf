@@ -101,8 +101,8 @@ pub enum EnableTokenError {
     #[allow(dead_code)]
     #[display(fmt = "Private key policy is not allowed: {}", _0)]
     PrivKeyPolicyNotAllowed(String),
-    /// Reserved by the chapter: the token protocol names another platform.
-    #[allow(dead_code)]
+    /// The token and its active platform are of different families: a TRC20 token on an EVM platform, or an ERC-20
+    /// token on a TRON platform (CRD ch.21 R21.10B.2).
     #[display(fmt = "The token protocol names a platform other than the activated one")]
     PlatformCoinMismatch,
     #[display(fmt = "Could not fetch the balance: {}", _0)]

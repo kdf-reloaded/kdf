@@ -13,6 +13,13 @@ extensions). Mixed treatment -- see §38.0.
 > event streaming, the fixed-fee policy with its fee-derived minimum trading
 > volume, and FIRO Spark verbose tx).
 
+> **Status note (2026-11-18; Spec Reader round 0.5.0-12; passed the KDF
+> Dirty Gate on 2026-11-18, measure 0.03).** §38.6.10 is new. It records how the reference reads
+> Dash-layout special transactions (a 16-bit type beside a 16-bit version
+> and an extra payload after the lock-time) for every UTXO coin, DASH and
+> Kerrigan included, what that means for history, balances and swaps, and a
+> gap in this repository's reader. No sentence above or below it is changed.
+
 ## 38.0 Treatment & scope split
 
 This chapter is a brand-new chapter spanning a broad UTXO feature surface.
@@ -873,6 +880,43 @@ addition no row is removed while the coin is in the state of R38.6.4o item
 Under each option Reloaded's legacy collector first has to meet R38.5A.3
 item (a).
 
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.1 is
+decided:* option (c), with a Reloaded refinement for how absence is
+established. It applies to the legacy history file, the QRC20 token
+collector (in place of R38.6.4Q.6 item 2) and the SQLite store alike, and
+replaces R38.5C.1 and R38.5C.3 items 2 and 3 for removal. For confirmed rows
+of the SQLite store it is a recorded departure from R38.5C.4 item 1.
+
+1. *When a row is removed.* A stored row, confirmed or not, is removed only
+   when **two successful listings in a row**, at least one block apart, both
+   answered by up-to-date servers (R38.6.4o item 4), do not contain its
+   transaction hash. The two listings must together cover every own address
+   the row concerns. All rows of one transaction hash (the several rows of a
+   QRC20 transaction, the BCH row and the SLP token row) are removed together.
+   A coin with a single connected server needs two listings from that server,
+   at least one block apart.
+   "One block apart" is judged from the chain tips observed with the two
+   listings: for an Electrum server, its last reported tip; for a native
+   daemon, its block count read with the listing.
+2. *What never removes.* A failed listing, a listing cut off by its time
+   budget or by a `history too large` answer, a listing from an out-of-date
+   server, and any listing while the coin is in the disagreement state of
+   R38.6.4o item 12.
+3. *Rows cannot stay forever.* A row found absent once carries a mark: the
+   height at which its absence was first seen. While any row carries such a
+   mark, the collector's need-to-run test (R38.5A.5) is true, so the second
+   listing comes at the next pass after a new block, not only at a balance
+   change. A listing that contains the hash clears the mark. What holds a
+   removal back is named in item 2, plus the absence of a new block. Each ends
+   by itself when its cause ends; none needs a user action.
+   The marks are kept in memory only; after a restart of the node the
+   counting starts again, which can delay a removal but never causes one.
+4. *Write and log.* A pass that removed rows writes the history at once
+   (R38.5A.3) and logs one INFO line naming the coin and the number of rows
+   removed. No line is logged per row.
+5. *Afterwards.* A removed hash that a later listing contains is fetched as
+   new, as in R38.5C.1 item 4.
+
 D38.5C.2 *(Open, 2026-11-16.)* **A stored confirmed row whose transaction is
 now at another height.** Neither store of the reference takes the new height
 over, and no pass runs for it while the balance is unchanged (R38.5C.2,
@@ -885,6 +929,79 @@ goes back to height 0; (c) option (b), and a pass is also started when the
 coin's client sees that the chain it follows has changed, since the
 need-to-run test alone does not start one. *Recommendation:* (c); what
 makes the client see the change is this repository's own design.
+
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.2 is
+decided:* option (c), in two steps. It is a recorded departure from R38.5C.2
+and R38.5C.4 item 2 for both stores.
+
+1. *In a pass that runs.* A listed positive height that differs from a
+   stored row's height is taken over, together with that block's time. A
+   stored confirmed row that the listing reports as unconfirmed goes back to
+   height 0. All rows of the hash change together.
+2. *Starting a pass.* A pass is also started when the coin's client sees
+   that the chain it follows has changed. One WARN line names the coin and
+   the height from which the chain changed, if known. How the client sees
+   the change is this repository's own design, specified when it is built;
+   until then, item 1 applies in the passes that run anyway.
+
+*Amendment (2026-11-18, clean side; Reloaded-original; implements item 2 of
+the status note above). How the client sees that its chain changed.*
+1. *The chain view.* Each Electrum client keeps the base headers (the first
+   80 bytes, as compared by item 12 of R38.6.4o, D38.6.4o.14) of the last
+   2*T* + 2 heights of the chain it follows, *T* being the coin's tolerance
+   (R38.6.4o item 1). The view is fed only by header notifications and
+   header answers of up-to-date maintained connections (R38.6.4o item 4), and
+   not at all while the coin is in the disagreement state (item 12). No block
+   identifier is computed: the identifier function differs between header
+   families, and comparing base headers at the same height works for all of
+   them.
+2. *One check per new tip.* When an up-to-date connection first reports a
+   height above the highest in the view, the client sends that connection one
+   directed `blockchain.block.headers` request (R38.6.4g) for the heights from
+   the highest in the view up to the one below the new tip. It compares each
+   returned base header with the view at the same height.
+   - All equal: the chain only grew; the view takes the new headers, the new
+     tip's included, and drops the oldest.
+   - A difference: the chain changed. One more directed request over the
+     whole view finds the lowest height that differs, the height from which
+     the chain changed; a difference at the bottom of the view is reported as
+     "at or below" its lowest height. The view is then replaced by the new
+     chain's headers.
+   - A request that fails or is not answered within the per-request bound
+     concludes nothing; the next tip is checked as usual.
+3. *What a change starts.* The client sends a chain-changed event to every
+   history collector of the coin instance: the legacy UTXO collector, the
+   QRC20 collector and the BCH/SLP collector. The event makes the collector
+   run a pass at once, whatever its need-to-run test says. That pass applies
+   item 1 of the status note above and counts absences under D38.5C.1.
+4. *The log.* One WARN line per change: `<ticker>: the Electrum servers report
+   a reorganization of the chain from height <H>` (or `at or below height
+   <L>`).
+   Nothing is said about consequences. Every change is reported, a change
+   back to a chain the view held before included, as in a race of two blocks
+   at the tip: each is a reorganization.
+5. *Cost and bounds.* At most one small directed request per new block per
+   coin instance, plus one when a change is found, always to a connection
+   that is already maintained. A chain that only grows always compares equal,
+   so no header family can make every block look like a change. A single
+   server answering a made-up header can cause at most one extra history pass
+   and one WARN line. It cannot remove a row, which needs two listings under
+   D38.5C.1.
+6. *One connected server.* The same applies to that server's headers alone.
+7. *Edges.*
+   - When the view is empty, or a new tip is more than 2*T* + 2 heights above
+     its highest, the view starts again from the new tip, with no request, no
+     event and no WARN: there is nothing to compare with.
+   - A tip at or below the view's highest height is not checked. A
+     replacement at the same height is therefore seen when the next higher
+     tip arrives.
+   - A header list that cannot be split into equal parts of at least 80 bytes
+     matching the requested count concludes nothing. A coin whose servers
+     never return such a list therefore never sees a change, and relies on
+     the passes that run anyway.
+   - With `electrum_tip_checks` `false` (R38.6.4o item 11) the view is not
+     fed and no change is seen; the history then relies on the passes that
+     run anyway.
 
 *Acceptance rows for a mock backend.* Each row names what the mock answers
 and what the node does. *Parity* is the reference behavior bound above;
@@ -4400,6 +4517,51 @@ item 6).
 > which this tree does not do (§38.5C, decided 2026-11-16); and the default
 > server order and read spreading.
 
+> **Measured, second part (2026-11-17, clean side; this repository on dev;
+> plan `qtum-qrc20-stabilization`).** Offline tests against the stub
+> Electrum server (`qrc20/qrc20_electrum_stub_tests.rs`, `t38_6_4q_*`), with
+> the same settings as the first part, pin rows T38.6.4Q.1 and T38.6.4Q.7 to
+> T38.6.4Q.11.
+>
+> 1. *T38.6.4Q.1, as the reference.* QTUM and two tokens naming one server
+>    hold three sessions there, each with its own `server.version` and header
+>    subscription. Disabling a token without history collection closes
+>    exactly one session. Disabling QTUM closes only QTUM's session; a token
+>    keeps its session and its balance.
+> 2. *T38.6.4Q.7, as the reference for activation and reconnects.* No
+>    `blockchain.contract.event.subscribe` is sent at activation or after the
+>    sessions are dropped and placed again. The header subscription is placed
+>    again once per client. The subscription that the balance stream places
+>    (§38.6.5 decision 2) was exercised on the token's client only:
+>    - an error answer, or no answer, leaves the balance and the history
+>      working;
+>    - after a reconnect it is not placed again.
+>    Enabling the stream itself is not covered here.
+> 3. *T38.6.4Q.8, as the reference.* From one address, with a server that
+>    keeps listing a spent output:
+>    - a token broadcast and a QTUM swap send, in either order, select the
+>      same input;
+>    - so do two tokens, and the same token twice;
+>    - only two QTUM swap sends in a row avoid it.
+>    A token broadcast and a QTUM swap send started together list at the same
+>    time, and both spend the one output.
+> 4. *T38.6.4Q.9.*
+>    - (a) As the reference: the status check asks the added and the removed
+>      delegations' history, and then the receipt; an error answer to any of
+>      them fails it.
+>    - (b) *Differs from the reference:* a delegation and a withdraw from one
+>      address list one after the other, because both builds wait for the
+>      process-wide lock (PR #354).
+> 5. *T38.6.4Q.10, differs from the reference.*
+>    - Disabling a token whose collector waits stops nothing at once. Its
+>      session stays open without requests until the collector's next
+>      registry check, up to 30 s later, which ends it and closes the session.
+>    - Enabling the token again within that wait leaves two collectors and two
+>      clients, each reading the balance once per interval.
+>    This is the case of the note after R38.6.4Q.10, decided as D38.6.4Q.5.
+> 6. *T38.6.4Q.11, as the reference.* A withdraw of another UTXO coin waits
+>    until a token's pending broadcast is answered.
+
 *Not established.* (1) The session count of R38.6.4Q.1 item 4 follows from
 how the reference builds its clients; it was not measured against a running
 reference binary and a live server in this pass. (2) Which error answers
@@ -5146,6 +5308,129 @@ response body. The question was shared with chapter 36 D36.3. The maintainer
 decided that such an error carries the daemon's error code and message and
 the body's size only, as R38.6.9b item 4 now states. Chapter 20 R-N3 states
 the same for the Sia wallet daemon.
+
+### 38.6.10 Dash-layout special transactions
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.03 (attestation in §38.9).**
+> This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-12)
+> under the two-team procedure of chapter 01 §1.4A, from the reference lineage
+> at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of 2026-10-07)` and
+> `add-krgn-chain-variant (as of 2026-04-18)` of chapter 02 §2.15A (read
+> read-only), the published Dash special-transaction format (R3: DIP-2) and
+> the Kerrigan source (R3, MIT, main branch as of 2026-10-19), the public coins
+> file, and this repository's own tree. It edits no sentence of this chapter.
+> Numbering: R38.6.10.1 -- R38.6.10.6 and T38.6.10.1 -- T38.6.10.4.
+
+*Public format (R3).* A Dash-layout transaction starts with a 32-bit word whose
+low 16 bits are the version and whose high 16 bits are the type. Inputs,
+outputs and the lock-time follow as in Bitcoin. When the version is 3 or higher
+and the type is not 0, a compact-size-prefixed extra payload follows the
+lock-time. The transaction identifier is the double-SHA256 of the whole
+serialization, payload included. Dash's types are 1 to 4 (masternode provider
+transactions), 5 (the coinbase special transaction carried by every block),
+6 (quorum commitment, no inputs and no outputs), 7 (hard-fork signal),
+8 (asset lock) and 9 (asset unlock, no inputs). Kerrigan uses the same layout
+and the same types and adds type 10, a Sapling transaction whose shielded part
+travels in the payload, and type 11; its ordinary transactions are version 2.
+Dash has no witness serialization.
+
+**R38.6.10.1** *Reference states.* The rows `v2.6.0-beta`, `v3.0.0-beta`,
+`main (as of 2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)` agree
+on every point of R38.6.10.2 -- R38.6.10.4.
+
+**R38.6.10.2** *How the reference reads such a transaction.* No coin-entry key
+is involved (chapter 45 §45.3A): the same reading applies to every UTXO coin,
+and DASH, whose entry carries no format key at all, is read by it like any
+other. When the low 16 bits of the leading word are 3, whatever the high 16
+bits hold, the reference reads a compact-size-prefixed payload after the
+lock-time (after the Zcash-family body, for an overwintered transaction)
+whenever bytes remain. It keeps the payload as opaque bytes and keeps the whole
+32-bit word as the version. It does not look at the type, and it reads no
+payload for any other version. When it writes the transaction again, as it
+does to compute the identifier, it writes the word unchanged and then the
+payload with its length prefix, so the identifier of a special transaction with
+inputs is the chain's transaction id. A payload of length zero, which the Dash
+rules do not produce for a special type, is read but not written back.
+
+**R38.6.10.3** *Special transactions with no inputs.* The reference takes an
+empty input list at the start of a non-overwintered transaction as the marker
+of a witness serialization. A quorum commitment or an asset unlock is read
+correctly by its Zcash-family reading, which does not do that. Whether one of
+its other readings accepts such a transaction first, in a wrong shape, depends
+on the bytes: the case at risk is an asset unlock with exactly one output,
+because the output count then equals the witness flag. This pass did not
+establish the outcome on real transactions. A Kerrigan Sapling transaction
+with no transparent inputs falls under the same case.
+
+**R38.6.10.4** *History, balances and swaps under the reference.*
+
+- *History.* A special transaction that is read correctly gives an ordinary row
+  with the chain's identifier. Its amounts and fee come from the transparent
+  inputs and outputs only, because the payload is never interpreted, so value
+  that a Kerrigan Sapling payload moves into or out of the shielded pool is
+  not shown as such. A transaction that cannot be read is skipped with a log
+  line by the legacy history loop and tried again on a later pass. The
+  version-two history instead enters its error cooldown and tries the same
+  transaction again, so it does not advance past that transaction.
+- *Balances and spendable outputs.* These come from the backend's balance and
+  unspent-output answers. No transaction is read to form them, and an output of
+  a special transaction (a coinbase payout, for instance) is spent through the
+  identifier the backend reports. Special transactions do not affect them.
+- *Swaps.* Every transaction the reference builds, payments included, uses the
+  entry's `txversion` (1 when absent, as for DASH and the proposed Kerrigan
+  entry) with type 0, so it is never a special transaction. Validating a
+  counterparty's payment reads it with the same reader and checks its outputs;
+  nothing in validation looks at the type or a payload. In a swap between two
+  reference nodes, no swap transaction is special.
+
+**R38.6.10.5** *Requirement.* The project shall read and write a transaction
+whose leading word has its top bit clear, a version (low 16 bits) of 3 or
+higher and a type (high 16 bits) other than 0 by the public format: it reads the
+compact-size-prefixed payload after the lock-time, keeps it, and writes it back
+with its length prefix, so the identifier it computes is the chain's
+transaction id. For such a transaction, an empty input list is not a witness
+marker. A type-0 transaction and every transaction with the top bit set keep
+their present reading. On every transaction the Dash and Kerrigan chains carry,
+this matches R38.6.10.2. It differs only where the reference's outcome is not
+established (R38.6.10.3) and for a zero-length payload, which the chains do not
+produce. The payload is not interpreted.
+
+> **Code-quality finding (informative; this repository's own code).** This
+> repository's transaction reader has no payload step, and it accepts a reading
+> that stops before the end of the bytes. A special transaction with inputs is
+> therefore read as if it had no payload: the trailing bytes are ignored, and
+> the identifier computed from the re-written bytes is not the chain's
+> transaction id. The UTXO history uses that computed identifier as the row's
+> transaction hash and internal id. A DASH wallet that receives a coinbase
+> payout or takes part in a masternode provider transaction, or a Kerrigan
+> wallet that shields or unshields, would get a history row whose identifier
+> the chain does not know. R38.6.10.5 is the fix. Whether the reader should
+> also refuse bytes left over after a complete reading is a wider question,
+> left to the orchestrator.
+
+**R38.6.10.6** *Kerrigan headers are not this section's subject.* How the
+reference reads Kerrigan's headers, the median-time-past and the HTLC
+lock-times is recorded in chapter 37 §37.5.11.
+
+**T38.6.10.1** *Real-chain vectors.* Pinned from the public chains: a DASH
+coinbase special transaction (type 5), a DASH provider registration (type 1), a
+DASH asset unlock (type 9, no inputs, one output), a DASH version-3 type-0
+transaction, and a Kerrigan Sapling transaction (type 10). Each one is read,
+written back byte-exact, and its computed identifier equals the chain's
+transaction id.
+
+**T38.6.10.2** *Unchanged readings.* An overwintered version-3 transaction (the
+low 16 bits of its leading word are also 3) and a segwit transaction keep their
+present results.
+
+**T38.6.10.3** *History identifier.* A history row built from a special
+transaction carries the chain's transaction id as its hash and internal id.
+
+**T38.6.10.4** *Truncated payload.* A special transaction whose payload length
+prefix is longer than the remaining bytes is refused as malformed; it is not
+read as a transaction without a payload.
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
@@ -5980,3 +6265,36 @@ R38.8.6 **Tests (two-direction, observable).**
   never read the forbidden corpus. The input is this repository's code and its
   tests. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Measured note, second part (2026-11-17), clean side -- before "Not
+  established" in §38.6.4Q: this repository's behavior for rows T38.6.4Q.1
+  and T38.6.4Q.7 to T38.6.4Q.11, from offline tests against the stub Electrum
+  server.* Written by a session that never read the forbidden corpus. The input
+  is this repository's code and its tests. It takes no forbidden-class input,
+  so chapter 01 R38 is not engaged and no gate pass is required.
+- *Maintainer decisions (2026-11-16), clean side -- status notes after D38.5C.1
+  and D38.5C.2: removal of unlisted rows after two listings, and changed
+  heights taken over.* Written by a session that never read the forbidden
+  corpus, from the maintainer's decisions and this repository's code. It takes
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.
+- *Reloaded-original amendment (2026-11-18), clean side -- after the status
+  note on D38.5C.2: how the client sees that its chain changed (a view of base
+  headers, one directed header request per new tip, a chain-changed event to
+  the history collectors, one WARN line).* Written by a session that never
+  read the forbidden corpus, from the maintainer's decision of 2026-11-16 and
+  this repository's code. It takes no forbidden-class input, so chapter 01 R38
+  is not engaged and no gate pass is required.
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-12) -- §38.6.10 (R38.6.10.1 -- R38.6.10.6, the code-quality finding and
+  T38.6.10.1 -- T38.6.10.4) and the status note at the head of this
+  chapter; cleared together with chapter 37 §37.5.11. No other text of this
+  chapter was changed.*
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.03, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* as the clearance
+  block of the section states them.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.03, no leak findings. *Extent:* the UTXO header reads for every family,
+  the transaction reader and writer including the special-transaction
+  payload, the choice of lock-time and sequence for claims and refunds, the
+  median-time query, refund readiness and the errors of the version-two
+  history, at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of
+  2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)`.

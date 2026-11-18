@@ -66,13 +66,25 @@ pub fn sign_tx(
 /// `p2pk_outpoints` set is empty this behaves exactly like [`sign_tx`], keeping the existing
 /// callers unaffected.
 pub fn sign_tx_with_p2pk(
-    unsigned: TransactionInputSigner,
+    mut unsigned: TransactionInputSigner,
     key_pair: &KeyPair,
     prev_script: Script,
     signature_version: SignatureVersion,
     fork_id: u32,
     p2pk_outpoints: &HashSet<OutPoint>,
 ) -> UtxoSignWithKeyPairResult<UtxoTx> {
+    if unsigned.overwintered && unsigned.version == 5 {
+        // The ZIP 244 digest commits to the scriptPubKey of every spent output: a P2PK input spends the
+        // `<pubkey> OP_CHECKSIG` output of the key, every other input the output `prev_script` describes
+        // (the signing functions below require the key to match it), unless the builder recorded it already.
+        for input in unsigned.inputs.iter_mut() {
+            if p2pk_outpoints.contains(&input.previous_output) {
+                input.script_pubkey = Some(Builder::build_p2pk(key_pair.public()));
+            } else if input.script_pubkey.is_none() {
+                input.script_pubkey = Some(prev_script.clone());
+            }
+        }
+    }
     let mut signed_inputs = vec![];
     for (i, input) in unsigned.inputs.iter().enumerate() {
         if p2pk_outpoints.contains(&input.previous_output) {
