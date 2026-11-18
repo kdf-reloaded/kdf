@@ -781,15 +781,34 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
             if let MmCoinEnum::Qrc20Coin(token) = &removed {
                 token.end_history_collector();
             }
-            // A disabled SPL token leaves the record its platform keeps of its tokens, so that the platform no
-            // longer reports it (CRD ch.40 T40.6B.20). The platform and its other tokens are untouched.
-            #[cfg(not(target_arch = "wasm32"))]
-            if let MmCoinEnum::SplToken(token) = &removed {
-                token.platform_coin.remove_spl_token_info(ticker);
-            }
+            forget_token_records(&coins, &removed, ticker);
             Ok(())
         },
         None => ERR!("{} is disabled already", ticker),
+    }
+}
+
+/// Takes a disabled token out of the record its platform keeps of its tokens, so that the platform no longer
+/// reports it (CRD ch.40 T40.6B.20 for SPL; CRD ch.43 §43.1E for the other families). The platform and its other
+/// tokens are untouched. Calling it again, or when the platform is not registered, changes nothing.
+///
+/// `registry` is the registry after the token was removed. Only the EVM and TRON families look the platform up
+/// there, because their token holds just the platform ticker; the other families hold the platform itself.
+pub(crate) fn forget_token_records(registry: &CoinRegistry, removed: &MmCoinEnum, ticker: &str) {
+    match removed {
+        MmCoinEnum::EthCoin(token) => {
+            use crate::eth::EthCoinType;
+            if let EthCoinType::Erc20 { platform, .. } | EthCoinType::Trc20 { platform, .. } = &token.coin_type {
+                if let Some(MmCoinEnum::EthCoin(platform_coin)) = registry.get(platform) {
+                    platform_coin.remove_erc20_token_info(ticker);
+                }
+            }
+        },
+        MmCoinEnum::SlpToken(token) => token.platform_coin().remove_slp_token_info(ticker),
+        MmCoinEnum::TendermintToken(token) => token.platform_coin.remove_activated_token_info(ticker),
+        #[cfg(not(target_arch = "wasm32"))]
+        MmCoinEnum::SplToken(token) => token.platform_coin.remove_spl_token_info(ticker),
+        _ => (),
     }
 }
 /// The request of `set_required_confirmations` (legacy members, unchanged).

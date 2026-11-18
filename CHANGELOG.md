@@ -257,6 +257,11 @@ the previous version used. The safe way:
   or `HardwareWalletInternal`; a device condition answers `HwError` (410) with the same words as above, and a
   device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
   answer `Internal` (500). Detail: PR #386; CRD ch.05 §5.9B R35c.
+- **A disabled token no longer stays in its platform's token list.** After `disable_coin` of an ERC-20 or TRC20,
+  SLP or Tendermint token, its platform no longer reports or serves that token, as was already the case for SPL
+  tokens. A single SPL token enabled with `enable_spl` is now listed by its platform, as a token enabled together
+  with the platform already was. Disabling a platform that still has active tokens works as before: the platform
+  is removed and its tokens stay. Detail: PR #418; CRD ch.43 R43.1E.5 status note of 2026-11-18.
 
 #### Shielded coins
 

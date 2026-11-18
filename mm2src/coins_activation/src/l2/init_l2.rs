@@ -129,6 +129,7 @@ where
             )));
         }
 
+        let platform_ticker = self.protocol_conf.platform_coin_ticker().to_owned();
         let (coin, result) = L2::init_l2(
             &self.ctx,
             self.platform_coin,
@@ -142,7 +143,7 @@ where
         let c_ctx = CoinsContext::from_ctx(&self.ctx)
             .map_to_mm(RegisterCoinError::Internal)
             .map_mm_err()?;
-        c_ctx.add_coin(coin.into()).await.map_err(|e| {
+        c_ctx.add_token(&platform_ticker, coin.into()).await.map_err(|e| {
             let reg_err = RegisterCoinError::CoinIsInitializedAlready {
                 coin: e.into_inner().ticker,
             };

@@ -140,3 +140,23 @@ fn t40_6b_20_disable_a_coin_that_is_not_active_is_an_error_and_changes_nothing()
     assert!(block_on(crate::disable_coin(&ctx, "SOL")).is_ok());
     assert!(block_on(crate::disable_coin(&ctx, "SOL")).is_err(), "disabled already");
 }
+
+/// A token registered through `add_token` joins the platform's dependent set, and `disable_coin` takes it out of the
+/// set and of the platform's records (CRD ch.43 R43.1E.5 items 1-2).
+#[test]
+fn t40_6b_20_a_token_joins_the_dependent_set_and_leaves_it_on_disable() {
+    let (ctx, sol, token) = sol_and_token();
+    register(&ctx, sol.clone().into()).unwrap();
+    let coins_ctx = crate::CoinsContext::from_ctx(&ctx).unwrap();
+    block_on(coins_ctx.add_token("SOL", token.clone().into())).unwrap();
+    sol.add_spl_token_info(token.ticker().to_owned(), token.get_info());
+    assert_eq!(
+        block_on(coins_ctx.dependents_of("SOL")).into_iter().collect::<Vec<_>>(),
+        vec!["USDC".to_owned()]
+    );
+
+    block_on(crate::disable_coin(&ctx, "USDC")).unwrap();
+
+    assert!(block_on(coins_ctx.dependents_of("SOL")).is_empty());
+    assert!(sol.get_spl_tokens_infos().is_empty());
+}

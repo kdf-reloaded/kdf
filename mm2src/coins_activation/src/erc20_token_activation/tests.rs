@@ -1120,3 +1120,66 @@ fn the_token_task_error_set_serializes_as_bound() {
         assert_error(&wire, error_type, error_data, status);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The dependent set and the unregister hook of `disable_coin` (CRD ch.43 R43.1E.5 items 1-2)
+// ---------------------------------------------------------------------------
+
+fn dependents(ctx: &MmArc) -> Vec<String> {
+    let coins_ctx = coins::CoinsContext::from_ctx(ctx).unwrap();
+    block_on(coins_ctx.dependents_of(PLATFORM)).into_iter().collect()
+}
+
+#[test]
+fn enable_erc20_joins_the_dependent_set_and_disable_coin_leaves_it_with_the_platform_record() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_platform(iguana_ctx(), &node);
+    assert!(dependents(&ctx).is_empty());
+
+    enable(&ctx, erc20("USDT-ERC20")).unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+    assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+    assert!(platform_coin(&ctx).get_erc20_tokens_infos().contains_key("USDT-ERC20"));
+
+    block_on(coins::disable_coin(&ctx, "USDT-ERC20")).expect("the token is disabled");
+    assert!(dependents(&ctx).is_empty(), "the token left the dependent set");
+    assert!(
+        platform_coin(&ctx).get_erc20_tokens_infos().is_empty(),
+        "the platform no longer records the token"
+    );
+    assert!(
+        block_on(coins::disable_coin(&ctx, "USDT-ERC20")).is_err(),
+        "disabled already"
+    );
+    assert!(platform_coin(&ctx).get_erc20_tokens_infos().is_empty());
+}
+
+#[test]
+fn the_token_task_joins_the_dependent_set_and_disable_coin_leaves_it() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_platform(iguana_ctx(), &node);
+    let status = run_task(&ctx, json!({ "ticker": "USDT-ERC20", "activation_params": {} }));
+    assert_eq!(status["status"], "Ok", "{}", status);
+    assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+
+    block_on(coins::disable_coin(&ctx, "USDT-ERC20")).expect("the token is disabled");
+    assert!(dependents(&ctx).is_empty());
+    assert!(platform_coin(&ctx).get_erc20_tokens_infos().is_empty());
+}
+
+#[test]
+fn disabling_a_platform_drops_its_dependent_set_and_its_tokens_stay_registered() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_platform(iguana_ctx(), &node);
+    enable(&ctx, erc20("USDT-ERC20")).unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+
+    block_on(coins::disable_coin(&ctx, PLATFORM)).expect("the platform is disabled");
+
+    assert!(dependents(&ctx).is_empty(), "the platform's entry is gone");
+    assert!(block_on(coins::lp_coinfind(&ctx, PLATFORM)).unwrap().is_none());
+    assert!(
+        block_on(coins::lp_coinfind(&ctx, "USDT-ERC20")).unwrap().is_some(),
+        "the token stays registered, as before"
+    );
+    // The platform is not registered: disabling the token has no platform record to change and still succeeds.
+    block_on(coins::disable_coin(&ctx, "USDT-ERC20")).expect("the remaining token is disabled");
+}
