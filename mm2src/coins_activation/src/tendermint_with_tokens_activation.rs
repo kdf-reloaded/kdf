@@ -11,8 +11,9 @@
 //! ("Iguana") path, where the generic activator passes a secp256k1 private
 //! key, and the HD path, where the key is derived from the seed at the coin's
 //! `derivation_path` and `path_to_address` (R36.1.2), and the public-key form of `activation_params` (R36.1.3
-//! form 1), which activates a watch-only coin (R36.14.16 -- R36.14.18). The WalletConnect forms (R36.1.3 forms 2
-//! and 3) are parsed and refused until their activation is built.
+//! form 1), which activates a watch-only coin (R36.14.16 -- R36.14.18), and the WalletConnect forms of
+//! `activation_params` (R36.1.3 forms 2 and 3), which activate a coin the paired wallet signs for (R36.14.13 --
+//! R36.14.15).
 
 use crate::platform_coin_with_tokens::*;
 use crate::prelude::*;
@@ -23,7 +24,8 @@ use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::rpc_command::get_my_address::PathToAddress;
 use coins::tendermint::{tendermint_coin_from_conf_and_request, tendermint_coin_from_conf_and_request_with_global_hd,
-                        tendermint_coin_from_conf_and_request_with_public_key, RpcNode, TendermintCoin,
+                        tendermint_coin_from_conf_and_request_with_public_key,
+                        tendermint_coin_from_conf_and_request_with_wallet_connect, RpcNode, TendermintCoin,
                         TendermintInitError, TendermintInitErrorKind, TendermintPublicKey, TendermintToken,
                         TendermintTokenInitError};
 use coins::{CoinBalance, MarketCoinOps, MmCoinEnum, PrivKeyActivationPolicy};
@@ -48,7 +50,7 @@ fn default_get_balances() -> bool { true }
 /// `enable_tendermint_with_assets` request parameters (R36.1.2). `path_to_address` selects the activated
 /// address under an HD login and has no effect under an iguana login. `activation_params` (R36.1.3) is parsed at
 /// request level, so a malformed one is a request-parse failure; the public-key form activates a watch-only coin
-/// and the WalletConnect forms are refused, see [`reject_unsupported_activation_params`].
+/// and the WalletConnect forms a coin the paired wallet signs for.
 ///
 /// The public docs list `required_confirmations` (default 3), `requires_notarization` and `priv_key_policy` for
 /// this method. The reference ignores all three for Tendermint, since the docs do not state an observable effect.
@@ -84,8 +86,8 @@ enum ActivationParamsForm {
         public_key: TendermintPublicKey,
         is_ledger_connection: bool,
     },
-    /// Forms 2 and 3: a WalletConnect session. Parsed, and refused until that activation is built.
-    WalletConnect,
+    /// Forms 2 and 3: a WalletConnect session topic. Form 3 is treated exactly as form 2 (CRD ch.36 R36.1.3).
+    WalletConnect { session_topic: String },
 }
 
 /// The `pubkey` object of form 1: `{"type": "secp256k1" | "ed25519", "value": [<integer 0..255>, ...]}`.
@@ -106,7 +108,6 @@ struct WithPubkeyParams {
 
 #[derive(Deserialize)]
 struct WalletConnectParams {
-    #[allow(dead_code)]
     session_topic: String,
 }
 
@@ -118,14 +119,14 @@ fn parse_activation_params(value: &Json) -> Result<ActivationParamsForm, String>
         .ok_or_else(|| "`activation_params` must be an object".to_owned())?;
     // Form 3, the shape of the public docs' example.
     if let Some(policy) = object.get("priv_key_policy") {
-        let is_wallet_connect = policy["type"] == "WalletConnect" && policy["data"].is_string();
-        return if is_wallet_connect {
-            Ok(ActivationParamsForm::WalletConnect)
-        } else {
-            Err(
+        return match (policy["type"].as_str(), policy["data"].as_str()) {
+            (Some("WalletConnect"), Some(session_topic)) => Ok(ActivationParamsForm::WalletConnect {
+                session_topic: session_topic.to_owned(),
+            }),
+            _ => Err(
                 "`activation_params.priv_key_policy` must be {\"type\": \"WalletConnect\", \"data\": <topic>}"
                     .to_owned(),
-            )
+            ),
         };
     }
     let params = object
@@ -146,9 +147,11 @@ fn parse_activation_params(value: &Json) -> Result<ActivationParamsForm, String>
             })
         },
         Some("WalletConnect") => {
-            serde_json::from_value::<WalletConnectParams>(params.clone())
-                .map_err(|e| format!("Invalid `WalletConnect` params: {e}"))?;
-            Ok(ActivationParamsForm::WalletConnect)
+            let params: WalletConnectParams =
+                serde_json::from_value(params.clone()).map_err(|e| format!("Invalid `WalletConnect` params: {e}"))?;
+            Ok(ActivationParamsForm::WalletConnect {
+                session_topic: params.session_topic,
+            })
         },
         _ => Err("`activation_params.type` must be `WithPubkey` or `WalletConnect`".to_owned()),
     }
@@ -183,28 +186,6 @@ fn reject_hardware_policy(
             },
         }),
         _ => Ok(()),
-    }
-}
-
-/// Rejects a request that asks for a signing policy this build does not provide (CRD ch.36 §36.7, interim
-/// divergence, narrowed 2026-11-16).
-///
-/// The public-key form (R36.1.3 form 1) is built and passes. The WalletConnect forms (R36.1.3 forms 2 and 3) are
-/// not built yet and are refused instead of activating with the local context key, so that a caller who asked for
-/// a device-backed activation never gets a hot-key one. The discriminant is the one the reference uses for an
-/// unsupported signing context. Remove when the WalletConnect activation is built.
-fn reject_unsupported_activation_params(
-    ticker: &str,
-    activation_params: &Option<ActivationParamsForm>,
-) -> Result<(), MmError<TendermintActivationError>> {
-    match activation_params {
-        Some(ActivationParamsForm::WalletConnect) => {
-            MmError::err(TendermintActivationError::PlatformCoinCreationError {
-                ticker: ticker.to_owned(),
-                error: "The `activation_params` signing policies are not supported yet".to_owned(),
-            })
-        },
-        Some(ActivationParamsForm::PublicKey { .. }) | None => Ok(()),
     }
 }
 
@@ -431,7 +412,6 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         priv_key: &[u8],
     ) -> Result<Self, MmError<Self::ActivationError>> {
         reject_hardware_policy(&ticker, &activation_request.priv_key_policy).mm_err(TendermintActivationError::from)?;
-        reject_unsupported_activation_params(&ticker, &activation_request.activation_params)?;
 
         // A public key activates a watch-only coin: nothing is derived from the login, and no node is contacted
         // here (CRD ch.36 R36.14.16).
@@ -447,6 +427,21 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
                 activation_request.nodes,
                 *public_key,
                 *is_ledger_connection,
+                activation_request.get_balances,
+            )
+            .await
+            .mm_err(TendermintActivationError::from);
+        }
+
+        // A WalletConnect session: the account, its key and the Ledger flag are read from the session, the node's
+        // own login plays no part (CRD ch.36 R36.1.3 forms 2 and 3, R36.14.13, R36.14.14).
+        if let Some(ActivationParamsForm::WalletConnect { session_topic }) = &activation_request.activation_params {
+            return tendermint_coin_from_conf_and_request_with_wallet_connect(
+                &ctx,
+                ticker,
+                &platform_conf,
+                activation_request.nodes,
+                session_topic,
                 activation_request.get_balances,
             )
             .await

@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 /// The single table / object-store name shared by both backends.
 pub const WC_SESSION_TABLE: &str = "wc_session";
 
+/// The table / object-store name of the single relay client key record.
+pub const WC_CLIENT_KEY_TABLE: &str = "wc_client_key";
+
 /// One persisted session row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredSession {
@@ -43,4 +46,10 @@ pub trait WcStorageOps: Send + Sync {
 
     /// Deletes the session with the given topic.
     async fn delete_session(&self, topic: &str) -> Result<(), WalletConnectError>;
+
+    /// Fetches the stored relay client key (hex of the 32-byte ed25519 seed), if any. The value is secret.
+    async fn load_client_key(&self) -> Result<Option<String>, WalletConnectError>;
+
+    /// Stores the relay client key, replacing any earlier one. The value is secret.
+    async fn save_client_key(&self, key: String) -> Result<(), WalletConnectError>;
 }
