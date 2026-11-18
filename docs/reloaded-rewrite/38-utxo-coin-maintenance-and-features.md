@@ -13,6 +13,15 @@ extensions). Mixed treatment -- see §38.0.
 > event streaming, the fixed-fee policy with its fee-derived minimum trading
 > volume, and FIRO Spark verbose tx).
 
+> **Status note (2026-11-18; Spec Reader round 0.5.0-12; pending the KDF
+> Dirty Gate).** §38.6.10 is new. It records how the reference reads
+> Dash-layout special transactions (a 16-bit type beside a 16-bit version
+> and an extra payload after the lock-time) for every UTXO coin, DASH and
+> Kerrigan included, what that means for history, balances and swaps, and a
+> gap in this repository's reader. No sentence above or below it is changed.
+> Until the gate clears it, §38.6.10 MUST NOT be relied on or implemented from
+> (chapter 01 R40). *(pending gate)*
+
 ## 38.0 Treatment & scope split
 
 This chapter is a brand-new chapter spanning a broad UTXO feature surface.
@@ -5191,6 +5200,133 @@ response body. The question was shared with chapter 36 D36.3. The maintainer
 decided that such an error carries the daemon's error code and message and
 the body's size only, as R38.6.9b item 4 now states. Chapter 20 R-N3 states
 the same for the Sia wallet daemon.
+
+### 38.6.10 Dash-layout special transactions (Spec Reader round 0.5.0-12; pending the KDF Dirty Gate)
+
+> **Provenance status: pending the KDF Dirty Gate.** This section is a
+> candidate under chapter 01 R40: until the gate clears it and this marker is
+> replaced by the clearance record, it MUST NOT be relied on as a statement of
+> required behavior and MUST NOT be implemented from. It was written by the
+> dirty-side specification author on 2026-11-18 (Spec Reader round 0.5.0-12)
+> under the two-team procedure of chapter 01 §1.4A, from the reference lineage
+> at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of 2026-10-07)` and
+> `add-krgn-chain-variant (as of 2026-04-18)` of chapter 02 §2.15A (read
+> read-only), the published Dash special-transaction format (R3: DIP-2) and
+> the Kerrigan source (R3, MIT, main branch as of 2026-10-19), the public coins
+> file, and this repository's own tree. It edits no sentence of this chapter.
+> Numbering: R38.6.10.1 -- R38.6.10.6 and T38.6.10.1 -- T38.6.10.4. Every
+> passage below is marked *(pending gate)* until cleared.
+
+*Public format (R3).* A Dash-layout transaction starts with a 32-bit word whose
+low 16 bits are the version and whose high 16 bits are the type. Inputs,
+outputs and the lock-time follow as in Bitcoin. When the version is 3 or higher
+and the type is not 0, a compact-size-prefixed extra payload follows the
+lock-time. The transaction identifier is the double-SHA256 of the whole
+serialization, payload included. Dash's types are 1 to 4 (masternode provider
+transactions), 5 (the coinbase special transaction carried by every block),
+6 (quorum commitment, no inputs and no outputs), 7 (hard-fork signal),
+8 (asset lock) and 9 (asset unlock, no inputs). Kerrigan uses the same layout
+and the same types and adds type 10, a Sapling transaction whose shielded part
+travels in the payload, and type 11; its ordinary transactions are version 2.
+Dash has no witness serialization. *(pending gate)*
+
+**R38.6.10.1** *Reference states.* The rows `v2.6.0-beta`, `v3.0.0-beta`,
+`main (as of 2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)` agree
+on every point of R38.6.10.2 -- R38.6.10.4. *(pending gate)*
+
+**R38.6.10.2** *How the reference reads such a transaction.* No coin-entry key
+is involved (chapter 45 §45.3A): the same reading applies to every UTXO coin,
+and DASH, whose entry carries no format key at all, is read by it like any
+other. When the low 16 bits of the leading word are 3, whatever the high 16
+bits hold, the reference reads a compact-size-prefixed payload after the
+lock-time (after the Zcash-family body, for an overwintered transaction)
+whenever bytes remain. It keeps the payload as opaque bytes and keeps the whole
+32-bit word as the version. It does not look at the type, and it reads no
+payload for any other version. When it writes the transaction again, as it
+does to compute the identifier, it writes the word unchanged and then the
+payload with its length prefix, so the identifier of a special transaction with
+inputs is the chain's transaction id. A payload of length zero, which the Dash
+rules do not produce for a special type, is read but not written back.
+*(pending gate)*
+
+**R38.6.10.3** *Special transactions with no inputs.* The reference takes an
+empty input list at the start of a non-overwintered transaction as the marker
+of a witness serialization. A quorum commitment or an asset unlock is read
+correctly by its Zcash-family reading, which does not do that. Whether one of
+its other readings accepts such a transaction first, in a wrong shape, depends
+on the bytes: the case at risk is an asset unlock with exactly one output,
+because the output count then equals the witness flag. This pass did not
+establish the outcome on real transactions. A Kerrigan Sapling transaction
+with no transparent inputs falls under the same case. *(pending gate)*
+
+**R38.6.10.4** *History, balances and swaps under the reference.*
+
+- *History.* A special transaction that is read correctly gives an ordinary row
+  with the chain's identifier. Its amounts and fee come from the transparent
+  inputs and outputs only, because the payload is never interpreted, so value
+  that a Kerrigan Sapling payload moves into or out of the shielded pool is
+  not shown as such. A transaction that cannot be read is skipped with a log
+  line by the legacy history loop and tried again on a later pass. The
+  version-two history instead enters its error cooldown and tries the same
+  transaction again, so it does not advance past that transaction.
+- *Balances and spendable outputs.* These come from the backend's balance and
+  unspent-output answers. No transaction is read to form them, and an output of
+  a special transaction (a coinbase payout, for instance) is spent through the
+  identifier the backend reports. Special transactions do not affect them.
+- *Swaps.* Every transaction the reference builds, payments included, uses the
+  entry's `txversion` (1 when absent, as for DASH and the proposed Kerrigan
+  entry) with type 0, so it is never a special transaction. Validating a
+  counterparty's payment reads it with the same reader and checks its outputs;
+  nothing in validation looks at the type or a payload. In a swap between two
+  reference nodes, no swap transaction is special. *(pending gate)*
+
+**R38.6.10.5** *Requirement.* The project shall read and write a transaction
+whose leading word has its top bit clear, a version (low 16 bits) of 3 or
+higher and a type (high 16 bits) other than 0 by the public format: it reads the
+compact-size-prefixed payload after the lock-time, keeps it, and writes it back
+with its length prefix, so the identifier it computes is the chain's
+transaction id. For such a transaction, an empty input list is not a witness
+marker. A type-0 transaction and every transaction with the top bit set keep
+their present reading. On every transaction the Dash and Kerrigan chains carry,
+this matches R38.6.10.2. It differs only where the reference's outcome is not
+established (R38.6.10.3) and for a zero-length payload, which the chains do not
+produce. The payload is not interpreted. *(pending gate)*
+
+> **Code-quality finding (informative; this repository's own code).** This
+> repository's transaction reader has no payload step, and it accepts a reading
+> that stops before the end of the bytes. A special transaction with inputs is
+> therefore read as if it had no payload: the trailing bytes are ignored, and
+> the identifier computed from the re-written bytes is not the chain's
+> transaction id. The UTXO history uses that computed identifier as the row's
+> transaction hash and internal id. A DASH wallet that receives a coinbase
+> payout or takes part in a masternode provider transaction, or a Kerrigan
+> wallet that shields or unshields, would get a history row whose identifier
+> the chain does not know. R38.6.10.5 is the fix. Whether the reader should
+> also refuse bytes left over after a complete reading is a wider question,
+> left to the orchestrator. *(pending gate)*
+
+**R38.6.10.6** *Kerrigan headers are not this section's subject.* How the
+reference reads Kerrigan's headers, the median-time-past and the HTLC
+lock-times is recorded in chapter 37 §37.5.11. *(pending gate)*
+
+**T38.6.10.1** *Real-chain vectors.* Pinned from the public chains: a DASH
+coinbase special transaction (type 5), a DASH provider registration (type 1), a
+DASH asset unlock (type 9, no inputs, one output), a DASH version-3 type-0
+transaction, and a Kerrigan Sapling transaction (type 10). Each one is read,
+written back byte-exact, and its computed identifier equals the chain's
+transaction id. *(pending gate)*
+
+**T38.6.10.2** *Unchanged readings.* An overwintered version-3 transaction (the
+low 16 bits of its leading word are also 3) and a segwit transaction keep their
+present results. *(pending gate)*
+
+**T38.6.10.3** *History identifier.* A history row built from a special
+transaction carries the chain's transaction id as its hash and internal id.
+*(pending gate)*
+
+**T38.6.10.4** *Truncated payload.* A special transaction whose payload length
+prefix is longer than the remaining bytes is refused as malformed; it is not
+read as a transaction without a payload. *(pending gate)*
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 

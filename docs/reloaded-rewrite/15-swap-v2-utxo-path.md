@@ -288,6 +288,15 @@ secret-reveal branch carries only one signature requirement (the
 taker's), because the cooperative two-signature shape is the
 timelock-refund alternative for the maker.
 
+> **Pointer (2026-11-18; Spec Reader round 0.5.0-12; pending the KDF Dirty
+> Gate).** The zero time-lock of R14 and R15 is the HTLC lock-time
+> argument that the spend builder receives. The lock-time the transaction
+> carries is formed from it and from the coin's median-time-past, and
+> chapter 37 §37.5.11 (R37.5.11.6 and the reference comparison under
+> R37.5.11.9) records how, together with the reference's choice of argument
+> for the same spends. A failed median query aborts these spends before
+> signing. R14 and R15 are unchanged. *(pending gate)*
+
 ## 15.6 Bound `TakerCoinSwapOpsV2` Methods
 
 The fourteen asynchronous methods plus one synchronous-flag
