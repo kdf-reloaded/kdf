@@ -25,6 +25,7 @@ mod utxo_activation;
 mod z_coin_activation;
 
 pub use erc20_token_activation::enable_evm_token;
+pub use eth_with_tokens_activation::evm_swap_contract_members_strict;
 pub use init_platform_coin_with_tokens::{cancel_init_platform_coin_with_tokens, init_platform_coin_with_tokens,
                                          init_platform_coin_with_tokens_status,
                                          init_platform_coin_with_tokens_user_action};

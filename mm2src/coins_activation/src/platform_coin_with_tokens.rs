@@ -214,6 +214,10 @@ pub trait PlatformWithTokensActivationOps: Into<MmCoinEnum> {
         Ok(())
     }
 
+    /// Whether the platform has a transaction-history process to start for a request that asks for one. A
+    /// platform without one ignores `tx_history` (CRD ch.21 R21.10B.2 for TRON).
+    fn history_supported(&self) -> bool { true }
+
     /// Completes the registration of what the activation set up beside the coins, once the platform and its
     /// tokens are registered.
     fn on_platform_registered(_ctx: &MmArc, _ticker: &str, _activation_request: &Self::ActivationRequest) {}
@@ -510,7 +514,7 @@ where
     log::info!("{} current block {}", ticker, activation_result.current_block());
 
     #[cfg(not(target_arch = "wasm32"))]
-    if request.tx_history() {
+    if request.tx_history() && platform_coin.history_supported() {
         let abort_handler = platform_coin.start_history_background_fetching(
             ctx.clone(),
             ctx.metrics.clone(),

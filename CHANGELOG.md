@@ -128,6 +128,20 @@ the previous version used. The safe way:
   only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
   hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
   so none of this can be used yet. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
+- **TRON has an activation route on the standard platform-with-tokens methods.** `enable_eth_with_tokens`,
+  `task::enable_eth::init` and its status, user-action and cancel calls accept a TRX platform with its TRC20
+  tokens, and `enable_erc20` and `task::enable_erc20::init` accept a TRC20 token, the way GLEEC KDF serves TRON.
+  The node list is read from `nodes` (a `url`, an optional `komodo_proxy` that is read but does not sign
+  requests, and an optional `headers` object); an empty list is refused with `AtLeastOneNodeRequired` and an
+  unparsable URL or a scheme other than `http` and `https` with `InvalidPayload`, before any node is asked.
+  The result lists the balances at the base58check address, with the head block from the TRON node. A TRC20 token
+  whose config has no `decimals` reads them from the contract, on both routes. The Trezor, WalletConnect and MetaMask
+  policies are refused at activation, and so is a global-HD login for now, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key (the other HD forms wait for TRON HD wallets, in a later change).
+  The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
+  TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
+  `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
+  answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
+  ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
 
 #### Tendermint (Cosmos) coins
 
@@ -478,7 +492,9 @@ the previous version used. The safe way:
   store-served coin family (PR #380).
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
-  headers and an API key; decisions about what lands before TRON is switched back on recorded.
+  headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
+  (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
+  (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser are in progress (PR #397).
 

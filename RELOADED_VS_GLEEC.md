@@ -648,6 +648,18 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   needed because a request without them is served as before. The values are secrets and are never logged or shown.
   Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 
+- **TRON (still switched off) gets the standard platform-with-tokens activation route, and keeps the legacy one.**
+  `enable_eth_with_tokens`, `task::enable_eth::*`, `enable_erc20` and `task::enable_erc20::init` accept a TRX
+  platform and TRC20 tokens, as GLEEC KDF `v3.0.0-beta` serves them; Reloaded also keeps TRX and TRC20 on the legacy
+  `enable` and `electrum` methods, which GLEEC KDF refuses for them, as an extension a GLEEC client never reaches.
+  Where Reloaded differs from that reference, none of it needs a switch, and each is a row of
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md): swap-contract members may also be written as
+  base58check or `41...` hex on a TRON platform (a wider input; an EVM platform keeps `0x` only); the MetaMask
+  policy and `rpc_mode` are refused for TRON at activation (the reference activates an address its withdraw then
+  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key; and a key in the
+  query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
+  CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
@@ -660,7 +672,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   to return in the next beta. No switch exists: the build constants
   `TRON_ACTIVATION_AVAILABLE` and `SOLANA_ACTIVATION_AVAILABLE`
   (`coins/lp_coins_ops.rs`) are `false`. When TRON returns, Reloaded activates
-  TRX and TRC20 on the legacy methods as an extension. GLEEC KDF `v3.0.0-beta`
+  TRX and TRC20 on the legacy methods as an extension, and, since the route of
+  the entry above, on the platform-with-tokens activation too. GLEEC KDF `v3.0.0-beta`
   serves them only through the platform-with-tokens activation,
   `enable_eth_with_tokens` and the `task::enable_eth::*` family, and refuses
   them on the legacy methods, so a client written for GLEEC never sends such a

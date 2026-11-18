@@ -291,6 +291,23 @@ fn the_api_key_is_not_sent_to_a_host_that_is_not_trongrid() {
     assert_eq!(seen(&node, "tron-pro-api-key"), vec![None]);
 }
 
+/// The query string of a node URL (a key in the query) stays at the end of the request URL, after the endpoint path
+/// (CRD ch.21 R-N9).
+#[test]
+fn a_query_string_key_of_a_node_url_stays_at_the_end_of_the_request_url() {
+    let node = StubNode::start(|path, _| {
+        if path == "/x/wallet/getchainparameters?key=1" {
+            Reply::ok(CHAIN_PARAMETERS)
+        } else {
+            Reply::status(404, "{}")
+        }
+    });
+    let nodes = parse_nodes(&json!([format!("{}/x?key=1", node.url())]), None).expect("nodes");
+    let client = TronApiClient::new_with_cutoff_s("TRX", nodes, 5.);
+    chain_parameters(&client).expect("the node answers the request with the query kept");
+    assert_eq!(node.requests()[0].0, "/x/wallet/getchainparameters?key=1");
+}
+
 fn activate(conf: serde_json::Value, urls: serde_json::Value) -> Result<(), String> {
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
     let mut key = [0u8; 32];

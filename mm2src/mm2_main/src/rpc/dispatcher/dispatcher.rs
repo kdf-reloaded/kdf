@@ -70,9 +70,9 @@ use coins::{add_delegation, claim_staking_rewards, convert_address_core, convert
             set_requires_notarization_core, sign_message, sign_raw_transaction, validate_address_core,
             validators_info, verify_message, withdraw};
 use coins_activation::{cancel_init_platform_coin_with_tokens, cancel_init_token, enable_evm_token,
-                       init_platform_coin_with_tokens, init_platform_coin_with_tokens_status,
-                       init_platform_coin_with_tokens_user_action, init_token, init_token_status,
-                       init_token_user_action};
+                       evm_swap_contract_members_strict, init_platform_coin_with_tokens,
+                       init_platform_coin_with_tokens_status, init_platform_coin_with_tokens_user_action, init_token,
+                       init_token_status, init_token_user_action};
 use coins_activation::{cancel_init_standalone_coin, cancel_l2_activation, enable_l2, enable_platform_coin_with_tokens,
                        enable_tendermint_token, enable_token, init_l2, init_l2_status, init_l2_user_action,
                        init_standalone_coin, init_standalone_coin_status, init_standalone_coin_user_action};
@@ -258,7 +258,10 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "enable_bch_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<BchCoin>).await,
         // `enable_erc20` and its alias `enable_nft` share one single-token handler (CRD ch. 35 R35.2.4).
         "enable_erc20" => handle_mmrpc(ctx, request, enable_evm_token).await,
-        "enable_eth_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<EthCoin>).await,
+        "enable_eth_with_tokens" => {
+            evm_swap_contract_members_strict(&ctx, &request.params)?;
+            handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<EthCoin>).await
+        },
         "enable_nft" => handle_mmrpc(ctx, request, enable_evm_token).await,
         "enable_sia" => handle_mmrpc(ctx, request, init_standalone_coin::<SiaCoin>).await,
         "enable_slp" => handle_mmrpc(ctx, request, enable_token::<SlpToken>).await,
@@ -527,7 +530,10 @@ async fn task_dispatcher(request: MmRpcRequest, ctx: MmArc, task_method: &str) -
         // Mirrors `enable_eth_with_tokens`' params and result; cross-platform
         // (the platform-coin task framework wraps the one-shot activation, which
         // the `rpc_task` `?Send`-on-wasm relaxation makes spawnable on wasm too).
-        "enable_eth::init" => handle_mmrpc(ctx, request, init_platform_coin_with_tokens::<EthCoin>).await,
+        "enable_eth::init" => {
+            evm_swap_contract_members_strict(&ctx, &request.params)?;
+            handle_mmrpc(ctx, request, init_platform_coin_with_tokens::<EthCoin>).await
+        },
         "enable_eth::status" => handle_mmrpc(ctx, request, init_platform_coin_with_tokens_status::<EthCoin>).await,
         "enable_eth::user_action" => {
             handle_mmrpc(ctx, request, init_platform_coin_with_tokens_user_action::<EthCoin>).await
@@ -792,6 +798,26 @@ mod tests {
             ));
             // A string-form policy.
             assert_invalid_request(evm_request_failure(method, with("priv_key_policy", json!("Trezor"))));
+            // A TRON form of a swap contract on a platform that is not a TRON one fails request decoding, as it
+            // always did (the request decoder itself also accepts the TRON forms, for a TRON platform).
+            for form in [
+                "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+                "41a614f803b6fd780986a42c78ec9c7f77e6ded13c",
+            ] {
+                assert_invalid_request(evm_request_failure(method, with("swap_contract_address", json!(form))));
+                assert_invalid_request(evm_request_failure(method, with("fallback_swap_contract", json!(form))));
+                assert_invalid_request(evm_request_failure(
+                    method,
+                    with(
+                        "swap_v2_contracts",
+                        json!({
+                            "maker_swap_v2_contract": form,
+                            "taker_swap_v2_contract": form,
+                            "nft_maker_swap_v2_contract": form,
+                        }),
+                    ),
+                ));
+            }
             // Absent token requests.
             let mut absent = valid.clone();
             absent.as_object_mut().unwrap().remove("erc20_tokens_requests");
@@ -941,6 +967,53 @@ mod tests {
         assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
 
         for ticker in ["SOL", "USDC-SOL", "SOL-REF", "USDC-SOL-REF"] {
+            assert!(
+                block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
+                "{ticker} registered"
+            );
+        }
+    }
+
+    /// TRON is postponed for this beta: the mmrpc 2.0 routes `enable_eth_with_tokens`, `enable_erc20` and
+    /// `task::enable_erc20::init` refuse a TRON platform or TRC20 token with the "not available in this build" text
+    /// and register nothing (the switch is `coins::TRON_ACTIVATION_AVAILABLE`, which the legacy routes read too).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn tron_mmrpc_activation_routes_refuse_while_tron_is_switched_off() {
+        use coins::{lp_coinfind, TRON_ACTIVATION_AVAILABLE, TRON_NOT_AVAILABLE};
+
+        const { assert!(!TRON_ACTIVATION_AVAILABLE) };
+        let ctx = MmCtxBuilder::default()
+            .with_conf(json!({ "coins": [
+                { "coin": "TRX", "mm2": 1, "wallet_only": true,
+                  "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
+                { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "protocol": { "type": "TRC20", "protocol_data": {
+                    "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } } },
+            ] }))
+            .into_mm_arc();
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tron gate test passphrase").unwrap();
+
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_eth_with_tokens",
+            json!({
+                "ticker": "TRX",
+                "nodes": [{ "url": "http://127.0.0.1:1" }],
+                "erc20_tokens_requests": [{ "ticker": "USDT-TRC20" }],
+            }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
+        assert_eq!(body["error_data"]["ticker"], "TRX");
+        assert_eq!(body["error_data"]["error"], TRON_NOT_AVAILABLE);
+
+        for method in ["enable_erc20", "task::enable_erc20::init"] {
+            let (status, body) = answer_of(&ctx, method, json!({ "ticker": "USDT-TRC20", "activation_params": {} }));
+            assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR, "{method}: {body}");
+            assert_eq!(body["error_type"], "Internal", "{method}: {body}");
+            assert_eq!(body["error_data"], TRON_NOT_AVAILABLE, "{method}: {body}");
+        }
+        for ticker in ["TRX", "USDT-TRC20"] {
             assert!(
                 block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
                 "{ticker} registered"
