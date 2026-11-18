@@ -689,7 +689,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   fails before any node is contacted, with a `PlatformCoinCreationError` (HTTP 500) that says the hardware key policy
   is not supported for Tendermint coins and to activate with the local key; GLEEC KDF ignores the member and activates
   with the local key. An absent value, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
-  as the WalletConnect form (not built yet), fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
+  as the WalletConnect form sent as this member (the WalletConnect forms of `activation_params` are built, see below),
+  fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
   CRD ch.36 §36.7. PR #358.
 - **A Tendermint activation under an HD login honors `priv_key_policy: IguanaPrivKey`.** GLEEC KDF accepts and ignores
   `priv_key_policy` for Tendermint coins; Reloaded activates the coin with the single internal key of the node, as the
@@ -710,6 +711,26 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   the account of the public Cosmos SDK rule for that key type, where GLEEC KDF applies the secp256k1 rule to it. A
   malformed key is `InvalidRequest`, where GLEEC KDF aborts the request. No switch exists. CRD ch.36 §36.14.3, D36.17,
   D36.18; ch.18 D18.11.10. PR #382.
+- **A Tendermint coin activated with a WalletConnect session is signed by the wallet, with a typed signing error
+  and a checked account.** Both forms (`{"type": "WalletConnect", "params": {"session_topic": ...}}` and the public
+  docs' `{"priv_key_policy": {"type": "WalletConnect", "data": ...}}`, which GLEEC KDF rejects) activate the coin of
+  the paired session; `withdraw` and the staking requests are signed in the wallet (Amino for a Ledger-backed account,
+  where the Ledger fee factor and the bank-send-only rule are as for the public-key form), and `withdraw` answers the
+  signed transaction without broadcasting it, as GLEEC KDF does. Where it differs: (1) a wallet that refuses, does not
+  answer, or a session that is gone or no longer grants the chain fails with the new `SigningError` (HTTP 500), where
+  GLEEC KDF answers `InternalError`; (2) the key record that supplies the public key and the Ledger flag is the one of
+  the coin's chain, where GLEEC KDF takes the first record whatever its chain, and when there is none the wallet is
+  asked for its accounts with no parameter, where GLEEC KDF sends the session's account address as the parameter;
+  (3) the address derived from the key must be one of the session's accounts for the chain, otherwise the activation
+  fails with `PlatformCoinCreationError`, where GLEEC KDF does not compare; (4) in the direct sign mode the
+  transaction body the wallet echoes must equal the one that was requested, where GLEEC KDF assembles the transaction
+  from the echo without comparing; (5) orders of such a coin and of its tokens are refused as wallet-only, where GLEEC
+  KDF accepts them (swaps are not signed through the wallet); (6) the fee and gas limit of a request the wallet signs
+  come from the node's gas simulation (gas limit = simulated gas x 1.5, fee = limit x gas price; an explicit gas limit
+  is kept), where GLEEC KDF uses a fixed assumed gas of 125,000, which ran out of gas for a real send and lost the
+  fee, and a failed simulation fails the request; `fee_details` reports the fee of the transaction the wallet signed.
+  A test with a real wallet is still to be run. No switch exists (a fixed limit that runs out of gas loses the fee).
+  CRD ch.36 §36.14.2, D36.15, D36.16; ch.18 D18.11.10.
 - **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
   chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
   until the first read ends (§36.14.1 R36.14.11), and a failed first balance read ends its fetcher silently where KDF

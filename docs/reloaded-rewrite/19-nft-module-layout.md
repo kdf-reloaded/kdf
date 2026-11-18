@@ -640,6 +640,12 @@ HTTP 500). Chapter 35 is authoritative for those wire values; this
 section remains authoritative for the request/response shapes, the
 activation scope and the graded failure semantics.
 
+*Pointer (2026-11-18).* How the NFT chain takes part in the
+dependent-token set of its EVM platform, and what happens to it when the
+platform becomes passive, is forced off or is re-activated, is stated in
+chapter 43 R43.1F.8 (passed the KDF Dirty Gate on 2026-11-18). This pointer binds
+nothing of its own.
+
 **Inline activation (cross-reference).** The NFT pseudo-coin of an
 EVM platform can also be activated together with the platform, by
 supplying `nft_req` (an `NftProvider`, bare or wrapped in
@@ -1220,6 +1226,11 @@ V4. The ABI fragments embedded in §19.7 are byte-identical to
     names; error and log string literals; per-method behaviour tables
     keyed to internal names; internal module trees; and internal
     test-function names.
+- *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
+  the wire error contract of `enable_nft`.* It names chapter 43 R43.1F.8 and
+  states no behavior of its own; it travels with chapter 43 §43.1F for the
+  KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in
+  chapter 43's provenance footer.
 
 ## 19.13 CoinProtocol::NFT Variant
 

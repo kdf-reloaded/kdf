@@ -6,7 +6,7 @@ use crate::my_tx_history_v2::TxHistoryStorage;
 use crate::utxo::bch::BchCoin;
 use crate::utxo::utxo_common::{self, listed_height_change, HeightChange};
 use crate::utxo::UtxoStandardOps;
-use crate::{BlockHeightAndTime, HistorySyncState, MarketCoinOps};
+use crate::{BlockHeightAndTime, HistorySyncState, MarketCoinOps, UnreadableTransaction};
 use async_trait::async_trait;
 use common::executor::Timer;
 use common::log::{error, info, warn};
@@ -366,6 +366,9 @@ impl<T: TxHistoryStorage> State for FetchingTransactionsData<T> {
     type Result = ();
 
     async fn on_changed(self: Box<Self>, ctx: &mut BchAndSlpHistoryCtx<T>) -> StateResult<BchAndSlpHistoryCtx<T>, ()> {
+        // The transactions this pass skipped because they cannot be interpreted. Rebuilt on every pass and kept in
+        // memory only, so a transaction that reads on a later pass drops out of the report (CRD ch.39 D39.11.4V.1).
+        let mut unreadable: Vec<UnreadableTransaction> = Vec::new();
         for (tx_hash, height) in self.all_tx_ids_with_height {
             let tx_hash_string = format!("{:02x}", tx_hash);
             match ctx
@@ -400,9 +403,21 @@ impl<T: TxHistoryStorage> State for FetchingTransactionsData<T> {
                         ctx.coin.ticker(),
                         tx_hash
                     );
-                    if e.get_inner().is_malformed_transaction() {
-                        // The transaction itself cannot be interpreted: skip it and store the rest of the
-                        // pass. It is not written, so a later pass tries it again (CRD ch.38 R38.5A.9).
+                    if let Some(reason) = e.get_inner().unreadable_reason() {
+                        // The transaction itself cannot be read (it cannot be interpreted, or it or an input
+                        // transaction does not parse): skip it and store the rest of the pass. It is not written,
+                        // so a later pass tries it again (CRD ch.38 R38.5A.9). The skip is reported in the sync
+                        // status (CRD ch.39 D39.11.4V.1). A backend, storage or derivation error is not a skip.
+                        if !unreadable.iter().any(|skipped| skipped.tx_hash == tx_hash_string) {
+                            unreadable.push(UnreadableTransaction {
+                                tx_hash: tx_hash_string.clone(),
+                                error: reason,
+                            });
+                            let mut state = ctx.coin.as_ref().history_sync_state.lock().unwrap();
+                            if let Some(running) = state.in_progress_with_unreadable(&unreadable) {
+                                *state = running;
+                            }
+                        }
                         continue;
                     }
                     return Self::change_state(OnIoErrorCooldown::new());
@@ -423,7 +438,7 @@ impl<T: TxHistoryStorage> State for FetchingTransactionsData<T> {
             Timer::sleep(1.).await;
         }
         info!("Tx history fetching finished for {}", ctx.coin.ticker());
-        *ctx.coin.as_ref().history_sync_state.lock().unwrap() = HistorySyncState::Finished;
+        *ctx.coin.as_ref().history_sync_state.lock().unwrap() = HistorySyncState::utxo_finished(&unreadable);
         Self::change_state(WaitForHistoryUpdateTrigger::new())
     }
 }
@@ -656,6 +671,142 @@ mod tests {
             |hash: H256Json| block_on(ctx.storage.history_has_tx_hash(&ticker, &format!("{:02x}", hash))).unwrap();
         assert!(has(valid_hash), "the rest of the pass is stored");
         assert!(!has(malformed_hash), "the malformed transaction is not written");
+
+        // The skipped transaction is reported in the finished sync status (CRD ch.39 D39.11.4V.1).
+        let status = |ctx: &BchAndSlpHistoryCtx<SqliteTxHistoryStorage>| -> serde_json::Value {
+            let state = ctx.coin.as_ref().history_sync_state.lock().unwrap().clone();
+            serde_json::to_value(state).unwrap()
+        };
+        let reported = status(&ctx);
+        assert_eq!(reported["state"], "Finished");
+        let list = reported["additional_info"]["unreadable_transactions"]
+            .as_array()
+            .expect("the finished state carries the list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["tx_hash"], format!("{:02x}", malformed_hash));
+        assert!(list[0]["error"].as_str().unwrap().contains("has no outputs"));
+
+        // The list is rebuilt on every pass: a pass without a skip answers a plain `Finished`.
+        let state = FetchingTransactionsData::<SqliteTxHistoryStorage>::new(vec![(valid_hash, 0)]);
+        let _next = block_on(Box::new(state).on_changed(&mut ctx));
+        assert_eq!(serde_json::to_string(&status(&ctx)).unwrap(), r#"{"state":"Finished"}"#);
+    }
+
+    /// CRD ch.39 D39.11.4V.1: a transaction, or an input transaction, that does not parse is skipped like a malformed
+    /// one: the rest of the pass is stored, the skipped transactions are reported in the finished sync status, and a
+    /// pass without them answers a plain `Finished`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn unparseable_transactions_are_skipped_and_reported_in_the_v2_loop() {
+        use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
+        use crate::utxo::bch::bch_coin_without_network_for_test;
+        use crate::utxo::{output_script, ScriptType};
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use rpc::v1::types::Bytes as BytesJson;
+
+        fn spending(prev_tx_hash: keys::hash::H256, index: u32, value: u64, script_pubkey: BytesJson) -> UtxoTx {
+            let mut tx = UtxoTx::default();
+            tx.inputs.push(TransactionInput {
+                previous_output: OutPoint {
+                    hash: prev_tx_hash,
+                    index,
+                },
+                script_sig: vec![].into(),
+                sequence: 0,
+                script_witness: vec![],
+            });
+            tx.outputs.push(TransactionOutput {
+                value,
+                script_pubkey: script_pubkey.0.into(),
+            });
+            tx
+        }
+
+        let coin = bch_coin_without_network_for_test();
+        let ticker = coin.ticker().to_owned();
+        let storage = SqliteTxHistoryStorage::in_memory();
+        block_on(storage.init(&ticker)).unwrap();
+
+        let my_address = coin.as_ref().derivation_method.iguana_or_err().unwrap();
+        let my_script = BytesJson::new(output_script(my_address, ScriptType::P2PKH).to_bytes().take());
+
+        let cache_bytes = |hash: H256Json, bytes: Vec<u8>| {
+            let key = BytesJson::new(hash.0.to_vec());
+            block_on(storage.add_tx_to_cache(&ticker, &key, &BytesJson::new(bytes))).unwrap();
+        };
+        let cache = |tx: &UtxoTx| -> H256Json {
+            let hash: H256Json = tx.hash().reversed().into();
+            cache_bytes(hash, serialization::serialize(tx).take());
+            hash
+        };
+
+        // The funding transaction pays my address; the valid transaction spends it.
+        let funding = spending([3; 32].into(), 0, 1_000, my_script);
+        cache(&funding);
+        let valid = spending(funding.hash(), 0, 500, BytesJson::new(vec![0x6a]));
+        let valid_hash = cache(&valid);
+        // The transaction itself does not parse.
+        let unparseable_hash = H256Json::from([5u8; 32]);
+        cache_bytes(unparseable_hash, vec![0xff, 0xff]);
+        // The transaction parses, but the transaction of its input does not.
+        let input_bytes_hash = H256Json::from([6u8; 32]);
+        cache_bytes(input_bytes_hash, vec![0xff, 0xff]);
+        let bad_input = spending([6; 32].into(), 0, 400, BytesJson::new(vec![0x6a]));
+        let bad_input_hash = cache(&bad_input);
+
+        let mm_ctx = MmCtxBuilder::default().into_mm_arc();
+        let mut ctx = BchAndSlpHistoryCtx {
+            coin,
+            metrics: mm_ctx.metrics.clone(),
+            mm_ctx,
+            storage,
+            current_balance: BigDecimal::from(0),
+            absence: AbsenceMarks::default(),
+            chain_changes: ChainChangeWatch::default(),
+            chain_changed: false,
+        };
+        let state = FetchingTransactionsData::<SqliteTxHistoryStorage>::new(vec![
+            (unparseable_hash, 0),
+            (bad_input_hash, 0),
+            (valid_hash, 0),
+        ]);
+        let _next = block_on(Box::new(state).on_changed(&mut ctx));
+
+        let has =
+            |hash: H256Json| block_on(ctx.storage.history_has_tx_hash(&ticker, &format!("{:02x}", hash))).unwrap();
+        assert!(has(valid_hash), "the rest of the pass is stored");
+        assert!(!has(unparseable_hash), "the unparseable transaction is not written");
+        assert!(
+            !has(bad_input_hash),
+            "the transaction with an unparseable input is not written"
+        );
+
+        let status = |ctx: &BchAndSlpHistoryCtx<SqliteTxHistoryStorage>| -> serde_json::Value {
+            let state = ctx.coin.as_ref().history_sync_state.lock().unwrap().clone();
+            serde_json::to_value(state).unwrap()
+        };
+        let reported = status(&ctx);
+        assert_eq!(reported["state"], "Finished");
+        let list = reported["additional_info"]["unreadable_transactions"]
+            .as_array()
+            .expect("the finished state carries the list");
+        assert_eq!(list.len(), 2);
+        let reason_of = |hash: H256Json| -> String {
+            list.iter()
+                .find(|item| item["tx_hash"] == format!("{:02x}", hash))
+                .expect("the transaction is reported")["error"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(reason_of(unparseable_hash).starts_with("the transaction cannot be parsed: "));
+        assert!(reason_of(bad_input_hash).starts_with("an input transaction cannot be parsed: "));
+
+        // A pass without them answers exactly the plain `Finished`.
+        let state = FetchingTransactionsData::<SqliteTxHistoryStorage>::new(vec![(valid_hash, 0)]);
+        let _next = block_on(Box::new(state).on_changed(&mut ctx));
+        assert_eq!(serde_json::to_string(&status(&ctx)).unwrap(), r#"{"state":"Finished"}"#);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

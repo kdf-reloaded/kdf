@@ -1,6 +1,6 @@
 //! Native SQLite session storage.
 
-use super::{StoredSession, WcStorageOps, WC_SESSION_TABLE};
+use super::{StoredSession, WcStorageOps, WC_CLIENT_KEY_TABLE, WC_SESSION_TABLE};
 use crate::error::WalletConnectError;
 use async_trait::async_trait;
 use db_common::async_sql_conn::{AsyncConnError, AsyncConnection};
@@ -30,9 +30,16 @@ impl WcStorageOps for SqliteSessionStorage {
                 expiry  BIGINT   NOT NULL
             );"
         );
+        let key_sql = format!(
+            "CREATE TABLE IF NOT EXISTS {WC_CLIENT_KEY_TABLE} (
+                id    INTEGER PRIMARY KEY CHECK (id = 1),
+                value TEXT    NOT NULL
+            );"
+        );
         self.conn
             .call(move |conn| {
                 conn.execute(&sql, [])?;
+                conn.execute(&key_sql, [])?;
                 Ok(())
             })
             .await?;
@@ -102,6 +109,33 @@ impl WcStorageOps for SqliteSessionStorage {
         self.conn
             .call(move |conn| {
                 conn.execute(&sql, params![topic])?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn load_client_key(&self) -> Result<Option<String>, WalletConnectError> {
+        let sql = format!("SELECT value FROM {WC_CLIENT_KEY_TABLE} WHERE id = 1;");
+        let value = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&sql)?;
+                let mut rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                match rows.next() {
+                    Some(row) => Ok(Some(row?)),
+                    None => Ok(None),
+                }
+            })
+            .await?;
+        Ok(value)
+    }
+
+    async fn save_client_key(&self, key: String) -> Result<(), WalletConnectError> {
+        let sql = format!("INSERT OR REPLACE INTO {WC_CLIENT_KEY_TABLE} (id, value) VALUES (1, ?1);");
+        self.conn
+            .call(move |conn| {
+                conn.execute(&sql, params![key])?;
                 Ok(())
             })
             .await?;

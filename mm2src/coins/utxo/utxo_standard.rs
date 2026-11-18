@@ -258,7 +258,7 @@ impl UtxoStandardOps for UtxoStandardCoin {
         &self,
         hash: &[u8],
         input_transactions: &mut HistoryUtxoTxMap,
-    ) -> Result<TransactionDetails, String> {
+    ) -> Result<TransactionDetails, utxo_common::TxDetailsByHashError> {
         utxo_common::tx_details_by_hash(self, hash, input_transactions).await
     }
 

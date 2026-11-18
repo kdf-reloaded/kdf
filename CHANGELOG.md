@@ -64,6 +64,13 @@ or undo, and every change that needs a step from you.
   - *Activation:* a Zcash-family (`overwintered`) entry whose `txversion` is not 4 or 5, and a version-5 entry without
     `consensus_branch_id`, are now refused with an error that names the field.
 
+- **WalletConnect sessions paired with an earlier version must be paired again.** The node now keeps one relay
+  identity across reconnects and restarts. Sessions made by an earlier version were made under a different identity,
+  so the relay refuses requests on them after the upgrade: remove them in the wallet and pair again.
+  - *Browser (WASM) builds:* the WalletConnect store in the browser is upgraded to a new format at the first start.
+    An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
+    in the browser first, then pair again.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
@@ -214,8 +221,31 @@ the previous version used. The safe way:
   three times the computed fee (for the coin, not for a token), and the staking requests fail. A `memo` in the `withdraw` request is carried in the transaction: `memo` is now a typed member of every withdraw request: a `memo` that is not a string is refused as a malformed request for every coin (it was ignored before); only Tendermint coins and tokens read it. Placing an order with the coin or one
   of its tokens, message signing, private-key display, and every swap payment, claim and refund are
   refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
-  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36
+  parsing with `InvalidRequest`. Detail: PR #382; CRD ch.36
   §36.14.3.
+- **A Tendermint coin can be activated with a WalletConnect wallet, and the wallet signs its
+  withdrawals.** `activation_params` of `enable_tendermint_with_assets` (and the task form) now accepts
+  `{"type": "WalletConnect", "params": {"session_topic": "..."}}` and the form the public docs show,
+  `{"priv_key_policy": {"type": "WalletConnect", "data": "..."}}`; both do the same. The node reads the
+  account and its public key for the coin's chain from the paired session: from the key record the wallet
+  delivered with the session when it has one for that chain, otherwise by asking the wallet once for its
+  accounts. When the key does not give the account the session granted for that chain, the activation
+  fails (`PlatformCoinCreationError`) instead of activating another account. The coin holds no private
+  key. `withdraw` and the delegation, undelegation and reward-claim requests are signed in the wallet (the
+  Ledger-backed account of a wallet signs the Amino form, which covers a plain send only, and a Ledger
+  `withdraw` costs three times the computed fee, for the coin and not for a token). A `withdraw` answers
+  the signed transaction (`tx_hex`, `tx_hash`) and broadcasts nothing; the staking requests broadcast the
+  signed transaction. The wallet's answer must carry the transaction body that was asked to be signed;
+  an echo of another body fails the request. A request the wallet refuses, does not answer within five
+  minutes, or cannot receive because the session is gone fails with the new error `SigningError` (HTTP
+  500) for `withdraw` and for the staking requests, where GLEEC KDF answers a general internal error.
+  Placing an order with such a coin or one of its tokens is refused, as for a watch-only coin, and swaps
+  do not sign through the wallet. The top-level `priv_key_policy` member of the request still refuses the
+  WalletConnect spelling. The fee and the gas limit of such a request come from the node's gas simulation
+  (gas limit = simulated gas x 1.5, fee = limit x gas price; an explicit gas limit is kept), because the fixed
+  limit of 125,000 ran out of gas for a real send and lost the fee; a failed simulation fails the request.
+  A test with a real wallet is still to be run. Detail: PR #393; CRD ch.36
+  R36.14.13--R36.14.15.
 
 ### Changed
 
@@ -358,6 +388,34 @@ the previous version used. The safe way:
 
 ### Fixed
 
+#### WalletConnect
+
+- **The pairing link of `wc_new_connection` is usable by a wallet.** Every `&` after the first was
+  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The `wc_*` answers now
+  carry the characters as JSON escapes that a client decodes to the plain characters. Detail: PR #393;
+  CRD ch.22 §22.2.
+- **The node reconnects to the WalletConnect relay.** The relay closes the connection about every ten
+  minutes; the node did not reopen it, and a new connection request failed until a restart. It now
+  reconnects with a growing wait and subscribes again to its pairings and sessions. Detail: PR #393;
+  CRD ch.22 §22.5.2.
+- **A WalletConnect session keeps working after the relay reconnects or the node restarts.** The node now
+  keeps one relay client identity, stored with its sessions, instead of a new one for every connection.
+  Field-checked with a wallet after a relay reconnect and after a restart. Detail: PR #393; CRD ch.22 §22.5.2.
+- **A wallet lists each node as "KDF Reloaded" with a short identifier.** The wallet used to list every
+  paired node as "Komodo DeFi Framework", so nodes could not be told apart. The name is now
+  `KDF Reloaded <identifier>`, where the identifier is the first eight characters of the node's relay
+  client key, the one the connect log prints; it does not change between restarts. An operator can set a
+  name of their own with `walletconnect.app_name` in `MM2.json`. Detail: PR #393; CRD ch.22 §22.5.2.
+
+#### Tendermint (Cosmos) coins
+
+- **The fee reported for a transaction signed by a WalletConnect wallet is the fee of that transaction.**
+  `fee_details` of `withdraw` and the staking requests is read from the signed transaction; it showed the
+  computed fee even when the wallet signed another one. Detail: PR #393; CRD ch.36 R36.14.15.
+- **Sending a Tendermint transaction the node already holds answers its hash.** A repeated
+  `send_raw_transaction` was answered with an error ("tx already exists in cache") although the transaction
+  was included. Detail: PR #393; CRD ch.36 R36.14.15.
+
 #### ZEC
 
 - **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
@@ -413,6 +471,14 @@ the previous version used. The safe way:
   the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
 
 #### Transaction history
+
+- **The history of a UTXO coin says which transactions it skipped.** A transaction the node cannot read is left out of
+  the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
+  as if it were complete. `sync_status` now lists each skipped transaction in
+  `additional_info.unreadable_transactions`, with its `tx_hash` and a short `error`. This includes transactions skipped
+  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. Until a later release
+  reads ZEC version-6 transactions, they appear in this list. The BCH and SLP history also no longer pauses at a
+  transaction that does not parse; it skips it and stores the rest. Detail: PR #415; CRD ch.39 D39.11.4V.1.
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
   served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
@@ -564,15 +630,15 @@ the previous version used. The safe way:
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
-  store-served coin family (PR #380).
+  store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #393).
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
   (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
-  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); history skip of
-  unreadable transactions and the coins entry follow.
+  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
+  unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
