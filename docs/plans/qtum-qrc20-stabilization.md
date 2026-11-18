@@ -141,6 +141,20 @@ subscription is placed again after a reconnect. P3 to P6 use regtest; funds for 
 **Gate:** no ownership refactor starts until tests capture current connection
 counts, task lifetimes, and failure behavior.
 
+*Progress (2026-11-17).* The harness and the measurements are in PRs #385 and
+#406: a stub Electrum server with the QRC20 methods, and offline tests for
+every acceptance row of CRD ch.38 §38.6.4Q. Their results are in that
+section's two "Measured" notes. The gate is met. Not covered:
+- *Repeated and concurrent activation* (item 2, last bullet). Activations of
+  one ticker are serialized since PR #156 (R55.1.12); a test for it is still
+  owed.
+- *The balance stream's own subscription inside the node.* It was skipped on
+  purpose. The tests already pin what the token's client does with the
+  subscription: it is never placed again after a reconnect, and an error or no
+  answer breaks nothing. What remains for D38.6.4Q.3 is whether real QTUM
+  servers answer the subscription at all, which a mock server cannot show. A
+  read-only probe of the public servers decides that instead.
+
 ## Phase B -- platform-resource ownership design
 
 Define the smallest platform-scoped resource boundary that can safely be

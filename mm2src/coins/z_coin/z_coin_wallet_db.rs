@@ -262,12 +262,41 @@ fn sync_pass_log_level(first_pass: bool, resets_state: bool, blocks: u64) -> log
 }
 
 impl ZCoinShieldedHistory {
+    /// [`Self::open_or_create_with_policy`] with the default upgrade policy.
+    #[cfg(test)]
     pub(crate) fn open_or_create(
         ticker: &str,
         db_dir_path: PathBuf,
         consensus_params: ZcoinConsensusParams,
         extfvk: &ExtendedFullViewingKey,
         check_point_block: Option<&CheckPointBlockInfo>,
+    ) -> MmResult<Self, ZCoinBuildError> {
+        Self::open_or_create_with_policy(
+            ticker,
+            db_dir_path,
+            consensus_params,
+            extfvk,
+            check_point_block,
+            &ShieldedDbUpgradePolicy::default(),
+        )
+    }
+
+    /// Opens the shielded wallet database of `ticker`, creating, upgrading or rebuilding it as its
+    /// recognized generation requires.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ZCoinBuildError`] when a file has an unrecognized or corrupt schema, when the backup
+    /// taken before a schema upgrade cannot be made or verified
+    /// ([`ZCoinBuildError::ShieldedDbBackupVerification`]), when the disk lacks the space for it
+    /// ([`ZCoinBuildError::InsufficientDiskSpace`]), or when the database cannot be opened or created.
+    pub(crate) fn open_or_create_with_policy(
+        ticker: &str,
+        db_dir_path: PathBuf,
+        consensus_params: ZcoinConsensusParams,
+        extfvk: &ExtendedFullViewingKey,
+        check_point_block: Option<&CheckPointBlockInfo>,
+        upgrade_policy: &ShieldedDbUpgradePolicy,
     ) -> MmResult<Self, ZCoinBuildError> {
         let paths = ZCoinShieldedHistoryPaths::new(ticker, db_dir_path);
         if let Some(parent) = paths.wallet_db_path.parent() {
@@ -297,14 +326,8 @@ impl ZCoinShieldedHistory {
             WalletDbGeneration::UpgradeablePreviousReloaded => {
                 let mutation_lock = wallet_db_mutation_lock(&paths.wallet_db_path);
                 let _guard = mutation_lock.lock();
-                upgrade_previous_reloaded_wallet(&paths.wallet_db_path, consensus_params.clone()).map_err(
-                    |reason| {
-                        MmError::new(ZCoinBuildError::ShieldedDbSchema {
-                            path: paths.wallet_db_path.display().to_string(),
-                            reason,
-                        })
-                    },
-                )?;
+                upgrade_previous_reloaded_wallet(&paths.wallet_db_path, consensus_params.clone(), upgrade_policy)
+                    .map_err(|error| MmError::new(error.into_build_error(&paths.wallet_db_path)))?;
             },
             WalletDbGeneration::ReferenceLegacy => {
                 // Renaming the wallet database aside is a rebuild path (R39.8.0ad).
@@ -2333,13 +2356,25 @@ CREATE TABLE sent_notes (
 );
 "#;
 
-/// Identity of the wallet schema produced by the previous Reloaded build
-/// (`zcash_client_sqlite 0.21.1`): `user_version = 8`, 467 canonical records, pinned by
-/// the digest of [`schema_fingerprint_digest`]. It cannot be rebuilt from DDL because the
-/// upstream migrator keys off its own migration table, so it is pinned by digest only.
-const PREVIOUS_RELOADED_WALLET_USER_VERSION: i64 = 8;
-const PREVIOUS_RELOADED_WALLET_RECORD_COUNT: usize = 467;
-const PREVIOUS_RELOADED_WALLET_DIGEST: &str = "dfba9135b6d5ae446e88d83d162e9458730b5b098051d8565fdd91fe6be5bea8";
+/// Identity of a wallet schema produced by an earlier Reloaded build that the current migrator can
+/// bring forward: `user_version`, the number of canonical records, and the digest of
+/// [`schema_fingerprint_digest`]. Such a schema cannot be rebuilt from DDL because the upstream
+/// migrator keys off its own migration table, so it is pinned by digest only. A later change of the
+/// wallet schema adds an entry here (R39.8.0bc).
+struct PreviousReloadedWalletGeneration {
+    user_version: i64,
+    record_count: usize,
+    digest: &'static str,
+}
+
+/// The generations recognized as upgradeable. The first is the schema of `zcash_client_sqlite 0.21.1`
+/// (`user_version = 8`, 467 canonical records, 48 migrations).
+const PREVIOUS_RELOADED_WALLET_GENERATIONS: [PreviousReloadedWalletGeneration; 1] =
+    [PreviousReloadedWalletGeneration {
+        user_version: 8,
+        record_count: 467,
+        digest: "dfba9135b6d5ae446e88d83d162e9458730b5b098051d8565fdd91fe6be5bea8",
+    }];
 
 const RECOGNIZED_COMPACT_CACHE_SCHEMA: &str = r#"
 CREATE TABLE compactblocks (
@@ -2388,21 +2423,132 @@ fn schema_fingerprint_digest(fingerprint: &SchemaFingerprint) -> String {
 }
 
 fn is_previous_reloaded_wallet_fingerprint(actual: &SchemaFingerprint) -> bool {
-    actual.user_version == PREVIOUS_RELOADED_WALLET_USER_VERSION
-        && actual.records.len() == PREVIOUS_RELOADED_WALLET_RECORD_COUNT
-        && schema_fingerprint_digest(actual) == PREVIOUS_RELOADED_WALLET_DIGEST
+    PREVIOUS_RELOADED_WALLET_GENERATIONS.iter().any(|generation| {
+        actual.user_version == generation.user_version
+            && actual.records.len() == generation.record_count
+            && schema_fingerprint_digest(actual) == generation.digest
+    })
 }
 
-/// R39.8.0ba: back up, migrate a working copy, verify, fall back to preserve-and-rebuild.
+/// Free-space margin added to the two database copies an upgrade needs (R39.8.0bc): room for the
+/// journal and the page padding the copies gain, and for what else the disk is doing meanwhile.
+const UPGRADE_FREE_SPACE_MARGIN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// How many `.pre-upgrade.*.bak` backups of one wallet database are kept after a successful
+/// upgrade when `shielded_db_upgrade_backups` is not set (R39.8.0bc).
+const DEFAULT_UPGRADE_BACKUPS_KEPT: usize = 1;
+
+/// The `MM2.json` key that sets how many upgrade backups are kept (R39.8.0bc).
+pub(crate) const UPGRADE_BACKUPS_CONF_KEY: &str = "shielded_db_upgrade_backups";
+
+/// Settings of a wallet-database schema upgrade (R39.8.0bc). The free-space source can be replaced so
+/// that tests do not depend on the disk they run on.
+#[derive(Clone, Copy)]
+pub(crate) struct ShieldedDbUpgradePolicy {
+    /// Newest `.pre-upgrade.*.bak` backups kept after a successful upgrade; at least 1.
+    backups_kept: usize,
+    available_bytes: fn(&Path) -> Result<u64, String>,
+    /// Runs on the backup file right after it is written, before it is verified.
+    #[cfg(test)]
+    after_backup: Option<fn(&Path)>,
+}
+
+impl Default for ShieldedDbUpgradePolicy {
+    fn default() -> Self {
+        ShieldedDbUpgradePolicy {
+            backups_kept: DEFAULT_UPGRADE_BACKUPS_KEPT,
+            available_bytes: super::z_disk_space::available_bytes,
+            #[cfg(test)]
+            after_backup: None,
+        }
+    }
+}
+
+impl ShieldedDbUpgradePolicy {
+    /// Reads `shielded_db_upgrade_backups` from the node configuration: a whole number of at least 1.
+    /// Absent or not a whole number: the default of 1. `0` or a negative number: 1, because the
+    /// backup just made is always kept.
+    pub(crate) fn from_node_conf(conf: &serde_json::Value) -> Self {
+        let backups_kept = match &conf[UPGRADE_BACKUPS_CONF_KEY] {
+            serde_json::Value::Null => DEFAULT_UPGRADE_BACKUPS_KEPT,
+            value => match value.as_i64() {
+                Some(number) => usize::try_from(number.max(1)).unwrap_or(usize::MAX),
+                None => {
+                    log::warn!(
+                        "{} must be a whole number; using {}",
+                        UPGRADE_BACKUPS_CONF_KEY,
+                        DEFAULT_UPGRADE_BACKUPS_KEPT
+                    );
+                    DEFAULT_UPGRADE_BACKUPS_KEPT
+                },
+            },
+        };
+        ShieldedDbUpgradePolicy {
+            backups_kept,
+            ..ShieldedDbUpgradePolicy::default()
+        }
+    }
+}
+
+/// Why a wallet-database upgrade did not start. The wallet database's content is unchanged in every case.
+#[derive(Debug, PartialEq, Eq)]
+enum WalletUpgradeError {
+    /// The backup could not be made, or the database could not be read.
+    Schema(String),
+    /// The backup was made and then failed the named check; it has been deleted.
+    BackupVerification {
+        backup: PathBuf,
+        check: String,
+    },
+    InsufficientDiskSpace {
+        needed_bytes: u64,
+        available_bytes: u64,
+    },
+}
+
+impl WalletUpgradeError {
+    fn into_build_error(self, wallet_db_path: &Path) -> ZCoinBuildError {
+        let path = wallet_db_path.display().to_string();
+        match self {
+            WalletUpgradeError::Schema(reason) => ZCoinBuildError::ShieldedDbSchema { path, reason },
+            WalletUpgradeError::BackupVerification { backup, check } => ZCoinBuildError::ShieldedDbBackupVerification {
+                path: backup.display().to_string(),
+                check,
+            },
+            WalletUpgradeError::InsufficientDiskSpace {
+                needed_bytes,
+                available_bytes,
+            } => ZCoinBuildError::InsufficientDiskSpace {
+                path,
+                needed_bytes,
+                available_bytes,
+            },
+        }
+    }
+}
+
+/// R39.8.0ba, R39.8.0bc: back up and verify, migrate a working copy made from the backup, verify,
+/// fall back to preserve-and-rebuild.
 ///
-/// The caller holds the wallet-database mutation lock. The original file is never
-/// modified by the migration: it runs on a private working copy that replaces the
+/// The caller holds the wallet-database mutation lock. The migration never changes the
+/// original's content: it runs on a private working copy that replaces the
 /// original only after it classifies as [`WalletDbGeneration::SelectedCurrent`]. On any
-/// failure the original is moved aside (the rebuild path of R39.8.0x) and activation
-/// proceeds with a fresh wallet. Only a failure to create the backup is returned as an
-/// error, with the original untouched.
-fn upgrade_previous_reloaded_wallet(path: &Path, consensus_params: ZcoinConsensusParams) -> Result<(), String> {
-    let backup_path = copy_database_as_backup(path, "pre-upgrade")?;
+/// failure of the migration the original is moved aside (the rebuild path of R39.8.0x) and
+/// activation proceeds with a fresh wallet. A failure before the migration starts (no room
+/// for the copies, no backup, a backup that fails verification) is returned as an error
+/// with the original's content unchanged (opening it may recover an interrupted transaction and
+/// closing it may fold its write-ahead log into the file); a successful upgrade then prunes the older backups.
+///
+/// # Errors
+///
+/// Returns [`WalletUpgradeError`] when the free space is insufficient, the backup cannot be
+/// made or fails verification, or the original cannot be moved aside after a failed migration.
+fn upgrade_previous_reloaded_wallet(
+    path: &Path,
+    consensus_params: ZcoinConsensusParams,
+    policy: &ShieldedDbUpgradePolicy,
+) -> Result<(), WalletUpgradeError> {
+    let backup_path = back_up_wallet_before_upgrade(path, policy)?;
     log::info!(
         "Backed up shielded wallet database {} as {} before upgrading its schema",
         path.display(),
@@ -2410,9 +2556,10 @@ fn upgrade_previous_reloaded_wallet(path: &Path, consensus_params: ZcoinConsensu
     );
 
     let work_path = path_with_suffix(path, ".upgrade-work");
-    match migrate_wallet_copy(path, &work_path, consensus_params) {
+    match migrate_wallet_copy(&backup_path, &work_path, consensus_params) {
         Ok(()) => {
-            // The original was checkpointed when it was backed up; drop any sidecar so it
+            // The working copy carries every committed page of the original, including what was
+            // still in its WAL when the backup was taken; drop the original's sidecars so they
             // cannot be replayed into the upgraded file.
             for suffix in DATABASE_SIDECAR_SUFFIXES {
                 let _ = std::fs::remove_file(path_with_suffix(path, suffix));
@@ -2424,6 +2571,7 @@ fn upgrade_previous_reloaded_wallet(path: &Path, consensus_params: ZcoinConsensu
                         path.display(),
                         backup_path.display()
                     );
+                    prune_upgrade_backups(path, &backup_path, policy.backups_kept);
                     return Ok(());
                 },
                 Err(e) => log::warn!(
@@ -2441,8 +2589,11 @@ fn upgrade_previous_reloaded_wallet(path: &Path, consensus_params: ZcoinConsensu
     }
 
     remove_database_files(&work_path);
-    let rebuilt_from = preserve_database_for_rebuild(path, "upgrade-failed")?
-        .ok_or_else(|| "recognized previous wallet disappeared before it could be preserved".to_owned())?;
+    let rebuilt_from = preserve_database_for_rebuild(path, "upgrade-failed")
+        .map_err(WalletUpgradeError::Schema)?
+        .ok_or_else(|| {
+            WalletUpgradeError::Schema("recognized previous wallet disappeared before it could be preserved".to_owned())
+        })?;
     log::info!(
         "Preserved shielded wallet database {} as {} (backup also at {}); a fresh wallet will be rebuilt and rescanned",
         path.display(),
@@ -2452,9 +2603,116 @@ fn upgrade_previous_reloaded_wallet(path: &Path, consensus_params: ZcoinConsensu
     Ok(())
 }
 
+/// R39.8.0bc: checks the free space, writes a consistent copy of `path` to a fresh
+/// `.pre-upgrade.<ms>.bak` name and verifies it. No backup file is left behind on failure.
+fn back_up_wallet_before_upgrade(path: &Path, policy: &ShieldedDbUpgradePolicy) -> Result<PathBuf, WalletUpgradeError> {
+    // The first connection of this activation to the wallet database; the caller holds the
+    // mutation lock (R39.8.0ad).
+    let conn = Connection::open(path).map_err(|e| {
+        WalletUpgradeError::Schema(format!(
+            "Failed to open shielded database {} for backup: {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    let schema_error = |what: &str, e: &dyn std::fmt::Display| {
+        WalletUpgradeError::Schema(format!(
+            "Failed to read the {} of shielded database {}: {}",
+            what,
+            path.display(),
+            e
+        ))
+    };
+    let page_count: i64 = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .map_err(|e| schema_error("page count", &e))?;
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(|e| schema_error("page size", &e))?;
+    let database_bytes = u64::try_from(page_count)
+        .unwrap_or(0)
+        .saturating_mul(u64::try_from(page_size).unwrap_or(0));
+    // The backup and the working copy made from it are each about the size of the database.
+    let needed_bytes = database_bytes
+        .saturating_mul(2)
+        .saturating_add(UPGRADE_FREE_SPACE_MARGIN_BYTES);
+    let db_dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let available_bytes = (policy.available_bytes)(db_dir).map_err(|e| {
+        WalletUpgradeError::Schema(format!(
+            "Failed to determine the free disk space for the upgrade of shielded database {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    if available_bytes < needed_bytes {
+        return Err(WalletUpgradeError::InsufficientDiskSpace {
+            needed_bytes,
+            available_bytes,
+        });
+    }
+
+    let expected = schema_fingerprint(&conn).map_err(|e| schema_error("schema", &e))?;
+    let backup_path = copy_database_consistently(&conn, path, "pre-upgrade").map_err(WalletUpgradeError::Schema)?;
+    drop(conn);
+
+    #[cfg(test)]
+    {
+        if let Some(after_backup) = policy.after_backup {
+            after_backup(&backup_path);
+        }
+    }
+
+    if let Err(check) = verify_backup(&backup_path, &expected) {
+        remove_database_files(&backup_path);
+        return Err(WalletUpgradeError::BackupVerification {
+            backup: backup_path,
+            check,
+        });
+    }
+    Ok(backup_path)
+}
+
+/// Opens the backup read-only and requires `PRAGMA integrity_check` to report `ok` and the schema
+/// fingerprint to equal `expected`, that of the source. The error names the failed check.
+fn verify_backup(backup: &Path, expected: &SchemaFingerprint) -> Result<(), String> {
+    let conn = Connection::open_with_flags(
+        backup,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open: {}", e))?;
+    let findings = conn
+        .prepare("PRAGMA integrity_check")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<String>, _>>()
+        })
+        .map_err(|e| format!("integrity_check: {}", e))?;
+    if findings.len() != 1 || findings.first().map(String::as_str) != Some("ok") {
+        let first = findings.first().map(String::as_str).unwrap_or("no result");
+        return Err(format!("integrity_check: {}", first));
+    }
+    let actual = schema_fingerprint(&conn).map_err(|e| format!("schema fingerprint: {}", e))?;
+    if actual != *expected {
+        return Err("schema fingerprint: differs from the source".to_owned());
+    }
+    Ok(())
+}
+
 fn migrate_wallet_copy(source: &Path, work_path: &Path, consensus_params: ZcoinConsensusParams) -> Result<(), String> {
     remove_database_files(work_path);
-    std::fs::copy(source, work_path).map_err(|e| format!("failed to create working copy: {}", e))?;
+    {
+        let source_conn = Connection::open_with_flags(
+            source,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| format!("failed to open the verified backup: {}", e))?;
+        vacuum_into(&source_conn, work_path).map_err(|e| format!("failed to create working copy: {}", e))?;
+    }
     {
         let mut wallet_db = open_wallet_db(work_path, consensus_params.clone())?;
         init_wallet_db(&mut wallet_db, None).map_err(|e| format!("schema migration failed: {}", e))?;
@@ -2482,15 +2740,22 @@ fn remove_database_files(path: &Path) {
     }
 }
 
-/// Copies `path` (after folding its WAL into the main file) to a fresh `.bak` name
-/// without disturbing the original.
-fn copy_database_as_backup(path: &Path, reason: &str) -> Result<PathBuf, String> {
-    let conn = Connection::open(path)
-        .map_err(|e| format!("Failed to open shielded database {} for backup: {}", path.display(), e))?;
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .map_err(|e| format!("Failed to checkpoint shielded database {}: {}", path.display(), e))?;
-    drop(conn);
+/// Writes a consistent snapshot of the database behind `conn` to `target` with `VACUUM INTO`. The
+/// snapshot includes committed content that is still in the WAL and is taken as one statement, so it
+/// is not affected by a checkpoint that a reader blocks. `target` must not exist.
+fn vacuum_into(conn: &Connection, target: &Path) -> Result<(), String> {
+    let target = target
+        .to_str()
+        .ok_or_else(|| format!("path {} is not valid UTF-8", target.display()))?;
+    conn.execute("VACUUM INTO ?1", params![target])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
 
+/// Writes a consistent copy of the database behind `conn` (opened on `path`) to a fresh
+/// `<file>.<reason>.<ms>.bak` name, adding a sequence number when the name is taken, and returns the
+/// name. The original is not modified. A partial copy is removed on failure.
+fn copy_database_consistently(conn: &Connection, path: &Path, reason: &str) -> Result<PathBuf, String> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -2503,20 +2768,76 @@ fn copy_database_as_backup(path: &Path, reason: &str) -> Result<PathBuf, String>
             format!("{}.{}.{}.{}.bak", file_name, reason, timestamp, sequence)
         };
         let candidate = path.with_file_name(name);
-        if candidate.exists() {
+        if candidate.exists()
+            || DATABASE_SIDECAR_SUFFIXES
+                .iter()
+                .any(|suffix| path_with_suffix(&candidate, suffix).exists())
+        {
             continue;
         }
-        std::fs::copy(path, &candidate).map_err(|e| {
-            format!(
-                "Failed to back up shielded database {} as {}: {}",
-                path.display(),
-                candidate.display(),
-                e
-            )
-        })?;
-        return Ok(candidate);
+        return match vacuum_into(conn, &candidate) {
+            Ok(()) => Ok(candidate),
+            Err(e) => {
+                remove_database_files(&candidate);
+                Err(format!(
+                    "Failed to back up shielded database {} as {}: {}",
+                    path.display(),
+                    candidate.display(),
+                    e
+                ))
+            },
+        };
     }
     Err("Too many shielded database backup-name collisions".to_owned())
+}
+
+/// R39.8.0bc: after a successful upgrade of `wallet_db_path`, deletes the `.pre-upgrade.*.bak`
+/// backups (and their sidecars) of that wallet beyond the newest `keep`. `current`, the backup just
+/// made, is always kept and counts towards `keep`. Other `.bak` kinds are not touched. A failure to
+/// delete is logged and does not fail the activation.
+fn prune_upgrade_backups(wallet_db_path: &Path, current: &Path, keep: usize) {
+    let (Some(dir), Some(file_name)) = (
+        wallet_db_path.parent(),
+        wallet_db_path.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let prefix = format!("{}.pre-upgrade.", file_name);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("Could not list {} to prune old upgrade backups: {}", dir.display(), e);
+            return;
+        },
+    };
+    // (timestamp, sequence, path); names that do not parse are not ours and stay.
+    let mut backups: Vec<(u64, u32, PathBuf)> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|candidate| candidate != current)
+        .filter_map(|candidate| {
+            let name = candidate.file_name()?.to_str()?;
+            let stamp = name.strip_prefix(&prefix)?.strip_suffix(".bak")?;
+            let (timestamp, sequence) = match stamp.split_once('.') {
+                Some((timestamp, sequence)) => (timestamp.parse().ok()?, sequence.parse().ok()?),
+                None => (stamp.parse().ok()?, 0),
+            };
+            Some((timestamp, sequence, candidate))
+        })
+        .collect();
+    backups.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    for (_, _, old) in backups.into_iter().skip(keep.saturating_sub(1)) {
+        remove_database_files(&old);
+        if old.exists() {
+            log::warn!("Could not delete the old shielded wallet backup {}", old.display());
+        } else {
+            log::info!("Deleted the old shielded wallet backup {}", old.display());
+        }
+    }
 }
 
 fn classify_compact_db(path: &Path) -> CompactDbGeneration {
@@ -7051,6 +7372,20 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// The backup is a consistent copy (R39.8.0bc), not a byte copy: it must read as the
+    /// previous generation and carry the fixture's account.
+    fn assert_is_previous_generation_backup_of_fixture(backup: &Path) {
+        assert_eq!(
+            classify_wallet_db(backup, test_params()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+        let conn = Connection::open(backup).unwrap();
+        let accounts: u32 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(accounts, 1);
+    }
+
     #[test]
     fn previous_reloaded_wallet_fixture_is_recognized_as_upgradeable() {
         let db_dir = test_db_dir("schema-previous-recognized");
@@ -7092,7 +7427,7 @@ pub(crate) mod tests {
 
         let backups = backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.pre-upgrade.");
         assert_eq!(backups.len(), 1);
-        assert_eq!(std::fs::read(&backups[0]).unwrap(), PREVIOUS_RELOADED_WALLET_FIXTURE);
+        assert_is_previous_generation_backup_of_fixture(&backups[0]);
         assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.upgrade-failed.").is_empty());
         assert!(!path_with_suffix(&paths.wallet_db_path, ".upgrade-work").exists());
     }
@@ -7124,8 +7459,306 @@ pub(crate) mod tests {
         ] {
             let backups = backups_with_prefix(&db_dir, prefix);
             assert_eq!(backups.len(), 1, "{prefix}");
-            assert_eq!(std::fs::read(&backups[0]).unwrap(), PREVIOUS_RELOADED_WALLET_FIXTURE);
+            if prefix.contains("upgrade-failed") {
+                // The original, moved aside as it was.
+                assert_eq!(std::fs::read(&backups[0]).unwrap(), PREVIOUS_RELOADED_WALLET_FIXTURE);
+            } else {
+                // The consistent copy of R39.8.0bc: the same database, not the same bytes.
+                assert_is_previous_generation_backup_of_fixture(&backups[0]);
+            }
         }
+    }
+
+    fn policy_with_available(available_bytes: fn(&Path) -> Result<u64, String>) -> ShieldedDbUpgradePolicy {
+        ShieldedDbUpgradePolicy {
+            available_bytes,
+            ..ShieldedDbUpgradePolicy::default()
+        }
+    }
+
+    fn open_with_policy(
+        db_dir: &Path,
+        policy: &ShieldedDbUpgradePolicy,
+    ) -> MmResult<ZCoinShieldedHistory, ZCoinBuildError> {
+        ZCoinShieldedHistory::open_or_create_with_policy(
+            "ARRR",
+            db_dir.to_path_buf(),
+            test_params(),
+            &test_extfvk(8),
+            None,
+            policy,
+        )
+    }
+
+    /// R39.8.0bc, test (a): committed rows that are still in the WAL, with a reader holding a
+    /// snapshot so that no checkpoint can complete, are in the backup.
+    #[test]
+    fn consistent_backup_carries_uncheckpointed_wal_content() {
+        let db_dir = test_db_dir("backup-wal-content");
+        let path = db_dir.join("ARRR_RELOADED_WALLET.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE t (v INTEGER NOT NULL); INSERT INTO t VALUES (1), (2);",
+            )
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN; SELECT COUNT(*) FROM t;").unwrap();
+        writer.execute_batch("INSERT INTO t VALUES (3), (4), (5);").unwrap();
+        // The rows are committed, are not in the main file, and a checkpoint cannot fold them in.
+        assert!(std::fs::metadata(path_with_suffix(&path, "-wal")).unwrap().len() > 0);
+
+        let backup = copy_database_consistently(&writer, &path, "pre-upgrade").unwrap();
+
+        let backed_up = Connection::open(&backup).unwrap();
+        let rows: i64 = backed_up
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 5, "the backup must hold every committed row, WAL included");
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("ARRR_RELOADED_WALLET.db.pre-upgrade."));
+        // The source still reads the same.
+        let source_rows: i64 = writer
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source_rows, 5);
+        drop(reader);
+    }
+
+    /// R39.8.0bc, test (b): a backup that fails verification is refused and deleted, and the
+    /// original is neither migrated nor moved.
+    #[test]
+    fn corrupted_backup_refuses_the_upgrade_and_leaves_the_original() {
+        fn corrupt(backup: &Path) { std::fs::write(backup, vec![0x5a; 8192]).unwrap(); }
+
+        let db_dir = test_db_dir("backup-corrupted");
+        let paths = place_previous_reloaded_wallet(&db_dir);
+        let policy = ShieldedDbUpgradePolicy {
+            after_backup: Some(corrupt),
+            ..ShieldedDbUpgradePolicy::default()
+        };
+
+        let error = open_with_policy(&db_dir, &policy)
+            .err()
+            .expect("the upgrade must be refused");
+
+        match error.into_inner() {
+            ZCoinBuildError::ShieldedDbBackupVerification { check, .. } => {
+                assert!(
+                    check.starts_with("open") || check.starts_with("integrity_check"),
+                    "{check}"
+                );
+            },
+            other => panic!("unexpected error {other}"),
+        }
+        assert_eq!(
+            std::fs::read(&paths.wallet_db_path).unwrap(),
+            PREVIOUS_RELOADED_WALLET_FIXTURE
+        );
+        assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.").is_empty());
+        assert!(!path_with_suffix(&paths.wallet_db_path, ".upgrade-work").exists());
+        assert_eq!(
+            classify_wallet_db(&paths.wallet_db_path, test_params()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+    }
+
+    /// R39.8.0bc: a backup whose schema differs from the source's fails the fingerprint check.
+    #[test]
+    fn backup_with_a_different_schema_fails_verification() {
+        let db_dir = test_db_dir("backup-fingerprint");
+        let paths = place_previous_reloaded_wallet(&db_dir);
+        let expected = read_only_schema_fingerprint(&paths.wallet_db_path).unwrap();
+        let other = db_dir.join("other.db");
+        Connection::open(&other)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (x INTEGER);")
+            .unwrap();
+
+        let check = verify_backup(&other, &expected).unwrap_err();
+
+        assert!(check.starts_with("schema fingerprint"), "{check}");
+    }
+
+    /// R39.8.0bc, test (c): with too little free space the activation is refused with both
+    /// figures and no backup is written.
+    #[test]
+    fn insufficient_free_space_refuses_the_upgrade_and_writes_nothing() {
+        fn almost_full(_dir: &Path) -> Result<u64, String> { Ok(1000) }
+
+        let db_dir = test_db_dir("backup-no-space");
+        let paths = place_previous_reloaded_wallet(&db_dir);
+        let (page_count, page_size): (u64, u64) = {
+            let conn = Connection::open(&paths.wallet_db_path).unwrap();
+            (
+                conn.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap(),
+                conn.query_row("PRAGMA page_size", [], |row| row.get(0)).unwrap(),
+            )
+        };
+        let files_before: Vec<_> = {
+            let mut names: Vec<_> = std::fs::read_dir(&db_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let error = open_with_policy(&db_dir, &policy_with_available(almost_full))
+            .err()
+            .expect("the upgrade must be refused");
+
+        match error.into_inner() {
+            ZCoinBuildError::InsufficientDiskSpace {
+                needed_bytes,
+                available_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    needed_bytes,
+                    2 * page_count * page_size + UPGRADE_FREE_SPACE_MARGIN_BYTES
+                );
+                assert_eq!(available_bytes, 1000);
+            },
+            other => panic!("unexpected error {other}"),
+        }
+        assert_eq!(
+            std::fs::read(&paths.wallet_db_path).unwrap(),
+            PREVIOUS_RELOADED_WALLET_FIXTURE
+        );
+        let mut files_after: Vec<_> = std::fs::read_dir(&db_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        files_after.sort();
+        assert_eq!(
+            files_after, files_before,
+            "nothing may be written when the space is short"
+        );
+    }
+
+    /// A free-space figure that cannot be read refuses the upgrade; no backup is written.
+    #[test]
+    fn unreadable_free_space_refuses_the_upgrade() {
+        fn unreadable(_dir: &Path) -> Result<u64, String> { Err("no statvfs".to_owned()) }
+
+        let db_dir = test_db_dir("backup-space-unreadable");
+        let paths = place_previous_reloaded_wallet(&db_dir);
+
+        let error = open_with_policy(&db_dir, &policy_with_available(unreadable))
+            .err()
+            .expect("the upgrade must be refused");
+
+        assert!(matches!(error.into_inner(), ZCoinBuildError::ShieldedDbSchema { .. }));
+        assert_eq!(
+            std::fs::read(&paths.wallet_db_path).unwrap(),
+            PREVIOUS_RELOADED_WALLET_FIXTURE
+        );
+        assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.").is_empty());
+    }
+
+    /// R39.8.0bc, test (d): after a successful upgrade only the newest N `.pre-upgrade` backups
+    /// stay, with their sidecars; other `.bak` kinds are not touched.
+    #[test]
+    fn upgrade_backups_beyond_the_newest_n_are_pruned() {
+        let db_dir = test_db_dir("backup-retention");
+        let wallet = db_dir.join("ARRR_RELOADED_WALLET.db");
+        let make = |name: &str| {
+            let path = db_dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            path
+        };
+        let oldest = make("ARRR_RELOADED_WALLET.db.pre-upgrade.100.bak");
+        let oldest_wal = make("ARRR_RELOADED_WALLET.db.pre-upgrade.100.bak-wal");
+        let older = make("ARRR_RELOADED_WALLET.db.pre-upgrade.200.bak");
+        let sequenced = make("ARRR_RELOADED_WALLET.db.pre-upgrade.300.1.bak");
+        let newer = make("ARRR_RELOADED_WALLET.db.pre-upgrade.300.bak");
+        let current = make("ARRR_RELOADED_WALLET.db.pre-upgrade.400.bak");
+        let other_kinds = [
+            make("ARRR_RELOADED_WALLET.db.upgrade-failed.50.bak"),
+            make("ARRR_RELOADED_WALLET.db.legacy-v2.60.bak"),
+            make("ARRR_RELOADED_WALLET.db.pre-upgrade.notes.bak"),
+            make("OTHER_RELOADED_WALLET.db.pre-upgrade.1.bak"),
+        ];
+
+        prune_upgrade_backups(&wallet, &current, 3);
+
+        assert!(
+            current.exists() && sequenced.exists() && newer.exists(),
+            "newest 3 stay"
+        );
+        assert!(!older.exists() && !oldest.exists() && !oldest_wal.exists());
+        assert!(other_kinds.iter().all(|path| path.exists()));
+
+        // One is the minimum: only the backup just made stays.
+        prune_upgrade_backups(&wallet, &current, 1);
+        assert!(current.exists());
+        assert!(!sequenced.exists() && !newer.exists());
+        assert!(other_kinds.iter().all(|path| path.exists()));
+    }
+
+    /// R39.8.0bc, test (d), end to end: three earlier backups, N = 2 set explicitly, one more upgrade.
+    #[test]
+    fn successful_upgrade_prunes_old_backups() {
+        let db_dir = test_db_dir("backup-retention-upgrade");
+        place_previous_reloaded_wallet(&db_dir);
+        for stamp in [1, 2, 3] {
+            std::fs::write(
+                db_dir.join(format!("ARRR_RELOADED_WALLET.db.pre-upgrade.{stamp}.bak")),
+                b"old",
+            )
+            .unwrap();
+        }
+        std::fs::write(db_dir.join("ARRR_RELOADED_WALLET.db.legacy-v2.1.bak"), b"legacy").unwrap();
+
+        let policy = ShieldedDbUpgradePolicy {
+            backups_kept: 2,
+            ..ShieldedDbUpgradePolicy::default()
+        };
+        open_with_policy(&db_dir, &policy).unwrap();
+
+        let backups = backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.pre-upgrade.");
+        assert_eq!(backups.len(), 2, "{backups:?}");
+        assert!(db_dir.join("ARRR_RELOADED_WALLET.db.pre-upgrade.3.bak").exists());
+        assert!(db_dir.join("ARRR_RELOADED_WALLET.db.legacy-v2.1.bak").exists());
+    }
+
+    #[test]
+    fn upgrade_backups_kept_is_read_from_the_node_config() {
+        let kept = |conf: serde_json::Value| ShieldedDbUpgradePolicy::from_node_conf(&conf).backups_kept;
+        assert_eq!(kept(serde_json::json!({})), 1);
+        assert_eq!(kept(serde_json::json!({ "shielded_db_upgrade_backups": 5 })), 5);
+        assert_eq!(kept(serde_json::json!({ "shielded_db_upgrade_backups": 1 })), 1);
+        assert_eq!(kept(serde_json::json!({ "shielded_db_upgrade_backups": 0 })), 1);
+        assert_eq!(kept(serde_json::json!({ "shielded_db_upgrade_backups": -3 })), 1);
+        assert_eq!(kept(serde_json::json!({ "shielded_db_upgrade_backups": "many" })), 1);
+        assert_eq!(kept(serde_json::json!({ "shielded_db_upgrade_backups": 1.5 })), 1);
+    }
+
+    /// R39.8.0bc, test (e): a database that is already current is opened without a backup.
+    #[test]
+    fn current_wallet_is_opened_without_a_backup() {
+        let db_dir = test_db_dir("backup-not-needed");
+        drop(open_with_policy(&db_dir, &ShieldedDbUpgradePolicy::default()).unwrap());
+        // A free-space source that always refuses would fail an upgrade; a current wallet never asks.
+        fn no_space(_dir: &Path) -> Result<u64, String> { Ok(0) }
+
+        drop(open_with_policy(&db_dir, &policy_with_available(no_space)).unwrap());
+
+        assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.").is_empty());
+    }
+
+    /// R39.8.0bc: the list of recognized previous generations holds the one pinned digest today.
+    #[test]
+    fn one_previous_generation_is_recognized() {
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS.len(), 1);
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[0].user_version, 8);
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[0].record_count, 467);
     }
 
     // Re-pinned for zcash_client_sqlite 0.22.0 (was 467 records / 48 migrations on 0.21.1).

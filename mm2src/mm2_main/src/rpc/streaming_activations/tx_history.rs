@@ -124,7 +124,7 @@ pub async fn enable_tx_history(
     Ok(EnableStreamingResponse::new(streamer_id))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use coins::tx_history_streaming::TxHistoryStreamerInput;

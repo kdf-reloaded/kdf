@@ -1407,6 +1407,33 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_backup_refusals_are_coin_creation_errors_with_the_figures() {
+        // R39.8.0bc: a refused wallet-database upgrade is an ordinary activation failure.
+        let build_err = ZCoinBuildError::InsufficientDiskSpace {
+            path: "/data/ARRR_RELOADED_WALLET.db".to_owned(),
+            needed_bytes: 300,
+            available_bytes: 100,
+        };
+        let text = build_err.to_string();
+        assert!(text.contains("300 bytes are needed, 100 bytes are available"), "{text}");
+        let (wire, status) = task_error(ZcoinInitError::from_build_err(build_err, "ARRR".to_owned()));
+        assert_eq!(wire["error_type"], "CoinCreationError");
+        assert_eq!(wire["error_data"]["ticker"], "ARRR");
+        assert_eq!(wire["error_data"]["error"], text);
+        assert_eq!(status, common::StatusCode::BAD_REQUEST);
+
+        let build_err = ZCoinBuildError::ShieldedDbBackupVerification {
+            path: "/data/ARRR_RELOADED_WALLET.db.pre-upgrade.1.bak".to_owned(),
+            check: "integrity_check: bad page".to_owned(),
+        };
+        let text = build_err.to_string();
+        assert!(text.contains("integrity_check: bad page"), "{text}");
+        let (wire, _) = task_error(ZcoinInitError::from_build_err(build_err, "ARRR".to_owned()));
+        assert_eq!(wire["error_type"], "CoinCreationError");
+        assert_eq!(wire["error_data"]["error"], text);
+    }
+
+    #[test]
     fn unresolved_default_params_directory_is_a_reported_activation_error() {
         let reason = "the APPDATA environment variable is not set and the roaming application-data folder could not \
                       be determined";

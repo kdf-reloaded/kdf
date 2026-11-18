@@ -601,7 +601,7 @@ async fn spawn_taker_swap_watcher(ctx: MmArc, data: TakerSwapWatcherData, verifi
 
 // ── Unit Tests ───────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

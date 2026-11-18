@@ -649,6 +649,18 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   needed because a request without them is served as before. The values are secrets and are never logged or shown.
   Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 
+- **TRON (still switched off) gets the standard platform-with-tokens activation route, and keeps the legacy one.**
+  `enable_eth_with_tokens`, `task::enable_eth::*`, `enable_erc20` and `task::enable_erc20::init` accept a TRX
+  platform and TRC20 tokens, as GLEEC KDF `v3.0.0-beta` serves them; Reloaded also keeps TRX and TRC20 on the legacy
+  `enable` and `electrum` methods, which GLEEC KDF refuses for them, as an extension a GLEEC client never reaches.
+  Where Reloaded differs from that reference, none of it needs a switch, and each is a row of
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md): swap-contract members may also be written as
+  base58check or `41...` hex on a TRON platform (a wider input; an EVM platform keeps `0x` only); the MetaMask
+  policy and `rpc_mode` are refused for TRON at activation (the reference activates an address its withdraw then
+  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key; and a key in the
+  query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
+  CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
@@ -661,7 +673,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   to return in the next beta. No switch exists: the build constants
   `TRON_ACTIVATION_AVAILABLE` and `SOLANA_ACTIVATION_AVAILABLE`
   (`coins/lp_coins_ops.rs`) are `false`. When TRON returns, Reloaded activates
-  TRX and TRC20 on the legacy methods as an extension. GLEEC KDF `v3.0.0-beta`
+  TRX and TRC20 on the legacy methods as an extension, and, since the route of
+  the entry above, on the platform-with-tokens activation too. GLEEC KDF `v3.0.0-beta`
   serves them only through the platform-with-tokens activation,
   `enable_eth_with_tokens` and the `task::enable_eth::*` family, and refuses
   them on the legacy methods, so a client written for GLEEC never sends such a
@@ -1035,6 +1048,38 @@ unchanged and activation returns a typed schema error; it is never silently
 deleted or treated as an empty wallet. Manual intervention is required only for
 that explicit unknown/corrupt-file error, not for ordinary switching between
 Reloaded and GLEEC KDF.
+
+#### Upgrade of a shielded wallet database and its backup
+
+When a new KDF Reloaded build needs a newer wallet-database schema than the one a
+`<TICKER>_RELOADED_WALLET.db` was created with, the first activation of that coin upgrades the
+file. Before it changes anything, the node:
+
+- checks that the disk holding the database has room for the backup and for the working copy:
+  twice the size of the wallet database plus 16 MiB. If not, the activation fails with an error that
+  gives the bytes needed and the bytes available, and no backup is written. Free some space and
+  activate again;
+- writes a consistent copy of the database next to it, named
+  `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<milliseconds>.bak`, in the same data directory. It is
+  about as large as the wallet database;
+- checks the copy (SQLite integrity check, same table layout as the original). If the check fails,
+  the copy is deleted, the wallet database's content stays as it was, and the activation fails with an error
+  naming the check.
+
+The upgrade then runs on a second copy made from the verified backup, and replaces the wallet
+database only when the result checks out. If the upgrade itself fails, the original is set aside as
+`.upgrade-failed.<milliseconds>.bak` and a fresh wallet is scanned from the chain, as before.
+
+*Going back to an older KDF Reloaded build:* stop the node, copy the `.pre-upgrade.<milliseconds>.bak`
+file over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal` and
+`<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start the older build. The older build then
+sees the wallet as it was before the upgrade.
+
+*How many backups stay:* after a successful upgrade the node keeps only the newest
+`.pre-upgrade` backup of that wallet and deletes older ones. The top-level `MM2.json` key
+`shielded_db_upgrade_backups` (a whole number, default `1`, lowest effective value `1`) changes the
+number; the backup just made is always kept. Other `.bak` files, such as `.upgrade-failed` and
+`.legacy-v2`, are never deleted by the node.
 
 ## Forward-compatibility commitment
 

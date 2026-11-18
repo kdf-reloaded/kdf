@@ -123,10 +123,10 @@ impl EthCoinImpl {
     }
 
     /// Returns this coin's own ERC-20 token info (contract address + decimals)
-    /// when it is an ERC-20 token coin; `None` for the native gas coin.
+    /// when it is an ERC-20 or TRC20 token coin; `None` for a native platform coin.
     pub fn erc20_token_info(&self) -> Option<Erc20TokenInfo> {
         match &self.coin_type {
-            EthCoinType::Erc20 { token_addr, .. } => Some(Erc20TokenInfo {
+            EthCoinType::Erc20 { token_addr, .. } | EthCoinType::Trc20 { token_addr, .. } => Some(Erc20TokenInfo {
                 token_addr: *token_addr,
                 decimals: self.decimals,
             }),
@@ -468,7 +468,22 @@ impl EthCoinImpl {
     }
 
     /// Try to parse address from string.
+    ///
+    /// A TRON coin takes both forms of CRD ch.21 R-AD1 (Base58Check and the 21-byte hex wire form); every other
+    /// coin takes the EVM form only.
     pub fn address_from_str(&self, address: &str) -> Result<Address, String> {
+        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+            return crate::eth::tron::TronAddress::parse(address)
+                .map(|parsed| parsed.to_evm_address())
+                .map_err(|e| e.to_string());
+        }
+        self.evm_address_from_str(address)
+    }
+
+    /// Parses an address in the EVM `0x` form only, whatever the coin type. Message verification uses it, so that
+    /// `verify_message` of a TRX or TRC20 coin behaves as it always did and never reads a TRON address with the EVM
+    /// message scheme.
+    pub(crate) fn evm_address_from_str(&self, address: &str) -> Result<Address, String> {
         Ok(try_s!(valid_addr_from_str(address)))
     }
 
@@ -532,14 +547,15 @@ pub async fn get_raw_transaction_impl(coin: EthCoin, req: RawTransactionRequest)
     })
 }
 
+/// The request-independent check of an EVM-family withdraw: every coin type of the family takes `withdraw`.
+///
+/// TRX and TRC20 are in the family for `task::withdraw` (CRD ch.21 R21.10B.7 "Routes"): `withdraw_impl` routes
+/// them to the TRON pipeline. The hardware refusal of CRD ch.49 R49.9 stays in front of this check on the Trezor
+/// path (`ensure_trezor_withdraw_supported`), and the MetaMask refusal in `withdraw_impl`.
 pub(crate) fn validate_evm_withdraw_request(coin: &EthCoin, _req: &WithdrawRequest) -> MmResult<(), WithdrawError> {
-    if !matches!(coin.coin_type, EthCoinType::Eth | EthCoinType::Erc20 { .. }) {
-        return MmError::err(WithdrawError::CoinDoesntSupportInitWithdraw {
-            coin: coin.ticker.clone(),
-        });
+    match coin.coin_type {
+        EthCoinType::Eth | EthCoinType::Erc20 { .. } | EthCoinType::Tron | EthCoinType::Trc20 { .. } => Ok(()),
     }
-
-    Ok(())
 }
 
 pub(crate) struct EvmWithdrawSender {
@@ -1532,6 +1548,24 @@ impl EthCoin {
         info: &Erc20TokenInfo,
         address: Address,
     ) -> Result<CoinBalance, MmError<BalanceError>> {
+        // A TRON platform reads its TRC20 balances through the TRON node API (CRD ch.21 R-WP3).
+        if let (Some(api), EthCoinType::Tron) = (&self.tron_api, &self.coin_type) {
+            use crate::eth::tron::balance::trc20_balance_units;
+            use crate::eth::tron::TronAddress;
+            let units = trc20_balance_units(
+                api,
+                &TronAddress::from_evm_address(info.token_addr),
+                &TronAddress::from_evm_address(address),
+            )
+            .await
+            .map_to_mm(BalanceError::from)?;
+            let spendable =
+                u256_to_big_decimal(units, info.decimals).mm_err(|e| BalanceError::Internal(e.to_string()))?;
+            return Ok(CoinBalance {
+                spendable,
+                unspendable: BigDecimal::from(0),
+            });
+        }
         let function = ERC20_CONTRACT
             .function("balanceOf")
             .map_to_mm(|e| BalanceError::Internal(e.to_string()))?;

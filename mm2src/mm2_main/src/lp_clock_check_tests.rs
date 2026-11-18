@@ -407,6 +407,7 @@ fn t45_27_the_start_no_answer_warning_counts_for_the_run_time_24_hours() {
 
 // ---- T45.28 ----------------------------------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn t45_28_with_the_check_off_no_query_is_sent() {
     for required in [false, true] {
@@ -435,6 +436,7 @@ fn t45_28_with_the_check_off_no_query_is_sent() {
     assert!(conf.is_off() && conf.required);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn t45_28_the_run_time_loop_sends_no_query_when_off() {
     let ctx = new_ctx();

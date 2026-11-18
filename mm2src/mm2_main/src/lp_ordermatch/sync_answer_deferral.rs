@@ -1425,6 +1425,7 @@ mod tests {
         assert!(deferral.parked_counts_agree());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// R-Q5b item 6 (a): a registration older than the bound counts as ended, whatever its handling still does.
     /// A request waits for A and B. A expires while its guard stays alive; B ends after that and long before its
     /// own expiry. The request leaves phase 1 when B ends, not when B would expire.
