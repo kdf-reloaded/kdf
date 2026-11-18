@@ -4318,6 +4318,45 @@ client. *Recommendation:* (b). No peer and no server contract observes the
 number of sessions, so this falls under the second arm of the default-side
 rule of `docs/COMPAT_SWITCHES.md`.
 
+*Status note (2026-11-15 and 2026-11-18, clean side; maintainer decisions).
+D38.6.4Q.1 is decided:* option (b), on 2026-11-15. Its details were decided
+on 2026-11-18.
+
+1. *When instances share.* Instances of the QTUM family (`protocol.type`
+   `QTUM` or `QRC20`) use one Electrum client when every input that shapes
+   the client is exactly equal: the platform (a token's
+   `protocol.protocol_data.platform`, QTUM's own ticker), the server list as
+   the activation request gives it (in order, and per entry), `min_connected`
+   and `max_connected`, the coin entry's `listed_order_for_spends` and
+   `block_interval`, and the builder arguments (ping, version negotiation
+   and its client name, metrics). An instance whose inputs differ in any of
+   them builds its own client, so the servers a token's request names are
+   always honored. Every other coin builds its own client as before.
+2. *Lifetime.* The node keeps the shared clients in a registry of its context,
+   by weak reference, so the registry owns none of them. A client lives as
+   long as any instance holds it, and the last holder's release closes it. A
+   token activates without QTUM and keeps working after QTUM is disabled.
+   Disabling one instance, or failing one activation, closes no session that
+   another instance uses. R38.6.4b-R item 2 binds the server order of a
+   reused client.
+3. *Reuse.* A reused client is not probed again. While its servers disagree,
+   an instance that would reuse it is refused as a fresh build would be
+   (R38.6.4o item 12), and holds no part of it. A build that failed is not
+   remembered: an instance that waited for it builds from the start.
+4. *Lock order.* The activation locks of R55.1.12 (chapter 55), then one
+   build lock per set of inputs, then the registry itself, and the coin
+   registry only after both registry locks are released. `disable_coin`
+   never takes a registry lock, and never waits for an activation lock while
+   it holds the coin registry. A build sends no transaction.
+5. *Naming.* A shared client goes by the platform ticker in its log lines,
+   its error texts and its transport metrics, so each connection is counted
+   once, and a token's transport errors name the platform. The
+   `electrum_servers` request for a token reports the shared client.
+6. *Subscriptions of a disabled instance.* On disable, an instance's
+   remembered subscriptions, script-hash and contract-event alike, are
+   removed from the shared client, unless another live instance remembers
+   the same one. They are then no longer placed again after a reconnect.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -6388,3 +6427,10 @@ R38.8.6 **Tests (two-direction, observable).**
   project's own probes of public servers and this repository's code. It takes
   no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
   is required.
+- *Maintainer decisions (2026-11-15 and 2026-11-18), clean side -- status
+  note after D38.6.4Q.1 (one Electrum client for the QTUM family: when
+  instances share, lifetime, reuse, lock order, naming, and the
+  subscriptions of a disabled instance).* Written by a session that never
+  read the forbidden corpus, from the maintainer's decisions and this
+  repository's code. It takes no forbidden-class input, so chapter 01 R38 is
+  not engaged and no gate pass is required.
