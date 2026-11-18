@@ -1499,6 +1499,12 @@ behavior, which the body makes visible.
 > chapter 55 D55.6); `force_disable` is still not read. The versioned
 > `disable_coin` of §43.1R is unchanged.
 
+> *Reloaded status (clean side, 2026-11-18, second note):* with the passive
+> state decided (chapter 55 D55.6), the maintainer decided on 2026-11-18 that
+> the legacy `disable_coin` reads `force_disable` and answers `passivized` as
+> R43.1E.5 and R43.1E.6 describe. The versioned `disable_coin` of §43.1R gets
+> neither: it keeps its request and answer unchanged.
+
 **D43.1E.2** *(Open, 2026-11-16.)* **A forced removal does not look at the
 dependent tokens.** In the reference the swap check, the matching-order check
 and the order cancellation of a forced call cover the platform's ticker only,
@@ -1508,6 +1514,12 @@ forced removal. Options: (a) reproduce the reference; (b) apply R43.1E.3 and
 R43.1E.4 to the platform's ticker and to every dependent token before
 anything is removed, and refuse the whole call if any of them is in use.
 *Recommendation:* (b).
+
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision of 2026-11-18 as option (b). A forced `disable_coin` applies
+> R43.1E.3 and R43.1E.4 to the platform's ticker and to every dependent token
+> before anything is removed, and refuses the whole call if any of them is in
+> use.
 
 *Status note (2026-11-18).* The maintainer decided that Reloaded builds the
 passive state of R43.1E.5 item 3 and R43.1E.6 in 0.5.0 (chapter 55 D55.6).
@@ -1963,6 +1975,23 @@ token instances. *Recommendation:* (b); it keeps every case a reference
 client is known to rely on (re-activation naming its own dependents) and
 turns the silent adoption into an answer.
 
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision of 2026-11-18 as a node setting that chooses between options (b)
+> and (a). The top-level startup-configuration member
+> `reactivation_registered_token` takes one of two values:
+>
+> - `"refuse"` (the default) -- option (b): a requested token that is
+>   already a dependent of this very platform is kept (case a); any other
+>   registered ticker (cases b and c') is refused with
+>   `TokenIsAlreadyActivated` (string: the token ticker, HTTP 400) before
+>   anything is built;
+> - `"keep"` -- option (a), the reference behavior of R43.1F.4: the
+>   registered instance is kept silently.
+>
+> Under either value a token whose configuration names another platform is
+> still refused with `PlatformCoinMismatch` (case c). Option (c), replacing
+> the registered instance, is not offered.
+
 **D43.1F.2** *(Open, 2026-11-18.)* **Failed re-activations and the
 forced-removal race (the second code-quality finding).** Options: (a)
 reproduce the reference; (b) update the token record only at registration,
@@ -1971,6 +2000,13 @@ and refuse the re-activation (`PlatformIsAlreadyActivated` is unsuitable;
 started from was removed meanwhile, or serialize `disable_coin` with the
 activations of the same ticker. *Recommendation:* (b), serializing
 `disable_coin` through the lock of chapter 55 R55.1.12.
+
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision of 2026-11-18 as option (b) in its serializing form: the
+> platform's token record is written only at registration, and
+> `disable_coin` is serialized with the activations of the same platform
+> instead of a re-activation being refused when its passive entry was
+> removed meanwhile.
 
 **D43.1F.3** *(Open, 2026-11-18.)* **EVM token operations that need the
 platform while it is passive** (R43.1F.10 item 3, R43.1F.11 item 2).
@@ -1983,6 +2019,11 @@ refund until the platform is re-activated; option (b) changes no answer a
 reference client relies on except that the refusals of R43.1F.10 item 3
 become successes. *Recommendation:* (b).
 
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision of 2026-11-18 as option (b). A token's own internal look-up of its
+> platform finds the passive platform, so the token's swaps, orders and fee
+> estimates keep working while the platform is passive.
+
 **D43.1F.4** *(Open, 2026-11-18.)* **A standalone activation task for a
 passive ticker** (R43.1F.9 item 3). Options: (a) reproduce the reference:
 `init` answers a `task_id`, the task builds a whole coin and ends with
@@ -1990,6 +2031,11 @@ passive ticker** (R43.1F.9 item 3). Options: (a) reproduce the reference:
 `{ticker}` (HTTP 400), as for an active coin, so nothing is built.
 *Recommendation:* (b); the terminal answer a client sees is the same token,
 only earlier.
+
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision of 2026-11-18 as option (b): `init` of a standalone activation task
+> for a passive ticker answers `CoinIsAlreadyActivated` `{ticker}`, HTTP 400,
+> and nothing is built.
 
 **D43.1F.5** *(Open, 2026-11-18.)* **Re-activation and `tx_history`**
 (R43.1F.3). Options: (a) reproduce the reference: the request's
@@ -1999,6 +2045,10 @@ running for the platform. *Recommendation:* (a); a passive platform keeps
 the collector it had, and (b) would make re-activation differ from the
 reference in what is written to the history storage.
 
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision of 2026-11-18 as option (a), the reference behavior: a
+> re-activation ignores the request's `tx_history`.
+
 *Not established.* (1) Whether the background work of an instance built and
 then discarded (a refused first activation, R43.1F.5 item 1; the standalone
 task of R43.1F.9 item 3; a token built for an already registered ticker,
@@ -2007,6 +2057,12 @@ EVM-token order while its platform is passive (R43.1F.10 item 4) was traced
 to the swap start only. (3) Feature-gated or WASM-only routes (MetaMask,
 WalletConnect specifics, cross-chain routing of Tendermint orders) were not
 examined. (4) Nothing was measured against a running reference binary.
+
+> *Reloaded status (clean side, 2026-11-18):* the maintainer decided on
+> 2026-11-18 that ending a coin's background work when the coin is removed,
+> or when an instance built for an activation is discarded, is built as a
+> separate change, the fifth of the passive-state work. Item (1) above and
+> item (1) of the not-established paragraph of §43.1E stay open until then.
 
 *Acceptance rows.* Each row runs against a node with mock backends; *parity*
 is the reference behavior above. Rows that need a passive platform apply to
@@ -2843,3 +2899,8 @@ shall be wound down as part of shutdown rather than abandoned.
   five-word match, two generic four-word matches), a per-token
   forced-versus-free test, and a scan for pull-request numbers and commit
   identifiers. *Measure:* 0.02.
+- *Status notes added 2026-11-18 -- second note after D43.1E.1, notes after
+  D43.1E.2, D43.1F.1 -- D43.1F.5 and the not-established paragraph of
+  §43.1F.* Reloaded-original, clean side: they record the maintainer's
+  decisions of 2026-11-18 on those items; no cleared sentence was changed
+  and no forbidden-class input was used, chapter 01 R38 not engaged.
