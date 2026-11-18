@@ -911,23 +911,89 @@ fn d21_10b_3_the_metamask_policy_and_rpc_mode_are_refused_with_internal() {
     assert_eq!(req.request.key_policy_facts(), KeyPolicyFacts::default());
 }
 
-/// The interim rule of this change: a global-HD login is refused with a typed error naming TRON HD as not yet
-/// available, before any node is contacted.
+/// The interim rule of this change: under a global-HD login the default and the `ContextPrivKey` policies are
+/// refused with a typed error naming TRON HD as not yet available, before any node is contacted.
 #[test]
-fn an_hd_login_is_refused_until_the_tron_hd_wallet_is_built() {
+fn an_hd_login_is_refused_for_the_default_and_context_policies_until_the_tron_hd_wallet_is_built() {
     let node = untouched_stub();
     let ctx = tron_hd_ctx();
-    let (body, status) = failure(&ctx, request("TRX", std::slice::from_ref(&node.url), json!({})));
-    assert_eq!(body["error_type"], "PrivKeyPolicyNotAllowed", "{body}");
-    assert!(
-        body["error_data"]
-            .as_str()
-            .is_some_and(|text| text.contains("not yet available")),
-        "{body}"
-    );
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    for extra in [json!({}), json!({ "priv_key_policy": { "type": "ContextPrivKey" } })] {
+        let (body, status) = failure(&ctx, request("TRX", std::slice::from_ref(&node.url), extra.clone()));
+        assert_eq!(body["error_type"], "PrivKeyPolicyNotAllowed", "{extra}: {body}");
+        assert!(
+            body["error_data"]
+                .as_str()
+                .is_some_and(|text| text.contains("not yet available")),
+            "{body}"
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
     assert_eq!(node.request_count(), 0);
     assert!(!is_registered(&ctx, "TRX"));
+    // The rule on its facts: only `IguanaPrivKey` passes an HD login.
+    let iguana = KeyPolicyFacts {
+        iguana_priv_key: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        key_policy_refusal(KeyPolicyFacts::default(), true),
+        Some(KeyPolicyRefusal::HdLogin)
+    );
+    assert_eq!(key_policy_refusal(iguana, true), None);
+    assert_eq!(key_policy_refusal(iguana, false), None);
+}
+
+/// Under a global-HD login `IguanaPrivKey` is honored: the coin uses the node's internal key, the key the UTXO
+/// family uses for the same policy, on both routes. The reference is `CryptoCtx::mm2_internal_pubkey_hex`.
+#[test]
+fn iguana_priv_key_under_an_hd_login_uses_the_internal_key() {
+    let node = TronStub::start(healthy);
+    let ctx = tron_hd_ctx();
+    let internal_pubkey = crypto::CryptoCtx::from_ctx(&ctx).unwrap().mm2_internal_pubkey_hex();
+    let expected = coins::eth::tron::addr_from_pubkey_str(&internal_pubkey).expect("the TRON address of the key");
+    let policy = json!({ "priv_key_policy": { "type": "IguanaPrivKey" } });
+
+    let result = activated(&ctx, request("TRX", std::slice::from_ref(&node.url), policy.clone()));
+    let coin = registered(&ctx, "TRX");
+    assert_eq!(coin.my_address().expect("an address"), expected);
+    assert!(matches!(coin.derivation_method, coins::DerivationMethod::Iguana(_)));
+    let pubkey = result["eth_addresses_infos"][&expected]["pubkey"]
+        .as_str()
+        .expect("a pubkey")
+        .to_owned();
+    assert!(pubkey.starts_with("04") && pubkey.len() == 130, "{pubkey}");
+    assert_eq!(
+        coins::eth::tron::addr_from_pubkey_str(&pubkey).expect("address"),
+        expected
+    );
+    assert_eq!(
+        result["eth_addresses_infos"][&expected]["derivation_method"],
+        json!({ "type": "Iguana" })
+    );
+
+    // The task route.
+    let ctx = tron_hd_ctx();
+    let status = run_task(&ctx, request("TRX", std::slice::from_ref(&node.url), policy));
+    assert_eq!(status["status"], "Ok", "{status}");
+    assert_eq!(registered(&ctx, "TRX").my_address().expect("an address"), expected);
+}
+
+/// Under an iguana login the policies behave as before: no policy, `ContextPrivKey` and `IguanaPrivKey` all
+/// activate the single key.
+#[test]
+fn under_an_iguana_login_every_single_key_policy_activates() {
+    let node = TronStub::start(healthy);
+    let mut addresses = Vec::new();
+    for extra in [
+        json!({}),
+        json!({ "priv_key_policy": { "type": "ContextPrivKey" } }),
+        json!({ "priv_key_policy": { "type": "IguanaPrivKey" } }),
+    ] {
+        let ctx = tron_ctx();
+        activated(&ctx, request("TRX", std::slice::from_ref(&node.url), extra));
+        addresses.push(registered(&ctx, "TRX").my_address().expect("an address"));
+    }
+    assert!(addresses.windows(2).all(|pair| pair[0] == pair[1]));
 }
 
 // ---------------------------------------------------------------------------------------------------------------

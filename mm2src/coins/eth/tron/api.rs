@@ -95,12 +95,21 @@ fn is_retryable(e: &TronApiError) -> bool {
 
 /// The URL of the endpoint `path` of the node `base`: the path is appended to the path of `base` and the query of
 /// `base` stays at the end, so `https://h/x?key=1` gives `https://h/x/wallet/getaccount?key=1` (CRD ch.21 R-N9, the
-/// query-string key of a node URL). A fragment is not sent to a server and is dropped.
+/// query-string key of a node URL). A fragment is not sent to a server and is dropped, and trailing slashes of the
+/// path are ignored (`https://h/` gives `https://h/wallet/getaccount`, never `https://h//wallet/getaccount`); the
+/// `//` after the scheme is never touched.
 fn endpoint_url(base: &str, path: &str) -> String {
     let without_fragment = base.split_once('#').map_or(base, |(head, _)| head);
-    match without_fragment.split_once('?') {
-        Some((head, query)) => format!("{head}{path}?{query}"),
-        None => format!("{without_fragment}{path}"),
+    let (head, query) = match without_fragment.split_once('?') {
+        Some((head, query)) => (head, Some(query)),
+        None => (without_fragment, None),
+    };
+    let authority_start = head.find("://").map_or(0, |at| at + 3);
+    let (scheme, rest) = head.split_at(authority_start);
+    let rest = rest.trim_end_matches('/');
+    match query {
+        Some(query) => format!("{scheme}{rest}{path}?{query}"),
+        None => format!("{scheme}{rest}{path}"),
     }
 }
 
@@ -878,6 +887,10 @@ mod tests {
             ("https://h/x#frag", "https://h/x/wallet/getaccount"),
             ("https://h/x", "https://h/x/wallet/getaccount"),
             ("https://h", "https://h/wallet/getaccount"),
+            ("https://h/", "https://h/wallet/getaccount"),
+            ("https://h/?k=1", "https://h/wallet/getaccount?k=1"),
+            ("https://h/x/", "https://h/x/wallet/getaccount"),
+            ("https://h/x//?k=1", "https://h/x/wallet/getaccount?k=1"),
         ] {
             assert_eq!(endpoint_url(base, "/wallet/getaccount"), expected, "{base}");
         }

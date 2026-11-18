@@ -114,9 +114,15 @@ to one server. The tests are in `mm2src/coins/utxo/utxo_tests.rs` (the `test_qtu
   timeout, run it again before suspecting the code.
 - **No broadcast.** The delegation tests (`add_delegation`, `remove_delegation`) only build and
   sign a transaction; none of these tests changes chain state.
-- **Gated.** These tests carry the `live-network-tests` attribute above. Among them are five
-  `r72a_qrc20_*` tests in `qrc20_tests.rs` that build a token coin against this server
-  (`r72a_qrc20_coin()`); the other `r72a_qrc20_*` tests run offline.
+- **Gated.** These tests carry the `live-network-tests` attribute above. The `r72a_qrc20_*` tests
+  in `qrc20_tests.rs` are not among them: `r72a_qrc20_coin()` builds the token against a local
+  stub Electrum server, so all of them run offline.
+- **Offline QRC20 tests over a stub server.** `qrc20/qrc20_electrum_stub_tests.rs` (`t38_6_4q_*`)
+  activates tokens and runs the history collector against `StubServer`
+  (`utxo/rpc_clients/electrum_stub_server.rs`). The stub answers the QRC20 methods with results
+  keyed by parameters (`set_params_result`, `set_params_prefix_result`), full JSON-RPC error
+  objects (`set_error_object`, `set_params_error`) and unknown-method errors, and it records
+  every request (`request_log`). These tests run in the `electrum-qrc20` CI row.
 - **The docker-tests job** passes the feature for its three gated withdraw tests, and those tests
   set `electrum_tip_checks` to `false` in their node configuration. Public testnet servers can
   briefly answer different headers at the same height, for example during a reorganization, and

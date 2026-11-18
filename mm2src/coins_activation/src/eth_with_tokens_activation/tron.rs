@@ -51,6 +51,8 @@ pub(super) struct KeyPolicyFacts {
     pub metamask_policy: bool,
     /// The `Metamask` value of `rpc_mode`.
     pub metamask_rpc_mode: bool,
+    /// The `IguanaPrivKey` value of `priv_key_policy`: the single key of the node, whatever the login.
+    pub iguana_priv_key: bool,
 }
 
 /// Why a TRON platform activation is refused by its key policy, in the order the rules are checked.
@@ -63,7 +65,8 @@ pub(super) enum KeyPolicyRefusal {
     MetaMask,
     /// The device is never driven for TRON (CRD ch.21 R21.10B.4, ch.49 R49.9).
     Trezor,
-    /// The global-HD wallet path of TRON is built in a later change (CRD ch.21 R21.10B.4, R-A2).
+    /// The global-HD wallet path of TRON is built in a later change (CRD ch.21 R21.10B.4, R-A2). Under a global-HD
+    /// login only the `IguanaPrivKey` policy is served, on the node's internal key; any other policy is refused.
     HdLogin,
 }
 
@@ -76,7 +79,7 @@ pub(super) fn key_policy_refusal(facts: KeyPolicyFacts, hd_login: bool) -> Optio
         Some(KeyPolicyRefusal::MetaMask)
     } else if facts.trezor {
         Some(KeyPolicyRefusal::Trezor)
-    } else if hd_login {
+    } else if hd_login && !facts.iguana_priv_key {
         Some(KeyPolicyRefusal::HdLogin)
     } else {
         None
@@ -112,6 +115,7 @@ impl EthWithTokensActivationRequest {
         KeyPolicyFacts {
             trezor: self.is_trezor_policy(),
             wallet_connect: matches!(self.priv_key_policy, Some(EthPrivKeyPolicy::WalletConnect { .. })),
+            iguana_priv_key: matches!(self.priv_key_policy, Some(EthPrivKeyPolicy::IguanaPrivKey)),
             #[cfg(target_arch = "wasm32")]
             metamask_policy: matches!(self.priv_key_policy, Some(EthPrivKeyPolicy::Metamask)),
             #[cfg(not(target_arch = "wasm32"))]

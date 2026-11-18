@@ -4347,6 +4347,104 @@ pending. Parity: the withdraw does not return before the token's broadcast has
 been answered. Under D38.6.4Q.4 (b) it returns without waiting (R38.6.4Q.7
 item 6).
 
+> **Measured (2026-11-16, clean side; this repository on dev; plan
+> `qtum-qrc20-stabilization`).**
+> Offline tests against the stub Electrum server
+> (`qrc20/qrc20_electrum_stub_tests.rs`, `t38_6_4q_*`) pin this tree's
+> behavior for rows T38.6.4Q.2 to T38.6.4Q.6. They run with
+> `electrum_server_order` `listed` and `electrum_spread_reads` `false`, so that
+> "the highest-ranked session" is deterministic. The activation is driven
+> through the legacy coin initialization plus the balance read and
+> deregistration of the `electrum` handler, not through the RPC itself.
+>
+> 1. *T38.6.4Q.2.* The activation sends `blockchain.headers.subscribe` and
+>    then exactly one `blockchain.contract.call`, with the token contract,
+>    the `balanceOf` call data and an empty sender. The balance is decoded
+>    from `executionResult.output`. Without `decimals`, a `decimals()` call
+>    comes first. Neither `blockchain.token.get_info` nor
+>    `blockchain.contract.event.subscribe` is sent. *Difference from
+>    R38.6.4Q.9:* this tree asks for the tip (`blockchain.headers.subscribe`)
+>    before the balance call, and with two servers it also asks
+>    `blockchain.block.header` of both (by R38.6.4o; not asserted here).
+> 2. *T38.6.4Q.3.* As the reference.
+>    - An error answer to the balance read fails the activation, without a
+>      repeat. The token is deregistered and the session stays open. A second
+>      attempt fails the same way, not as already active.
+>    - Without `decimals`, the build fails on the `decimals()` call and
+>      nothing is registered.
+>    - With two servers, the first server's error answer ends the request,
+>      although the second would answer correctly.
+> 3. *T38.6.4Q.4.* As the reference. An error answer of the highest-ranked
+>    session fails `my_balance`. The other server is not asked, the session
+>    stays open and the token stays active. Each read asks again, no earlier
+>    value is served, and after recovery the next read succeeds.
+> 4. *T38.6.4Q.5.* The request order is: the balance read, then
+>    `blockchain.contract.event.get_history`, then per transaction the
+>    receipt (`blochchain.transaction.get_receipt`) and the verbose
+>    transaction, and each spent-from transaction once. The next pass with
+>    an unchanged balance sends one `blockchain.contract.call` and nothing
+>    else.
+> 5. *T38.6.4Q.6.*
+>    - (a) A failed history request is asked again after this tree's
+>      backoff: 10, 20, 40, 80, 160 and then 300 s (§38.6.5 item 8), and the
+>      history state is not an error.
+>    - (b) Only the exact error object `{"code": 1, "message": "history too
+>      large"}` ends the collector, with the state's code −1; the balance
+>      still answers.
+>    - (c) A failed receipt leaves that transaction out. The other is stored.
+>      While the balance is unchanged, no pass asks again, as the finding
+>      after R38.6.4Q.6 says.
+>
+> Not measured here: rows T38.6.4Q.1 and T38.6.4Q.7 to T38.6.4Q.11 (next
+> package); the dropping of an unlisted transaction (R38.6.4Q.6 item 2),
+> which this tree does not do (§38.5C, decided 2026-11-16); and the default
+> server order and read spreading.
+
+> **Measured, second part (2026-11-17, clean side; this repository on dev;
+> plan `qtum-qrc20-stabilization`).** Offline tests against the stub
+> Electrum server (`qrc20/qrc20_electrum_stub_tests.rs`, `t38_6_4q_*`), with
+> the same settings as the first part, pin rows T38.6.4Q.1 and T38.6.4Q.7 to
+> T38.6.4Q.11.
+>
+> 1. *T38.6.4Q.1, as the reference.* QTUM and two tokens naming one server
+>    hold three sessions there, each with its own `server.version` and header
+>    subscription. Disabling a token without history collection closes
+>    exactly one session. Disabling QTUM closes only QTUM's session; a token
+>    keeps its session and its balance.
+> 2. *T38.6.4Q.7, as the reference for activation and reconnects.* No
+>    `blockchain.contract.event.subscribe` is sent at activation or after the
+>    sessions are dropped and placed again. The header subscription is placed
+>    again once per client. The subscription that the balance stream places
+>    (§38.6.5 decision 2) was exercised on the token's client only:
+>    - an error answer, or no answer, leaves the balance and the history
+>      working;
+>    - after a reconnect it is not placed again.
+>    Enabling the stream itself is not covered here.
+> 3. *T38.6.4Q.8, as the reference.* From one address, with a server that
+>    keeps listing a spent output:
+>    - a token broadcast and a QTUM swap send, in either order, select the
+>      same input;
+>    - so do two tokens, and the same token twice;
+>    - only two QTUM swap sends in a row avoid it.
+>    A token broadcast and a QTUM swap send started together list at the same
+>    time, and both spend the one output.
+> 4. *T38.6.4Q.9.*
+>    - (a) As the reference: the status check asks the added and the removed
+>      delegations' history, and then the receipt; an error answer to any of
+>      them fails it.
+>    - (b) *Differs from the reference:* a delegation and a withdraw from one
+>      address list one after the other, because both builds wait for the
+>      process-wide lock (PR #354).
+> 5. *T38.6.4Q.10, differs from the reference.*
+>    - Disabling a token whose collector waits stops nothing at once. Its
+>      session stays open without requests until the collector's next
+>      registry check, up to 30 s later, which ends it and closes the session.
+>    - Enabling the token again within that wait leaves two collectors and two
+>      clients, each reading the balance once per interval.
+>    This is the case of the note after R38.6.4Q.10, decided as D38.6.4Q.5.
+> 6. *T38.6.4Q.11, as the reference.* A withdraw of another UTXO coin waits
+>    until a token's pending broadcast is answered.
+
 *Not established.* (1) The session count of R38.6.4Q.1 item 4 follows from
 how the reference builds its clients; it was not measured against a running
 reference binary and a live server in this pass. (2) Which error answers
@@ -5921,3 +6019,15 @@ R38.8.6 **Tests (two-direction, observable).**
   comparison (5-word overlap of the gated lines against comment and literal
   wording; identifier-shaped tokens and identifier-derived phrases against
   the identifier set); the additions embed no code blocks.
+- *Measured note (2026-11-16), clean side -- before "Not established" in
+  §38.6.4Q: this repository's behavior for rows T38.6.4Q.2 to T38.6.4Q.6, from
+  offline tests against the stub Electrum server.* Written by a session that
+  never read the forbidden corpus. The input is this repository's code and its
+  tests. It takes no forbidden-class input, so chapter 01 R38 is not engaged
+  and no gate pass is required.
+- *Measured note, second part (2026-11-17), clean side -- before "Not
+  established" in §38.6.4Q: this repository's behavior for rows T38.6.4Q.1
+  and T38.6.4Q.7 to T38.6.4Q.11, from offline tests against the stub Electrum
+  server.* Written by a session that never read the forbidden corpus. The input
+  is this repository's code and its tests. It takes no forbidden-class input,
+  so chapter 01 R38 is not engaged and no gate pass is required.

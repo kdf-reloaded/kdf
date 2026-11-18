@@ -137,7 +137,8 @@ tower = { workspace = true }
 # Windows build failed with "unresolved import winapi::um::shlobj". Nothing
 # in CI catches this on push -- no Windows job runs outside workflow_dispatch.
 # shlobj: SHGetSpecialFolderPathA + CSIDL_APPDATA, minwindef: MAX_PATH (utxo.rs:155-161).
-winapi = { version = "0.3", features = ["shlobj", "minwindef"] }
+# fileapi + ntdef: GetDiskFreeSpaceExW and ULARGE_INTEGER (z_coin/z_disk_space.rs).
+winapi = { version = "0.3", features = ["shlobj", "minwindef", "fileapi", "ntdef"] }
 zbase32 = "0.1.2"
 incrementalmerkletree = { version = "=0.8.2", features = ["legacy-api", "std"] }
 zcash_note_encryption = "=0.4.2"

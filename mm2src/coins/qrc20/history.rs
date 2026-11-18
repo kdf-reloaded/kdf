@@ -1117,3 +1117,9 @@ mod tests {
         assert_eq!(history_map, history_map_expected);
     }
 }
+
+// Offline tests of the collector and the token's Electrum methods over scripted servers (CRD ch.38 §38.6.4Q).
+// A child of this module, so that they can call its private steps.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "qrc20_electrum_stub_tests.rs"]
+mod electrum_stub_tests;

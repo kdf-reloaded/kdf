@@ -138,6 +138,19 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
+- **Solana wallet methods answer.** On an active Solana coin or SPL token
+  GLEEC KDF ends many requests without a JSON answer (`sign_message`,
+  `verify_message`, `validateaddress`, `convertaddress`,
+  `get_raw_transaction`, the legacy `my_tx_history`,
+  `set_required_confirmations`, `show_priv_key` and others). Reloaded answers
+  each: with a result where the code exists, with an error naming the coin
+  otherwise. Message signing uses the message's bytes with no prefix and a
+  base58 signature; `show_priv_key` gives the 64-byte keypair in base58. The
+  minimum transaction amount of an SPL token is one smallest unit of its own
+  decimals, where GLEEC KDF states one lamport for every token; no peer sees
+  it while Solana cannot trade. No switch: an abnormal end cannot be a
+  compatibility target. CRD ch.40 D40.6B.1, R40.6B.14; PR #401.
+
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the
   key from the seed phrase at `m/44'/501'/N'/0'` by default, or at
@@ -643,7 +656,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md): swap-contract members may also be written as
   base58check or `41...` hex on a TRON platform (a wider input; an EVM platform keeps `0x` only); the MetaMask
   policy and `rpc_mode` are refused for TRON at activation (the reference activates an address its withdraw then
-  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change; and a key in the
+  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key; and a key in the
   query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
   CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
 
@@ -1040,6 +1053,38 @@ unchanged and activation returns a typed schema error; it is never silently
 deleted or treated as an empty wallet. Manual intervention is required only for
 that explicit unknown/corrupt-file error, not for ordinary switching between
 Reloaded and GLEEC KDF.
+
+#### Upgrade of a shielded wallet database and its backup
+
+When a new KDF Reloaded build needs a newer wallet-database schema than the one a
+`<TICKER>_RELOADED_WALLET.db` was created with, the first activation of that coin upgrades the
+file. Before it changes anything, the node:
+
+- checks that the disk holding the database has room for the backup and for the working copy:
+  twice the size of the wallet database plus 16 MiB. If not, the activation fails with an error that
+  gives the bytes needed and the bytes available, and no backup is written. Free some space and
+  activate again;
+- writes a consistent copy of the database next to it, named
+  `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<milliseconds>.bak`, in the same data directory. It is
+  about as large as the wallet database;
+- checks the copy (SQLite integrity check, same table layout as the original). If the check fails,
+  the copy is deleted, the wallet database's content stays as it was, and the activation fails with an error
+  naming the check.
+
+The upgrade then runs on a second copy made from the verified backup, and replaces the wallet
+database only when the result checks out. If the upgrade itself fails, the original is set aside as
+`.upgrade-failed.<milliseconds>.bak` and a fresh wallet is scanned from the chain, as before.
+
+*Going back to an older KDF Reloaded build:* stop the node, copy the `.pre-upgrade.<milliseconds>.bak`
+file over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal` and
+`<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start the older build. The older build then
+sees the wallet as it was before the upgrade.
+
+*How many backups stay:* after a successful upgrade the node keeps only the newest
+`.pre-upgrade` backup of that wallet and deletes older ones. The top-level `MM2.json` key
+`shielded_db_upgrade_backups` (a whole number, default `1`, lowest effective value `1`) changes the
+number; the backup just made is always kept. Other `.bak` files, such as `.upgrade-failed` and
+`.legacy-v2`, are never deleted by the node.
 
 ## Forward-compatibility commitment
 

@@ -136,12 +136,12 @@ the previous version used. The safe way:
   unparsable URL or a scheme other than `http` and `https` with `InvalidPayload`, before any node is asked.
   The result lists the balances at the base58check address, with the head block from the TRON node. A TRC20 token
   whose config has no `decimals` reads them from the contract, on both routes. The Trezor, WalletConnect and MetaMask
-  policies are refused at activation, and so is a global-HD login for now (TRON HD wallets come in a later change).
+  policies are refused at activation, and so is a global-HD login for now, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key (the other HD forms wait for TRON HD wallets, in a later change).
   The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
   TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
   `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
-  answers "TRON support is not available in this build" and none of this can be used yet. Detail: CRD ch.21 §21.4,
-  R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+  answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
+  ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
 - **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
   `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
   address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
@@ -220,6 +220,20 @@ the previous version used. The safe way:
   changes a public type that the Zcash wallet library constructs itself, which kept that library from
   compiling with its Orchard feature on. Transactions are built exactly as before.
   Detail: PR #375; CRD ch.39 status note of 2026-11-15, ch.34 ledger entry of 2026-11-15.
+- **The backup a shielded wallet database gets before a schema upgrade is now consistent, checked and
+  space-aware.** Until now the backup was a plain file copy, which could miss recent changes that were
+  still waiting in the database's log file, and it was neither checked nor limited in number. Now the
+  node first checks the disk has room for two copies of the database plus 16 MiB and, if not,
+  refuses to activate the coin with an error that gives the bytes needed and available, without
+  writing a backup. It then writes a consistent copy named `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak`
+  and checks it (SQLite integrity check, same table layout as the original); a copy that fails is
+  deleted and the activation fails, with the wallet database's content unchanged (opening it may
+  recover an interrupted write, and closing it may fold its log file into it). The upgrade itself runs on a
+  second copy made from the checked backup. After a successful upgrade only the newest
+  `.pre-upgrade` backup is kept; `shielded_db_upgrade_backups` in `MM2.json` sets that number
+  (default 1, lowest 1). Other `.bak` files are left alone. To go back to an older build, put the
+  backup over the wallet database file as described in `RELOADED_VS_GLEEC.md`.
+  Detail: PR #407; CRD ch.39 R39.8.0bc, T39.8.0j.
 
 #### Tendermint (Cosmos) coins
 
@@ -265,6 +279,17 @@ the previous version used. The safe way:
   status note of 2026-11-17.
 
 #### Solana coins
+
+- **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
+  answer an error.** Message signing and verification, address validation, the confirmation settings
+  and `show_priv_key` now answer; `validateaddress` accepts every valid Solana address (any base58
+  text of 32 bytes), and `show_priv_key` gives the 64-byte keypair in base58 that common Solana
+  wallets import. `convertaddress`, `get_raw_transaction`, `get_trade_fee`, `sign_raw_transaction`,
+  the trade-fee part of `max_taker_vol` / `max_maker_vol` and the legacy `my_tx_history` answer an
+  error that names the coin instead of ending the request, and so does every swap operation, also
+  for a swap imported or recovered by hand; switching a coin off follows in a later change. The
+  minimum transaction amount is now one lamport for SOL and one smallest unit of each SPL token.
+  Solana stays switched off in this build. Detail: PR #401; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
   its coins entry is parsed.** On `enable_solana_with_tokens` a failed block-height or balance read
@@ -348,6 +373,13 @@ the previous version used. The safe way:
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
 
+#### Siacoin
+
+- **Under an HD login the Sia activation answer now lists the coin's address.** The answer of
+  `task::enable_sia` is the per-account report under an HD login, but it listed account 0 with no
+  address. It now lists account 0 with its single address, the one the coin uses, and that address's
+  balance. Detail: PR #402; CRD ch.46 R46.2.4.
+
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
@@ -378,6 +410,13 @@ the previous version used. The safe way:
   updated to the matching release and the runner name in `.cargo/config.toml` is the standard one. This also
   updates `wasm-bindgen-futures`, which the browser build uses at run time, to 0.4.67. No CI job runs the
   browser tests yet. Detail: PR #373.
+- **The browser tests of `mm2_main` now compile.** `wasm-pack test --firefox --headless mm2src/mm2_main`
+  stopped at 52 compile errors, because test code that only works natively (tests written for the `tokio`
+  runtime, tests that create random identifiers with a function the browser build does not have, and
+  tests that use a native-only database helper) was also built for the browser. That test code is now left
+  out of the browser test build, as is the same kind of test code in `mm2_gui_storage`; only test code
+  changed. The run finds 12 tests: one fails without the `BOB_PASSPHRASE` test setup it asks for, one (`test_qrc20_tx_history`, which starts a node on network id 9998) hangs and is skipped, and the other ten, the storage tests of orders and swaps, all pass; the list by name is in `docs/DEV_ENVIRONMENT.md`. No CI job runs the browser tests yet.
+  Detail: PR #403.
 - **The browser tests of `coins` now compile.** `wasm-pack test --firefox --headless mm2src/coins` stopped at
   compile errors, because some test code that only works natively (tests written for the `tokio` runtime and the BCH
   tests that use the SQLite history storage) was also built for the browser, and a test helper
@@ -403,8 +442,26 @@ the previous version used. The safe way:
   that withdraw on public testnet servers no longer fail when two of those servers briefly disagree
   about the chain: they turn the server height checks off, which they do not test. Detail: PR #377.
 
+- **Offline tests now pin how a QRC20 token behaves over Electrum.** A local stub Electrum server
+  now answers the QRC20 contract methods. Twelve new tests cover token activation, a balance read
+  that a server answers with an error, the history collector's requests and its failures,
+  including the server's "history too large" answer. The five QRC20 tests that needed the public
+  Qtum testnet server now run against the stub, offline, in CI. Detail: PR #385; CRD ch.38
+  §38.6.4Q.
+
+- **More offline tests pin how QTUM and its tokens share servers and coins.** Fifteen tests cover:
+  - the connections QTUM and two tokens hold;
+  - what disabling a token or QTUM stops;
+  - the token event subscription after a reconnect;
+  - spends of the shared QTUM coins by QTUM and its tokens;
+  - delegation, and the lock that orders withdraws.
+  Some of them wait in real time for the history collector's 30-second cycle. Detail: PR #406; CRD ch.38 §38.6.4Q.
+
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)
+  done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
+  the plan.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
   `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
@@ -432,7 +489,7 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #401.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
@@ -441,7 +498,8 @@ the previous version used. The safe way:
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
-  (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays.
+  (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
+  (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser are in progress (PR #397).
 

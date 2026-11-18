@@ -824,6 +824,7 @@ mod lp_swap_tests {
         assert_eq!(result["action"], "RefundedMyPayment");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn recent_swap_status_json_skips_missing_swap() {
         let uuid = Uuid::new_v4();
@@ -831,6 +832,7 @@ mod lp_swap_tests {
         assert!(recent_swap_status_json(&uuid, Ok(None)).is_none());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn recent_swap_status_json_skips_unloadable_swap() {
         let uuid = Uuid::new_v4();

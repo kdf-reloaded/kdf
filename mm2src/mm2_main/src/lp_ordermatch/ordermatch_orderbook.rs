@@ -3568,7 +3568,7 @@ pub(crate) fn orderbook_address(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod orderbook_address_tests {
     use super::*;
     use mm2_test_helpers::for_tests::mm_ctx_with_custom_db;

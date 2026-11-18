@@ -39,7 +39,7 @@ the next beta. Swap participation follows once its own blocker is cleared
    stays switched off in the 0.4.0 beta; the node-client, activation-route and
    switch-on changes move to a later version.
 
-   *Built 2026-11-17 (T2a):* the mmrpc 2.0 route accepts the TRX platform and
+   *Built 2026-11-17 (PR #405):* the mmrpc 2.0 route accepts the TRX platform and
    its TRC20 tokens (`enable_eth_with_tokens`, `task::enable_eth::*`,
    `enable_erc20`, `task::enable_erc20::init`), the legacy route stays as an
    extension, and both are still behind the constant. The global-HD path, the

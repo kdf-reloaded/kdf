@@ -213,7 +213,7 @@ public method strings are part of the external API contract
 > legacy route a documented Reloaded extension; chapter 35 R35.1.1's
 > `ticker` row describes the target, not the current tree.
 
-*Status note (2026-11-17), the mmrpc 2.0 route is built (T2a; D21.B1 (a),
+*Status note (2026-11-17), the mmrpc 2.0 route is built (PR #405; D21.B1 (a),
 decided 2026-11-17).* `enable_eth_with_tokens` and `task::enable_eth::init` /
 `status` / `user_action` / `cancel` accept a platform whose protocol is `TRX`,
 with its TRC20 tokens in `erc20_tokens_requests`; `enable_erc20` and
@@ -232,7 +232,8 @@ note at D21.B7), `required_confirmations`, `get_balances`, the NFT refusal, the
 key-policy refusals (see the note at D21.10B.3), and the result keyed by the
 base58check address. Not built in this change: the global-HD path (a
 global-HD login is refused with `PrivKeyPolicyNotAllowed` naming TRON HD as not
-yet available; it is unreachable while the constant is `false`), transaction
+yet available, except for `IguanaPrivKey`, which is honored on the node's
+internal key; unreachable while the constant is `false`), transaction
 history (`tx_history` is ignored), `convertaddress`, `get_my_address` and
 `show_priv_key`, and swaps. On `task::enable_erc20::init` a token of the other
 family than its active platform is `PlatformCoinMismatch` inside the task
@@ -280,7 +281,7 @@ status, not at `init`.
    the Tron node client attached, leaving the swap-contract
    binding empty (§21.11).
 
-*Status note (2026-11-17), step 4 (decided with R21.10B.2, T2a).* Step 4 no
+*Status note (2026-11-17), step 4 (decided with R21.10B.2, PR #405).* Step 4 no
 longer requires the coin config to declare `decimals` for a TRC20 token: a token
 config without `decimals`, or with `decimals` 0, reads the token's `decimals()`
 through `POST /wallet/triggerconstantcontract` at activation and uses the
@@ -570,11 +571,12 @@ whose first entry is not hex move on. (4) Activation accepts only the `http` and
 only. R-WP2 still governs the top-level `Error` form (any text moves on), and
 R-N8 governs the all-failed error, where R21.10B.3 differs.
 
-*Status note (2026-11-17), request URL of a node (T2a).* The request URL of an
+*Status note (2026-11-17), request URL of a node (PR #405).* The request URL of an
 endpoint is the node URL with the endpoint path appended to the URL's path and
 the URL's query kept at the end: `https://h/x?key=1` is asked as
-`https://h/x/wallet/getaccount?key=1`; a fragment is dropped, and a URL without a
-query is asked as before. A key in the query string of a node URL therefore
+`https://h/x/wallet/getaccount?key=1`; a fragment is dropped, a trailing slash
+on the node URL is ignored (`https://h/` is asked as
+`https://h/wallet/getaccount`), and a URL without a query is asked as before. A key in the query string of a node URL therefore
 works; the node is still named host-only everywhere (R-N1). The `headers` object
 and `tron_api_key` of this rule also apply to the entries of the `nodes` list of
 the mmrpc 2.0 route (R21.10B.2).
@@ -1042,6 +1044,15 @@ bullet "MetaMask (browser builds only)" of R21.10B.4, which accepts the MetaMask
 policy with the default `rpc_mode`, describes the reference and is not Reloaded's
 rule.
 
+*Status note (2026-11-17), HD interim rule (maintainer decision across the
+coin families).* Under a global-HD login a TRON activation that asks for
+`IguanaPrivKey` is honored: the coin uses the node's internal key
+(`mm2_internal_privkey_secret`), the key the UTXO family uses for that policy
+under an HD login, on both routes, and is a single-address coin. An absent
+policy, `ContextPrivKey` and any HD-wallet policy under a global-HD login stay
+refused with `PrivKeyPolicyNotAllowed` until the TRON HD wallet (R21.10B.4,
+R-A2) is built. Under an iguana login nothing changes.
+
 > **Compatibility (this repository on dev, 2026-11-17; its own code, not
 > the reference).** TRX and TRC20 activate only through legacy `enable`
 > and `electrum`, behind the availability constant (D55.5); the request
@@ -1419,7 +1430,7 @@ route with the swap-contract fields instead. The umbrella plan
 
 *Status note (2026-11-17), D21.B1 decided: (a).* TRON has the mmrpc 2.0 route
 and keeps the legacy route as a documented Reloaded extension (maintainer
-decision EJ (A); built in T2a, see the note at §21.4).
+decision of 2026-11-08; built in PR #405, see the note at §21.4).
 
 **D21.B2 -- Contract choice.** No released reference client exists, so
 the contract is Reloaded's to choose: (a) adopt the public MIT Tron-VM

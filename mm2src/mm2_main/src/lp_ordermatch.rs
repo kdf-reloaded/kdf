@@ -454,7 +454,7 @@ pub(crate) struct OrdermatchContext {
     ordermatch_db: ConstructibleDb<OrdermatchDb>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 impl Default for OrdermatchContext {
     /// Creates a test `OrdermatchContext` with a live trie-ops channel+worker.
     /// The receiver side is spawned as a local future (requires an active async
