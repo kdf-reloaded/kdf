@@ -1,13 +1,15 @@
 use super::*;
+use crate::history_absence::{removed_rows_line, AbsenceMarks};
 use crate::utxo::{RequestTxHistoryResult, UtxoFeeDetails};
 use crate::{CoinsContext, TxFeeDetails, TxHistoryResult};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use common::jsonrpc_client::JsonRpcErrorType;
+use common::log::info;
 use itertools::Itertools;
 use mm2_metrics::MetricsArc;
 use script_pubkey::{extract_contract_call_from_script, extract_gas_from_script, ExtractGasEnum};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use utxo_common::{HISTORY_TOO_LARGE_ERROR, HISTORY_TOO_LARGE_ERR_CODE};
 
@@ -101,6 +103,8 @@ impl Qrc20Coin {
         // below are this loop's own and stay as they are). The two sources are independent.
         let mut balance_failures = utxo_common::FailureThrottle::default();
         let mut history_failures = utxo_common::FailureThrottle::default();
+        // The absence rule (CRD ch.38 §38.5C): memory only, so a restart starts counting again.
+        let mut absence = AbsenceMarks::default();
         loop {
             if ctx.is_stopping() {
                 break;
@@ -132,7 +136,8 @@ impl Qrc20Coin {
                 },
             };
 
-            let need_update = self.check_if_history_update_is_needed(&history_map, &my_balance, &actual_balance);
+            let need_update =
+                self.check_if_history_update_is_needed(&history_map, &my_balance, &actual_balance, &absence);
             if !need_update {
                 // The balance read worked and nothing is pending, so the server answers again: end a
                 // history backoff quietly (the balance source logs its own recovery). While the
@@ -144,9 +149,14 @@ impl Qrc20Coin {
             }
 
             let metrics = ctx.metrics.clone();
+            let mut removed_rows = false;
             let tx_ids = match self.request_tx_history(metrics).await {
-                RequestTxHistoryResult::Ok(tx_ids) => {
+                RequestTxHistoryResult::Ok(tx_ids, qualifying_tip) => {
                     history_failures.record_success(&ctx, &self.utxo.conf.ticker, "history request");
+                    // The removal comes first, before any detail request of the pass (R38.6.4Q.6, D38.5C.1).
+                    if let Some(tip) = qualifying_tip {
+                        removed_rows = self.remove_unlisted_rows(&mut absence, &mut history_map, tip, &tx_ids);
+                    }
                     tx_ids
                 },
                 RequestTxHistoryResult::Retry { error } => {
@@ -178,7 +188,8 @@ impl Qrc20Coin {
             };
             history_retry_delay_secs = HISTORY_RETRY_INITIAL_DELAY_SECS;
 
-            let updated = self.process_tx_ids(&ctx, &mut history_map, tx_ids).await;
+            // Rows removed above are written even when nothing else changed.
+            let updated = self.process_tx_ids(&ctx, &mut history_map, tx_ids).await || removed_rows;
             if success_iteration == 0 {
                 ctx.log.log(
                     "😅",
@@ -364,7 +375,7 @@ impl Qrc20Coin {
         mm_counter!(metrics, "tx.history.request.count", 1,
                     "coin" => self.utxo.conf.ticker.clone(), "client" => "electrum", "method" => "blockchain.contract.event.get_history");
         let history_res = TransferHistoryBuilder::new(self.clone()).build_tx_idents().await;
-        let history = match history_res {
+        let (history, qualifying_tip) = match history_res {
             Ok(h) => h,
             Err(e) => match e.into_inner() {
                 UtxoRpcError::Transport(json_rpc_e) | UtxoRpcError::ResponseParseError(json_rpc_e) => {
@@ -400,7 +411,7 @@ impl Qrc20Coin {
         mm_counter!(metrics, "tx.history.response.total_length", history.len() as u64,
                     "coin" => self.utxo.conf.ticker.clone(), "client" => "electrum", "method" => "blockchain.contract.event.get_history");
 
-        RequestTxHistoryResult::Ok(history)
+        RequestTxHistoryResult::Ok(history, qualifying_tip)
     }
 
     fn check_if_history_update_is_needed(
@@ -408,18 +419,43 @@ impl Qrc20Coin {
         history: &HistoryMapByHash,
         last_balance: &Option<CoinBalance>,
         actual_balance: &CoinBalance,
+        absence: &AbsenceMarks,
     ) -> bool {
         let need_update = history
             .iter()
             .flat_map(|(_, txs)| txs)
             .any(|(_, tx)| tx.should_update_timestamp() || tx.should_update_block_height());
         match last_balance {
-            Some(last_balance) if last_balance == actual_balance && !need_update => {
+            // A mark of the absence rule keeps the test true: the second listing does not wait for a balance change.
+            Some(last_balance) if last_balance == actual_balance && !need_update && !absence.any() => {
                 // my balance hasn't been changed, there is no need to reload tx_history
                 false
             },
             _ => true,
         }
+    }
+
+    /// Applies one qualifying listing taken at `tip` to the absence marks and removes the transactions whose second
+    /// absence it is, with every transfer row of each (CRD ch.38 §38.5C, D38.5C.1 status note). Returns whether any row
+    /// was removed; the removal is logged once.
+    fn remove_unlisted_rows(
+        &self,
+        absence: &mut AbsenceMarks,
+        history_map: &mut HistoryMapByHash,
+        tip: u64,
+        tx_ids: &TxIds,
+    ) -> bool {
+        let listed: HashSet<H256Json> = tx_ids.iter().map(|(hash, _)| *hash).collect();
+        let to_remove = absence.judge(tip, &listed, history_map.keys().copied());
+        let removed: usize = to_remove
+            .iter()
+            .filter_map(|hash| history_map.remove(hash))
+            .map(|rows| rows.len())
+            .sum();
+        if removed > 0 {
+            info!("{}", removed_rows_line(&self.utxo.conf.ticker, removed));
+        }
+        removed > 0
     }
 
     /// Returns true if the `history_map` has been updated.
@@ -470,6 +506,26 @@ impl Qrc20Coin {
             if tx.should_update_block_height() && tx_height > 0 {
                 tx.block_height = tx_height;
                 updated = true;
+            }
+            // A confirmed row listed at another height takes it over, with that block's time; one listed as
+            // unconfirmed goes back to height 0. All rows of the transaction change together (D38.5C.2 status note).
+            match utxo_common::listed_height_change(tx.block_height, tx_height) {
+                utxo_common::HeightChange::Moved => {
+                    if qtum_verbose.is_none() {
+                        qtum_verbose = get_verbose_transaction(self, ctx, *tx_hash).await;
+                    }
+                    // Without the block's time the row is left as it is and the next pass tries again.
+                    if let Some(ref qtum_verbose) = qtum_verbose {
+                        tx.block_height = tx_height;
+                        tx.timestamp = qtum_verbose.time as u64;
+                        updated = true;
+                    }
+                },
+                utxo_common::HeightChange::Unconfirmed => {
+                    tx.block_height = 0;
+                    updated = true;
+                },
+                utxo_common::HeightChange::Same => (),
             }
             if tx.should_update_timestamp() {
                 if qtum_verbose.is_none() {
@@ -633,7 +689,7 @@ impl TransferHistoryBuilder {
         self.coin.utxo.rpc_client.build(params).await
     }
 
-    pub async fn build_tx_idents(self) -> Result<Vec<(H256Json, u64)>, MmError<UtxoRpcError>> {
+    pub async fn build_tx_idents(self) -> Result<(Vec<(H256Json, u64)>, Option<u64>), MmError<UtxoRpcError>> {
         let params = self.build_params()?;
         self.coin.utxo.rpc_client.build_tx_idents(params).await
     }
@@ -665,10 +721,12 @@ impl TransferHistoryBuilder {
 trait BuildTransferHistory {
     async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, MmError<UtxoRpcError>>;
 
+    /// The transactions with their heights, and the tip by which the listing may be judged for the absence rule (CRD
+    /// ch.38 §38.5C): `Some` only when the listing is complete and the server that answered it was up to date.
     async fn build_tx_idents(
         &self,
         params: TransferHistoryParams,
-    ) -> Result<Vec<(H256Json, u64)>, MmError<UtxoRpcError>>;
+    ) -> Result<(Vec<(H256Json, u64)>, Option<u64>), MmError<UtxoRpcError>>;
 }
 
 #[async_trait]
@@ -687,7 +745,7 @@ impl BuildTransferHistory for UtxoRpcClientEnum {
     async fn build_tx_idents(
         &self,
         params: TransferHistoryParams,
-    ) -> Result<Vec<(H256Json, u64)>, MmError<UtxoRpcError>> {
+    ) -> Result<(Vec<(H256Json, u64)>, Option<u64>), MmError<UtxoRpcError>> {
         match self {
             UtxoRpcClientEnum::Native(native) => native.build_tx_idents(params).await,
             UtxoRpcClientEnum::Electrum(electrum) => electrum.build_tx_idents(params).await,
@@ -702,7 +760,7 @@ impl BuildTransferHistory for UtxoRpcClientEnum {
 #[async_trait]
 impl BuildTransferHistory for ElectrumClient {
     async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, MmError<UtxoRpcError>> {
-        let tx_idents = self.build_tx_idents(params).await?;
+        let (tx_idents, _tip) = self.build_tx_idents(params).await?;
 
         let mut receipts = Vec::new();
         for (tx_hash, _height) in tx_idents {
@@ -718,20 +776,22 @@ impl BuildTransferHistory for ElectrumClient {
     async fn build_tx_idents(
         &self,
         params: TransferHistoryParams,
-    ) -> Result<Vec<(H256Json, u64)>, MmError<UtxoRpcError>> {
+    ) -> Result<(Vec<(H256Json, u64)>, Option<u64>), MmError<UtxoRpcError>> {
         let address = contract_addr_into_rpc_format(&params.address);
         let token_address = contract_addr_into_rpc_format(&params.token_address);
-        let history = self
-            .blockchain_contract_event_get_history(&address, &token_address, QRC20_TRANSFER_TOPIC)
-            .compat()
+        let (history, tip) = self
+            .blockchain_contract_event_get_history_for_absence(&address, &token_address, QRC20_TRANSFER_TOPIC)
             .await?;
 
-        Ok(history
-            .into_iter()
-            .filter(|item| params.from_block <= item.height)
-            .map(|tx| (tx.tx_hash, tx.height))
-            .unique()
-            .collect())
+        Ok((
+            history
+                .into_iter()
+                .filter(|item| params.from_block <= item.height)
+                .map(|tx| (tx.tx_hash, tx.height))
+                .unique()
+                .collect(),
+            tip,
+        ))
     }
 }
 
@@ -778,13 +838,19 @@ impl BuildTransferHistory for NativeClient {
     async fn build_tx_idents(
         &self,
         params: TransferHistoryParams,
-    ) -> Result<Vec<(H256Json, u64)>, MmError<UtxoRpcError>> {
+    ) -> Result<(Vec<(H256Json, u64)>, Option<u64>), MmError<UtxoRpcError>> {
         let receipts = self.build(params).await?;
-        Ok(receipts
-            .into_iter()
-            .map(|receipt| (receipt.transaction_hash, receipt.block_number))
-            .unique()
-            .collect())
+        // The daemon is the single server: no up-to-date or disagreement test, only its tip. A tip that cannot be
+        // read leaves the complete listing unjudged for the absence rule.
+        let tip = self.get_block_count().compat().await.ok();
+        Ok((
+            receipts
+                .into_iter()
+                .map(|receipt| (receipt.transaction_hash, receipt.block_number))
+                .unique()
+                .collect(),
+            tip,
+        ))
     }
 }
 

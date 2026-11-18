@@ -1,5 +1,6 @@
 use super::*;
 use crate::utxo::rpc_clients::{UtxoRpcError, UtxoRpcFut};
+use common::jsonrpc_client::JsonRpcError;
 use rpc::v1::types::H256;
 
 impl From<crate::eth::abi::AbiError> for UtxoRpcError {
@@ -346,6 +347,27 @@ impl Qrc20NativeOps for NativeClient {
             rpc_func!(self, "searchlogs", from_block, to_block, addr_block, topic_block)
                 .map_to_mm_fut(UtxoRpcError::from),
         )
+    }
+}
+
+impl ElectrumClient {
+    /// `blockchain.contract.event.get_history` with the tip the history collector may judge the listing by (CRD
+    /// ch.38 §38.5C): `Some(tip)` only when the answering server was up to date at that moment and the coin's servers
+    /// did not disagree about the chain.
+    pub async fn blockchain_contract_event_get_history_for_absence(
+        &self,
+        address: &H160Json,
+        contract_addr: &H160Json,
+        topic: &str,
+    ) -> Result<(Vec<TxHistoryItem>, Option<u64>), JsonRpcError> {
+        let request = rpc_req!(
+            self,
+            "blockchain.contract.event.get_history",
+            address,
+            contract_addr,
+            topic
+        );
+        self.send_request_with_listing_tip(request).await
     }
 }
 

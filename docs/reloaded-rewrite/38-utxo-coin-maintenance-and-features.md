@@ -873,6 +873,38 @@ addition no row is removed while the coin is in the state of R38.6.4o item
 Under each option Reloaded's legacy collector first has to meet R38.5A.3
 item (a).
 
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.1 is
+decided:* option (c), with a Reloaded refinement for how absence is
+established. It applies to the legacy history file, the QRC20 token
+collector (in place of R38.6.4Q.6 item 2) and the SQLite store alike, and
+replaces R38.5C.1 and R38.5C.3 items 2 and 3 for removal. For confirmed rows
+of the SQLite store it is a recorded departure from R38.5C.4 item 1.
+
+1. *When a row is removed.* A stored row, confirmed or not, is removed only
+   when **two successful listings in a row**, at least one block apart, both
+   answered by up-to-date servers (R38.6.4o item 4), do not contain its
+   transaction hash. The two listings must together cover every own address
+   the row concerns. All rows of one transaction hash (the several rows of a
+   QRC20 transaction, the BCH row and the SLP token row) are removed together.
+   A coin with a single connected server needs two listings from that server,
+   at least one block apart.
+2. *What never removes.* A failed listing, a listing cut off by its time
+   budget or by a `history too large` answer, a listing from an out-of-date
+   server, and any listing while the coin is in the disagreement state of
+   R38.6.4o item 12.
+3. *Rows cannot stay forever.* A row found absent once carries a mark: the
+   height at which its absence was first seen. While any row carries such a
+   mark, the collector's need-to-run test (R38.5A.5) is true, so the second
+   listing comes at the next pass after a new block, not only at a balance
+   change. A listing that contains the hash clears the mark. What holds a
+   removal back is named in item 2, plus the absence of a new block. Each ends
+   by itself when its cause ends; none needs a user action.
+4. *Write and log.* A pass that removed rows writes the history at once
+   (R38.5A.3) and logs one INFO line naming the coin and the number of rows
+   removed. No line is logged per row.
+5. *Afterwards.* A removed hash that a later listing contains is fetched as
+   new, as in R38.5C.1 item 4.
+
 D38.5C.2 *(Open, 2026-11-16.)* **A stored confirmed row whose transaction is
 now at another height.** Neither store of the reference takes the new height
 over, and no pass runs for it while the balance is unchanged (R38.5C.2,
@@ -885,6 +917,20 @@ goes back to height 0; (c) option (b), and a pass is also started when the
 coin's client sees that the chain it follows has changed, since the
 need-to-run test alone does not start one. *Recommendation:* (c); what
 makes the client see the change is this repository's own design.
+
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.2 is
+decided:* option (c), in two steps. It is a recorded departure from R38.5C.2
+and R38.5C.4 item 2 for both stores.
+
+1. *In a pass that runs.* A listed positive height that differs from a
+   stored row's height is taken over, together with that block's time. A
+   stored confirmed row that the listing reports as unconfirmed goes back to
+   height 0. All rows of the hash change together.
+2. *Starting a pass.* A pass is also started when the coin's client sees
+   that the chain it follows has changed. One WARN line names the coin and
+   the height from which the chain changed, if known. How the client sees
+   the change is this repository's own design, specified when it is built;
+   until then, item 1 applies in the passes that run anyway.
 
 *Acceptance rows for a mock backend.* Each row names what the mock answers
 and what the node does. *Parity* is the reference behavior bound above;
@@ -5980,3 +6026,9 @@ R38.8.6 **Tests (two-direction, observable).**
   never read the forbidden corpus. The input is this repository's code and its
   tests. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Maintainer decisions (2026-11-16), clean side -- status notes after D38.5C.1
+  and D38.5C.2: removal of unlisted rows after two listings, and changed
+  heights taken over.* Written by a session that never read the forbidden
+  corpus, from the maintainer's decisions and this repository's code. It takes
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.

@@ -410,6 +410,20 @@ const READ_ONLY_METHODS: &[&str] = &[
     "blockchain.relayfee",
 ];
 
+/// The decision of [`PoolShared::listing_tip_of`] over its inputs: whether the coin is in the disagreement state,
+/// whether the answering server is a maintained connection that is up to date (`None`: it is not a maintained
+/// connection, so it was not judged), and its tip. Only an up-to-date maintained server on a coin whose servers agree
+/// gives a tip.
+pub(super) fn qualifying_listing_tip(disagreement: bool, up_to_date: Option<bool>, tip: Option<u64>) -> Option<u64> {
+    if disagreement {
+        return None;
+    }
+    match up_to_date {
+        Some(true) => tip,
+        _ => None,
+    }
+}
+
 /// Whether `request` is a read-only query: a single request whose method is on [`READ_ONLY_METHODS`], or a
 /// non-empty batch of which every element is (R38.6.4a item 1, R38.6.3a batches).
 pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
@@ -1898,6 +1912,21 @@ impl PoolShared {
             .unwrap_or_else(|p| p.into_inner())
             .current
             .clone()
+    }
+
+    /// The tip of the server that answered a listing from `addr`, when that answer may serve the absence rule of the
+    /// history collectors (CRD ch.38 §38.5C, D38.5C.1 status note): the server is a maintained connection, is up to
+    /// date at this moment (R38.6.4o item 4), reports a tip, and the coin is not in the disagreement state (item 12).
+    /// `None` otherwise. The state is judged anew, as a routed request judges it.
+    pub(super) fn listing_tip_of(&self, addr: &str) -> Option<u64> {
+        let states = self.refresh_out_of_date();
+        let disagreement = self.chain_disagreement().is_some();
+        let slot = self.slot_by_addr(addr)?;
+        let up_to_date = states
+            .iter()
+            .find(|(other, _)| other.id == slot.id)
+            .map(|(_, state)| state.is_none());
+        qualifying_listing_tip(disagreement, up_to_date, Self::tip_height(&slot))
     }
 
     /// Notes the pairs of a measurement round that answered different base headers at one height (item 7).
