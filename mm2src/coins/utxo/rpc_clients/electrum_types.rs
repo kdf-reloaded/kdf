@@ -79,6 +79,7 @@ impl ElectrumBlockHeaderV12 {
             wide_time: false,
             claim_trie_root: None,
             pivx_trailer: None,
+            kerrigan_kawpow: None,
         }
     }
 
