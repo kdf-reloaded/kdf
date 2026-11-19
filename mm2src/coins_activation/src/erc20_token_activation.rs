@@ -5,7 +5,7 @@
 //! a custom token), builds the token on top of an activated platform, and serves the single-token RPC and its
 //! task variant.
 
-use crate::context::{lock_activation, CoinsActivationContext};
+use crate::context::{lock_activation_under, CoinsActivationContext};
 use crate::eth_with_tokens_activation::tron::tron_activation_available;
 use crate::init_token::{InitTokenActivationOps, InitTokenError, InitTokenInProgressStatus, InitTokenTaskHandle,
                         InitTokenTaskManagerShared};
@@ -559,9 +559,9 @@ pub async fn enable_evm_token(
         EvmTokenProtocol::Nft { platform } => platform.clone(),
     };
 
-    // R55.1.12 with D43.1F.2 (b): the locks of the token and of its platform are held together through
+    // R55.1.12 with D43.1F.2 (b): the lock of the token (exclusive) and the lock of its platform (shared) are held together through
     // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
-    let _activation_guard = lock_activation(&ctx, &[&req.ticker, &platform_ticker])
+    let _activation_guard = lock_activation_under(&ctx, &platform_ticker, &[&req.ticker])
         .await
         .map_to_mm(EnableTokenError::Internal)?;
     ensure_evm_token_not_active(&ctx, &req.ticker).await?;

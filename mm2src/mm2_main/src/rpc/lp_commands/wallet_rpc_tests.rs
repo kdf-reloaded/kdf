@@ -1659,7 +1659,7 @@ fn a_forced_disable_is_refused_while_an_order_of_a_dependent_is_being_matched() 
     assert_eq!(legacy_disable_result(ctx, "PLAT", json!({}))["passivized"], json!(true));
 }
 
-/// The versioned `disable_coin` is unchanged (decision LAG): it has no `passivized`, ignores `force_disable`, and
+/// The versioned `disable_coin` is unchanged (the maintainer's decision of 2026-11-18): it has no `passivized`, ignores `force_disable`, and
 /// removes a platform with dependents, which stay registered; its dependent set is dropped.
 #[test]
 fn the_versioned_disable_coin_removes_a_platform_with_dependents_and_has_no_passivized() {

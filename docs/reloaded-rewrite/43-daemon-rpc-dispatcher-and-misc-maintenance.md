@@ -2003,7 +2003,11 @@ names.
 >    activation lock of the requested ticker (chapter 55 R55.1.12), the legacy
 >    forced call that of every dependent too, and the token and layer-two
 >    activations, one-shot and task forms, take the lock of their platform with
->    their own, and check the platform again once the locks are held.
+>    their own, and check the platform again once the locks are held. Each
+>    ticker's lock is a shared/exclusive lock: the token and layer-two
+>    activations take their platform's lock shared (so several tokens of one
+>    platform activate in parallel), and `disable_coin` and each ticker's own
+>    activation take it exclusively.
 > 4. *Token and layer-two activations on a passive platform (R43.1F.6).* They
 >    answer `PlatformCoinIsNotActivated`, naming the platform, and for the
 >    Lightning task `init` naming the Lightning ticker; a legacy `enable` of an
@@ -2019,7 +2023,9 @@ names.
 >    R43.1F.3: until it follows, those methods answer `PlatformIsAlreadyActivated`
 >    for a passive platform and a legacy `enable` or `electrum` is refused as
 >    already activated), the NFT chain as a dependent (R43.1F.8), the token
->    record timing (D43.1F.2), and ending the background work of a removed coin
+>    record timing (D43.1F.2), the `reactivation_registered_token` setting
+>    (D43.1F.1), the rule that `tx_history` is ignored on re-activation
+>    (D43.1F.5), and ending the background work of a removed coin
 >    (R43.1E.5 items 2 and 4).
 
 **D43.1F.1** *(Open, 2026-11-18.)* **A requested token that is already

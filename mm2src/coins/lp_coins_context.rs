@@ -283,6 +283,14 @@ impl CoinsContext {
         self.activation_locks.lock(tickers).await
     }
 
+    /// Like [`Self::lock_activation`], for the activation of a token or layer-two coin: the locks of `tickers` are
+    /// taken exclusively and the lock of the `platform` shared, in one call (CRD ch.43 D43.1F.2 (b)). Several
+    /// tokens of one platform activate in parallel, and a `disable_coin` or an activation of the platform, which
+    /// take its lock exclusively, wait for them.
+    pub async fn lock_activation_under(&self, platform: &str, tickers: &[&str]) -> Result<ActivationGuard, String> {
+        self.activation_locks.lock_with_shared(&[platform], tickers).await
+    }
+
     pub async fn add_coin(&self, coin: MmCoinEnum) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
         // A passive platform is registered: its ticker counts as already activated until the re-activation of a

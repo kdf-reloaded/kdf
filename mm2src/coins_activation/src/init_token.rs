@@ -6,7 +6,7 @@
 //! (R48.11.5) and the registration and cancel rules (R48.11.7). A token family supplies only what is specific
 //! to it through [`InitTokenActivationOps`].
 
-use crate::context::{lock_activation, CoinsActivationContext};
+use crate::context::{lock_activation_under, CoinsActivationContext};
 use crate::platform_coin_with_tokens::CustomTokenError;
 use crate::prelude::*;
 use crate::token::TokenProtocolParams;
@@ -227,12 +227,12 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
-        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the token is
-        // taken together with the lock of its platform, so a `disable_coin` of the platform cannot run while the
+        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the token (exclusive) is
+        // taken together with the platform's shared lock, so a `disable_coin` of the platform cannot run while the
         // token is registered. The lock is held through registration, and the ticker and the platform are checked
         // again once it is ours.
         let platform_ticker = self.protocol_info.platform_coin_ticker().to_owned();
-        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker, &platform_ticker])
+        let _activation_guard = lock_activation_under(&self.ctx, &platform_ticker, &[&self.ticker])
             .await
             .map_to_mm(InitTokenError::Internal)?;
         if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {

@@ -45,7 +45,7 @@ use mm2_err_handle::prelude::*;
 use uuid::Uuid;
 
 /// The request of the versioned `disable_coin` (legacy members, unchanged). The versioned form does not read
-/// `force_disable` (CRD ch.43 §43.1E status note on LAG).
+/// `force_disable` (the maintainer's decision of 2026-11-18; CRD ch.43 §43.1E, second status note).
 #[derive(Deserialize)]
 pub struct DisableCoinRequest {
     pub coin: String,
@@ -135,7 +135,7 @@ async fn check_and_cancel_orders(
     Ok(cancelled)
 }
 
-/// The versioned `disable_coin` (CRD ch.43 §43.1R, decision LAG): cancels the orders of the coin and removes the
+/// The versioned `disable_coin` (CRD ch.43 §43.1R; the maintainer's decision of 2026-11-18): cancels the orders of the coin and removes the
 /// coin, unless a running swap uses the coin or one of its orders is being matched. It neither passivizes a
 /// platform nor reads `force_disable`: a platform with dependents is removed, its dependents stay registered, and
 /// its dependent set is dropped. A passive platform is not an active coin here and answers `NoSuchCoin`.

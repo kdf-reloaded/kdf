@@ -814,6 +814,10 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
 pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Result<Vec<String>, String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
+    // The platform must be registered before any dependent is removed.
+    if !coins.registered().contains(platform) {
+        return ERR!("{} is disabled already", platform);
+    }
     let mut tickers: Vec<String> = coins.dependents_of(platform).into_iter().collect();
     tickers.push(platform.to_owned());
     let mut removed_tickers = Vec::with_capacity(tickers.len());

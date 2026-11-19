@@ -804,8 +804,8 @@ pub(crate) fn case_c_two_paths_wait_for_each_other<First: Family, Second: Family
     assert_eq!(builds(&ticker), 1, "{:?}", names);
 }
 
-/// T55.21 (d): activations of two different tickers do not wait for each other, except that the activations of tokens
-/// and layer-two coins of one platform serialize on the platform's lock (CRD ch.43 D43.1F.2 (b)).
+/// T55.21 (d): activations of two different tickers do not wait for each other. A token or layer-two activation
+/// holds the lock of its platform shared (CRD ch.43 D43.1F.2 (b)), so tokens of one platform do not wait either.
 pub(crate) fn case_d_different_tickers_do_not_wait<F: Family>() {
     let (held, other) = (unique_ticker("SD"), unique_ticker("SD"));
     let ctx = serialization_ctx(&[&held, &other]);
@@ -813,26 +813,45 @@ pub(crate) fn case_d_different_tickers_do_not_wait<F: Family>() {
     let first = F::start(&ctx, &held, "gate");
     wait_until("the first build to start", || builds(&held) == 1);
     let second = F::start(&ctx, &other, "ok");
-    // A token or layer-two activation also holds the lock of its platform (CRD ch.43 D43.1F.2 (b)), and every
-    // ticker of these families shares the one platform, so two of them wait for each other.
-    if F::NAME.starts_with("token") || F::NAME.starts_with("layer-2") {
-        settle();
-        assert_eq!(
-            second.poll(),
-            None,
-            "{}: the second waits for the platform's lock",
-            F::NAME
-        );
-        open_gate(&held);
-        assert_eq!(first.wait(), Outcome::Registered, "{}", F::NAME);
-        assert_eq!(second.wait(), Outcome::Registered, "{}", F::NAME);
-        return;
-    }
     assert_eq!(second.wait(), Outcome::Registered, "{}", F::NAME);
     assert_eq!(first.poll(), None, "{}: the held activation moved", F::NAME);
 
     open_gate(&held);
     assert_eq!(first.wait(), Outcome::Registered, "{}", F::NAME);
+}
+
+/// CRD ch.43 D43.1F.2 (b): a token or layer-two activation holds the lock of its platform shared, and the lock of the
+/// platform taken exclusively (what `disable_coin` and an activation of the platform take) waits for it, and the
+/// other way round: a token activation waits while the platform's lock is held exclusively.
+pub(crate) fn case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other<F: Family>() {
+    let (first_ticker, second_ticker) = (unique_ticker("SF"), unique_ticker("SF"));
+    let ctx = serialization_ctx(&[&first_ticker, &second_ticker]);
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+
+    // An activation in flight: the exclusive lock of the platform waits for it.
+    let first = F::start(&ctx, &first_ticker, "gate");
+    wait_until("the first build to start", || builds(&first_ticker) == 1);
+    let mut disable = Box::pin(coins_ctx.lock_activation(&[PLATFORM_TICKER]));
+    assert!(
+        disable.as_mut().now_or_never().is_none(),
+        "{}: the platform's exclusive lock waits for the activation",
+        F::NAME
+    );
+    open_gate(&first_ticker);
+    assert_eq!(first.wait(), Outcome::Registered, "{}", F::NAME);
+    let guard = common::block_on(disable).unwrap_or_else(|e| panic!("{}: {}", F::NAME, e));
+
+    // The platform's lock is held exclusively: an activation of a token of it waits.
+    let second = F::start(&ctx, &second_ticker, "ok");
+    settle();
+    assert_eq!(
+        second.poll(),
+        None,
+        "{}: the activation waits for the platform",
+        F::NAME
+    );
+    drop(guard);
+    assert_eq!(second.wait(), Outcome::Registered, "{}", F::NAME);
 }
 
 /// T55.21 (e): cancelling an activation that is still waiting registers nothing and deregisters nothing.
@@ -961,6 +980,15 @@ family_cases!(
     l2_task => L2Task,
     l2_one_shot => L2OneShot,
 );
+
+// (f): the platform's lock and the token and layer-two activations wait for each other.
+#[test]
+fn t43_1f_2_a_platform_lock_and_a_dependent_activation_wait_for_each_other() {
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<TokenTask>();
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<TokenOneShot>();
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<L2Task>();
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<L2OneShot>();
+}
 
 // (c): a task and a one-shot call, and tasks of two families, of one ticker wait for each other.
 #[test]

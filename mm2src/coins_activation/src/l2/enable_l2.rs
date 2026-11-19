@@ -1,6 +1,6 @@
 /// Simple one-shot L2 activation. For lightweight L2 protocols that
 /// activate quickly and do not need progress tracking.
-use crate::context::lock_activation;
+use crate::context::lock_activation_under;
 use crate::prelude::*;
 use async_trait::async_trait;
 use coins::{lp_coinfind, lp_coinfind_or_err, CoinProtocol, CoinsContext, MmCoinEnum};
@@ -126,9 +126,9 @@ where
     let coin_conf = L2::coin_conf_from_json(coin_conf_json).mm_err(Into::into)?;
     let platform_ticker = l2_protocol.platform_coin_ticker().to_owned();
 
-    // R55.1.12 with D43.1F.2 (b): the locks of the layer-two coin and of its platform are held together through
+    // R55.1.12 with D43.1F.2 (b): the lock of the layer-two coin (exclusive) and the lock of its platform (shared) are held together through
     // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
-    let _activation_guard = lock_activation(&ctx, &[&req.ticker, &platform_ticker])
+    let _activation_guard = lock_activation_under(&ctx, &platform_ticker, &[&req.ticker])
         .await
         .map_to_mm(EnableL2Error::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
