@@ -219,12 +219,28 @@ the previous version used. The safe way:
   unparsable URL or a scheme other than `http` and `https` with `InvalidPayload`, before any node is asked.
   The result lists the balances at the base58check address, with the head block from the TRON node. A TRC20 token
   whose config has no `decimals` reads them from the contract, on both routes. The Trezor, WalletConnect and MetaMask
-  policies are refused at activation, and so is a global-HD login for now, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key (the other HD forms wait for TRON HD wallets, in a later change).
+  policies are refused at activation.
   The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
   TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
   `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
   answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
   ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+- **TRON has an HD wallet under a global-HD login.** `enable_eth_with_tokens` and `task::enable_eth::init` derive the
+  TRX address under the `derivation_path` of the coin config (coin type 195, `m/44'/195'`) with `path_to_address`,
+  `gap_limit`, `scan_policy` and `min_addresses_number`, the way every EVM platform does, for the default policy and for
+  `ContextPrivKey`; a config without `derivation_path` is refused with `InvalidPayload`. `IguanaPrivKey` keeps the node's
+  single internal key. The result lists the accounts with base58check addresses, their derivation paths and the balances
+  of TRX and the enabled TRC20 tokens. `get_new_address`, `account_balance`, `task::get_new_address::init`,
+  `task::scan_for_new_addresses::init` and `task::account_balance::init` work for TRX and TRC20 tickers; an address counts
+  as used when the chain has created its account or an enabled TRC20 token has a balance there.
+  `task::create_new_account::init` fails with `Internal` for every TRON coin. `withdraw` and `task::withdraw` take an HD
+  `from` for TRX and TRC20 and sign with the key of that path, and `show_priv_key` answers the key of the activated
+  address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, which Reloaded's EVM
+  ERC-20 coins do not allow. A TRON coin on a single key now refuses `from` with `UnexpectedFromAddress`, as an EVM coin
+  does; it was ignored before. The legacy `enable` method keeps the node's internal key under a global-HD login, as the EVM and UTXO
+  legacy routes do in Reloaded, so its TRON address differs from the one the mmrpc 2.0 methods give for the same seed.
+  **TRON stays switched off in this build**, so every route still answers "TRON support is not available in this
+  build" and none of this can be used yet. Detail: CRD ch.21 R-A2, R21.10B.4, R21.10B.5, R21.10B.8, T21.10B.8.
 - **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
   `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
   address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
@@ -739,7 +755,7 @@ the previous version used. The safe way:
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
-  (PR #405).
+  (PR #405). The TRON HD wallet is built on the same route, still switched off.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.

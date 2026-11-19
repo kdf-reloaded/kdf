@@ -299,6 +299,14 @@ derivation path is `m/44'/195'/...`). The coin-type value 195 is
 dictated by the public SLIP-44 registry (R29/R33); the derivation
 plumbing is discretionary.
 
+*Status note (2026-11-19), R-A2 built on the mmrpc 2.0 route.* Under a
+global-HD login, `enable_eth_with_tokens` and `task::enable_eth::init` build
+the TRON HD wallet for an absent `priv_key_policy` and for `ContextPrivKey`:
+the address is the one at the coin config's `derivation_path` extended by
+`path_to_address` (`m/44'/195'/0'/0/0` by default), the wallet is the one an
+EVM platform has, and TRC20 tokens use it. A config without `derivation_path`
+answers `InvalidPayload` (HTTP 400) before any node is contacted.
+
 ## 21.5 Address Encoding (dictated interop)
 
 Tron addresses are dictated by the public Tron protocol. The
@@ -1053,6 +1061,29 @@ policy, `ContextPrivKey` and any HD-wallet policy under a global-HD login stay
 refused with `PrivKeyPolicyNotAllowed` until the TRON HD wallet (R21.10B.4,
 R-A2) is built. Under an iguana login nothing changes.
 
+*Status note (2026-11-19), HD interim rule retired.* The interim refusal of
+the note above is gone: under a global-HD login an absent policy,
+`ContextPrivKey` and the HD-wallet forms build the TRON HD wallet (R21.10B.4,
+R-A2) instead of answering `PrivKeyPolicyNotAllowed`. `IguanaPrivKey` is
+unchanged: it still uses the node's internal key
+(`mm2_internal_privkey_secret`) and is a single-address coin, on both routes.
+The Trezor, WalletConnect and MetaMask refusals are unchanged under a
+global-HD login. The HD methods (`get_new_address`, `account_balance` and the
+task forms of `get_new_address`, `scan_for_new_addresses` and
+`account_balance`) answer for a TRX or TRC20 ticker with base58check addresses
+and a balance map over TRX and the enabled TRC20 tokens; a TRC20 ticker is
+served by the HD wallet of its platform. An address counts as used as R21.10B.4
+says. `task::create_new_account::init` ends with `Internal` in the task status
+for every TRON coin, before any account is created. `withdraw` and
+`task::withdraw::init` of a TRX or TRC20 coin take the HD `from` forms of the
+EVM withdraw (an address id or a derivation path, resolved in the HD wallet of
+the platform) and sign with the key of that path. For a TRC20 coin this is a
+Reloaded extension: any activated address of the platform's HD wallet can be
+named, whereas an EVM ERC-20 coin in Reloaded refuses `from`; without `from` the sender is
+the activated address; a single-key TRON coin refuses `from` with
+`UnexpectedFromAddress`. `show_priv_key` answers the key of the activated
+address (R21.10B.8).
+
 > **Compatibility (this repository on dev, 2026-11-17; its own code, not
 > the reference).** TRX and TRC20 activate only through legacy `enable`
 > and `electrum`, behind the availability constant (D55.5); the request
@@ -1071,6 +1102,14 @@ R-A2) is built. Under an iguana login nothing changes.
 > node read fails); `max: true` for TRX sends the whole balance without
 > deducting the fee, and a TRX amount plus fee above the balance is not
 > refused before building; the TRC20 `fee_limit` is a fixed cap.
+
+*Status note (2026-11-19), compatibility block.* On the mmrpc 2.0 route R-A2
+is now met: under a global-HD login the TRON address is derived under the
+coin's `derivation_path`, as R-A2 and R21.10B.4 require.
+The legacy `enable` and `electrum` routes keep the node's internal key under a
+global-HD login, as the EVM and UTXO legacy routes do in Reloaded (decided
+2026-11-19), so their TRON address differs from the address of the mmrpc 2.0
+route for the same seed; the reference does not serve TRON on those routes.
 
 *Not established.* (1) Nothing was measured against a running reference
 binary or a live node. (2) The exact text the legacy error body carries in

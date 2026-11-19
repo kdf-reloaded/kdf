@@ -719,9 +719,21 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md): swap-contract members may also be written as
   base58check or `41...` hex on a TRON platform (a wider input; an EVM platform keeps `0x` only); the MetaMask
   policy and `rpc_mode` are refused for TRON at activation (the reference activates an address its withdraw then
-  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key; and a key in the
+  refuses); `IguanaPrivKey` under a global-HD login is honored with the node's single internal key; and a key in the
   query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
   CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
+
+- **TRON (still switched off) has an HD wallet on the standard methods; the legacy route keeps the internal key.**
+  Under a global-HD login `enable_eth_with_tokens` and `task::enable_eth::init` derive the TRX address under the
+  `derivation_path` of the coin config (coin type 195), as GLEEC KDF does; the HD methods (`get_new_address`,
+  `account_balance` and the task forms of `get_new_address`, `scan_for_new_addresses` and `account_balance`) answer
+  base58check addresses and a balance map over TRX and the enabled TRC20 tokens, and `task::create_new_account::init`
+  fails with `Internal`. A TRX address counts as used when the chain has created its account or an enabled TRC20 token
+  has a balance there. The legacy `enable` method keeps the node's internal key under a global-HD login, as Reloaded's
+  EVM and UTXO legacy routes do, so its TRON address differs from the HD route's address for the same seed; GLEEC KDF
+  refuses TRON on the legacy method, so a GLEEC client never reaches it. `withdraw` of a TRON coin takes an HD `from`
+  and signs with that key, and refuses `from` on a single-key coin (it was ignored before). A TRC20 withdraw under a global-HD login takes an HD `from` resolved in the platform's HD wallet (any activated address of the platform); this is a Reloaded extension, and an EVM ERC-20 coin in Reloaded refuses `from`. No switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R-A2, R21.10B.4.
 
 - **`convertaddress` for a TRON coin (still switched off) converts between the base58check and the `41...` hex form.**
   GLEEC KDF answers an EVM `0x` form for a TRX or TRC20 address. Reloaded takes `{"format": "base58"}` or

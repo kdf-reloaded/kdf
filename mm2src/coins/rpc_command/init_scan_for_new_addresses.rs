@@ -84,6 +84,10 @@ impl RpcTask for InitScanAddressesTask {
         match self.coin {
             MmCoinEnum::UtxoCoin(utxo) => utxo.init_scan_for_new_addresses_rpc(self.req.params).await,
             MmCoinEnum::QtumCoin(qtum) => qtum.init_scan_for_new_addresses_rpc(self.req.params).await,
+            // Served for TRX and TRC20 tickers (CRD ch.21 R21.10B.4); an EVM coin keeps its answer.
+            MmCoinEnum::EthCoin(eth) if eth.is_tron_family() => {
+                eth.init_scan_for_new_addresses_rpc(self.req.params).await
+            },
             _ => MmError::err(HDAccountBalanceRpcError::CoinIsActivatedNotWithHDWallet),
         }
     }
