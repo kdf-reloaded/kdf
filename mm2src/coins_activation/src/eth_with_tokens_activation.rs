@@ -478,9 +478,7 @@ impl TokenAsMmCoinInitializer for Erc20TokenInitializer {
             tokens.push(token);
         }
 
-        for token in tokens.iter() {
-            self.platform_coin.register_token_info(token);
-        }
+        // The platform's token record is written at registration, not here (CRD ch.43 D43.1F.2 (b)).
         Ok(tokens.into_iter().map(Into::into).collect())
     }
 }
@@ -766,6 +764,22 @@ impl PlatformWithTokensActivationOps for EthCoin {
             .await
             .mm_err(ActivationErr::from),
         }
+    }
+
+    fn record_token(&self, token: &coins::MmCoinEnum) {
+        if let coins::MmCoinEnum::EthCoin(token) = token {
+            self.register_token_info(token);
+        }
+    }
+
+    fn forget_token_record(&self, ticker: &str) { self.remove_erc20_token_info(ticker); }
+
+    /// An inline `nft_req` activates the NFT chain of this platform (CRD ch.43 R43.1F.8).
+    fn requested_nft_ticker(&self, activation_request: &Self::ActivationRequest) -> Option<String> {
+        activation_request.nft_req.as_ref()?;
+        Chain::from_coin_ticker(self.ticker())
+            .ok()
+            .map(|chain| chain.nft_ticker().to_owned())
     }
 
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {

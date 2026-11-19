@@ -1983,8 +1983,9 @@ names.
 >    activation never does, at a first activation or a re-activation.
 
 > *Reloaded status (clean side, 2026-11-18; Reloaded-original, its own code):*
-> the passive platform state is built for the legacy `disable_coin`; the
-> re-activation and the NFT chain of this section are not built yet.
+> the passive platform state is built for the legacy `disable_coin`, with the
+> re-activation, the token record timing and the NFT chain of this section;
+> the node setting of D43.1F.1 and ending background work are not built yet.
 >
 > 1. *Legacy `disable_coin`.* It reads `force_disable` (R43.1E.1) and answers
 >    `passivized` (R43.1E.2). An unforced call for a platform with at least one
@@ -2019,14 +2020,52 @@ names.
 > 6. *Standalone tasks (D43.1F.4 (b)).* The `init` of a standalone activation
 >    task refuses the ticker of a passive platform with `CoinIsAlreadyActivated`
 >    and builds nothing.
-> 7. *Not yet built.* The platform-with-tokens re-activation (R43.1F.2,
->    R43.1F.3: until it follows, those methods answer `PlatformIsAlreadyActivated`
->    for a passive platform and a legacy `enable` or `electrum` is refused as
->    already activated), the NFT chain as a dependent (R43.1F.8), the token
->    record timing (D43.1F.2), the `reactivation_registered_token` setting
->    (D43.1F.1), the rule that `tx_history` is ignored on re-activation
->    (D43.1F.5), and ending the background work of a removed coin
->    (R43.1E.5 items 2 and 4).
+> 7. *Re-activation (R43.1F.2, R43.1F.3).* A platform-with-tokens method, in
+>    its one-shot and its task form, whose ticker is a passive platform of the
+>    method's family re-activates the passive instance; `init` of the task form
+>    answers a `task_id` for it. The decision is taken under the activation
+>    locks and before the platform's configuration is read; an active ticker
+>    and a passive ticker of another family answer `PlatformIsAlreadyActivated`.
+>    No platform instance is built. The request's nodes, signing policy,
+>    swap-contract settings, required confirmations and `tx_history` are not
+>    applied, and no history collector is started (D43.1F.5 (a)); `get_balances`
+>    and, for an HD wallet, the address-scan settings and `path_to_address`
+>    shape the answer. One registry step, under the registry lock, makes the
+>    entry active, registers each requested token that is not registered and
+>    adds every requested ticker to the dependent set; if the entry is no longer
+>    registered and passive then, the call answers `Internal` and changes
+>    nothing (the locks keep `disable_coin` out, so this is not reached).
+> 8. *A requested token that is already registered (R43.1F.4, D43.1F.1).* In a
+>    first activation and in a re-activation, under the locks and before
+>    anything is built: a ticker that is already a dependent of this very
+>    platform is kept (the built instance is discarded, the request's token
+>    members are not applied, the ticker is reported once); any other
+>    registered ticker is refused with `TokenIsAlreadyActivated` (string: the
+>    ticker, HTTP 400); cases (c), (d) and (e) of the table are as stated
+>    there. This is the `"refuse"` behavior; the check is one function with a
+>    policy argument, so the `"keep"` value of the setting selects the other
+>    branch at that one place later.
+> 9. *Token record (D43.1F.2 (b)).* In every family (EVM including TRC20, BCH
+>    with SLP, Tendermint, Solana) the token initializers write nothing to the
+>    platform's token record. The activation writes the tokens it built that
+>    were not registered before the answer is assembled, because the answer
+>    lists every token on the record, and removes exactly those tokens again if
+>    the call fails before registration. After a refusal the record holds no
+>    token of the refused request.
+> 10. *NFT chain (R43.1F.8).* An NFT chain activated by `enable_nft` or by an
+>     inline `nft_req` is a dependent of its platform: its pseudo-ticker is a
+>     member of the platform's dependent set and has no coin entry, so a
+>     platform whose only dependent is its NFT chain becomes passive on an
+>     unforced `disable_coin`. A forced removal deactivates the chain with the
+>     other dependents. A re-activation without `nft_req` keeps the chain; with
+>     `nft_req` the chain is built anew. A chain that is already active
+>     answers `TokenIsAlreadyActivated` to `enable_nft` whatever the state of
+>     its platform (R43.1F.7). Reloaded has no method that disables an NFT
+>     chain by itself, so item 5 of R43.1F.8 has no caller yet.
+> 11. *Not yet built.* The `reactivation_registered_token` setting of D43.1F.1
+>     and its `"keep"` value (the default behavior of item 8 is the only one in
+>     effect), and ending the background work of a removed coin (R43.1E.5
+>     items 2 and 4).
 
 **D43.1F.1** *(Open, 2026-11-18.)* **A requested token that is already
 registered.** Options: (a) reproduce the reference: keep the registered

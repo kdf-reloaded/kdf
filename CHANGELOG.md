@@ -69,10 +69,18 @@ or undo, and every change that needs a step from you.
   - *What to do:* to remove the platform and its tokens, send `"force_disable": true`.
   - *Versioned form:* the `mmrpc: "2.0"` `disable_coin` does not change. It neither makes a platform passive nor
     reads `force_disable`: it removes the platform, and its tokens stay registered.
-  - *Not yet:* a passive platform cannot be activated again by `enable_eth_with_tokens` and the other
-    platform-with-tokens methods; they answer `PlatformIsAlreadyActivated` until that follows. Ending a removed coin's
-    background work is also still to come. Until then, force-disable the platform and activate it afresh.
+  - *Activating it again:* `enable_eth_with_tokens` and the other platform-with-tokens methods activate a passive
+    platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
+    Ending a removed coin's background work is still to come.
   - Detail: PR #424; CRD ch.43 §43.1E and §43.1F.
+- **A platform-with-tokens activation that names a token already registered as something else is now refused.**
+  Before, `enable_eth_with_tokens`, `enable_bch_with_tokens`, `enable_tendermint_with_assets`,
+  `experimental::enable_solana_with_assets` and the task forms replaced a registered token of the same ticker by a new
+  one built from the request. Now a token that is already an active token of this very platform is kept as it is,
+  and any other registered ticker, for example a token activated by the legacy `enable`, is refused with
+  `TokenIsAlreadyActivated` (HTTP 400) before anything is built. GLEEC KDF keeps the registered token without saying so.
+  - *What to do:* disable the token first, or leave it out of the request.
+  - Detail: PR #424; CRD ch.43 §43.1F R43.1F.4.
 
 - **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
   handler produced them. A client that decoded those entities itself to get the original text must stop doing so,
@@ -123,6 +131,20 @@ the previous version used. The safe way:
   running swap or an order that is being matched. Every other successful call now also answers `passivized: false`.
   Only the JSON value `true` forces. A node restart makes every coin inactive, as before. Detail: PR #424; CRD ch.43 §43.1E
   and §43.1F.
+- **A passive platform coin is activated again by the platform-with-tokens methods.** `enable_eth_with_tokens`,
+  `enable_bch_with_tokens`, `enable_tendermint_with_assets`, `experimental::enable_solana_with_assets` and the task
+  forms `task::enable_eth::init` and `task::enable_tendermint::init`, given the ticker of a passive platform of their
+  own family, make it active again with the instance it already has. The request's nodes, signing policy, swap-contract
+  settings, required confirmations and `tx_history` are not applied, and no history collection is started;
+  `get_balances` and, for an HD wallet, the address-scan settings and `path_to_address` shape the answer. The requested
+  tokens are activated, and the answer lists every token the platform was activated with and not disabled since, plus
+  the request's tokens. An active platform, and a passive platform of another family, still answer
+  `PlatformIsAlreadyActivated`. A refused request leaves the platform passive and its token list as it was. Detail: PR
+  #424; CRD ch.43 §43.1F R43.1F.2 to R43.1F.5.
+- **An EVM platform's NFT chain counts as its dependent.** An NFT chain activated by `enable_nft`, or inline by
+  `nft_req`, now keeps its platform from being removed by an unforced `disable_coin`: a platform whose only dependent
+  is its NFT chain becomes passive, and a forced `disable_coin` deactivates the NFT chain with the platform's tokens. A
+  re-activation without `nft_req` keeps the NFT chain. Detail: PR #424; CRD ch.43 R43.1F.8.
 - **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
   members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
@@ -306,6 +328,10 @@ the previous version used. The safe way:
   middle of the activation of its token. A token activation on a platform that is passive is refused with
   `PlatformCoinIsNotActivated` naming the platform (the Lightning ticker for Lightning). Detail: PR #424; CRD ch.43 D43.1F.2;
   ch.55 R55.1.12.
+- **A refused platform-with-tokens activation leaves none of its tokens on the platform's token list.** The list a
+  platform reports in its activation answer and its balance stream is now written only once the tokens are registered,
+  so a request that failed after its tokens were built no longer leaves them on the list of the platform. Detail: PR
+  #424; CRD ch.43 D43.1F.2.
 - **A standalone activation task for the ticker of a passive platform is refused at `init`.** `task::enable_utxo::init`
   and the other standalone activation tasks answer `CoinIsAlreadyActivated` with HTTP 400, as for an active coin,
   and build nothing. Detail: PR #424; CRD ch.43 R43.1F.9 and D43.1F.4.

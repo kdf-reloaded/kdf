@@ -310,3 +310,88 @@ fn a_forced_removal_takes_the_platform_and_every_dependent_in_one_step() {
         "disabled already"
     );
 }
+
+// Re-activation and the requested-token check (CRD ch.43 R43.1F.3 -- R43.1F.5, R43.1F.8, D43.1F.1)
+
+fn names(tickers: &[&str]) -> Vec<String> { tickers.iter().map(|t| (*t).to_owned()).collect() }
+
+#[test]
+fn the_requested_token_check_keeps_a_dependent_and_refuses_every_other_registered_ticker() {
+    let (_ctx, coins_ctx) = passive_platform();
+    block_on(coins_ctx.add_coin(test_coin("LEGACY"))).unwrap();
+    let check = |platform: &str, tickers: &[&str], policy| {
+        block_on(coins_ctx.check_requested_tokens(platform, &names(tickers), policy))
+    };
+
+    // A dependent of the very platform and an unregistered ticker pass.
+    check("PLAT", &["T1", "NEW"], RegisteredTokenPolicy::Refuse).unwrap();
+    // Any other registered ticker is refused, the first one named.
+    let refused = check("PLAT", &["T1", "LEGACY", "T2"], RegisteredTokenPolicy::Refuse).unwrap_err();
+    assert_eq!(refused.get_inner().ticker, "LEGACY");
+    // A dependent of another platform is no dependent of this one.
+    let refused = check("OTHER", &["T1"], RegisteredTokenPolicy::Refuse).unwrap_err();
+    assert_eq!(refused.get_inner().ticker, "T1");
+    // The keep policy refuses nothing.
+    check("PLAT", &["T1", "LEGACY"], RegisteredTokenPolicy::Keep).unwrap();
+    check("OTHER", &["T1"], RegisteredTokenPolicy::Keep).unwrap();
+    assert_eq!(RegisteredTokenPolicy::DEFAULT, RegisteredTokenPolicy::Refuse);
+}
+
+#[test]
+fn a_re_activation_makes_the_platform_active_and_registers_the_new_tokens_once() {
+    let (ctx, coins_ctx) = passive_platform();
+
+    // The same ticker twice, and a token that is registered already: kept, and in the set once.
+    block_on(coins_ctx.reactivate_platform_with_tokens("PLAT", vec![
+        test_coin("NEW"),
+        test_coin("NEW"),
+        test_coin("T1"),
+    ]))
+    .unwrap();
+
+    assert!(!block_on(coins_ctx.is_passive("PLAT")));
+    assert!(block_on(lp_coinfind(&ctx, "PLAT")).unwrap().is_some());
+    assert_eq!(block_on(coins_ctx.dependents_of("PLAT")), set(&["NEW", "T1", "T2"]));
+    for ticker in ["NEW", "T1", "T2"] {
+        assert!(block_on(lp_coinfind(&ctx, ticker)).unwrap().is_some(), "{}", ticker);
+    }
+}
+
+#[test]
+fn a_re_activation_of_an_entry_that_is_not_passive_changes_nothing() {
+    let (ctx, coins_ctx) = ctx_and_coins();
+    block_on(coins_ctx.add_platform_with_tokens(test_coin("PLAT"), vec![test_coin("T1")])).unwrap();
+
+    let refused = block_on(coins_ctx.reactivate_platform_with_tokens("PLAT", vec![test_coin("NEW")])).unwrap_err();
+    assert_eq!(refused.get_inner().ticker, "PLAT");
+    let refused = block_on(coins_ctx.reactivate_platform_with_tokens("ABSENT", vec![test_coin("NEW")])).unwrap_err();
+    assert_eq!(refused.get_inner().ticker, "ABSENT");
+
+    assert!(block_on(lp_coinfind_registered(&ctx, "NEW")).unwrap().is_none());
+    assert_eq!(block_on(coins_ctx.dependents_of("PLAT")), set(&["T1"]));
+    assert!(block_on(lp_coinfind_registered(&ctx, "ABSENT")).unwrap().is_none());
+}
+
+#[test]
+fn the_nft_chain_is_a_dependent_with_no_coin_entry() {
+    let (ctx, coins_ctx) = ctx_and_coins();
+    assert!(
+        !block_on(coins_ctx.add_nft_dependent("PLAT", "NFT_PLAT")),
+        "an unregistered platform has no NFT chain"
+    );
+    block_on(coins_ctx.add_coin(test_coin("PLAT"))).unwrap();
+    assert!(!block_on(coins_ctx.make_passive("PLAT")), "no dependent yet");
+
+    assert!(block_on(coins_ctx.add_nft_dependent("PLAT", "NFT_PLAT")));
+    assert!(block_on(coins_ctx.add_nft_dependent("PLAT", "NFT_PLAT")), "idempotent");
+
+    assert_eq!(block_on(coins_ctx.dependents_of("PLAT")), set(&["NFT_PLAT"]));
+    assert!(block_on(lp_coinfind_registered(&ctx, "NFT_PLAT")).unwrap().is_none());
+    assert!(
+        block_on(coins_ctx.make_passive("PLAT")),
+        "a platform whose only dependent is its NFT chain can be passive"
+    );
+    // A re-activation keeps the chain in the set.
+    block_on(coins_ctx.reactivate_platform_with_tokens("PLAT", vec![])).unwrap();
+    assert_eq!(block_on(coins_ctx.dependents_of("PLAT")), set(&["NFT_PLAT"]));
+}

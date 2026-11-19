@@ -192,6 +192,14 @@ impl CoinRegistry {
             .insert(ticker.clone());
         self.entries.insert(ticker, coin);
     }
+    /// Records `ticker` in the dependent set of `platform` without registering a coin. A ticker that is already a
+    /// member stays one.
+    pub(crate) fn add_dependent_ticker(&mut self, platform: &str, ticker: String) {
+        self.dependents.entry(platform.to_owned()).or_default().insert(ticker);
+    }
+    /// Makes the passive platform coin `ticker` active again (CRD ch.43 R43.1F.3 item 5). Returns `false`, and
+    /// changes nothing, when the ticker is not a registered passive coin.
+    pub(crate) fn make_active(&mut self, ticker: &str) -> bool { self.passive.remove(ticker) }
     /// Removes a coin, passive or not. The coin leaves the dependent set of its platform and loses its passive
     /// flag, and a platform loses its own set: its tokens stay registered (CRD ch.43 §43.1E compatibility note
     /// item 2). A platform whose last dependent leaves stays registered, and passive if it was (R43.1E.6 item 5).
@@ -249,6 +257,29 @@ pub struct CoinIsAlreadyActivatedErr {
 #[derive(Debug)]
 pub struct PlatformIsAlreadyActivatedErr {
     pub ticker: String,
+}
+/// The registered token that a platform-with-tokens request refused (CRD ch.43 R43.1F.4).
+#[derive(Debug)]
+pub struct RegisteredTokenRefused {
+    pub ticker: String,
+}
+/// The passive platform entry that a re-activation started from is not registered and passive any more.
+#[derive(Debug)]
+pub struct PlatformNotPassiveErr {
+    pub ticker: String,
+}
+/// What a platform-with-tokens request does with a requested token that is already registered (CRD ch.43
+/// R43.1F.4, D43.1F.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisteredTokenPolicy {
+    /// A token that is a dependent of the very platform is kept; any other registered ticker is refused.
+    Refuse,
+    /// The registered instance is kept whatever it is. Nothing selects it yet.
+    Keep,
+}
+impl RegisteredTokenPolicy {
+    /// The policy a node uses.
+    pub const DEFAULT: RegisteredTokenPolicy = RegisteredTokenPolicy::Refuse;
 }
 impl CoinsContext {
     /// The registered reader of the unfinished swaps, if the swap layer has registered one.
@@ -353,13 +384,51 @@ impl CoinsContext {
     /// changes nothing, when the ticker is not registered or has no dependent token.
     pub async fn make_passive(&self, ticker: &str) -> bool { self.coins.lock().await.make_passive(ticker) }
 
+    /// Refuses the first requested ticker that is registered and that `policy` does not keep, before anything
+    /// is built (CRD ch.43 R43.1F.4). Under [`RegisteredTokenPolicy::Refuse`] a ticker that is already a dependent
+    /// of `platform_ticker` is kept; every other registered ticker is refused. Nothing is changed.
+    pub async fn check_requested_tokens(
+        &self,
+        platform_ticker: &str,
+        tickers: &[String],
+        policy: RegisteredTokenPolicy,
+    ) -> Result<(), MmError<RegisteredTokenRefused>> {
+        let coins = self.coins.lock().await;
+        let dependents = coins.dependents_of(platform_ticker);
+        for ticker in tickers {
+            let kept = match policy {
+                RegisteredTokenPolicy::Refuse => dependents.contains(ticker),
+                RegisteredTokenPolicy::Keep => true,
+            };
+            if coins.registered().contains(ticker) && !kept {
+                return MmError::err(RegisteredTokenRefused { ticker: ticker.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Registers the tokens of a platform-with-tokens request under the registry lock, as dependents of
+    /// `platform_ticker`. A token whose ticker is registered keeps its instance and only joins the set; the same
+    /// ticker twice in `tokens` registers once (CRD ch.43 R43.1F.4).
+    fn add_requested_tokens(&self, coins: &mut CoinRegistry, platform_ticker: &str, tokens: Vec<MmCoinEnum>) {
+        for token in tokens {
+            if coins.registered().contains(token.ticker()) {
+                coins.add_dependent_ticker(platform_ticker, token.ticker().to_owned());
+            } else {
+                self.fee_estimate_cache.forget_coin(token.ticker());
+                coins.insert_dependent(platform_ticker, token.ticker().into(), token);
+            }
+        }
+    }
+
     pub async fn add_platform_with_tokens(
         &self,
         platform: MmCoinEnum,
         tokens: Vec<MmCoinEnum>,
     ) -> Result<(), MmError<PlatformIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
-        // A passive platform answers `PlatformIsAlreadyActivated` until its re-activation is built.
+        // A registered platform, passive or not, is refused: a passive one is re-activated through
+        // [`Self::reactivate_platform_with_tokens`].
         if coins.registered().contains(platform.ticker()) {
             return MmError::err(PlatformIsAlreadyActivatedErr {
                 ticker: platform.ticker().into(),
@@ -369,13 +438,42 @@ impl CoinsContext {
         let platform_ticker = platform.ticker().to_owned();
         self.fee_estimate_cache.forget_coin(&platform_ticker);
         coins.insert(platform_ticker.clone(), platform);
-
-        // Tokens can't be activated without platform coin so we can safely insert them without checking prior existence
-        for token in tokens {
-            self.fee_estimate_cache.forget_coin(token.ticker());
-            coins.insert_dependent(&platform_ticker, token.ticker().into(), token);
-        }
+        self.add_requested_tokens(&mut coins, &platform_ticker, tokens);
         Ok(())
+    }
+
+    /// The registration step of the re-activation of a passive platform (CRD ch.43 R43.1F.3 item 5), in one hold
+    /// of the registry: the platform becomes active, every requested token that is not registered is registered,
+    /// and every requested ticker joins the platform's dependent set.
+    ///
+    /// The activation locks keep `disable_coin` from removing the entry meanwhile, so a platform that is not
+    /// registered and passive here cannot happen; the call then changes nothing and answers the error, which the
+    /// caller reports as an internal failure.
+    pub async fn reactivate_platform_with_tokens(
+        &self,
+        platform_ticker: &str,
+        tokens: Vec<MmCoinEnum>,
+    ) -> Result<(), MmError<PlatformNotPassiveErr>> {
+        let mut coins = self.coins.lock().await;
+        if !coins.make_active(platform_ticker) {
+            return MmError::err(PlatformNotPassiveErr {
+                ticker: platform_ticker.to_owned(),
+            });
+        }
+        self.add_requested_tokens(&mut coins, platform_ticker, tokens);
+        Ok(())
+    }
+
+    /// Records the NFT chain `nft_ticker` (for example `NFT_ETH`) in the dependent set of the registered
+    /// platform coin `platform_ticker`, with no coin entry of its own (CRD ch.43 R43.1F.8 item 1). Returns `false`,
+    /// and changes nothing, when the platform is not registered.
+    pub async fn add_nft_dependent(&self, platform_ticker: &str, nft_ticker: &str) -> bool {
+        let mut coins = self.coins.lock().await;
+        if !coins.registered().contains(platform_ticker) {
+            return false;
+        }
+        coins.add_dependent_ticker(platform_ticker, nft_ticker.to_owned());
+        true
     }
 
     #[cfg(target_arch = "wasm32")]
