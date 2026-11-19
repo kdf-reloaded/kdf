@@ -4,7 +4,7 @@
 //!
 //! - [`networks`]: the per-network constants and the proxy creation bytecode (§63.4.1, §63.5, §63.6);
 //! - [`custody`]: the local derivation of a user's custody address (§63.5), its check against the controller
-//!   contract (R25) and the on-chain balance read of the custody address (§63.7);
+//!   contract (R29) and the on-chain balance read of the custody address (§63.7);
 //! - [`authorization`]: the `PermitTransfer` typed data, its signer and the signed artifact (§63.6, §63.8 step 5);
 //! - [`provider`] and [`provider_payloads`]: the provider's REST client and its typed payloads (§63.4);
 //! - [`preflight`]: the preflight decision (§63.7);

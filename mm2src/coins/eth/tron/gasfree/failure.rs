@@ -73,7 +73,7 @@ pub(crate) enum RpcArm {
 /// Why a step of the GasFree group failed.
 #[derive(Debug, Display)]
 pub(crate) enum GasFreeError {
-    /// The controller contract of the network derives another custody address than this build does (R25).
+    /// The controller contract of the network derives another custody address than this build does (R29).
     #[display(
         fmt = "GasFree is not available on {}: the GasFree contract no longer derives the expected address",
         network
@@ -133,7 +133,7 @@ pub(crate) enum GasFreeError {
 impl std::error::Error for GasFreeError {}
 
 impl GasFreeError {
-    /// The arm of the withdraw RPC this failure is reported through (§63.9.3, R17; R25 for the derivation check).
+    /// The arm of the withdraw RPC this failure is reported through (§63.9.3, R17; R29 for the derivation check).
     pub(crate) fn rpc_arm(&self) -> RpcArm {
         match self {
             GasFreeError::DerivationMismatch { .. } => RpcArm::Gasless(GaslessMember::Unavailable),

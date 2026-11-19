@@ -233,7 +233,7 @@ the previous version used. The safe way:
 - **Support code for gasless TRC20 transfers through GasFree was added; nothing uses it yet.** The code derives a
   user's GasFree custody address and checks it against the GasFree contract, prepares and signs a transfer
   authorization, and reads account and fee data from a GasFree provider. No RPC reaches it, so nothing changes for
-  users. Detail: PR #433; CRD ch.63 §63.4 to §63.7, R25.
+  users. Detail: PR #433; CRD ch.63 §63.4 to §63.7, R29.
 
 #### Tendermint (Cosmos) coins
 

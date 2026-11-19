@@ -66,7 +66,7 @@ new PRs, and the branch stays until the second PR below has landed.
   it relates to `task::withdraw`.
 - **PRs.**
   - First: the module group `mm2src/coins/eth/tron/gasfree/` with the pinned and verified bytecode: the
-    per-network constants, the custody-address derivation and its check against the controller (ch.63 R25), the
+    per-network constants, the custody-address derivation and its check against the controller (ch.63 R29), the
     `PermitTransfer` signer and artifact, the provider client with its payloads, and the preflight decision. No
     shared request, balance or error fields; unreachable from every RPC.
   - Then: the activation binding, the fields at every placement ch.63 R18 lists, and the withdraw dispatcher.

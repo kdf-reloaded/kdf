@@ -1021,7 +1021,7 @@ R24. **No silent substitution without consent (Reloaded-original).**
     project MUST NOT switch rails under `fee_method = gasless`
     unless `fallback_to_native` is set.
 
-R25. **Custody derivation checked against the controller
+R29. **Custody derivation checked against the controller
     (Reloaded-original, 2026-11-19).** Before the gasless rail uses a
     custody address for a user on a network, whenever no confirmation of
     that address younger than 10 minutes exists (so after every restart
@@ -1140,7 +1140,7 @@ T14. **Nile end-to-end (lab row; deferred with D63.6).** A
     smoke test of the header-bearing transport. No end-to-end test
     exists at the reference row.
 
-T15. **Controller check (R25) (Reloaded-original, 2026-11-19).** A
+T17. **Controller check (R29) (Reloaded-original, 2026-11-19).** A
     match is confirmed and reused for 10 minutes; after that, or after a
     restart, the controller is read again; a mismatch refuses with
     `Unavailable` (503), signs nothing and keeps nothing cached; a failed
@@ -1370,6 +1370,6 @@ V2. The baseline withdraw request has no fee-rail selector and no
   only in that branch's commit message of 2026-06-26, against a
   reference state that was not tabled at the time. Neither that
   verdict nor the two failed passes carry to this revision.
-- *Additions of 2026-11-19:* R25, T15 and the status notes dated
+- *Additions of 2026-11-19:* R29, T17 and the status notes dated
   2026-11-19 (§63.4.5, §63.5, R23, T1, T2) are Reloaded-original and take no
   reference input.

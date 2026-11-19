@@ -1,8 +1,8 @@
-//! The GasFree custody address of a user (CRD ch.63 §63.5, R2, R25) and its on-chain token balance (§63.7).
+//! The GasFree custody address of a user (CRD ch.63 §63.5, R2, R29) and its on-chain token balance (§63.7).
 //!
 //! The address is derived locally with TRON's `CREATE2` rule from the per-network constants of
 //! [`super::networks`]. Before the gasless rail first uses a derived address, [`check_against_controller`]
-//! compares it with the controller contract's own `getGasFreeAddress(address)` (R25).
+//! compares it with the controller contract's own `getGasFreeAddress(address)` (R29).
 //!
 //! # Invariants
 //!
@@ -91,11 +91,11 @@ fn usize_word(value: usize) -> [u8; 32] {
     word
 }
 
-/// How long a confirmation by the controller stays valid, in milliseconds (R25): 10 minutes.
+/// How long a confirmation by the controller stays valid, in milliseconds (R29): 10 minutes.
 pub(crate) const CONFIRMATION_VALIDITY_MS: u64 = 600_000;
 
 /// The (network, user) pairs whose derived custody address the controller has confirmed, each with the time of
-/// its last confirmation (R25).
+/// its last confirmation (R29).
 ///
 /// The gasless rail uses the one [`ControllerChecks::process_wide`] instance, which lives as long as the process:
 /// the check runs again after a restart, and whenever the last confirmation is older than
@@ -147,7 +147,7 @@ impl ControllerChecks {
     }
 }
 
-/// The warning line of a failed controller check (R25). It names the network and the three addresses, all of
+/// The warning line of a failed controller check (R29). It names the network and the three addresses, all of
 /// them public values.
 fn mismatch_warning(network: &str, user: &TronAddress, derived: &TronAddress, reported: &TronAddress) -> String {
     format!(
@@ -187,7 +187,7 @@ pub(crate) async fn read_controller_word(
 }
 
 /// Derives the custody address of `user` on `network` and requires the controller contract to derive the same
-/// one (R25). A match is remembered in `checks` for [`CONFIRMATION_VALIDITY_MS`], so the controller is asked at
+/// one (R29). A match is remembered in `checks` for [`CONFIRMATION_VALIDITY_MS`], so the controller is asked at
 /// most once per (network, user) in that time.
 ///
 /// # Errors
