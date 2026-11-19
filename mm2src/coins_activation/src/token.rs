@@ -157,16 +157,37 @@ where
     Token: TokenActivationOps,
     EnableTokenError: From<Token::ActivationError>,
 {
+    enable_token_resolving::<Token, _>(ctx, req.ticker, req.activation_params, |ctx, ticker, _| {
+        let (_, token_protocol): (_, Token::ProtocolInfo) = coin_conf_with_protocol(ctx, ticker)
+            .mm_err(|e: CoinConfWithProtocolError| -> EnableTokenError { e.into() })?;
+        Ok(token_protocol)
+    })
+    .await
+}
+
+/// [`enable_token`] with the token's protocol resolved by `resolve`: the coins configuration for the generic
+/// activation, a request-supplied protocol where the request may carry one (CRD ch.40 R40.3.2). `resolve` runs after
+/// the already-activated check, before the platform coin is looked up.
+pub(crate) async fn enable_token_resolving<Token, Resolve>(
+    ctx: MmArc,
+    ticker: String,
+    activation_params: Token::ActivationParams,
+    resolve: Resolve,
+) -> Result<Token::ActivationResult, MmError<EnableTokenError>>
+where
+    Token: TokenActivationOps,
+    EnableTokenError: From<Token::ActivationError>,
+    Resolve: FnOnce(&MmArc, &str, &Token::ActivationParams) -> Result<Token::ProtocolInfo, MmError<EnableTokenError>>,
+{
     // R55.1.12: the lock is held through registration; the check below is the one that follows the wait.
-    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
+    let _activation_guard = lock_activation(&ctx, &[&ticker])
         .await
         .map_to_mm(EnableTokenError::Internal)?;
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
-        return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
+    if let Ok(Some(_)) = lp_coinfind(&ctx, &ticker).await {
+        return MmError::err(EnableTokenError::TokenIsAlreadyActivated(ticker));
     }
 
-    let (_, token_protocol): (_, Token::ProtocolInfo) =
-        coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
+    let token_protocol = resolve(&ctx, &ticker, &activation_params)?;
 
     let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
     let platform_coin = lp_coinfind_or_err(&ctx, &platform_ticker)
@@ -176,12 +197,12 @@ where
     let platform_coin = Token::PlatformCoin::try_from_mm_coin(platform_coin).or_mm_err(|| {
         EnableTokenError::UnsupportedPlatformCoin {
             platform_coin_ticker: token_protocol.platform_coin_ticker().into(),
-            token_ticker: req.ticker.clone(),
+            token_ticker: ticker.clone(),
         }
     })?;
 
     let (token, activation_result) =
-        Token::enable_token(req.ticker, platform_coin.clone(), req.activation_params, token_protocol)
+        Token::enable_token(ticker, platform_coin.clone(), activation_params, token_protocol)
             .await
             .mm_err(Into::into)?;
 

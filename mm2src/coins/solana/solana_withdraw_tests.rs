@@ -85,6 +85,7 @@ fn pubkey_param(params: &Json, index: usize) -> Option<Pubkey> {
 fn answer(script: &Script, method: &str, params: &Json) -> Reply {
     let context = json!({ "slot": 1 });
     match method {
+        "getHealth" => Reply::Result(json!("ok")),
         "getBalance" => {
             let lamports = pubkey_param(params, 0).and_then(|key| script.sol.get(&key).copied());
             Reply::Result(json!({ "context": context, "value": lamports.unwrap_or(0) }))

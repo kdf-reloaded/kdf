@@ -94,7 +94,7 @@ cfg_native! {
     use coins::lightning::{add_trusted_node, close_channel, connect_to_lightning_node, generate_invoice, get_channel_details,
         get_claimable_balances, get_payment_details, list_closed_channels_by_filter, list_open_channels_by_filter, list_payments_by_filter, list_trusted_nodes, open_channel,
         remove_trusted_node, send_payment, update_channel, LightningCoin};
-    use coins_activation::{enable_solana_with_tokens, enable_spl};
+    use coins_activation::{enable_solana_token, enable_solana_with_assets, enable_solana_with_tokens, enable_spl};
     use coins::my_tx_history_v2::z_coin_tx_history_rpc;
     use crate::mm2::lp_wallet::{change_mnemonic_password_rpc, create_wallet_rpc, delete_wallet_rpc, get_mnemonic_rpc, get_wallet_names_rpc};
     use crate::mm2::rpc::trezor::trezor_connection_status_rpc;
@@ -395,6 +395,9 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             "open_channel" => handle_mmrpc(ctx, request, open_channel).await,
             "send_payment" => handle_mmrpc(ctx, request, send_payment).await,
             "enable_solana_with_tokens" => handle_mmrpc(ctx, request, enable_solana_with_tokens).await,
+            // The compatibility surface of CRD ch.40 §40.2-§40.3; native only until the WASM package lifts the gate.
+            "experimental::enable_solana_with_assets" => handle_mmrpc(ctx, request, enable_solana_with_assets).await,
+            "experimental::enable_solana_token" => handle_mmrpc(ctx, request, enable_solana_token).await,
             "enable_spl" => handle_mmrpc(ctx, request, enable_spl).await,
             "trezor_connection_status" => handle_mmrpc(ctx, request, trezor_connection_status_rpc).await,
             _ => {
@@ -967,6 +970,57 @@ mod tests {
         assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
 
         for ticker in ["SOL", "USDC-SOL", "SOL-REF", "USDC-SOL-REF"] {
+            assert!(
+                block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
+                "{ticker} registered"
+            );
+        }
+    }
+
+    /// T40.1 (native): the two compatibility methods are routed, and while Solana is switched off they answer as the
+    /// primary methods do (`PlatformCoinCreationError` for the platform method, `Internal` for the token method,
+    /// both HTTP 500, "not available in this build") and register nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn solana_compat_routes_refuse_while_solana_is_switched_off() {
+        use coins::{lp_coinfind, SOLANA_NOT_AVAILABLE};
+
+        let ctx = MmCtxBuilder::default()
+            .with_conf(json!({ "coins": [
+                { "coin": "SOL-REF", "mm2": 1, "protocol": { "type": "SOLANA", "protocol_data": {} } },
+                { "coin": "USDC-SOL-REF", "mm2": 1, "protocol": { "type": "SOLANATOKEN", "protocol_data": {
+                    "platform": "SOL-REF",
+                    "decimals": 6,
+                    "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" } } },
+            ] }))
+            .into_mm_arc();
+
+        let (status, body) = answer_of(
+            &ctx,
+            "experimental::enable_solana_with_assets",
+            json!({
+                "ticker": "SOL-REF",
+                "nodes": [{ "url": "http://127.0.0.1:1" }],
+                "tokens_params": [{ "ticker": "USDC-SOL-REF" }],
+                "tx_history": true,
+            }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
+        assert_eq!(body["error_data"]["ticker"], "SOL-REF");
+        assert_eq!(body["error_data"]["error"], SOLANA_NOT_AVAILABLE);
+
+        let (status, body) = answer_of(
+            &ctx,
+            "experimental::enable_solana_token",
+            json!({ "ticker": "USDC-SOL-REF", "activation_params": {} }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "Internal", "{body}");
+        assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
+
+        for ticker in ["SOL-REF", "USDC-SOL-REF"] {
             assert!(
                 block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
                 "{ticker} registered"

@@ -92,6 +92,17 @@ R40.1.1 The project shall route the mmrpc-2.0 methods
 `experimental::enable_solana_token` (single token, §40.3) on **all targets,
 including WASM**. There is no task-managed Solana family.
 
+> *Reloaded status (clean side, 2026-11-19):* both methods are routed on
+> native builds (PR #426), next to `enable_solana_with_tokens` and
+> `enable_spl` and behind the same switch: while
+> `SOLANA_ACTIVATION_AVAILABLE` is `false` the platform method answers the
+> `PlatformCoinCreationError` of T40.9 and the token method its `Internal`,
+> each with "Solana support is not available in this build", and nothing is
+> registered. WASM routing follows with the WASM package of
+> `docs/plans/solana-support.md`. Both methods share the activation code of
+> §40.3A: a platform activated through either surface takes tokens through
+> either token method, and `disable_coin` treats it the same.
+
 R40.1.2 **Platform coin configuration.** A Solana platform coin's
 coins-configuration `protocol` is `{"type": "SOLANA", "protocol_data": {}}`
 (an empty `protocol_data` object). The platform's decimals are fixed at 9
@@ -142,6 +153,36 @@ address is the associated token account of the platform address for
 R40.1.5 **Node selection.** Each request that needs the chain selects, in list
 order, the first node whose Solana JSON-RPC `getHealth` succeeds and uses it;
 when none succeeds the operation fails (mapped per §40.2 / §40.3).
+
+> *Reloaded status (clean side, 2026-11-19):* by the maintainer's decision of
+> 2026-11-19 every Solana coin, whichever surface activated it, reaches its
+> nodes through one pool (PR #426):
+>
+> - *Order.* The listed nodes are put into a uniformly random order once
+>   when the coin is built, so the users of one coins file spread over its
+>   nodes. The top-level `MM2.json` string `solana_node_order` set to
+>   `listed` keeps the listed order instead; an absent key means `random`,
+>   and any other value means `random` with one warning at activation naming
+>   the key and the value.
+> - *Health.* A node is asked `getHealth` before it is used when it has not
+>   been checked in the last 30 seconds or its set-aside has just ended; a
+>   failed check sets it aside like a transport failure. The reference asks
+>   before every request.
+> - *Set-aside.* A node is set aside for 20 seconds, doubling on each
+>   further failure up to 12 hours, and a success resets it. Nodes are tried
+>   in the coin's order, so a recovered node that ranks higher is used again.
+>   When every node is set aside, each is tried once before the operation
+>   fails.
+> - *One operation, one node.* The reads of one withdraw, one balance read
+>   and one broadcast each go to a single node; after a transport failure the
+>   operation runs again on the next node. An activation runs its mint
+>   checks and its balance and height reads as two such operations (the
+>   token methods as three), which use the same node unless it fails in
+>   between. A signed transaction that has been sent is never built again:
+>   a failed broadcast is retried with the same signed bytes, and when every
+>   node fails the error carries the transaction's signature.
+>
+> When no node answers, the failure maps as §40.2, §40.3 and §40.3A bind.
 
 ## 40.1A Keys under each login (Reloaded-original)
 
@@ -317,6 +358,24 @@ proceed as with `false`.
 > handling of the request (no normal response). A crash cannot be a parity
 > target; R40.2.5 binds the non-crashing behaviour.
 
+> *Reloaded status (clean side, 2026-11-19):* built as R40.2.1-R40.2.5 bind
+> (PR #426), with these additions of this repository's own:
+>
+> - the request also takes `hd_path_layout`, `path_to_address` and
+>   `priv_key_policy` (R40.1A.5);
+> - `tx_history` is read as an optional boolean and has no effect, so a
+>   value of another type is `InvalidRequest` (HTTP 400, chapter 55
+>   §55.1);
+> - an inline `protocol` may also take Reloaded's own `SPLTOKEN` form, as a
+>   coins-file entry may (status note after R40.1.3);
+> - for a ticker present in the configuration, `CustomTokenError` is
+>   answered before the inline `protocol` is parsed.
+>
+> The request has no commitment member, so a coin activated through this
+> method sends no commitment level and the node's default applies. A token
+> activated from an inline `protocol` is wallet-only. A wallet without a
+> token account reads `"0"` (D40.6B.2 (a)).
+
 ## 40.3 `experimental::enable_solana_token`
 
 R40.3.1 **Request fields:** `ticker` (string, **required**);
@@ -350,6 +409,12 @@ R40.3.4 **Errors** (all mmrpc-level):
 **Unresponsive nodes:** `Transport` (string), HTTP **500**. (The single-token
 method maps `Transport` to 500, the platform method of R40.2.4 to 502; both are
 bound as the reference does.)
+
+> *Reloaded status (clean side, 2026-11-19):* built as R40.3.1-R40.3.4 bind
+> (PR #426). The platform may have been activated through either surface. A
+> Token-2022 token is refused before any node is contacted, with `Internal`
+> as on `enable_spl` (D40.6B.4 (a)); an inline `protocol` follows the status
+> note after R40.2.5.
 
 ## 40.3A Reloaded's primary surface (Reloaded-original)
 
@@ -411,6 +476,11 @@ is reached once the mint-owner check of R40.2.2 is built (plan
 > by another program than the token's `program_id`, answers the `Transport`
 > row (HTTP 502) instead of `PlatformCoinCreationError`. `enable_spl`
 > answers `Transport` (HTTP 500) for the same cases.
+
+> *Reloaded status (clean side, 2026-11-19):* the `PlatformCoinMismatch`
+> row of R40.2.4 (HTTP 400, no `error_data`) is now answered on this
+> surface as well, before any node is contacted (PR #426). Before, an inline
+> token whose `platform` named another coin was not checked.
 
 **R40.3A.4** *`enable_spl`.* Request: `ticker` (string, **required**) and
 `activation_params` (object, **required**, may be `{}`; members ignored);
@@ -1660,6 +1730,11 @@ session; see `docs/plans/solana-support.md`.
 > read since PR #361 (status note after R40.1.3); the primary surface's wire
 > shapes are bound in §40.3A (PR #371). The `experimental::` methods remain.
 
+> *Reloaded status (clean side, 2026-11-19):* the two `experimental::`
+> methods are built for native targets (PR #426; status notes after R40.1.1,
+> R40.2.5 and R40.3.4). Their WASM routing is the WASM package of
+> `docs/plans/solana-support.md`.
+
 D40.4 Switching Solana back on (planned for the next beta; maintainer decision
 2026-10-26): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable the Solana
 docker tests listed in `docs/DISABLED_TESTS.md` (group 6) and retire T40.9.
@@ -1827,3 +1902,8 @@ with the shapes listed in §40.6 items 3-5.
   after the last finding of §40.6B.5 and after D40.6B.2 to D40.6B.6) record
   this repository's own code and the maintainer's decisions of 2026-11-15
   and 2026-11-18.
+- *Clean-context addition (2026-11-19, forbidden corpus not consulted):*
+  the status notes after R40.1.1, R40.1.5, R40.2.5, R40.3.4, R40.3A.3 and
+  D40.3 record this repository's own code and the maintainer's decisions of
+  2026-11-15, 2026-11-18 and 2026-11-19. They take no forbidden-class input
+  beyond the cleared rules they cite.
