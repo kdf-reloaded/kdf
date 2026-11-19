@@ -105,7 +105,7 @@ including WASM**. There is no task-managed Solana family.
 
 > *Reloaded status (clean side, 2026-11-19, browser builds):* both methods,
 > and `enable_solana_with_tokens` and `enable_spl`, are routed in browser
-> (WASM) builds as well (PR #N), with the same switch: while
+> (WASM) builds as well (PR #430), with the same switch: while
 > `SOLANA_ACTIVATION_AVAILABLE` is `false` each answers its T40.9 refusal
 > there too instead of `NoSuchMethod`. The node client uses the HTTP
 > transport shared by both targets, so requests, answers and host-only node
@@ -142,7 +142,7 @@ protocol unparsable (`TokenProtocolParseError`).
 > account, balance and transfers use it only from the Token-2022 package on.
 
 > *Reloaded status (clean side, 2026-11-19):* browser (WASM) builds read
-> every form above as native builds do (PR #N).
+> every form above as native builds do (PR #430).
 
 R40.1.4 **Keys and addresses.** The Solana keypair shall be the ed25519 keypair
 whose 32-byte seed is the wallet's single-key (Iguana) secp256k1 private-key
@@ -1747,7 +1747,7 @@ session; see `docs/plans/solana-support.md`.
 > `docs/plans/solana-support.md`.
 
 > *Reloaded status (clean side, 2026-11-19, browser builds):* the WASM part
-> is built as well (PR #N; status note after R40.1.1); the compatibility
+> is built as well (PR #430; status note after R40.1.1); the compatibility
 > surface is now routed on all targets.
 
 D40.4 Switching Solana back on (planned for the next beta; maintainer decision
