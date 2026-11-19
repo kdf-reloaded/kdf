@@ -247,13 +247,31 @@ impl SolanaRpcPool {
         self.state(idx).health_valid_until_ms = until;
     }
 
-    /// Sets the node aside after a failure; the next health check is due when the set-aside ends.
+    /// Sets the node aside after a failure; the next health check is due when the set-aside ends. A failure seen while
+    /// the node is already set aside (several operations running at once met the same fault, or the node was tried
+    /// once because every node was set aside) keeps the current set-aside and does not count: only a failure after
+    /// the set-aside has ended, or on a node that was not set aside, counts and doubles the time.
     fn set_aside(&self, idx: usize) {
         let now = self.inner.clock.now_ms();
         let mut state = self.state(idx);
+        if state.set_aside_until_ms > now {
+            state.health_valid_until_ms = 0;
+            return;
+        }
         state.set_aside_until_ms = now.saturating_add(set_aside_ms(state.failures));
         state.failures = state.failures.saturating_add(1);
         state.health_valid_until_ms = 0;
+    }
+
+    /// Tests: reports a failure of the node at `idx` as an operation would.
+    #[cfg(test)]
+    pub(crate) fn report_failure_for_test(&self, idx: usize) { self.set_aside(idx); }
+
+    /// Tests: how long the node at `idx` stays set aside from now, in milliseconds.
+    #[cfg(test)]
+    pub(crate) fn set_aside_remaining_ms_for_test(&self, idx: usize) -> u64 {
+        let now = self.inner.clock.now_ms();
+        self.state(idx).set_aside_until_ms.saturating_sub(now)
     }
 
     /// The node answered: the back-off starts over.

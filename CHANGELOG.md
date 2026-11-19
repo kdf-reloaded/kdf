@@ -148,7 +148,7 @@ the previous version used. The safe way:
 
 #### Solana coins
 
-- **The Solana activation methods of GLEEC KDF are available.** `experimental::enable_solana_with_assets`
+- **The Solana activation methods of GLEEC KDF are routed.** `experimental::enable_solana_with_assets`
   activates a Solana platform with its tokens and `experimental::enable_solana_token` a single SPL
   token, with the requests, results and errors GLEEC KDF uses, in native builds. They share the
   activation of `enable_solana_with_tokens` and `enable_spl`: a platform activated through either

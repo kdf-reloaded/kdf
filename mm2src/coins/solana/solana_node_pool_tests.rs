@@ -216,20 +216,22 @@ fn set_aside_time_doubles_from_20_s_up_to_12_h() {
     let stub = spawn(Mode::Down);
     let pool = pool_of(&[&stub], SolanaNodeOrder::Listed, clock.clone(), 1);
     let mut expected = SET_ASIDE_FIRST_MS;
+    assert!(balance(&pool).is_err(), "the node is down");
     for _ in 0..30 {
-        assert!(balance(&pool).is_err(), "the node is down");
-        // Still set aside one millisecond before the end, and tried again (alone in the pool) after it.
+        // One millisecond before the end the node is still set aside: with every node set aside it is tried once,
+        // and that failure neither extends the set-aside nor doubles it.
         let asked = stub.total();
         clock.advance(expected - 1);
         assert!(balance(&pool).is_err(), "all set aside: tried once");
         assert!(stub.total() == asked + 1, "tried once while every node is set aside");
-        // That attempt failed too: the next set-aside is twice as long, at most 12 h.
+        // After the set-aside has ended, the next failure doubles it, at most to 12 h.
+        clock.advance(1);
+        assert!(balance(&pool).is_err(), "still down");
         expected = (expected * 2).min(SET_ASIDE_MAX_MS);
-        // Let the new set-aside run out.
-        clock.advance(expected);
     }
     assert!(expected == SET_ASIDE_MAX_MS, "the cap is reached");
     // A success resets it.
+    clock.advance(SET_ASIDE_MAX_MS);
     stub.set_mode(Mode::Healthy);
     assert!(balance(&pool).is_ok(), "recovered");
     stub.set_mode(Mode::Down);
@@ -238,6 +240,49 @@ fn set_aside_time_doubles_from_20_s_up_to_12_h() {
     clock.advance(SET_ASIDE_FIRST_MS - 1);
     assert!(balance(&pool).is_err());
     assert!(stub.total() == asked + 1, "after a success the back-off starts over");
+}
+
+/// Failures reported on one node within one set-aside window (parallel operations meeting the same fault) set it
+/// aside for the first time only; the next failure after the window doubles it; a success resets it; a recovered
+/// higher-ranked node is used again on time.
+#[test]
+fn concurrent_failures_in_one_window_do_not_stack_the_set_aside() {
+    let (a, b) = (spawn(Mode::Down), spawn(Mode::Healthy));
+    let clock = Arc::new(TestClock::default());
+    let pool = pool_of(&[&a, &b], SolanaNodeOrder::Listed, clock.clone(), 1);
+    // Six failures of node 0 are reported inside one window.
+    for _ in 0..6 {
+        pool.report_failure_for_test(0);
+    }
+    assert!(
+        pool.set_aside_remaining_ms_for_test(0) == SET_ASIDE_FIRST_MS,
+        "20 s, not more"
+    );
+    // The node recovers; it is used again as soon as the 20 s have passed.
+    a.set_mode(Mode::Healthy);
+    clock.advance(SET_ASIDE_FIRST_MS - 1);
+    assert!(
+        balance(&pool).is_ok() && a.count("getBalance") == 0,
+        "still set aside one millisecond before the end"
+    );
+    clock.advance(1);
+    assert!(
+        balance(&pool).is_ok() && a.count("getBalance") == 1,
+        "the higher-ranked node is back on time"
+    );
+    // A success reset the count: a failure now is the first again.
+    pool.report_failure_for_test(0);
+    assert!(
+        pool.set_aside_remaining_ms_for_test(0) == SET_ASIDE_FIRST_MS,
+        "reset to the base"
+    );
+    // A failure after that window ends doubles it.
+    clock.advance(SET_ASIDE_FIRST_MS);
+    pool.report_failure_for_test(0);
+    assert!(
+        pool.set_aside_remaining_ms_for_test(0) == 2 * SET_ASIDE_FIRST_MS,
+        "40 s after a later failure"
+    );
 }
 
 #[test]
