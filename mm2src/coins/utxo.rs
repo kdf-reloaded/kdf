@@ -101,9 +101,9 @@ use utxo_signer::with_trezor::TrezorTxSigner;
 use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, refuse_transaction_version_for_hardware_wallet,
                   TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult};
 
-use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest, EstimateFeeMethod, EstimateFeeMode,
-                        NativeClient, UnspentInfo, UnspentMap, UtxoRpcClientEnum, UtxoRpcError, UtxoRpcFut,
-                        UtxoRpcResult};
+use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumOwner, ElectrumRpcRequest, EstimateFeeMethod,
+                        EstimateFeeMode, NativeClient, UnspentInfo, UnspentMap, UtxoRpcClientEnum, UtxoRpcError,
+                        UtxoRpcFut, UtxoRpcResult};
 use super::{big_decimal_from_sat_unsigned, BalanceError, BalanceFut, BalanceResult, CoinBalance, CoinsContext,
             DerivationMethod, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, KmdRewardsDetails, MarketCoinOps,
             MmCoin, NumConversError, NumConversResult, PrivKeyActivationPolicy, PrivKeyNotAllowed, PrivKeyPolicy,
@@ -720,6 +720,10 @@ pub struct UtxoCoinFields {
     pub dust_amount: u64,
     /// RPC client
     pub rpc_client: UtxoRpcClientEnum,
+    /// This instance's identity towards the Electrum client it may share with other instances of the QTUM family
+    /// (CRD ch.38 D38.6.4Q.1 status note, item 6): the subscriptions the instance places are remembered under it, and
+    /// `disable_coin` removes it from them.
+    pub electrum_owner: ElectrumOwner,
     /// Either ECDSA key pair or a Hardware Wallet info.
     pub priv_key_policy: PrivKeyPolicy<KeyPair>,
     /// Initialized hardware-wallet context for hardware-backed coins.
@@ -816,6 +820,14 @@ impl From<BlockHeaderStorageError> for GetBlockHeaderError {
 }
 
 impl UtxoCoinFields {
+    /// Removes this instance from the subscriptions its Electrum client remembers, so that the client stops placing
+    /// again the ones no other instance remembers (CRD ch.38 D38.6.4Q.1 status note, item 6). `disable_coin` calls it.
+    pub fn forget_electrum_subscriptions(&self) {
+        if let UtxoRpcClientEnum::Electrum(client) = &self.rpc_client {
+            client.forget_owner(self.electrum_owner);
+        }
+    }
+
     pub fn transaction_preimage(&self) -> TransactionInputSigner {
         let lock_time = if self.conf.ticker == "KMD" {
             (now_ms() / 1000) as u32 - 3600 + 777 * 2

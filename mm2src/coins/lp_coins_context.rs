@@ -2,6 +2,7 @@ use super::*;
 use crate::activation_locks::{ActivationGuard, ActivationLocks};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 use crate::rpc_command::get_my_address::PathToAddress;
+use crate::utxo::rpc_clients::electrum_client_registry::ElectrumClientRegistry;
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -142,6 +143,8 @@ pub struct CoinsContext {
     pub(crate) coins: AsyncMutex<HashMap<String, MmCoinEnum>>,
     /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
     activation_locks: ActivationLocks,
+    /// The Electrum clients that QTUM and its QRC20 tokens share, by weak reference (CRD ch.38 D38.6.4Q.1 status note).
+    pub(crate) electrum_clients: ElectrumClientRegistry,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
     pub(crate) withdraw_task_manager: WithdrawTaskManagerShared,
     pub(crate) create_account_manager: CreateAccountTaskManagerShared,
@@ -173,6 +176,7 @@ impl CoinsContext {
             Ok(CoinsContext {
                 coins: AsyncMutex::new(HashMap::new()),
                 activation_locks: ActivationLocks::default(),
+                electrum_clients: ElectrumClientRegistry::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
                 create_account_manager: CreateAccountTaskManager::new_shared(),
