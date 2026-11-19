@@ -539,6 +539,30 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   (status notes after D38.6.4Q.2 and D38.6.4Q.3, and after the
   code-quality finding of R38.6.4Q.6). Code: `coins/utxo/rpc_clients/electrum_pool.rs`,
   `coins/utxo/rpc_clients/electrum_rpc_client.rs`, `coins/qrc20/history.rs`.
+- **QTUM and its QRC20 tokens share one Electrum client when their client
+  inputs match.** No switch. GLEEC KDF gives every activated instance its
+  own client, so each server holds one session for QTUM and one for each
+  token. KDF Reloaded gives instances of the QTUM family one client when the
+  platform, the server list (in order and per entry), `min_connected`,
+  `max_connected`, `listed_order_for_spends`, `block_interval` and the
+  builder arguments are all equal; any difference gives the instance its own
+  client, as in GLEEC KDF. What stays the same: a token activates without
+  QTUM and keeps working after QTUM is disabled, and disabling one instance
+  or a failed activation closes no session another instance uses. What
+  differs on a shared client:
+  - *Sessions.* Each server holds one session for all sharing instances.
+  - *Naming.* Transport error texts, log lines and `CoinTransportMetrics`
+    name the platform ticker, also for a token's requests, and
+    `electrum_servers` for a token reports the shared client.
+  - *Disagreeing servers.* A token that would reuse a client whose servers
+    disagree is refused with `ElectrumServersDisagree`, as a fresh build is.
+  - *Subscriptions.* A disabled instance's remembered subscriptions are
+    not placed again after a reconnect unless another live instance
+    remembers them.
+  Contract: [CRD ch.38 §38.6.4Q](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md)
+  (status note after D38.6.4Q.1). Code:
+  `coins/utxo/rpc_clients/electrum_client_registry.rs`,
+  `coins/utxo/utxo_builder/utxo_coin_builder.rs`, `coins/lp_coins_ops.rs`.
 - **A seed that is already connected is not dialed again.** A node short of relays dials each
   address at most once per 5 minutes, as GLEEC KDF does. GLEEC KDF also dials a seed that has
   connected to it by itself, because it compares addresses only, and the extra connection closes
