@@ -143,7 +143,7 @@ the previous version used. The safe way:
   registered for another platform and is named in `enable_eth_with_tokens` or another platform-with-tokens method is
   kept silently and joins the platform, as in GLEEC KDF; a token whose coin configuration names another platform is
   still refused with `PlatformCoinMismatch`. With `"refuse"` it is refused with `TokenIsAlreadyActivated`. Any other
-  value stops the node at start with an error that names the member. Detail: PR #TBD; CRD ch.43 §43.1F D43.1F.1.
+  value stops the node at start with an error that names the member. Detail: PR #435; CRD ch.43 §43.1F D43.1F.1.
 
 #### RPC interface
 
@@ -539,7 +539,7 @@ the previous version used. The safe way:
 - **EVM transaction history could fail to start after an activation with `tx_history`.** The history collection
   started just before the platform was registered, and its first check for the registered coin could run before
   the registration, which ended the collection. It now starts after the registration, and a failed activation no
-  longer leaves it running. Detail: PR #TBD; CRD ch.55 D55.8.
+  longer leaves it running. Detail: PR #435; CRD ch.55 D55.8.
 
 #### WalletConnect
 
