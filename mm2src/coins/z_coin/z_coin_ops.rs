@@ -384,7 +384,14 @@ impl ZCoin {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn get_one_kbyte_tx_fee(&self) -> UtxoRpcResult<BigDecimal> {
         let fee = self.get_tx_fee().await?;
-        Ok(big_decimal_from_sat_unsigned(fee.rate_per_kb(), self.decimals()))
+        // A shielded coin pays one fixed fee per transaction; a ZIP 317 coin has no such fee, so it is refused
+        // here rather than priced per kilobyte.
+        let rate_per_kb = fee.rate_per_kb().ok_or_else(|| {
+            MmError::new(crate::utxo::rpc_clients::UtxoRpcError::Internal(
+                "a shielded coin cannot follow the ZIP 317 fee rule".to_owned(),
+            ))
+        })?;
+        Ok(big_decimal_from_sat_unsigned(rate_per_kb, self.decimals()))
     }
 
     /// Generates a tx sending outputs from our address

@@ -6896,6 +6896,30 @@ plan `zec-v5-transactions` settles the rate Reloaded uses.
 > §39.11.4V ("a transparent transaction pays more than ZIP 317's conventional
 > fee") holds for these shapes only.
 
+> *Reloaded status (clean side, 2026-11-18):* by the maintainer's decision of
+> 2026-11-18 Reloaded computes ZIP 317's conventional fee directly for ZEC, so the
+> per-kilobyte rate no longer has to approximate it. The rule applies to an
+> entry that is `overwintered`, has `txversion` 5 and names a Zcash branch id from
+> NU7 on (today `0x77190AD9`); every other entry, including an overwintered
+> version-5 entry with an unknown branch id, keeps the policy of chapter 38
+> R38.6.6a -- R38.6.6b, and no coins key is added. The branch id alone would not
+> do: a version-4 entry of another network carries Zcash's Sapling id. Under the
+> rule the fee is 5000 zatoshi times the larger of 2 and the logical actions,
+> `max(ceil(input bytes / 150), ceil(output bytes / 34))`, with the builder's
+> estimate of 148 bytes per signed P2PKH input and the real script sizes of an
+> HTLC spend; a change output adds its action if it adds one, and a forced
+> minimum relay fee stays a floor. The entry's `txfee` is not used to build. The
+> claim and the refund of a version-1 swap pay 10000 (two actions), not the
+> 496-byte estimate; the DEX-fee estimate counts a burn output, so it is never
+> below the transaction it stands for; `trade_preimage` and `max_taker_vol` use
+> the same fees; `get_trade_fee` reports 10000, the conventional fee of a
+> standard transaction. A `fee` given in a withdraw request is used as given.
+> The spends and refunds of a resumed version-2 swap keep the estimate over 496
+> bytes at the entry's `txfee` (34720 at 70000 per kilobyte): a counterparty
+> checks the fee of the funding-spend and the taker-payment-spend preimages
+> against that estimate (§39.11.4W), and the conventional fee would fall
+> outside its band.
+
 D39.11.4V.1 *(Open.)* *A transaction of a version the history cannot read.*
 Reproducing the reference (R39.11.4V.8) leaves such a transaction out of the
 legacy history without a signal, and keeps the version-two history in progress
@@ -8700,6 +8724,11 @@ entries in its list cannot be told apart. Passing the position to the fallback c
 - *Status note added 2026-11-17 -- under R39.11.4V.10.* Reloaded-original,
   clean side: it records that Reloaded computes the fee over the version-5 size;
   no forbidden-class input, chapter 01 R38 not engaged.
+- *Status note added 2026-11-18 -- under R39.11.4V.10.* Reloaded-original,
+  clean side: it records the maintainer's decision of 2026-11-18 on the ZIP 317
+  fee for ZEC and what this repository builds for it, written from this
+  repository's code and the public ZIP 317; no forbidden-class input, chapter 01
+  R38 not engaged.
 - *Clean-context addition (2026-11-17), §39.8.0.3:* R39.8.0bc, T39.8.0j and the status
   note after R39.8.0ba are Reloaded-original, clean side, written from this repository's
   own code and the public SQLite documentation of `VACUUM INTO`; no forbidden-class input,

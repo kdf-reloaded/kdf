@@ -360,6 +360,24 @@ the previous version used. The safe way:
   answers with a signing error that names the output index and the case. Withdrawals and swaps never build
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
+#### ZEC
+
+- **ZEC pays the Zcash network's standard fee (ZIP 317).** With the version-5 ZEC coins entry (`txversion` 5 and the
+  branch id `77190ad9`), every ZEC transaction pays ZIP 317's conventional fee: 0.00005 ZEC per logical action, at
+  least two actions, where each transparent input of up to 150 bytes and each output of up to 34 bytes counts as one.
+  A withdrawal with up to two inputs and two outputs pays 0.0001 ZEC, a DEX fee or a swap payment with one input
+  0.0001 or 0.00015 ZEC, and a swap claim or refund 0.0001 ZEC instead of 0.0003472. The entry's `txfee` is no
+  longer used for ZEC; KMD, ZER, BTCZ, FLUX and the other Zcash-family coins keep their per-kilobyte fee.
+  - *Previews:* `trade_preimage` and `max_taker_vol` use the same fees, and `get_trade_fee` shows 0.0001 ZEC.
+  - *Explicit fee:* a `fee` given in a withdraw request is used as given. ZIP 317 expects at least the conventional
+    fee; a lower fee can delay the transaction or keep it out of blocks.
+  - *Lower minimum for ZEC orders:* ZEC's minimum trading volume, also the default minimum volume of a new ZEC order,
+    is 0.001 ZEC instead of 0.003472, ten times the new claim fee.
+  - *Version-2 swaps:* the spends and refunds of a resumed version-2 swap keep the earlier fee (0.0003472 ZEC),
+    because the other side of such a swap checks it against that figure.
+
+  Detail: PR #NNN; CRD ch.39 R39.11.4V.10 status note.
+
 ### Fixed
 
 #### WalletConnect

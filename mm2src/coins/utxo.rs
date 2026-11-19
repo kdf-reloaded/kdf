@@ -39,6 +39,7 @@ pub mod utxo_standard;
 pub mod utxo_standard_swap_v2;
 pub mod utxo_withdraw;
 pub mod wc_integration;
+pub mod zip317;
 
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
@@ -300,6 +301,15 @@ pub enum TxFee {
     /// CRD ch.38 R38.6.6a "whole-kilobyte fixed" (`dingo_fee: true` with a positive `txfee`):
     /// the fee is the rate for every started kilobyte of the transaction.
     FixedPerStartedKb(u64),
+    /// The ZIP 317 conventional fee, computed from the inputs and outputs of the transaction (Reloaded's own
+    /// rule, see [`zip317`]). Selected by the coins entry (`overwintered`, `txversion` 5, a known NU7-or-later
+    /// `consensus_branch_id`); the entry's `txfee` is not used to build.
+    Zip317 {
+        /// The plain per-kilobyte rate that the entry's `txfee` names (1,000 when it names none or asks for
+        /// estimation). It is never used to build a transaction: only an estimate that is still size-based
+        /// (the version-2 swap spend estimate) reads it.
+        legacy_rate_per_kb: u64,
+    },
 }
 
 /// The actual "runtime" fee that is received from RPC in case of dynamic calculation
@@ -313,36 +323,81 @@ pub enum ActualTxFee {
     /// Use the specified amount per each started 1 kb of transaction (CRD ch.38 R38.6.6b
     /// "whole-kilobyte fixed"). There is no per-output surcharge.
     FixedPerStartedKb(u64),
+    /// The ZIP 317 conventional fee of the transaction's inputs and outputs (see [`zip317`]). It has no rate
+    /// per kilobyte and no fee for a size alone: [`ActualTxFee::rate_per_kb`] and [`ActualTxFee::fee_for_size`]
+    /// return `None`, and a caller that can describe the transaction uses [`ActualTxFee::fee_for_shape`].
+    /// `legacy_rate_per_kb` is the plain rate of the entry's `txfee`, read only by
+    /// [`ActualTxFee::legacy_fee_for_size`].
+    Zip317 { legacy_rate_per_kb: u64 },
+}
+
+/// `floor(rate * size / 1000)`, saturating at `u64::MAX`.
+fn proportional_fee(rate: u64, size: u64) -> u64 {
+    let fee = u128::from(rate) * u128::from(size) / u128::from(KILO_BYTE);
+    u64::try_from(fee).unwrap_or(u64::MAX)
 }
 
 impl ActualTxFee {
-    /// The fee rate in base units per kilobyte.
-    pub fn rate_per_kb(&self) -> u64 {
+    /// The fee rate in base units per kilobyte; `None` for the ZIP 317 rule, which has none.
+    pub fn rate_per_kb(&self) -> Option<u64> {
         match self {
-            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) | ActualTxFee::FixedPerStartedKb(rate) => *rate,
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) | ActualTxFee::FixedPerStartedKb(rate) => {
+                Some(*rate)
+            },
+            ActualTxFee::Zip317 { .. } => None,
         }
     }
 
     /// CRD ch.38 R38.6.6b: the fee for a transaction of `size` bytes (virtual size where the coin has
     /// segregated witness), before any forced minimum relay fee.
     /// - dynamic and plain fixed: `floor(rate * size / 1000)`;
-    /// - whole-kilobyte fixed: `rate * ceil(size / 1000)`.
+    /// - whole-kilobyte fixed: `rate * ceil(size / 1000)`;
+    /// - ZIP 317: `None`, its fee does not depend on the size alone.
     /// Products saturate at `u64::MAX` instead of wrapping.
-    pub fn fee_for_size(&self, size: u64) -> u64 {
+    pub fn fee_for_size(&self, size: u64) -> Option<u64> {
         match self {
-            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) => {
-                let fee = u128::from(*rate) * u128::from(size) / u128::from(KILO_BYTE);
-                u64::try_from(fee).unwrap_or(u64::MAX)
-            },
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) => Some(proportional_fee(*rate, size)),
+            ActualTxFee::FixedPerStartedKb(rate) => Some(rate.saturating_mul(size.div_ceil(KILO_BYTE))),
+            ActualTxFee::Zip317 { .. } => None,
+        }
+    }
+
+    /// The size-based fee of an estimate that is still size-based: [`ActualTxFee::fee_for_size`], and for a ZIP 317
+    /// coin the plain proportional fee at the rate of the entry's `txfee`. It exists for the version-2 swap spend
+    /// estimate only; a transaction is never built with it.
+    pub fn legacy_fee_for_size(&self, size: u64) -> u64 {
+        match self {
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) => proportional_fee(*rate, size),
             ActualTxFee::FixedPerStartedKb(rate) => rate.saturating_mul(size.div_ceil(KILO_BYTE)),
+            ActualTxFee::Zip317 { legacy_rate_per_kb } => proportional_fee(*legacy_rate_per_kb, size),
+        }
+    }
+
+    /// The fee of a transaction of `size` bytes whose transparent inputs and outputs are `bytes`: the size rule
+    /// of [`ActualTxFee::fee_for_size`] for the per-kilobyte policies and the conventional fee of `bytes` for
+    /// ZIP 317. A forced minimum relay fee is not applied.
+    pub fn fee_for_shape(&self, size: u64, bytes: zip317::Zip317Bytes) -> u64 {
+        match self {
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) => proportional_fee(*rate, size),
+            ActualTxFee::FixedPerStartedKb(rate) => rate.saturating_mul(size.div_ceil(KILO_BYTE)),
+            ActualTxFee::Zip317 { .. } => bytes.fee(),
         }
     }
 
     /// CRD ch.38 R38.6.6b: the increase of the fee that a change output of `P2PKH_OUTPUT_LEN` bytes
-    /// causes on a transaction of `size` bytes (without the change output) under the fixed policies.
-    pub fn change_output_increase(&self, size: u64) -> u64 {
-        self.fee_for_size(size.saturating_add(P2PKH_OUTPUT_LEN))
-            .saturating_sub(self.fee_for_size(size))
+    /// causes on a transaction of `size` bytes (without the change output) under the fixed policies;
+    /// `None` for ZIP 317.
+    pub fn change_output_increase(&self, size: u64) -> Option<u64> {
+        let with_change = self.fee_for_size(size.saturating_add(P2PKH_OUTPUT_LEN))?;
+        Some(with_change.saturating_sub(self.fee_for_size(size)?))
+    }
+
+    /// The increase of the fee that a P2PKH change output causes on a transaction of `size` bytes with the
+    /// transparent bytes `bytes` (both without the change output), under any rule. Under ZIP 317 it can be a
+    /// whole action (5000) when the change output pushes the outputs into one more action, or nothing.
+    pub fn change_output_increase_for_shape(&self, size: u64, bytes: zip317::Zip317Bytes) -> u64 {
+        self.fee_for_shape(size.saturating_add(P2PKH_OUTPUT_LEN), bytes.with_p2pkh_change())
+            .saturating_sub(self.fee_for_shape(size, bytes))
     }
 }
 
@@ -1003,6 +1058,8 @@ pub(crate) fn electrum_chain_disagreement(fields: &UtxoCoinFields) -> Option<Str
 pub trait UtxoCommonOps:
     AsRef<UtxoCoinFields> + UtxoTxGenerationOps + UtxoTxBroadcastOps + Clone + Send + Sync + 'static
 {
+    /// The per-kilobyte HTLC spend fee of `tx_size` bytes. It fails for a ZIP 317 coin, whose spend fee depends
+    /// on the shape of the spend: see `utxo_common::get_htlc_spend_fee_for_shape`.
     async fn get_htlc_spend_fee(&self, tx_size: u64) -> UtxoRpcResult<u64>;
 
     fn addresses_from_script(&self, script: &Script) -> Result<Vec<Address>, String>;
