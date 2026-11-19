@@ -145,14 +145,14 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   activates the token with balance `"0"` (GLEEC KDF fails the activation); the platform
   method also takes `hd_path_layout`, `path_to_address` and `priv_key_policy`; an inline
   token `protocol` may also use Reloaded's `SPLTOKEN` form. Native builds only for now;
-  Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #N.
+  Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
 
 - **Solana node selection.** GLEEC KDF asks the nodes `getHealth` in list order before every
   request and uses the first healthy one. Reloaded draws a random node order once when the coin is
   enabled (`solana_node_order: "listed"` keeps the listed order), asks a node `getHealth` at most
   once per 30 seconds, sets a failing node aside for 20 seconds doubling up to 12 hours, and keeps
   the reads of one withdraw on one node. A sent transaction is never rebuilt on another node. CRD
-  ch.40 R40.1.5; PR #N.
+  ch.40 R40.1.5; PR #426.
 
 - **Solana wallet methods answer.** On an active Solana coin or SPL token
   GLEEC KDF ends many requests without a JSON answer (`sign_message`,
