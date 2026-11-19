@@ -207,6 +207,9 @@ impl BchCoin {
         self.slp_tokens_infos.lock().unwrap().insert(ticker, info);
     }
 
+    /// Forgets the token recorded by [`Self::add_slp_token_info`]; a ticker that is not recorded is ignored.
+    pub fn remove_slp_token_info(&self, ticker: &str) { self.slp_tokens_infos.lock().unwrap().remove(ticker); }
+
     pub fn get_slp_tokens_infos(&self) -> MutexGuard<'_, HashMap<String, SlpTokenInfo>> {
         self.slp_tokens_infos.lock().unwrap()
     }
@@ -334,7 +337,10 @@ impl BchCoin {
         let mut total_input = 0;
         for input in &tx.inputs {
             let prev_tx_hash: H256Json = input.previous_output.hash.reversed().into();
-            let prev_tx = self.tx_from_storage_or_rpc(&prev_tx_hash, storage).await?;
+            let prev_tx = self
+                .tx_from_storage_or_rpc(&prev_tx_hash, storage)
+                .await
+                .map_err(|e| e.map(GetTxDetailsError::into_input_error))?;
             let prev_output = utxo_common::prev_output_at(&prev_tx, &prev_tx_hash, input.previous_output.index)
                 .map_to_mm(|e| {
                     GetTxDetailsError::MalformedTransaction(format!(
@@ -379,7 +385,10 @@ impl BchCoin {
         token_id: H256,
         storage: &T,
     ) -> Result<SlpGenesisParams, MmError<GetTxDetailsError<T::Error>>> {
-        let token_genesis_tx = self.tx_from_storage_or_rpc(&token_id.into(), storage).await?;
+        let token_genesis_tx = self
+            .tx_from_storage_or_rpc(&token_id.into(), storage)
+            .await
+            .map_err(|e| e.map(GetTxDetailsError::into_input_error))?;
         let maybe_genesis_script: Script = token_genesis_tx
             .outputs
             .first()
@@ -492,7 +501,8 @@ impl BchCoin {
         for input in &tx.inputs {
             let prev_tx = self
                 .tx_from_storage_or_rpc(&input.previous_output.hash.reversed().into(), storage)
-                .await?;
+                .await
+                .map_err(|e| e.map(GetTxDetailsError::into_input_error))?;
             let prev_op_return = prev_tx.outputs.first().ok_or_else(|| {
                 MmError::new(GetTxDetailsError::MalformedTransaction(no_outputs_message(
                     &prev_tx.hash().reversed().into(),

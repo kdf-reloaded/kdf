@@ -70,6 +70,7 @@ type Seen = Arc<Mutex<Vec<(String, Json)>>>;
 
 /// A JSON-RPC node on a loopback port. `health` is always answered; any other method is answered by the
 /// function given to [`FakeNode::answer`], and by a JSON-RPC error while there is none (or it returns `None`).
+/// A function that wants to answer with a particular error returns `{ "__rpc_error": { "code": .., "message": .. } }`.
 struct FakeNode {
     port: u16,
     stop: Arc<AtomicBool>,
@@ -151,6 +152,10 @@ fn serve_connection(mut stream: TcpStream, answer: &Mutex<Arc<Answer>>, seen: &M
         current(method.as_str(), &params)
     };
     let payload = match result {
+        // An answer that holds an `__rpc_error` member is sent as that JSON-RPC error.
+        Some(result) if result.get("__rpc_error").is_some() => {
+            json!({ "jsonrpc": "2.0", "id": "fake-node", "error": result["__rpc_error"] })
+        },
         Some(result) => json!({ "jsonrpc": "2.0", "id": "fake-node", "result": result }),
         None => json!({
             "jsonrpc": "2.0",
@@ -2598,4 +2603,5 @@ fn tm_act_hd_withdrawal_is_signed_with_the_key_at_the_path() {
 
 mod priority_fee_tests;
 mod tx_history_tests;
+mod wallet_connect_tests;
 mod watch_only_tests;

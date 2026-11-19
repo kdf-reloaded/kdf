@@ -1810,7 +1810,9 @@ fn tx_details_prev_output_index_out_of_range_is_an_error() {
     ));
 
     let hash = spending_tx.hash().reversed().to_vec();
-    let err = block_on(coin.tx_details_by_hash(&hash, &mut input_transactions)).unwrap_err();
+    let err = block_on(coin.tx_details_by_hash(&hash, &mut input_transactions))
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("output 5 of transaction") && err.contains("it has 1 outputs"),
         "unexpected error: {}",

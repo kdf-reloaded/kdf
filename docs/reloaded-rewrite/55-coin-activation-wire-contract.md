@@ -1425,6 +1425,16 @@ instead of answering `PlatformIsAlreadyActivated`. Whether Reloaded has passive
 coins at all is a [Chapter 43](43-daemon-rpc-dispatcher-and-misc-maintenance.md)
 question (`disable_coin`); the activation side is deferred to it.
 
+*Status note (2026-11-18), decided and pointed.* The maintainer decided that
+Reloaded builds the passive state in 0.5.0. The activation side this item
+defers -- re-activation by the platform-with-tokens methods in both forms,
+requested tokens that are already registered, token and layer-two
+activations while the platform is passive, and what the standalone and
+legacy activations do for a passive ticker -- is stated in chapter 43
+§43.1F (R43.1F.2 -- R43.1F.9, with D43.1F.1, D43.1F.2, D43.1F.4 and
+D43.1F.5 open), which passed the KDF Dirty Gate on 2026-11-18. This note binds
+nothing of its own.
+
 **D55.7** *Inline NFT activation and the activation lock (deferred past the
 beta, 2026-10-29).* An `enable_eth_with_tokens` request with `nft_req`
 activates the NFT chain inline, but takes only the locks of R55.1.12 for the
@@ -1441,6 +1451,15 @@ it stops when none is. If its first check runs before the registration, the
 platform's history collection never starts. This was found by reading this
 repository's code, and has not been reproduced. Starting the loop after the
 registration is deferred.
+
+*Status note (2026-11-18), passive state.* Once the passive state of D55.6 is
+built, a passive platform stays registered, and chapter 43 R43.1F.10 item 2
+(passed the KDF Dirty Gate on 2026-11-18) keeps its history collection running while it
+is passive. The per-pass check this item describes has to count a passive
+platform as registered, or the platform's history stops when it becomes
+passive. Whether a re-activation starts a collector is chapter 43 R43.1F.3
+and D43.1F.5. The note adds no reference content: the consequence it draws
+for this repository's loop follows from R43.1F.10 item 2.
 
 ## 55.14 Baseline Verifications
 
@@ -1654,3 +1673,11 @@ R55.4.5 and the error body of R55.1.10.
   *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
   0.00, no findings; the pointer was judged with its target, whose clearance
   is recorded in chapter 21's provenance footer of the same date.
+- *Status notes added 2026-11-18 (Spec Reader round 0.5.0-13) -- after D55.6
+  and after D55.8.* The first records the maintainer's decision to build the
+  passive state in 0.5.0 and points to chapter 43 §43.1F; the second draws
+  the consequence of chapter 43 R43.1F.10 item 2 for this repository's EVM
+  history loop. Neither states reference behavior of its own; both are
+  written by the Spec Reader and travel with chapter 43 §43.1F for the KDF
+  Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
+  43's provenance footer.

@@ -12,6 +12,7 @@ use derive_more::Display;
 use futures::lock::Mutex as AsyncMutex;
 use hex::FromHexError;
 use kdf_crypto::sha256;
+use kdf_walletconnect::Topic;
 use keys::Public;
 use mm2_core::mm_ctx::MmWeak;
 use mm2_err_handle::prelude::*;
@@ -54,6 +55,9 @@ pub(super) const STAKING_GAS_LIMIT_DEFAULT: u64 = 187_500;
 /// Default gas limit of an undelegation: twice [`GAS_LIMIT_DEFAULT`] (CRD ch.18 R18.6B.3).
 pub(super) const UNDELEGATE_GAS_LIMIT_DEFAULT: u64 = 250_000;
 pub const GAS_WANTED_BASE_VALUE: f64 = 50_000.;
+/// The margin the fee computations apply to the simulated gas: the local-key path (`calculate_fee`) multiplies the
+/// simulated gas by it for the fee amount, and the WalletConnect path (`wc_request_fee`) also for the gas limit.
+pub(super) const FEE_GAS_MARGIN: f64 = 1.5;
 pub(crate) const TX_DEFAULT_MEMO: &str = "";
 
 // IRIS HTLC time-lock bounds (in blocks)
@@ -247,6 +251,15 @@ pub enum TendermintActivationPolicy {
         public_key: cosmrs::tendermint::PublicKey,
         is_ledger_connection: bool,
     },
+    /// A coin activated with a WalletConnect session (CRD ch.36 R36.14.13 -- R36.14.15): the node holds no private
+    /// key and the paired wallet signs every transaction. `session_topic` names the session the activation read
+    /// the key from, `public_key` is the wallet's account key and `is_ledger_connection` is the Ledger flag of
+    /// R36.14.18, which selects the wallet method (R36.14.15).
+    WalletConnect {
+        session_topic: Topic,
+        public_key: cosmrs::tendermint::PublicKey,
+        is_ledger_connection: bool,
+    },
 }
 
 impl TendermintActivationPolicy {
@@ -262,6 +275,19 @@ impl TendermintActivationPolicy {
         }
     }
 
+    /// The policy of a coin signed by a WalletConnect wallet (CRD ch.36 R36.14.14, R36.14.15).
+    pub fn with_wallet_connect(
+        session_topic: Topic,
+        public_key: cosmrs::tendermint::PublicKey,
+        is_ledger_connection: bool,
+    ) -> Self {
+        Self::WalletConnect {
+            session_topic,
+            public_key,
+            is_ledger_connection,
+        }
+    }
+
     pub(super) fn generate_account_id(&self, account_prefix: &str) -> Result<AccountId, ErrorReport> {
         match self {
             Self::PrivateKey(priv_key_policy) => {
@@ -271,7 +297,9 @@ impl TendermintActivationPolicy {
                 account_id_from_privkey(pk.private_key_secret.as_slice(), account_prefix)
                     .map_err(|e| ErrorReport::new(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))
             },
-            Self::PublicKey { public_key, .. } => account_id_from_public_key(public_key, account_prefix),
+            Self::PublicKey { public_key, .. } | Self::WalletConnect { public_key, .. } => {
+                account_id_from_public_key(public_key, account_prefix)
+            },
         }
     }
 
@@ -289,24 +317,26 @@ impl TendermintActivationPolicy {
                     "Trezor is not supported yet!",
                 )),
             },
-            Self::PublicKey { public_key, .. } => Ok(*public_key),
+            Self::PublicKey { public_key, .. } | Self::WalletConnect { public_key, .. } => Ok(*public_key),
         }
     }
 
-    /// The key this node signs with. Refused for a hardware policy and, with
-    /// [`PrivKeyNotAllowed::WatchOnlyCoin`], for a coin activated by a public key: every path that would sign with a
-    /// node-held key goes through this and so fails for a watch-only coin (CRD ch.36 R36.14.17).
+    /// The key this node signs with. Refused for a hardware policy, with [`PrivKeyNotAllowed::WatchOnlyCoin`] for a
+    /// coin activated by a public key and with [`PrivKeyNotAllowed::WalletConnectCoin`] for a coin signed by a
+    /// WalletConnect wallet: every path that would sign with a node-held key goes through this and so fails for such
+    /// a coin (CRD ch.36 R36.14.17, R36.14.15).
     pub(crate) fn activated_key_or_err(&self) -> Result<&Secp256k1Secret, MmError<PrivKeyNotAllowed>> {
         match self {
             Self::PrivateKey(private_key) => Ok(private_key.key_pair_or_err()?.private_key_secret.as_ref()),
             Self::PublicKey { .. } => MmError::err(PrivKeyNotAllowed::WatchOnlyCoin),
+            Self::WalletConnect { .. } => MmError::err(PrivKeyNotAllowed::WalletConnectCoin),
         }
     }
 
     pub(crate) fn activated_key(&self) -> Option<Secp256k1Secret> {
         match self {
             Self::PrivateKey(private_key) => Some(*private_key.key_pair()?.private_key_secret.as_ref()),
-            Self::PublicKey { .. } => None,
+            Self::PublicKey { .. } | Self::WalletConnect { .. } => None,
         }
     }
 
@@ -314,10 +344,38 @@ impl TendermintActivationPolicy {
     /// policy.
     pub(crate) fn watch_only_ledger_flag(&self) -> Option<bool> {
         match self {
-            Self::PrivateKey(_) => None,
+            Self::PrivateKey(_) | Self::WalletConnect { .. } => None,
             Self::PublicKey {
                 is_ledger_connection, ..
             } => Some(*is_ledger_connection),
+        }
+    }
+
+    /// `Some(is_ledger_connection)` for a coin without a private key that carries the Ledger flag of R36.14.18: a
+    /// coin activated by a public key and a coin signed by a WalletConnect wallet. `None` for a coin with a private
+    /// key policy.
+    pub(crate) fn ledger_flag(&self) -> Option<bool> {
+        match self {
+            Self::PrivateKey(_) => None,
+            Self::PublicKey {
+                is_ledger_connection, ..
+            }
+            | Self::WalletConnect {
+                is_ledger_connection, ..
+            } => Some(*is_ledger_connection),
+        }
+    }
+
+    /// The session topic and the Ledger flag of a coin signed by a WalletConnect wallet (CRD ch.36 R36.14.15),
+    /// `None` for every other policy.
+    pub(crate) fn wallet_connect_session(&self) -> Option<(&Topic, bool)> {
+        match self {
+            Self::WalletConnect {
+                session_topic,
+                is_ledger_connection,
+                ..
+            } => Some((session_topic, *is_ledger_connection)),
+            Self::PrivateKey(_) | Self::PublicKey { .. } => None,
         }
     }
 
@@ -455,6 +513,10 @@ pub enum TendermintInitErrorKind {
     #[display(fmt = "Tendermint `avg_blocktime` must be at least 1 second, got 0")]
     AvgBlockTimeZero,
     ErrorDeserializingDerivationPath(String),
+    /// The WalletConnect activation could not read the session, or the key and account it holds, for the coin's chain
+    /// (CRD ch.36 R36.14.14, D36.16 (b)); the text names the failed step.
+    #[display(fmt = "WalletConnect activation failed: {}", _0)]
+    WalletConnect(String),
     /// The activation under an HD login needs the coin's `derivation_path` (CRD ch.36 R36.1.4 step 3).
     #[display(fmt = "The coin configuration has no `derivation_path`, which an HD activation needs")]
     DerivationPathMissing,
@@ -608,9 +670,10 @@ pub(super) enum UnsignedTxError {
 /// It is while swaps are switched off in this build, while the coins-file entry says so, and always when:
 /// - the chain's account prefix selects no HTLC dialect (only `iaa` and `nuc` have one): such a coin is refused at
 ///   order time and not at payment time. A token passes its platform coin's prefix;
-/// - the activation policy holds no local private key (`has_local_key` is `false`). Such a coin cannot sign an
-///   HTLC transaction, and the legacy swap path would otherwise announce this node's own key as the coin's HTLC
-///   public key. A token passes its platform coin's policy;
+/// - the activation policy holds no local private key (`has_local_key` is `false`: a public-key coin, a
+///   WalletConnect coin, a hardware policy). Such a coin cannot sign an HTLC transaction, and the legacy swap path
+///   would otherwise announce this node's own key as the coin's HTLC public key. A token passes its platform
+///   coin's policy;
 /// - the token is a custom one, activated from an inline `protocol` and absent from the coins file, as a custom
 ///   EVM token is (`custom_token`; a platform coin passes `false`).
 pub(super) fn tendermint_wallet_only(

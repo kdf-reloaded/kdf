@@ -128,7 +128,8 @@ where
         coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
     let coin_conf = L2::coin_conf_from_json(coin_conf_json).mm_err(Into::into)?;
 
-    let platform_coin = lp_coinfind_or_err(&ctx, l2_protocol.platform_coin_ticker())
+    let platform_ticker = l2_protocol.platform_coin_ticker().to_owned();
+    let platform_coin = lp_coinfind_or_err(&ctx, &platform_ticker)
         .await
         .mm_err(|_| EnableL2Error::PlatformCoinIsNotActivated(req.ticker.clone()))?;
 
@@ -148,7 +149,7 @@ where
 
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx
-        .add_coin(l2.into())
+        .add_token(&platform_ticker, l2.into())
         .await
         .mm_err(|e| EnableL2Error::L2IsAlreadyActivated(e.ticker))?;
 

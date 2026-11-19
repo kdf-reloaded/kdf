@@ -149,6 +149,9 @@ pub enum GetTxDetailsError<E: TxHistoryStorageError> {
     AddressesFromScriptError(String),
     SlpTokenIdIsNotGenesisTx(H256),
     TxDeserializationError(serialization::Error),
+    /// The transaction of an input (or the genesis transaction of an SLP token) does not parse. The history collector
+    /// skips the transaction that needs it and reports it (CRD ch.39 D39.11.4V.1).
+    InputTxDeserializationError(serialization::Error),
     RpcError(UtxoRpcError),
     ParseSlpScriptError(ParseSlpScriptError),
     ToSlpAddressError(String),
@@ -160,8 +163,32 @@ pub enum GetTxDetailsError<E: TxHistoryStorageError> {
 }
 
 impl<E: TxHistoryStorageError> GetTxDetailsError<E> {
-    /// Whether the error is about the transaction itself, so that retrying at once cannot help.
-    pub(crate) fn is_malformed_transaction(&self) -> bool { matches!(self, GetTxDetailsError::MalformedTransaction(_)) }
+    /// The reason text when the transaction cannot be read (it cannot be interpreted, or it or an input transaction does
+    /// not parse), so that retrying at once cannot help; `None` for every other error (a backend, storage or
+    /// derivation error). The history collector skips such a transaction and reports it (CRD ch.38 R38.5A.9, ch.39
+    /// D39.11.4V.1). The text names a transaction hash, a ticker, counts and the parser's error kind, never a body.
+    pub(crate) fn unreadable_reason(&self) -> Option<String> {
+        match self {
+            GetTxDetailsError::MalformedTransaction(reason) => {
+                Some(format!("the transaction cannot be interpreted: {}", reason))
+            },
+            GetTxDetailsError::TxDeserializationError(e) => {
+                Some(utxo_common::parse_failure_reason("the transaction", e))
+            },
+            GetTxDetailsError::InputTxDeserializationError(e) => {
+                Some(utxo_common::parse_failure_reason("an input transaction", e))
+            },
+            _ => None,
+        }
+    }
+
+    /// The error of a transaction looked up as an input: a parse failure is then the input's.
+    pub(crate) fn into_input_error(self) -> Self {
+        match self {
+            GetTxDetailsError::TxDeserializationError(e) => GetTxDetailsError::InputTxDeserializationError(e),
+            other => other,
+        }
+    }
 }
 
 impl<E: TxHistoryStorageError> From<UtxoRpcError> for GetTxDetailsError<E> {
@@ -756,7 +783,7 @@ impl UtxoStandardOps for BchCoin {
         &self,
         hash: &[u8],
         input_transactions: &mut HistoryUtxoTxMap,
-    ) -> Result<TransactionDetails, String> {
+    ) -> Result<TransactionDetails, utxo_common::TxDetailsByHashError> {
         utxo_common::tx_details_by_hash(self, hash, input_transactions).await
     }
 

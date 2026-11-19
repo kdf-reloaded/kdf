@@ -390,6 +390,31 @@ pub fn escape_answer<'a, S: Into<Cow<'a, str>>>(input: S) -> Cow<'a, str> {
     }
 }
 
+/// Escapes `<`, `>` and `&` in an answer body that is JSON by writing each as its JSON `\uXXXX` escape. A JSON parser
+/// decodes the original character, so the value a client reads is unchanged, while the wire bytes still hold no markup
+/// characters. The characters can only occur inside JSON strings, so a plain text replacement is exact.
+///
+/// Used for the WalletConnect methods, whose answers carry strings that are consumed as data (the `wc:` pairing URI
+/// has `&` separators and a wallet refuses it once they read `&amp;`).
+#[cfg(not(target_arch = "wasm32"))]
+fn escape_json_answer(input: &str) -> String {
+    input
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+}
+
+/// Escapes a response body for the wire: the generic markup escape, except for the `wc_*` WalletConnect methods which
+/// use the value-preserving JSON escape ([`escape_json_answer`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn escape_response_body(body: &str, is_walletconnect_method: bool) -> String {
+    if is_walletconnect_method {
+        escape_json_answer(body)
+    } else {
+        escape_answer(body).into_owned()
+    }
+}
+
 async fn process_single_request(ctx: MmArc, req: Json, client: SocketAddr) -> Result<Response<Vec<u8>>, String> {
     let local_only = ctx.conf["rpc_local_only"].as_bool().unwrap_or(true);
     if req["mmrpc"].is_null() {
@@ -536,6 +561,7 @@ async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> 
         trace!("[unsafe-rpc-wire-dump] request from {}: {}", client, request_dump);
     }
 
+    let is_walletconnect_method = req_json["method"].as_str().is_some_and(|m| m.starts_with("wc_"));
     let res = try_sf!(process_rpc_request(ctx, req, req_json, client).await, ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
     let (mut parts, body) = res.into_parts();
     parts.headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, rpc_cors);
@@ -547,10 +573,7 @@ async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> 
     }
 
     let body_escaped = match std::str::from_utf8(&body) {
-        Ok(body_utf8) => {
-            let escaped = escape_answer(body_utf8);
-            escaped.as_bytes().to_vec()
-        },
+        Ok(body_utf8) => escape_response_body(body_utf8, is_walletconnect_method).into_bytes(),
         Err(_) => {
             return Response::builder()
                 .status(500)
@@ -2290,5 +2313,63 @@ mod server_tests {
         for line in &lines {
             assert!(line.starts_with("ERROR RPC error response: "), "{line}");
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod walletconnect_answer_escape_tests {
+    use super::*;
+    use kdf_walletconnect::pairing::build_pairing_uri;
+    use serde_json::json;
+
+    /// Splits a `wc:<topic>@2?<query>` URI the way a wallet does: scheme, path, then `&`-separated `key=value` pairs.
+    fn query_pairs(uri: &str) -> Vec<(String, String)> {
+        let (_path, query) = uri.split_once('?').expect("the URI has a query");
+        query
+            .split('&')
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').expect("every pair has a value");
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    /// The RPC answer for `wc_new_connection` goes through the wire escape; its `url` must come back as the plain URI.
+    #[test]
+    fn wc_new_connection_answer_carries_the_plain_pairing_uri() {
+        let topic = kdf_walletconnect::Topic::generate();
+        let sym_key = [7u8; 32];
+        let uri = build_pairing_uri(&topic, &sym_key, 1_800_000_000);
+        let topic_str: &str = topic.as_ref();
+        let body = json!({
+            "mmrpc": "2.0",
+            "result": { "url": uri, "pairing_topic": topic_str },
+            "id": 0,
+        })
+        .to_string();
+
+        let wire = escape_response_body(&body, true);
+        assert!(!wire.contains("&amp;"), "{wire}");
+        assert!(!wire.contains('&'), "{wire}");
+
+        let decoded: Json = json::from_str(&wire).unwrap();
+        let url = decoded["result"]["url"].as_str().unwrap();
+        assert_eq!(url, uri);
+        assert!(!url.contains("&amp;"));
+        let pairs = query_pairs(url);
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["relay-protocol", "symKey", "expiryTimestamp"]);
+        assert_eq!(pairs[1].1, hex::encode(sym_key));
+    }
+
+    /// Every other method keeps the generic markup escape.
+    #[test]
+    fn other_methods_keep_the_generic_markup_escape() {
+        let body = r#"{"error":"a&b<c>"}"#;
+        assert_eq!(escape_response_body(body, false), r#"{"error":"a&amp;b&lt;c&gt;"}"#);
+        let wc = escape_response_body(body, true);
+        assert!(!wc.contains(['&', '<', '>']));
+        let decoded: Json = json::from_str(&wc).unwrap();
+        assert_eq!(decoded["error"], "a&b<c>");
     }
 }

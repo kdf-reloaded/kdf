@@ -138,6 +138,18 @@ The pairing URI follows the public WC2 format
 (`wc:<topic>@2?...`) and is opaque to the project: it is
 delivered verbatim to the consumer (a GUI, a CLI, a deep link).
 
+> **Status note (2026-11-17, Reloaded-original; informative).** A lab run with
+> a mobile wallet found that the URI in the answer of `wc_new_connection`
+> reached the client with every `&` after the first written as the text `&amp;`,
+> so a wallet read the keys `amp;symKey` and `amp;expiryTimestamp` and found no
+> symmetric key. The cause was not the URI builder but the response writer of the
+> RPC server, which HTML-escapes `<`, `>` and `&` in every answer body (Chapter
+> 55's status note names the same behavior). "Verbatim" is now met for the
+> methods of this chapter: for the `wc_*` methods the three characters are
+> written as the JSON escapes `\u0026`, `\u003c` and `\u003e`, which a JSON parser
+> decodes to the original characters; the answers of every other method are
+> unchanged. The URI the client reads has the plain separators.
+
 ## 22.3 The Integration Trait
 
 Coin support modules that wish to expose WalletConnect-backed
@@ -322,6 +334,63 @@ Lifecycle on relay connect:
    skipped).
 6. On user-initiated disconnect, delete the record and
    unsubscribe.
+
+> **Status note (2026-11-17, Reloaded-original; informative).** The relay closes
+> the websocket from time to time (about every ten minutes in the lab, with the
+> close code 4010, "Disconnecting for load balancing reasons"). Before this
+> note the node did not reconnect, and a later `wc_new_connection` failed with
+> the relay error "Not connected" until a restart. The node now opens the
+> connection again after any close or connection error, waiting 1 s, 2 s, 4 s
+> and so on up to 60 s between attempts, with a freshly signed relay token, and
+> then subscribes again to every unexpired pairing topic, every in-flight
+> establishment topic and every settled session topic, so a session approved
+> before the drop still takes signing requests (step 4 is thus also run after
+> each reconnect, not only at start). Messages that arrive while a reconnect
+> runs are kept and routed afterwards.
+>
+> Every relay message the node publishes or receives is logged at debug level
+> with its direction, JSON-RPC method (`response` for a response, `-` when it
+> could not be read), the first eight characters of the topic, the relay tag and
+> the request id; a payload, a key or a full topic is never logged.
+
+> **Status note (2026-11-17, Reloaded-original; informative).** The relay
+> identifies a client by the ed25519 key that signs its auth token. The node
+> keeps one such client key for its WalletConnect context: it is created once,
+> stored next to the sessions (the same store, native and browser), loaded
+> before the first connect, and used to sign every later token (the token
+> itself is still signed anew for each connect, with a new issue and expiry
+> time). A missing or unusable stored key is replaced by a new one, which is
+> stored. Reason: sessions are meant to keep working after a relay reconnect
+> and after a node restart, and a client identity that changed with each
+> connect could make the relay refuse requests on sessions made under an
+> earlier identity. Lab result (2026-11-18, Keplr Mobile, ATOM mainnet): after a
+> relay reconnect and after a node restart with the same data directory, signing
+> on the same session prompted in the wallet and returned a signed transaction,
+> and the key fingerprint stayed the same; before this change both cases failed.
+> Privacy: the relay identity is now persistent, so the relay operator can
+> link all connections and sessions of a node across restarts and reconnects,
+> whereas before each connect had a fresh identity; this is the price of
+> sessions that survive reconnects and restarts. A stored key that cannot be
+> decoded is replaced by a new one and logged at warning level (existing
+> sessions must then be paired again); a missing key on first start is logged
+> at debug level only.
+> The key is secret: it is never logged,
+> returned or put into an error text; the debug log carries only the first
+> eight hex digits of the public key and whether the key was loaded or newly
+> created.
+
+> **Status note (2026-11-18, Reloaded-original; informative).** The app
+> metadata the node advertises in a session proposal (and keeps as the
+> `proposer` of the settled session) names the project and tells instances
+> apart: `name` is `KDF Reloaded <fp>`, where `<fp>` is the first eight
+> lower-case hex digits of the public relay client key (the fingerprint the
+> connect log prints), `description` is `KDF Reloaded WalletConnect client`,
+> `url` is unchanged and `icons` stay empty. The name is stable across restarts
+> and upgrades of one data directory and differs between instances, so a wallet
+> that lists the paired apps shows each node apart. The metadata is built once
+> the client key is loaded or created. The optional `MM2.json` member
+> `walletconnect.app_name`, when present and not empty, replaces the whole
+> `name`; an empty value is ignored.
 
 ### 22.5.3 On-disk record format (Interop / wire-format reuse, R29)
 

@@ -127,6 +127,12 @@ The full set of `error_type` values that `init` and the task status can carry is
 `L2IsAlreadyActivated`, `PlatformCoinIsNotActivated`, `L2ConfigIsNotFound`,
 `UnexpectedL2Protocol`; 408 for `TaskTimedOut`; 500 for all others.
 
+*Pointer (2026-11-18).* A Lightning coin is a dependent of its UTXO
+platform in the sense of chapter 43 R43.1E.5; what that means when the
+platform is disabled without `force_disable`, and how `init` answers while
+the platform is passive, is stated in chapter 43 R43.1F.6 and R43.1F.9
+(passed the KDF Dirty Gate on 2026-11-18). This pointer binds nothing of its own.
+
 ### `task::enable_lightning::status`
 
 R41.2.7 **Request:** `{task_id: integer, forget_if_finished: boolean (default
@@ -693,3 +699,8 @@ list records the resulting deviations.
   [Chapter 55](55-coin-activation-wire-contract.md) was implemented. It adds
   no reference content, so chapter 01 R38 is not engaged and the corpus
   record above is unchanged.
+- *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
+  R41.2.6.* It names chapter 43 R43.1F.6 and R43.1F.9 and states no behavior
+  of its own; it travels with chapter 43 §43.1F for the KDF Dirty Gate.
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter 43's
+  provenance footer.
