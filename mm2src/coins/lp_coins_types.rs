@@ -709,6 +709,11 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
         // was reported but the same oversight. Genuine Utxo entries have no
         // `gas_limit` field, so this reordering can't misclassify them.
         //
+        // `Solana { fee_amount, rent_amount, total_amount }` (CRD ch.40 R40.6B.12) needs no particular place: all
+        // three members are required and `fee_amount` is in no other family's fee object, so it reads no other
+        // family's entry (Sia has a `total_amount` but no `fee_amount`) and no other arm reads its entry (every
+        // other family requires a member it lacks: `amount`, `coin`, `gas`, `miner_fee`, `total_fee_sun`).
+        //
         // `Slp { amount, coin: String }` is deliberately NOT added: its shape
         // is *identical* to Utxo's whenever `coin` is present, so no
         // placement in this list can distinguish the two structurally --
@@ -1355,6 +1360,95 @@ mod tx_fee_details_tests {
             uamount: 0,
             gas_limit: 100000,
         }));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn solana_details() -> SolanaFeeDetails {
+        SolanaFeeDetails::new("0.000005".parse().unwrap(), "0.00203928".parse().unwrap())
+    }
+
+    /// T40.6B.13: the Solana object is exactly the tag and the three members, the last three decimal strings, and
+    /// the total is the sum.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_solana_fee_details_wire_shape() {
+        let details = TxFeeDetails::Solana(solana_details());
+        let wire: Json = json::to_value(&details).unwrap();
+        let members: std::collections::BTreeSet<&str> = wire.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            members,
+            ["type", "fee_amount", "rent_amount", "total_amount"]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(wire["type"], "Solana");
+        assert_eq!(wire["fee_amount"], "0.000005");
+        assert_eq!(wire["rent_amount"], "0.00203928");
+        assert_eq!(wire["total_amount"], "0.00204428");
+        let no_rent = json::to_value(TxFeeDetails::Solana(SolanaFeeDetails::new(
+            "0.000005".parse().unwrap(),
+            0.into(),
+        )))
+        .unwrap();
+        assert_eq!(no_rent["rent_amount"], "0");
+        assert_eq!(no_rent["total_amount"], "0.000005");
+    }
+
+    /// T40.6B.13: the untagged reader reads the new shape back as Solana, with and without rent.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_solana_fee_details_roundtrip() {
+        roundtrip(TxFeeDetails::Solana(solana_details()));
+        roundtrip(TxFeeDetails::Solana(SolanaFeeDetails::new(
+            "0.000005".parse().unwrap(),
+            0.into(),
+        )));
+    }
+
+    /// T40.6B.13: every other family's sample still reads as its own family, and none of them as Solana.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_other_families_are_not_read_as_solana() {
+        roundtrip(TxFeeDetails::Utxo(UtxoFeeDetails {
+            coin: None,
+            amount: "0.0001".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Eth(EthTxFeeDetails {
+            coin: "ETH".to_owned(),
+            gas: 21000,
+            gas_price: "20".parse().unwrap(),
+            total_fee: "0.00042".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Qrc20(Qrc20FeeDetails {
+            coin: "QTUM".to_owned(),
+            miner_fee: "0.0001".parse().unwrap(),
+            gas_limit: 100000,
+            gas_price: 40,
+            total_gas_fee: "0.04".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Tron(crate::eth::tron::fee::TronTxFeeDetails {
+            total_fee_sun: 1000,
+            bandwidth_used: 270,
+            bandwidth_fee_sun: 1000,
+            energy_used: 0,
+            energy_fee_sun: 0,
+            activation_fee_sun: 0,
+        }));
+        roundtrip(TxFeeDetails::Sia(siacoin::SiaFeeDetails {
+            coin: "SC".to_owned(),
+            policy: siacoin::SiaFeePolicy::Fixed,
+            total_amount: "0.001".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Tendermint(tendermint::TendermintFeeDetails {
+            coin: "ATOM".to_owned(),
+            amount: "0.002".parse().unwrap(),
+            uamount: 0,
+            gas_limit: 100000,
+        }));
+        // A Sia object next to a Solana-looking `total_amount`: it is still Sia.
+        let sia: TxFeeDetails =
+            json::from_str(r#"{"type":"Sia","coin":"SC","policy":"Fixed","total_amount":"0.001"}"#).unwrap();
+        assert!(matches!(sia, TxFeeDetails::Sia(_)));
     }
 
     /// A real Utxo entry (no `gas_limit`) must keep deserializing as `Utxo`

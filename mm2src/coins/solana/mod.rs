@@ -18,9 +18,9 @@ pub mod rpc_pool;
 
 pub(crate) use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, TradeFee, TransactionEnum,
                        WatcherOps};
-pub(crate) use crate::solana::rpc_client::{RpcError, RpcErrorKind, SolanaRpcClient, TokenAccountsFilter};
+pub(crate) use crate::solana::rpc_client::{RpcError, RpcErrorKind, SolanaRpcClient};
 pub(crate) use crate::solana::rpc_pool::SolanaRpcPool;
-pub(crate) use crate::solana::solana_common::{lamports_to_sol, PrepareTransferData, SufficientBalanceError};
+pub(crate) use crate::solana::solana_common::lamports_to_sol;
 pub(crate) use crate::solana::spl::SplTokenInfo;
 pub(crate) use crate::{BalanceError, BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend,
                        NegotiateSwapContractAddrErr, RawTransactionError, RawTransactionFut, RawTransactionRequest,
@@ -59,8 +59,12 @@ pub mod solana_common;
 #[cfg(test)] mod solana_common_tests;
 mod solana_decode_tx_helpers;
 #[cfg(test)] mod solana_disable_coin_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_node_pool_tests;
 #[cfg(test)] mod solana_tests;
 #[cfg(test)] mod solana_wallet_answers_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_withdraw_tests;
 pub mod spl;
 #[cfg(test)] mod spl_tests;
 

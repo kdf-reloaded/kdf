@@ -26,22 +26,19 @@ or undo, and every change that needs a step from you.
   - *Going back to an older build:* stop the node, copy the `.pre-upgrade.<ms>.bak` file over
     `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal` and `<TICKER>_RELOADED_WALLET.db-shm` if
     they exist, and start the older build. Anything the wallet recorded after the upgrade is not in the backup; the
-    older build scans it again. Keep the backup until you are sure you stay on this version
+    older build scans it again. A wallet of another key (`<TICKER>_RELOADED_WALLET.<fingerprint>.db`, made by a
+    development build) has its own backup named after that file and is restored the same way. Keep the backup until
+    you are sure you stay on this version
     (`shielded_db_upgrade_backups` in `MM2.json` sets how many backups the node keeps; the default is 1).
   - *Before you upgrade:* make your own copy of the wallet database file and of the seed or passphrase as for any
     upgrade; the steps under "Coins that are no longer visible after an upgrade" below apply if a coin is no longer
     shown afterwards.
   Detail: PR #411; CRD ch.39 R39.8.0ba, R39.8.0bc and the status note of 2026-11-18; RELOADED_VS_GLEEC.md.
-- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
-  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
-  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
-  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
-  servers now report at another height shows that height and its block's time.
-  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
-  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
-  value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
-  with tokens and Lightning the key derived from the passphrase. A request that asks for `IguanaPrivKey` now gets a
+  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia, Lightning and shielded coins such as ARRR.** Until
+  now these families ignored the value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed
+  single-address HD key, BCH with tokens and Lightning the key derived from the passphrase, and shielded coins the key
+  the HD login derives (at `z_derivation_path` and `account`). A request that asks for `IguanaPrivKey` now gets a
   different address or Lightning identity.
   - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
     those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
@@ -54,6 +51,13 @@ or undo, and every change that needs a step from you.
     `IguanaPrivKey`.
   - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
     where it used to be ignored.
+  - *Shielded coins (ARRR):* under an HD login, `IguanaPrivKey` now activates the coin with the internal key, for the
+    shielded address and the transparent key, and with a wallet database of its own; the HD wallet stays in its own
+    file with its scan state, and the two never mix. If your ARRR activation requests already contain `IguanaPrivKey`,
+    the address changes after this upgrade and the balance of the HD wallet is not shown. To keep the HD wallet, leave
+    `priv_key_policy` out or send `ContextPrivKey`. If coins are not visible after the upgrade, read "Coins that are
+    no longer visible after an upgrade" below and start the previous version again before you move or spend
+    anything. A hardware value fails the request, where it used to be ignored.
 - **ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "77190ad9"`** (the branch id is
   accepted with or without `0x`). Since the Zcash network upgrade NU7 the network refuses version-4 transactions. This
   release builds version-5 ZEC transactions when the ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every
@@ -70,6 +74,19 @@ or undo, and every change that needs a step from you.
   - *Browser (WASM) builds:* the WalletConnect store in the browser is upgraded to a new format at the first start.
     An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
     in the browser first, then pair again.
+
+- **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
+  handler produced them. A client that decoded those entities itself to get the original text must stop doing so,
+  or it will now change text that really contains such a sequence.
+  - *What you see:* URLs with query strings, memos, error texts and labels in answers arrive with their plain
+    characters.
+  - Detail: PR #421; CRD ch.55 status note of 2026-11-18.
+- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
+  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
+  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
+  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
+  servers now report at another height shows that height and its block's time.
+  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -134,7 +151,33 @@ the previous version used. The safe way:
   `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
   purpose, and the test-only `sim_panic`. Detail: PR #387; CRD ch.43 §43.1R.
 
+#### Shielded coins
+
+- **ARRR and the other shielded coins accept `priv_key_policy`, and each key gets a wallet of its own.**
+  Under an HD login, `IguanaPrivKey` activates the shielded coin with the node's single internal key; leaving
+  the member out keeps the HD key. The shielded balance and history are per key and per `account`: switching
+  the policy or the `account` opens the other wallet instead of failing, and switching back reopens the first
+  one with its scan state, without a rescan. The existing wallet file keeps the name it has and keeps the key
+  it already holds; another key's wallet is stored in files whose names carry a short fingerprint of that key.
+  Amounts a swap step pays or receives appear in the account that was active when that step ran; activate that
+  account to see them. The coin is refused with a message that names the swaps and says what to do, in two
+  cases: when swaps of that coin that are not finished were started with another key (activate with the key they
+  were started with, let them finish or refund, then switch), and when a wallet database of the coin cannot be
+  read while a swap still has to send its payment or fee. Changing `account` alone is allowed.
+  Detail: PR #414; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
+
 #### Solana coins
+
+- **The Solana activation methods of GLEEC KDF are routed.** `experimental::enable_solana_with_assets`
+  activates a Solana platform with its tokens and `experimental::enable_solana_token` a single SPL
+  token, with the requests, results and errors GLEEC KDF uses, in native builds. They share the
+  activation of `enable_solana_with_tokens` and `enable_spl`: a platform activated through either
+  method takes tokens through either token method, and `disable_coin` treats both the same. A token
+  can also be activated from a `protocol` given in the request; such a token is wallet-only. A coin
+  activated through these methods sends no commitment level, so the node's default applies.
+  `enable_solana_with_tokens` now also refuses an inline token whose platform is another coin
+  (`PlatformCoinMismatch`). Solana stays switched off in this build. Detail: PR #426; CRD ch.40
+  §40.2, §40.3, R40.3A.3.
 
 - **Solana activates under an HD login, at a path the request chooses.** Under an HD login the
   Solana key is now derived from the seed phrase at `m/44'/501'/N'/0'` by default, or at
@@ -275,6 +318,17 @@ the previous version used. The safe way:
   or `HardwareWalletInternal`; a device condition answers `HwError` (410) with the same words as above, and a
   device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
   answer `Internal` (500). Detail: PR #386; CRD ch.05 §5.9B R35c.
+- **A disabled token no longer stays in its platform's token list.** After `disable_coin` of an ERC-20 or TRC20,
+  SLP or Tendermint token, its platform no longer reports or serves that token, as was already the case for SPL
+  tokens. A single SPL token enabled with `enable_spl` is now listed by its platform, as a token enabled together
+  with the platform already was. Disabling a platform that still has active tokens works as before: the platform
+  is removed and its tokens stay. Detail: PR #418; CRD ch.43 R43.1E.5 status note of 2026-11-18.
+
+- **RPC answers are sent as the handler produced them.** `<`, `>` and `&` in answer strings are no longer replaced
+  with `&lt;`, `&gt;` and `&amp;`, for every method including the `wc_*` ones. The visible effect: URLs with query
+  strings, memos, error texts and labels reach the client with their plain characters. A request body that
+  contains `<`, `>` or `&` is still refused, as before. Every answer now carries `X-Content-Type-Options: nosniff`, and
+  `Content-Type: application/json` where the method set no content type. Detail: PR #421; CRD ch.55 status note of 2026-11-18.
 
 #### Shielded coins
 
@@ -351,6 +405,29 @@ the previous version used. The safe way:
 
 #### Solana coins
 
+- **Solana nodes are checked before use and spread across users.** A Solana coin's nodes are now put
+  into a random order once when the coin is enabled, so users of one coins file spread over its
+  nodes; set the `MM2.json` string `solana_node_order` to `listed` to keep the listed order, as
+  GLEEC KDF does. A node is asked whether it is healthy (`getHealth`) before it is used when it has
+  not been checked in the last 30 seconds; a node that fails is skipped for 20 seconds, doubling up
+  to 12 hours, and a recovered node that ranks higher is used again. The reads of one withdraw go to
+  one node, and a sent transaction is never rebuilt: a failed broadcast is retried with the same
+  signed bytes, and the error names the transaction's signature. This applies to both Solana
+  activation surfaces. Solana stays switched off in this build. Detail: PR #426; CRD ch.40 R40.1.5.
+
+- **Solana withdraws send the right amounts and say what they cost.** An SPL withdraw with `max` now
+  sends the whole token balance (it used to move the requested amount while the answer showed the
+  whole balance). Creating the recipient's token account is paid in SOL: the rent is checked against
+  the SOL balance together with the fee, a short balance answers the new error
+  `NotSufficientPlatformBalanceForFee` naming SOL, and `fee_details` shows `fee_amount`,
+  `rent_amount` and `total_amount` for SOL and SPL withdraws alike, instead of a single `amount`.
+  A token balance is read from the wallet's own token account for that token, and is zero when the
+  wallet has none. A recipient that is a token account rather than a wallet address is refused. An
+  amount below the coin's minimum transaction amount answers `AmountTooLow`. Activation now checks
+  that the token's mint belongs to its token program, so a node failure while an inline token is
+  checked answers `Transport`; a Token-2022 token is refused at activation until it is supported.
+  Solana stays switched off in this build. Detail: PR #425; CRD ch.40 R40.6B.9-R40.6B.12,
+  D40.6B.2-D40.6B.6; ch.43 R43.1D.2.
 - **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
   are removed and can be activated again; a removed token no longer stays in its platform's token
   records. A platform with active tokens is handled as for every other family: the platform is
@@ -391,9 +468,9 @@ the previous version used. The safe way:
 #### WalletConnect
 
 - **The pairing link of `wc_new_connection` is usable by a wallet.** Every `&` after the first was
-  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The `wc_*` answers now
-  carry the characters as JSON escapes that a client decodes to the plain characters. Detail: PR #393;
-  CRD ch.22 §22.2.
+  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The link now arrives
+  with plain `&` separators, as every RPC answer does (see "RPC answers are sent as the handler produced them"
+  under Changed). Detail: PR #393; CRD ch.22 §22.2.
 - **The node reconnects to the WalletConnect relay.** The relay closes the connection about every ten
   minutes; the node did not reopen it, and a new connection request failed until a restart. It now
   reconnects with a growing wait and subscribes again to its pairings and sessions. Detail: PR #393;
@@ -543,6 +620,30 @@ the previous version used. The safe way:
   answer before it has seen the send, and a token that lists other servers than QTUM does not share
   its first server. A shared connection and a shared record of spent coins for QTUM and its tokens
   are planned. Detail: PR #368; CRD ch.38 R38.6.4a.
+- **A QRC20 token keeps working when one of its Electrum servers answers a contract request with an
+  error.** Some public QTUM servers answer the token balance, history and receipt requests with an
+  internal error. One such answer used to fail the activation, the balance read or the history
+  request, although another listed server would have answered. The request now moves on to the next
+  server, without dropping the connection, and fails only when every server tried has answered with
+  an error. These three requests now also take turns among the servers, as other reads do. Detail:
+  PR #417; CRD ch.38 D38.6.4Q.2.
+- **QRC20 token history no longer misses a transfer whose details a server failed to deliver.** Such
+  a transfer was left out, and the history was not asked for again until the token balance changed.
+  The history is now asked for again after a short delay, which grows while details keep failing.
+  Detail: PR #417; CRD ch.38 R38.6.4Q.6.
+- **QRC20 token history now stops with a clear status when no listed server serves it.** When three
+  history passes in a row get an error answer from every server tried, the token's history stops,
+  and `my_tx_history` reports it in `sync_status` with code `-2`. Activating the token again starts
+  it again. Passes that fail because a server cannot be reached never count, so a node that is
+  offline keeps its history. Detail: PR #417; CRD ch.38 amendment after R38.6.4Q.6.
+- **A QRC20 token's balance subscription is placed again after a reconnect.** With the balance
+  stream on, the token's subscription was lost when its server connection dropped, and the token
+  fell back to polling. It is now placed again once on the new connection; a server that refuses it
+  changes nothing else. Detail: PR #417; CRD ch.38 D38.6.4Q.3.
+- **Disabling a QRC20 token now ends its history work at once.** The token's history kept running
+  for up to about 40 s after `disable_coin`, and enabling the token again within that time left two
+  of them running. It now ends when the token is disabled, and exactly one runs after the token is
+  enabled again. Detail: PR #417; CRD ch.38 D38.6.4Q.5.
 
 ### Tests
 
@@ -605,7 +706,8 @@ the previous version used. The safe way:
   done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
   the plan.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
-  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
+  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family;
+  shielded coins read `priv_key_policy` as well (H7 row note of 2026-11-18).
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
@@ -631,7 +733,9 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
+  S6 in PR #425, S7 in PR #426; new package S6c (a rent-exempt guard for SOL withdraws); switch-on
+  lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

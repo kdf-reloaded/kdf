@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (state check 2026-11-15; P1 in PR #354, P0 in PR #356; P2 and P3 next) — **Last reviewed:** 2026-11-15
+**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5, P7, P8 and P9 next) — **Last reviewed:** 2026-11-18
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -179,6 +179,11 @@ cross-wallet or incompatible-client reuse.
 **Gate:** document lifetime and lock ordering before code changes. Prove that
 the design cannot cross wallet identities and cannot deadlock coin disable,
 history, or transaction construction.
+
+*Gate met (2026-11-18):* the status note after D38.6.4Q.1 in CRD ch.38 records
+when instances share a client, its lifetime, reuse, lock order, naming and the
+subscriptions of a disabled instance. The registry lives in the node's context,
+which serves one wallet, so no client crosses wallet identities.
 
 ## Phase C -- Electrum and activation stabilization
 

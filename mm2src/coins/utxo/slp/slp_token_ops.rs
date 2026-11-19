@@ -22,6 +22,9 @@ impl SlpToken {
         slp_send_output(&self.conf.token_id, amounts)
     }
 
+    /// The BCH coin the token rides on.
+    pub(crate) fn platform_coin(&self) -> &BchCoin { &self.platform_coin }
+
     pub(crate) fn rpc(&self) -> &UtxoRpcClientEnum { &self.platform_coin.as_ref().rpc_client }
 
     /// Returns unspents of the SLP token plus plain BCH UTXOs plus RecentlySpentOutPoints mutex guard
