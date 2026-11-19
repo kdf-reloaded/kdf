@@ -341,7 +341,7 @@ the previous version used. The safe way:
   amount below the coin's minimum transaction amount answers `AmountTooLow`. Activation now checks
   that the token's mint belongs to its token program, so a node failure while an inline token is
   checked answers `Transport`; a Token-2022 token is refused at activation until it is supported.
-  Solana stays switched off in this build. Detail: PR #N; CRD ch.40 R40.6B.9-R40.6B.12,
+  Solana stays switched off in this build. Detail: PR #425; CRD ch.40 R40.6B.9-R40.6B.12,
   D40.6B.2-D40.6B.6; ch.43 R43.1D.2.
 - **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
   are removed and can be activated again; a removed token no longer stays in its platform's token
@@ -642,7 +642,7 @@ the previous version used. The safe way:
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S6 in PR #N; new package S6c (a rent-exempt guard for SOL withdraws); switch-on lab rows for
+  S6 in PR #425; new package S6c (a rent-exempt guard for SOL withdraws); switch-on lab rows for
   `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.

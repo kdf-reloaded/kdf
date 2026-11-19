@@ -164,7 +164,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   - `AmountTooLow` for an SPL token names one smallest unit of the token's
     decimals as its threshold, not one lamport.
   No switch: none of these is a compatibility target. CRD ch.40 D40.6B.2 to
-  D40.6B.6; PR #N.
+  D40.6B.6; PR #425.
 
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the
