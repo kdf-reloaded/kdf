@@ -744,7 +744,7 @@ the previous version used. The safe way:
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
   (PR #405).
-- [`tron-gasfree`](docs/plans/tron-gasfree.md) — the bytecode blocker is resolved: the creation bytecode is taken
+- [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
   controller; the support modules are built and not yet reachable; the remaining PRs are listed again (activation
   binding, fields and withdraw dispatcher; then submission and settlement).
