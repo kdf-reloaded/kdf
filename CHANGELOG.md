@@ -660,7 +660,7 @@ the previous version used. The safe way:
   withdraws and QTUM delegations are entered when they are broadcast with `send_raw_tx`. Building
   such a transaction no longer waits for other UTXO coins, and theirs no longer wait for it. Under an
   HD login, QTUM's enabled address and the tokens' address are different addresses with separate
-  records. Detail: PR #P7PR; CRD ch.38 D38.6.4Q.4 and its status note.
+  records. Detail: PR #436; CRD ch.38 D38.6.4Q.4 and its status note.
 
 ### Tests
 
@@ -720,7 +720,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P7, one record of spent coins
-  and one lock per address for QTUM and its tokens, in PR #P7PR; Phase E items 1 and 2 are covered.
+  and one lock per address for QTUM and its tokens, in PR #436; Phase E items 1 and 2 are covered.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
   QTUM and its tokens, in PR #427; the Phase C items it leaves open are named under Phase C.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)

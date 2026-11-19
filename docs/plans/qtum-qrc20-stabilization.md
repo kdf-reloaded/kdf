@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 merged; P7 in PR #P7PR; P8 and P9 next) — **Last reviewed:** 2026-11-20
+**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 merged; P7 in PR #436; P8 and P9 next) — **Last reviewed:** 2026-11-20
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -240,7 +240,7 @@ a shared client (item 5).
    serialization, and swap terminal state. Balance-only assertions are not
    sufficient.
 
-*P7 (2026-11-20).* PR #P7PR implements D38.6.4Q.4 (b), as its status note in CRD
+*P7 (2026-11-20).* PR #436 implements D38.6.4Q.4 (b), as its status note in CRD
 ch.38 records it: one recently-spent record per platform and address script for
 QTUM and its tokens, whose lock orders the builds of that address. Items 1 and
 2 are covered by offline tests with the stub server. Items 3 and 4 stay open;
