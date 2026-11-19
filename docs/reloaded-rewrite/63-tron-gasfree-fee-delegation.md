@@ -871,6 +871,12 @@ D63.8. **Shape of the sign-only result in Reloaded (for the
     which Chapter 49 R49.25 otherwise makes mandatory; the Chapter 49
     pointer of 2026-11-19 records that.
 
+    *Status note (2026-11-19, clean side).* Decided 2026-11-19: option
+    (a). Reloaded's sign-only result carries the members of R26 at the
+    top level except the selector of row 4, emits `coin` once, and gives
+    `from` always as the address array of R28; T16 applies in its (a)
+    form.
+
 T15. **Sign-only result members.** A sign-only gasless withdraw of a
     TRC20 token, once without and once with a `from` selector under
     an HD wallet, through the direct method and through the task
@@ -1483,3 +1489,6 @@ V2. The baseline withdraw request has no fee-rail selector and no
   4, 5 and 6); the repository's clean-room gate tool was not applicable
   because the additions embed no code blocks. *Measure:* 0.01, on the
   discretionary-expression basis.
+- *Status note added 2026-11-19 -- after D63.8.* Reloaded-original, clean
+  side: it records the maintainer's decision of 2026-11-19 (option (a));
+  no forbidden-class input, chapter 01 R38 not engaged.
