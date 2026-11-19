@@ -804,7 +804,8 @@ pub(crate) fn case_c_two_paths_wait_for_each_other<First: Family, Second: Family
     assert_eq!(builds(&ticker), 1, "{:?}", names);
 }
 
-/// T55.21 (d): activations of two different tickers do not wait for each other.
+/// T55.21 (d): activations of two different tickers do not wait for each other, except that the activations of tokens
+/// and layer-two coins of one platform serialize on the platform's lock (CRD ch.43 D43.1F.2 (b)).
 pub(crate) fn case_d_different_tickers_do_not_wait<F: Family>() {
     let (held, other) = (unique_ticker("SD"), unique_ticker("SD"));
     let ctx = serialization_ctx(&[&held, &other]);
@@ -812,6 +813,21 @@ pub(crate) fn case_d_different_tickers_do_not_wait<F: Family>() {
     let first = F::start(&ctx, &held, "gate");
     wait_until("the first build to start", || builds(&held) == 1);
     let second = F::start(&ctx, &other, "ok");
+    // A token or layer-two activation also holds the lock of its platform (CRD ch.43 D43.1F.2 (b)), and every
+    // ticker of these families shares the one platform, so two of them wait for each other.
+    if F::NAME.starts_with("token") || F::NAME.starts_with("layer-2") {
+        settle();
+        assert_eq!(
+            second.poll(),
+            None,
+            "{}: the second waits for the platform's lock",
+            F::NAME
+        );
+        open_gate(&held);
+        assert_eq!(first.wait(), Outcome::Registered, "{}", F::NAME);
+        assert_eq!(second.wait(), Outcome::Registered, "{}", F::NAME);
+        return;
+    }
     assert_eq!(second.wait(), Outcome::Registered, "{}", F::NAME);
     assert_eq!(first.poll(), None, "{}: the held activation moved", F::NAME);
 

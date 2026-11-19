@@ -118,9 +118,12 @@ where
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
-        // R55.1.12: activations of one ticker run one at a time. The lock is held through registration, and the
-        // ticker is checked again once it is ours, because the activation that held it may have registered the coin.
-        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker])
+        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the layer-two
+        // coin is taken together with the lock of its platform, so a `disable_coin` of the platform cannot run
+        // while the coin is registered. The lock is held through registration, and the ticker and the platform are
+        // checked again once it is ours.
+        let platform_ticker = self.protocol_conf.platform_coin_ticker().to_owned();
+        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker, &platform_ticker])
             .await
             .map_err(|e| MmError::new(L2::ActivationError::from(RegisterCoinError::Internal(e))))?;
         if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {
@@ -128,8 +131,13 @@ where
                 RegisterCoinError::CoinIsInitializedAlready { coin: self.ticker },
             )));
         }
-
-        let platform_ticker = self.protocol_conf.platform_coin_ticker().to_owned();
+        // The platform that was active at `init` may have been disabled, or made passive, while the task waited.
+        // The status-level error set of a layer-two task has no platform member, so the text names it.
+        if !matches!(lp_coinfind(&self.ctx, &platform_ticker).await, Ok(Some(_))) {
+            return Err(MmError::new(L2::ActivationError::from(RegisterCoinError::Internal(
+                format!("Platform coin {} is not activated", platform_ticker),
+            ))));
+        }
         let (coin, result) = L2::init_l2(
             &self.ctx,
             self.platform_coin,

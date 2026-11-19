@@ -193,18 +193,25 @@ pub async fn enable_tendermint_token(
     ctx: MmArc,
     req: EnableTendermintTokenRequest,
 ) -> Result<TendermintTokenInitResult, MmError<EnableTokenError>> {
-    // R55.1.12: the lock is held through registration; the check below is the one that follows the wait.
-    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
+    // The lock needs the platform ticker, which the token's protocol names, so the protocol is resolved first. A
+    // registered ticker keeps the refusal it has always had, before any other check.
+    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
+        return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
+    }
+    let token_protocol = resolve_tendermint_token_protocol(&ctx, &req.ticker, req.protocol.as_ref())
+        .map_to_mm(EnableTokenError::from)?;
+    let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
+
+    // R55.1.12 with D43.1F.2 (b): the locks of the token and of its platform are held together through
+    // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
+    let _activation_guard = lock_activation(&ctx, &[&req.ticker, &platform_ticker])
         .await
         .map_to_mm(EnableTokenError::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
     }
 
-    let token_protocol = resolve_tendermint_token_protocol(&ctx, &req.ticker, req.protocol.as_ref())
-        .map_to_mm(EnableTokenError::from)?;
-
-    let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
+    // The platform must be active: a passive platform counts as not activated (CRD ch.43 R43.1F.6).
     let platform_coin = lp_coinfind_or_err(&ctx, &platform_ticker)
         .await
         .mm_err(|_| EnableTokenError::PlatformCoinIsNotActivated(token_protocol.platform_coin_ticker().to_owned()))?;

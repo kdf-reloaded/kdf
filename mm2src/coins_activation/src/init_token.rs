@@ -227,13 +227,22 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
-        // R55.1.12: activations of one ticker run one at a time. The lock is held through registration, and the
-        // ticker is checked again once it is ours, because the activation that held it may have registered the token.
-        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker])
+        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the token is
+        // taken together with the lock of its platform, so a `disable_coin` of the platform cannot run while the
+        // token is registered. The lock is held through registration, and the ticker and the platform are checked
+        // again once it is ours.
+        let platform_ticker = self.protocol_info.platform_coin_ticker().to_owned();
+        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker, &platform_ticker])
             .await
             .map_to_mm(InitTokenError::Internal)?;
         if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {
             return MmError::err(InitTokenError::TokenIsAlreadyActivated { ticker: self.ticker });
+        }
+        // The platform that was active at `init` may have been disabled, or made passive, while the task waited.
+        match lp_coinfind(&self.ctx, &platform_ticker).await {
+            Ok(Some(_)) => (),
+            Ok(None) => return MmError::err(InitTokenError::PlatformCoinIsNotActivated(platform_ticker)),
+            Err(e) => return MmError::err(InitTokenError::Internal(e)),
         }
 
         let (token, result) = Token::init_token(

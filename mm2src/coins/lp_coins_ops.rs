@@ -72,7 +72,9 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
     let cctx = try_s!(CoinsContext::from_ctx(ctx));
     {
         let coins = cctx.coins.lock().await;
-        if coins.get(ticker).is_some() {
+        // A passive platform is registered, so the legacy `enable` and `electrum` refuse its ticker as already
+        // activated (CRD ch.43 R43.1E.6 item 6).
+        if coins.registered().contains(ticker) {
             return ERR!("Coin {} already initialized", ticker);
         }
     }
@@ -233,7 +235,8 @@ pub async fn lp_register_coin(
     // So I'm leaving the possibility of race condition intentionally in favor of faster concurrent activation.
     // Should consider refactoring: maybe extract the RPC client initialization part from coin init functions.
     let mut coins = cctx.coins.lock().await;
-    if coins.contains_key(&ticker) {
+    // A passive platform is registered: its ticker is refused as already initialized.
+    if coins.registered().contains(&ticker) {
         return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() });
     }
     cctx.fee_estimate_cache.forget_coin(&ticker);
@@ -278,11 +281,20 @@ fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum) -> Result<(), String> {
     common::executor::spawn_local(fut);
     Ok(())
 }
-/// NB: Returns only the enabled (aka active) coins.
+/// NB: Returns only the enabled (aka active) coins: a passive platform coin is not found (CRD ch.43 R43.1E.6
+/// item 1). A caller that a rule says must still see a passive coin uses [`lp_coinfind_registered`].
 pub async fn lp_coinfind(ctx: &MmArc, ticker: &str) -> Result<Option<MmCoinEnum>, String> {
     let cctx = try_s!(CoinsContext::from_ctx(ctx));
     let coins = cctx.coins.lock().await;
-    Ok(coins.get(ticker).cloned())
+    Ok(coins.active().get(ticker).cloned())
+}
+/// Returns a registered coin, active or passive (CRD ch.43 R43.1E.6). Use it only where a rule says that a passive
+/// platform coin still counts: `get_enabled_coins`, the already-activated checks, a dependent token's own look-up of
+/// its platform (D43.1F.3), and the background work of a passive platform.
+pub async fn lp_coinfind_registered(ctx: &MmArc, ticker: &str) -> Result<Option<MmCoinEnum>, String> {
+    let cctx = try_s!(CoinsContext::from_ctx(ctx));
+    let coins = cctx.coins.lock().await;
+    Ok(coins.registered().get(ticker).cloned())
 }
 /// Attempts to find a pair of active coins returning None if one is not enabled
 pub async fn find_pair(ctx: &MmArc, base: &str, rel: &str) -> Result<Option<(MmCoinEnum, MmCoinEnum)>, String> {
@@ -756,7 +768,9 @@ struct EnabledCoin {
 pub async fn get_enabled_coins(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
     let coins_ctx: Arc<CoinsContext> = try_s!(CoinsContext::from_ctx(&ctx));
     let coins = coins_ctx.coins.lock().await;
+    // A passive platform is listed, with its address as for an active coin (CRD ch.43 R43.1E.6 item 2).
     let enabled_coins: Vec<_> = try_s!(coins
+        .registered()
         .iter()
         .map(|(ticker, coin)| {
             let address = try_s!(coin.my_address());
@@ -770,22 +784,53 @@ pub async fn get_enabled_coins(ctx: MmArc) -> Result<Response<Vec<u8>>, String> 
     let res = try_s!(json::to_vec(&json!({ "result": enabled_coins })));
     Ok(try_s!(Response::builder().body(res)))
 }
+/// A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's Electrum client
+/// closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5). Every removal path calls it.
+fn end_qrc20_history_collector(removed: &MmCoinEnum) {
+    if let MmCoinEnum::Qrc20Coin(token) = removed {
+        token.end_history_collector();
+    }
+}
+/// Removes one registered coin, active or passive, and its records on its platform. Ending the rest of the coin's background
+/// work is not part of the removal (CRD ch.43 R43.1E.5 item 4 awaits the work of the background-work plan).
 pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
         Some(removed) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
-            // A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's
-            // Electrum client closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
-            if let MmCoinEnum::Qrc20Coin(token) = &removed {
-                token.end_history_collector();
-            }
+            end_qrc20_history_collector(&removed);
             forget_token_records(&coins, &removed, ticker);
             Ok(())
         },
         None => ERR!("{} is disabled already", ticker),
     }
+}
+
+/// Removes the registered platform coin `platform` and every one of its dependent tokens and layer-two coins in one
+/// step, under one hold of the registry: the forced removal of CRD ch.43 R43.1E.5 item 4. Each dependent leaves
+/// through the same record clean-up as a single [`disable_coin`], before the platform does. Returns the tickers
+/// removed, the dependents first. Ending the rest of the background work of the removed coins is not part of it.
+pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Result<Vec<String>, String> {
+    let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
+    let mut coins = coins_ctx.coins.lock().await;
+    let mut tickers: Vec<String> = coins.dependents_of(platform).into_iter().collect();
+    tickers.push(platform.to_owned());
+    let mut removed_tickers = Vec::with_capacity(tickers.len());
+    for ticker in tickers {
+        // A dependent that was removed meanwhile is simply not there; the platform must be.
+        match coins.remove(&ticker) {
+            Some(removed) => {
+                coins_ctx.fee_estimate_cache.forget_coin(&ticker);
+                end_qrc20_history_collector(&removed);
+                forget_token_records(&coins, &removed, &ticker);
+                removed_tickers.push(ticker);
+            },
+            None if ticker == platform => return ERR!("{} is disabled already", ticker),
+            None => (),
+        }
+    }
+    Ok(removed_tickers)
 }
 
 /// Takes a disabled token out of the record its platform keeps of its tokens, so that the platform no longer
@@ -799,7 +844,7 @@ pub(crate) fn forget_token_records(registry: &CoinRegistry, removed: &MmCoinEnum
         MmCoinEnum::EthCoin(token) => {
             use crate::eth::EthCoinType;
             if let EthCoinType::Erc20 { platform, .. } | EthCoinType::Trc20 { platform, .. } = &token.coin_type {
-                if let Some(MmCoinEnum::EthCoin(platform_coin)) = registry.get(platform) {
+                if let Some(MmCoinEnum::EthCoin(platform_coin)) = registry.registered().get(platform) {
                     platform_coin.remove_erc20_token_info(ticker);
                 }
             }

@@ -116,19 +116,27 @@ where
     L2: L2ActivationOps,
     EnableL2Error: From<L2::ActivationError>,
 {
-    // R55.1.12: the lock is held through registration; the check below is the one that follows the wait.
-    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
+    // The lock needs the platform ticker, which the layer-two protocol names, so the protocol is resolved first. A
+    // registered ticker keeps the refusal it has always had, before any other check.
+    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
+        return MmError::err(EnableL2Error::L2IsAlreadyActivated(req.ticker));
+    }
+    let (coin_conf_json, l2_protocol): (Json, L2::ProtocolInfo) =
+        coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
+    let coin_conf = L2::coin_conf_from_json(coin_conf_json).mm_err(Into::into)?;
+    let platform_ticker = l2_protocol.platform_coin_ticker().to_owned();
+
+    // R55.1.12 with D43.1F.2 (b): the locks of the layer-two coin and of its platform are held together through
+    // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
+    let _activation_guard = lock_activation(&ctx, &[&req.ticker, &platform_ticker])
         .await
         .map_to_mm(EnableL2Error::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnableL2Error::L2IsAlreadyActivated(req.ticker));
     }
 
-    let (coin_conf_json, l2_protocol): (Json, L2::ProtocolInfo) =
-        coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
-    let coin_conf = L2::coin_conf_from_json(coin_conf_json).mm_err(Into::into)?;
-
-    let platform_ticker = l2_protocol.platform_coin_ticker().to_owned();
+    // The platform must be active: a passive platform counts as not activated, and the answer names the layer-two
+    // ticker (CRD ch.41 R41.2.6 row 6, ch.43 R43.1F.6).
     let platform_coin = lp_coinfind_or_err(&ctx, &platform_ticker)
         .await
         .mm_err(|_| EnableL2Error::PlatformCoinIsNotActivated(req.ticker.clone()))?;

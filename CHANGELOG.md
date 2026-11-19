@@ -52,6 +52,18 @@ or undo, and every change that needs a step from you.
   - *Browser (WASM) builds:* the WalletConnect store in the browser is upgraded to a new format at the first start.
     An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
     in the browser first, then pair again.
+- **`disable_coin` of a platform coin that has active tokens no longer removes it.** The legacy `disable_coin`
+  now makes such a platform coin passive and answers `passivized: true`: its tokens stay active, and every
+  method that needs an active coin answers as if the platform were not activated. Before, the call removed the
+  platform and left its tokens registered. A script or wallet that disabled a platform to remove it, then
+  activated it again, now finds it still registered, and its `enable` or `electrum` is refused as already
+  activated.
+  - *What to do:* to remove the platform and its tokens, send `"force_disable": true`.
+  - *Versioned form:* the `mmrpc: "2.0"` `disable_coin` does not change. It neither makes a platform passive nor
+    reads `force_disable`: it removes the platform, and its tokens stay registered.
+  - *Not yet:* a passive platform cannot be activated again by `enable_eth_with_tokens` and the other
+    platform-with-tokens methods; they answer `PlatformIsAlreadyActivated` until that follows. Ending a removed coin's
+    background work is also still to come. Until then, force-disable the platform and activate it afresh.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -83,6 +95,18 @@ the previous version used. The safe way:
 
 #### RPC interface
 
+- **The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized`, and takes
+  `force_disable`.** A platform coin (an EVM, BCH, Tendermint, Solana or standard UTXO coin) that has at least one
+  active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens
+  activation, is not removed by `disable_coin`. The call cancels the platform's own orders, keeps the platform
+  registered but passive, and answers `{"coin", "cancelled_orders", "passivized": true}`. A passive platform is
+  listed by `get_enabled_coins`, its tokens stay active, and its history collection goes on; every other method
+  answers as if it were not activated, and a second `disable_coin` for it is refused like one for an unknown coin.
+  With `"force_disable": true` the call removes the platform and all its tokens and answers `passivized: false`;
+  unlike in GLEEC KDF it first checks the platform and every token, and refuses the whole call if any of them has a
+  running swap or an order that is being matched. Every other successful call now also answers `passivized: false`.
+  Only the JSON value `true` forces. A node restart makes every coin inactive, as before. Detail: CRD ch.43 §43.1E
+  and §43.1F.
 - **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
   members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
@@ -233,6 +257,22 @@ the previous version used. The safe way:
 
 #### RPC interface
 
+- **Warning: the legacy `disable_coin` no longer removes a platform coin that has active tokens, and the versioned
+  `disable_coin` never makes one passive.** The legacy call keeps such a platform registered as passive and answers
+  `passivized: true`; to remove the platform and its tokens, send `"force_disable": true`. The `mmrpc: "2.0"`
+  `disable_coin` is unchanged: it does not read `force_disable` and has no `passivized`; it removes the platform and
+  its tokens stay registered. A client that must remove a platform together with its tokens uses the legacy call with
+  `force_disable`. Detail: CRD ch.43 §43.1E and §43.1F.
+- **A token or layer-two activation waits for a `disable_coin` of its platform, and the other way round.** The token
+  and layer-two activation methods (`enable_erc20`, `enable_nft`, `enable_slp`, `enable_tendermint_token`, the Solana
+  token method, the Lightning activation, and the task forms) now take the activation lock of the platform with the lock of
+  the token, and `disable_coin` takes the lock of the coin it disables, so a platform cannot be disabled in the
+  middle of the activation of its token. A token activation on a platform that is passive is refused with
+  `PlatformCoinIsNotActivated` naming the platform (the Lightning ticker for Lightning). Detail: CRD ch.43 D43.1F.2;
+  ch.55 R55.1.12.
+- **A standalone activation task for the ticker of a passive platform is refused at `init`.** `task::enable_utxo::init`
+  and the other standalone activation tasks answer `CoinIsAlreadyActivated` with HTTP 400, as for an active coin,
+  and build nothing. Detail: CRD ch.43 R43.1F.9 and D43.1F.4.
 - **A transport failure of `withdraw` answers HTTP 502 instead of 500.** The versioned `withdraw`, `withdraw_nft` and the
   start of `task::withdraw::init` answer the error `Transport` (a node or server that does not answer, or answers
   unusably) with status 502, as the reference does; the token and the body are unchanged. A client that treats
