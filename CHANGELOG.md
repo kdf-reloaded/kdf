@@ -644,6 +644,19 @@ the previous version used. The safe way:
   for up to about 40 s after `disable_coin`, and enabling the token again within that time left two
   of them running. It now ends when the token is disabled, and exactly one runs after the token is
   enabled again. Detail: PR #417; CRD ch.38 D38.6.4Q.5.
+- **QTUM and its QRC20 tokens now share one set of Electrum connections when their server settings
+  match.** Until now QTUM and each activated token opened their own connection to every server, so a
+  server held one session per instance. Instances that list the same servers in the same order and
+  have the same `min_connected`, `max_connected`, `listed_order_for_spends` and `block_interval` now
+  use one set of connections; any difference keeps a separate set, as before. A token still
+  activates without QTUM and keeps working after QTUM is disabled, and disabling one of them, or a
+  failed activation, closes no connection the others use. A subscription of a disabled instance is
+  no longer placed again after a reconnect unless another instance still uses it. A token that
+  would join a set whose servers disagree about the chain is refused with the same error as a new
+  activation. On a shared set, activation errors, transport error texts, log lines and transport
+  metrics name the platform (for example `QTUM`) also for a token, and `electrum_servers` for a token
+  reports the shared set. A shared record of spent coins is still planned. Detail: PR #427; CRD ch.38
+  D38.6.4Q.1 and its status note.
 
 ### Tests
 
@@ -702,6 +715,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
+  QTUM and its tokens, in PR #427; the Phase C items it leaves open are named under Phase C.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)
   done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
   the plan.

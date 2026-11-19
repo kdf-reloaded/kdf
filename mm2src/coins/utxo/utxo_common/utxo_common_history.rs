@@ -328,7 +328,10 @@ where
     let watched_script_hash = match (&coin.as_ref().rpc_client, coin.as_ref().derivation_method.iguana()) {
         (UtxoRpcClientEnum::Electrum(electrum), Some(address)) => {
             let script_hash = hex::encode(electrum_script_hash(&output_script(&address, ScriptType::P2PKH)));
-            match electrum.subscribe_scripthash(script_hash.clone()).await {
+            match electrum
+                .subscribe_scripthash(coin.as_ref().electrum_owner, script_hash.clone())
+                .await
+            {
                 Ok(()) => {
                     crate::utxo::rpc_clients::watch_scripthash(script_hash.clone(), wake_tx);
                     Some(script_hash)
