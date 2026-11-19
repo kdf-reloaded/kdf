@@ -1,6 +1,6 @@
 # Plan: ZEC transactions in the version-5 format (Zcash NU7)
 
-**Status:** in progress (0.5.0; route (A) decided 2026-11-17; P1 format and digests PR #397 and P2 ZEC wiring PR #404 merged; P2b history report PR #415; P3 coins file open) — **Last reviewed:** 2026-11-18
+**Status:** in progress (0.5.0; route (A) decided 2026-11-17; P1 format and digests PR #397 and P2 ZEC wiring PR #404 merged; P2b history report PR #415 merged; Z10 ZIP 317 fee PR #NNN; P3 coins file open) — **Last reviewed:** 2026-11-19
 
 > **Context.** The Zcash network upgrade NU7 activated on mainnet at height 3,543,405 (ZIP 259,
 > consensus branch id `0x77190AD9`). From NU7 on, a transaction's version must be 5 or 6, also for a
@@ -78,6 +78,7 @@ cross-check of the v5 serializer in tests.
 | Z7 | **Reference position:** a Spec Reader pass that records in the CRD how the reference implementation handles ZEC after NU7, before the implementation starts. | Done (CRD ch.39 §39.11.4V) |
 | Z8 | **Lab:** a small mainnet withdrawal, then a ZEC/RIN swap between two KDF Reloaded nodes. | Done (lab rows of PR #404: withdrawal, swap, refund, all version 5 on mainnet) |
 | Z9 | **Coins file:** `txversion` 5, the version group id and the branch id for ZEC in komodo-coins-rin, once the code ships. | Not started |
+| Z10 | **Fees under ZIP 317:** an entry that is `overwintered`, has `txversion` 5 and names a Zcash branch id from NU7 on pays ZIP 317's conventional fee for withdrawals, the DEX fee and the payment, claim and refund of a version-1 swap; previews report 0.0001 ZEC; a `fee` given in a withdraw request is used as given; ZEC's minimum trading volume is 0.001 ZEC; a resumed version-2 swap keeps the size-based spend fee (CRD ch.39 §39.11.4W). | In progress (PR #NNN) |
 
 ## Decisions (2026-11-17)
 
@@ -92,6 +93,13 @@ cross-check of the v5 serializer in tests.
   ZEC/RIN swap between two KDF Reloaded nodes as READY conditions; P2b the history report of unreadable transactions
   (decision D39.11.4V.1 (b) of 2026-11-18); P3 the coins file (Z9).
 
+## Decisions (2026-11-18)
+
+- ZIP 317: the conventional fee applies to an entry that is `overwintered`, has `txversion` 5 and names a Zcash branch id
+  from NU7 on; any other entry, an unknown branch id included, keeps the per-kilobyte fee; no new coins key, `txfee` stays
+  in the entry. `get_trade_fee` reports 0.0001 ZEC. An explicit withdraw fee is used as given. The minimum trading
+  volume follows the claim fee (0.001 ZEC) and is also the default minimum volume of a new ZEC order (Z10).
+
 ## Open points
 
-- Fees under ZIP 317, if the lab shows a refusal.
+- None. *(Fees under ZIP 317: resolved 2026-11-18 by Z10.)*

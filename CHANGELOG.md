@@ -760,7 +760,7 @@ the previous version used. The safe way:
   (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
-  unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.
+  unreadable transactions (PR #415); ZEC fees under ZIP 317 (Z10, PR #NNN); the coins entry follows. Z1–Z8 done.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
