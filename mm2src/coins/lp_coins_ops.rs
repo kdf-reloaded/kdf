@@ -784,6 +784,16 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
             if let MmCoinEnum::Qrc20Coin(token) = &removed {
                 token.end_history_collector();
             }
+            // The disabled instance leaves the subscriptions of its Electrum client; one that no other instance
+            // remembers is no longer placed again after a reconnect (CRD ch.38 D38.6.4Q.1 status note, item 6). This
+            // takes no registry lock and sends nothing.
+            match &removed {
+                MmCoinEnum::QtumCoin(qtum) => {
+                    AsRef::<crate::utxo::UtxoCoinFields>::as_ref(qtum).forget_electrum_subscriptions()
+                },
+                MmCoinEnum::Qrc20Coin(token) => token.utxo.forget_electrum_subscriptions(),
+                _ => (),
+            }
             forget_token_records(&coins, &removed, ticker);
             Ok(())
         },

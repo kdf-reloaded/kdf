@@ -44,6 +44,8 @@ impl<'a> UtxoCoinBuilderCommonOps for Qrc20CoinBuilder<'a> {
 
     fn ticker(&self) -> &str { self.ticker }
 
+    fn shared_electrum_platform(&self) -> Option<&str> { Some(self.platform.as_str()) }
+
     async fn decimals(&self, rpc_client: &UtxoRpcClientEnum) -> UtxoCoinBuildResult<u8> {
         if let Some(d) = self.conf()["decimals"].as_u64() {
             return Ok(d as u8);

@@ -94,6 +94,9 @@ pub use electrum_pool::{with_call_budget, ElectrumPoolOptions, ElectrumPoolTimin
 pub(crate) mod electrum_rpc_client;
 pub use electrum_rpc_client::*;
 
+#[path = "rpc_clients/electrum_client_registry.rs"]
+pub(crate) mod electrum_client_registry;
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "rpc_clients/electrum_stub_server.rs"]
 pub(crate) mod electrum_stub_server;
