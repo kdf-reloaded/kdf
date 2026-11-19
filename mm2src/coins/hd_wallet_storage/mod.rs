@@ -350,7 +350,7 @@ impl HDWalletCoinStorage {
     /// Any storage failure, a failed derivation or a failed removal fails the load; no unchecked row is returned.
     pub async fn load_accounts_derived_from_seed(
         &self,
-        master: &bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
+        master: &crypto::Secp256k1ExtendedPrivateKey,
         coin_path: &DerivationPath,
     ) -> HDWalletStorageResult<Vec<HDAccountStorageItem>> {
         let stored = self.load_all_accounts().await?;
@@ -433,7 +433,7 @@ impl HDWalletCoinStorage {
 /// The expected key is the one the software derivation of R30 gives: the coin's derivation path plus the hardened
 /// account index.
 fn is_account_of_the_seed(
-    master: &bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
+    master: &crypto::Secp256k1ExtendedPrivateKey,
     coin_path: &DerivationPath,
     item: &HDAccountStorageItem,
 ) -> HDWalletStorageResult<bool> {
@@ -952,7 +952,7 @@ mod tests {
     const SEED_MNEMONIC: &str =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-    fn master_of(mnemonic: &str) -> bip32::ExtendedPrivateKey<secp256k1::SecretKey> {
+    fn master_of(mnemonic: &str) -> crypto::Secp256k1ExtendedPrivateKey {
         use crypto::KeyPairPolicy;
 
         let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -964,7 +964,7 @@ mod tests {
     }
 
     /// The extended public key the software derivation gives at `path`, as it is stored.
-    fn xpub_at(master: &bip32::ExtendedPrivateKey<secp256k1::SecretKey>, path: &str) -> String {
+    fn xpub_at(master: &crypto::Secp256k1ExtendedPrivateKey, path: &str) -> String {
         crypto::derive_secp256k1_extended_pubkey(master.clone(), &DerivationPath::from_str(path).unwrap())
             .unwrap()
             .to_string(bip32::Prefix::XPUB)

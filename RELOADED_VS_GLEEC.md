@@ -1166,6 +1166,10 @@ file over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal
 `<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start the older build. The older build then
 sees the wallet as it was before the upgrade.
 
+The upgrade of the Zcash libraries (wallet database `zcash_client_sqlite` 0.22 to 0.23) is such an upgrade: a wallet database
+of the earlier generation is backed up and migrated on the first activation, and the older build cannot open the migrated
+file. Put the backup back as described above to return to it.
+
 *How many backups stay:* after a successful upgrade the node keeps only the newest
 `.pre-upgrade` backup of that wallet and deletes older ones. The top-level `MM2.json` key
 `shielded_db_upgrade_backups` (a whole number, default `1`, lowest effective value `1`) changes the
