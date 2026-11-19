@@ -2074,10 +2074,19 @@ names.
 >     `TokenIsAlreadyActivated` without putting it back, so the platform can
 >     then be removed by an unforced `disable_coin` while its NFT chain is
 >     active.
-> 11. *Not yet built.* The `reactivation_registered_token` setting of D43.1F.1
->     and its `"keep"` value (the default behavior of item 8 is the only one in
->     effect), and ending the background work of a removed coin (R43.1E.5
->     items 2 and 4).
+> 11. *Not yet built.* Ending the background work of a removed coin
+>     (R43.1E.5 items 2 and 4).
+> 12. *The `reactivation_registered_token` setting (D43.1F.1).* The node reads
+>     the top-level startup-configuration member `reactivation_registered_token`
+>     when it starts: `"refuse"` (also when the member is absent) or `"keep"`;
+>     any other value, including a value that is not a string, stops the node
+>     with an error that names the member and the two values. The policy
+>     argument of the check in item 8 is the setting's value. Under `"refuse"`
+>     item 8 applies. Under `"keep"` any registered requested token is kept
+>     silently, whatever platform it was registered for, and joins the
+>     platform's dependent set and token list, case c' included; a token whose
+>     configuration names another platform is still refused with
+>     `PlatformCoinMismatch` (case c), and cases d and e are unchanged.
 
 **D43.1F.1** *(Open, 2026-11-18.)* **A requested token that is already
 registered.** Options: (a) reproduce the reference: keep the registered

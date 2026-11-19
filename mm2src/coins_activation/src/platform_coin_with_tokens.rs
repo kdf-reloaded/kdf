@@ -474,9 +474,11 @@ where
     ))
 }
 
-/// The policy for a requested token that is already registered (CRD ch.43 R43.1F.4, D43.1F.1). The one place a
-/// node setting would select it.
-fn registered_token_policy(_ctx: &MmArc) -> RegisteredTokenPolicy { RegisteredTokenPolicy::DEFAULT }
+/// The policy for a requested token that is already registered (CRD ch.43 R43.1F.4, D43.1F.1): the
+/// `reactivation_registered_token` member of the startup configuration, which the node start has validated.
+fn registered_token_policy(ctx: &MmArc) -> RegisteredTokenPolicy {
+    RegisteredTokenPolicy::from_conf(&ctx.conf).unwrap_or(RegisteredTokenPolicy::DEFAULT)
+}
 
 /// Refuses a requested token that is registered for another platform, before anything is built (CRD ch.43
 /// R43.1F.4); a registered token of this platform is kept and joins it again. Runs with the activation locks held,
@@ -634,18 +636,6 @@ where
             .mm_err(Into::into)?;
         log::info!("{} current block {}", ticker, activation_result.current_block());
 
-        // A re-activation starts no history collector (CRD ch.43 D43.1F.5 (a)); the passive platform keeps the
-        // one it had.
-        #[cfg(not(target_arch = "wasm32"))]
-        if !reactivation && request.tx_history() && platform_coin.history_supported() {
-            let abort_handler = platform_coin.start_history_background_fetching(
-                ctx.clone(),
-                ctx.metrics.clone(),
-                SqliteTxHistoryStorage(ctx.sqlite_connection.as_option().unwrap().clone()),
-                activation_result.get_platform_balance(),
-            );
-            ctx.abort_handlers.lock().unwrap().push(abort_handler);
-        }
         Ok::<_, MmError<EnablePlatformCoinWithTokensError>>(activation_result)
     }
     .await;
@@ -683,7 +673,41 @@ where
     }
     Platform::on_platform_registered(&ctx, ticker, request);
 
+    // The history collector starts after the registry accepted the platform, so a failure before the registration
+    // leaves no loop behind and the loop's first registration check finds the platform (CRD ch.55 D55.8). A
+    // re-activation starts none; the passive platform keeps the one it had (CRD ch.43 D43.1F.5 (a)).
+    #[cfg(not(target_arch = "wasm32"))]
+    if !reactivation && request.tx_history() {
+        start_history_collector::<Platform>(&ctx, ticker, &activation_result).await;
+    }
+
     Ok(activation_result)
+}
+
+/// Starts the transaction-history collector of the platform that has just been registered (CRD ch.55 D55.8).
+#[cfg(not(target_arch = "wasm32"))]
+async fn start_history_collector<Platform>(ctx: &MmArc, ticker: &str, activation_result: &Platform::ActivationResult)
+where
+    Platform: PlatformWithTokensActivationOps,
+{
+    let registered = match lp_coinfind_registered(ctx, ticker).await {
+        Ok(Some(coin)) => Platform::try_from_mm_coin(coin),
+        _ => None,
+    };
+    let Some(platform_coin) = registered else {
+        log::warn!("{ticker}: the registered platform was not found, no history collector was started");
+        return;
+    };
+    if !platform_coin.history_supported() {
+        return;
+    }
+    let abort_handler = platform_coin.start_history_background_fetching(
+        ctx.clone(),
+        ctx.metrics.clone(),
+        SqliteTxHistoryStorage(ctx.sqlite_connection.as_option().unwrap().clone()),
+        activation_result.get_platform_balance(),
+    );
+    ctx.abort_handlers.lock().unwrap().push(abort_handler);
 }
 
 /// Removes the tokens a failed activation call added to the token record of the platform instance.

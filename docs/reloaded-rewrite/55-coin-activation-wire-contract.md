@@ -1471,6 +1471,14 @@ passive. Whether a re-activation starts a collector is chapter 43 R43.1F.3
 and D43.1F.5. The note adds no reference content: the consequence it draws
 for this repository's loop follows from R43.1F.10 item 2.
 
+*Reloaded status note (2026-11-20), history start.* The history collector of a
+first activation with `tx_history` now starts after the registry has accepted
+the platform, so the loop's first registration check finds it and a failure
+before the registration leaves no loop behind. A re-activation starts none
+(chapter 43 D43.1F.5 (a)). The per-pass check counts a passive platform as
+registered, as the note above requires. The note states this repository's
+own behavior and adds no reference content.
+
 ## 55.14 Baseline Verifications
 
 **V55.1** The pinned baseline (Chapter 02) contains the task framework with

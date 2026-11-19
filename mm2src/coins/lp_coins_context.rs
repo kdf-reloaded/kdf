@@ -278,12 +278,26 @@ pub enum RegisteredTokenPolicy {
     /// A registered token that is a dependent of the platform, or whose instance belongs to it, is kept; a registered
     /// token of another platform is refused.
     Refuse,
-    /// The registered instance is kept whatever it is. Nothing selects it yet.
+    /// The registered instance is kept whatever it is (the reference behavior of R43.1F.4).
     Keep,
 }
 impl RegisteredTokenPolicy {
-    /// The policy a node uses.
+    /// The policy a node uses when `reactivation_registered_token` is absent.
     pub const DEFAULT: RegisteredTokenPolicy = RegisteredTokenPolicy::Refuse;
+
+    /// Reads the top-level `reactivation_registered_token` member of the startup configuration (CRD ch.43
+    /// D43.1F.1): `"refuse"` or `"keep"`; an absent member selects [`Self::DEFAULT`]. Any other value is an error
+    /// that names the member and the two values.
+    pub fn from_conf(conf: &Json) -> Result<RegisteredTokenPolicy, String> {
+        match conf.get("reactivation_registered_token") {
+            None => Ok(Self::DEFAULT),
+            Some(Json::String(value)) if value == "refuse" => Ok(RegisteredTokenPolicy::Refuse),
+            Some(Json::String(value)) if value == "keep" => Ok(RegisteredTokenPolicy::Keep),
+            Some(other) => Err(format!(
+                "Invalid `reactivation_registered_token` in the configuration: {other}; it must be \"refuse\" or \"keep\""
+            )),
+        }
+    }
 }
 impl CoinsContext {
     /// The registered reader of the unfinished swaps, if the swap layer has registered one.
