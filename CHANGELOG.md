@@ -237,10 +237,12 @@ the previous version used. The safe way:
   `from` for TRX and TRC20 and sign with the key of that path, and `show_priv_key` answers the key of the activated
   address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, which Reloaded's EVM
   ERC-20 coins do not allow. A TRON coin on a single key now refuses `from` with `UnexpectedFromAddress`, as an EVM coin
-  does; it was ignored before. The legacy `enable` method keeps the node's internal key under a global-HD login, as the EVM and UTXO
-  legacy routes do in Reloaded, so its TRON address differs from the one the mmrpc 2.0 methods give for the same seed.
+  does; it was ignored before. The legacy `enable` method keeps the node's internal key under a global-HD login, as the
+  EVM and UTXO legacy routes do in Reloaded, so its TRON address differs from the one the mmrpc 2.0 methods give for the
+  same seed.
   **TRON stays switched off in this build**, so every route still answers "TRON support is not available in this
-  build" and none of this can be used yet. Detail: CRD ch.21 R-A2, R21.10B.4, R21.10B.5, R21.10B.8, T21.10B.8.
+  build" and none of this can be used yet. Detail: PR #428; CRD ch.21 R-A2, R21.10B.4, R21.10B.5, R21.10B.8,
+  T21.10B.8.
 - **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
   `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
   address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
