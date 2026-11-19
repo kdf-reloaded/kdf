@@ -26,18 +26,14 @@ or undo, and every change that needs a step from you.
   - *Going back to an older build:* stop the node, copy the `.pre-upgrade.<ms>.bak` file over
     `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal` and `<TICKER>_RELOADED_WALLET.db-shm` if
     they exist, and start the older build. Anything the wallet recorded after the upgrade is not in the backup; the
-    older build scans it again. Keep the backup until you are sure you stay on this version
+    older build scans it again. A wallet of another key (`<TICKER>_RELOADED_WALLET.<fingerprint>.db`, made by a
+    development build) has its own backup named after that file and is restored the same way. Keep the backup until
+    you are sure you stay on this version
     (`shielded_db_upgrade_backups` in `MM2.json` sets how many backups the node keeps; the default is 1).
   - *Before you upgrade:* make your own copy of the wallet database file and of the seed or passphrase as for any
     upgrade; the steps under "Coins that are no longer visible after an upgrade" below apply if a coin is no longer
     shown afterwards.
   Detail: PR #411; CRD ch.39 R39.8.0ba, R39.8.0bc and the status note of 2026-11-18; RELOADED_VS_GLEEC.md.
-- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
-  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
-  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
-  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
-  servers now report at another height shows that height and its block's time.
-  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
   coins, EVM coins and their tokens, BCH with its SLP tokens, Sia, Lightning and shielded coins such as ARRR.** Until
   now these families ignored the value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed
@@ -85,6 +81,12 @@ or undo, and every change that needs a step from you.
   - *What you see:* URLs with query strings, memos, error texts and labels in answers arrive with their plain
     characters.
   - Detail: PR #421; CRD ch.55 status note of 2026-11-18.
+- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
+  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
+  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
+  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
+  servers now report at another height shows that height and its block's time.
+  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 
 #### Coins that are no longer visible after an upgrade
 
