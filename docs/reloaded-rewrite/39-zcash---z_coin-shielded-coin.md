@@ -708,6 +708,12 @@ script-mismatch outcome of R39.5.11(d)) and vice versa. Either R39.6.4 §2 is ex
 HD-derive the transparent key as the reference does, or the divergence is recorded as a
 deliberate Reloaded exception in §39.0 and in the operator-facing compatibility document.
 
+> **Status note (2026-11-18, Reloaded-original).** The transparent key of D39.5.a is the HD key for an
+> absent `priv_key_policy` and for `ContextPrivKey`; with `IguanaPrivKey` under a global-HD login it is
+> the node's internal key (R39.8.0bd). The base key of R39.5.9, and with it the HTLC key of every swap
+> started after the switch, follows. A swap keeps the key it was started with (R39.5.11), which is why
+> R39.8.0bd refuses an activation that would leave an unfinished swap unable to use it.
+
 D39.5.b **A dedicated build error for the transparent key under HD** *(after the beta;
 cosmetic; 2026-10-29).* Since D39.5.a, a failure to derive the shielded coin's transparent
 key under the HD-wallet policy (the crypto context unavailable, or the coins-file
@@ -1414,6 +1420,16 @@ mainnet constants.
 > - **ZOMBIE fixtures.** Test fixtures updated to carry full `protocol_data` with
 >   Zcash-mainnet parameters; bare `{"type":"ZHTLC"}` is now non-conformant per
 >   R39.1.2.
+
+> **Status note (2026-11-18, Reloaded-original).** The activation request gains `priv_key_policy`
+> (R39.8.0bd), in the shape the other coin families use. Under a global-HD login the HD-derivation and
+> transparent-key bullets above describe the absent value and `ContextPrivKey`; with `IguanaPrivKey`
+> both the shielded key and the transparent key are the node's internal key
+> (`mm2_internal_privkey_secret`): the shielded spending key is the ZIP32 master of that secret, as under a
+> single-key login, `account` has no effect, and `z_derivation_path` and `derivation_path` are not
+> consulted. Under a single-key login every value selects the single key, as before. A hardware wallet
+> value is refused and an unknown value fails the request. The reference's behavior for this member is not
+> recorded in this chapter, so the note claims no parity. The cleared sentences above are unchanged.
 
 ### 39.6.5 Pirate1 withdrawal destination (v0.4.0)
 
@@ -3038,6 +3054,80 @@ other `.bak` kinds are untouched; the key is read as specified; (e) a wallet
 database that is already current is opened without a backup and without asking
 for free space; (f) the tests of R39.8.0ba (T39.8.0f) stay green, their backup
 check being the content check described in the status note above.
+
+R39.8.0bd **Key policy under a global-HD login, and one wallet database per key.**
+*(Reloaded-original.)*
+
+1. **Request member.** The shielded activation request accepts `priv_key_policy` in the shape of the
+   other coin families: a bare name or `{"type": name}`. Absent or `ContextPrivKey` selects the key the
+   login selects. Under a global-HD login `IguanaPrivKey` selects the node's internal key for the
+   shielded key (the ZIP32 master of that secret, as under a single-key login; `account` has no effect)
+   and for the transparent key (R39.6.4 status note of 2026-11-18). Under a single-key login every value
+   selects the same key as before. A hardware wallet value is refused with the unsupported-key-policy
+   activation error before anything is built; an unknown value fails the request. The method that selects
+   the keys receives the policy, and so does the live probe that calls it.
+2. **The login's default key.** The default key is the single key under a single-key login, and under a
+   global-HD login the HD derivation of `account` 0. `IguanaPrivKey` under a global-HD login and any other
+   HD account are not the default key.
+3. **Wallet files.** The three files `<TICKER>_RELOADED_WALLET.db`, `<TICKER>_RELOADED_COMPACT_BLOCKS.db`
+   and `<TICKER>_RELOADED_TX_ADDRESSES.db` belong to the key whose account the wallet file holds, and
+   nothing is renamed. At activation: (a) if `<TICKER>_RELOADED_WALLET.db` holds this key's account, it is
+   used; (b) if it is absent, empty or holds no account, it is used and created only when the key is the
+   default key; (c) in every other case the key uses its own files, the same three names with
+   `.<fingerprint>` before `.db`, where the fingerprint is the first 8 bytes, in 16 lowercase hex
+   characters, of the SHA-256 of the Bech32 encoding of the key's Sapling extended full viewing key (a
+   hash; the viewing key is not in the name). They are created on first use. Switching the policy or the
+   account therefore opens the other wallet instead of failing, and switching back reopens the first one
+   with its scan state; an older build still finds `<TICKER>_RELOADED_WALLET.db` with the key it holds.
+   The default wallet file is brought to the current schema, with the backup of R39.8.0bc, whichever key
+   is activated, and each per-key file follows the same rules as it is opened. The refusal "belongs to a
+   different viewing key" remains for a selected file that holds another key's account; the selection
+   above makes it unreachable in the normal flow.
+4. **What the user sees.** One shielded coin instance per ticker is active at a time. The shielded
+   balance and history are per account: `get_my_address`, `my_balance` and `z_coin_tx_history` report the
+   active key's wallet only, and amounts a swap step pays or receives appear in the account that was
+   active when that step ran. Activating that account shows them.
+5. **Swaps started with another key.** At activation of a shielded coin, the node reads the saved swaps
+   that are not finished and have a leg in this coin. For each that recorded its HTLC public key for this
+   coin and saved no private key, the HTLC key is derived again from the key being activated, exactly as
+   the resume check of R39.5.11 does; a saved private key exempts a swap only when it is the recorded key, as the resume treats it, and any other saved key counts as none. The saved swaps are read through a reader that the swap layer
+   registers at start, so the check sees swaps that are waiting for their coin as well as running ones. It runs
+   before any wallet file is opened, so a refusal opens and creates none. If the saved swaps cannot be
+   read, the activation is refused with a typed error that gives the reason. If any key differs, the activation
+   is refused with a typed error that says: what is blocked (activation of the coin with this key); why (these swaps were started with another
+   key, and with this key they could not be completed or refunded); the swap UUIDs; and what to do
+   (activate the coin with the key they were started with, let them finish or refund, then switch). A
+   change of the HD `account` alone does not change the HTLC key (it does not depend on `account`) and is
+   allowed.
+6. **Account change with a swap step not yet paid.** The already-sent lookup of R39.11.26 reads every
+   wallet database of the ticker (status note there). If any of those databases cannot be opened or read
+   (locked, being migrated, corrupt), an activation is refused while an unfinished swap of this coin has
+   not recorded its own payment or fee as sent: for a maker, the payment in the coin it pays; for a taker, the
+   fee and the payment in the coin it pays; a swap is not asked for anything in the coin it only receives.
+   The check runs together with item 5, before the files of the activation are chosen, so the file the
+   activation would use is among those read; it does not ask whether the account differs from the one a
+   swap's earlier step used, because no record says which that was. The typed error names the database that
+   cannot be read, the swap UUIDs and what to do (make the database readable, or activate the coin with the
+   key the swap was started with until the step has run). With every database readable, or with no such
+   swap, the activation proceeds.
+
+T39.8.0k *Key policy and per-key wallet files (R39.8.0bd).* Unit tests shall prove: the request member
+parses as a bare name and as the tagged form, rejects an unknown value and leaves an absent value absent;
+under a global-HD login `IguanaPrivKey` selects the internal key for both the shielded and the transparent
+key, independent of `account`, while the absent value keeps the HD derivation; under a single-key login
+every value selects the iguana key and a hardware value is refused; the default key is named as item 2; the
+default key uses the default files; a non-default key with no wallet uses the per-key files and creates
+no default file; switching back and forth reopens each wallet without creating a file; a default file that
+holds a key keeps it when that key is no longer the default key, and the login's default key then gets its
+own files; a previous-generation default file is backed up when another key is activated; the fingerprint
+is 16 lowercase hex characters and differs per key; the send-record lookup returns records from the other
+wallet databases, skips a sibling that cannot be read and fails on an unreadable active database; only the
+two file-name shapes count as wallets of a ticker. The refusals of items 5 and 6 shall be tested with a
+scripted source of the unfinished swaps: a mismatching saved HTLC key refuses with the listed UUIDs; a
+matching one, a swap with a saved private key, a swap of another coin and a finished swap allow; an
+account change allows; an unreadable sibling database with an unpaid unfinished swap refuses, and with every
+database readable, allows; a payment recorded in another account's database answers "sent" for the
+restarted swap, so no second payment is made.
 
 R39.8.0y The public modern candidates form two coherent, non-interchangeable
 dependency generations as of the reference date:
@@ -7525,6 +7615,16 @@ wallet's own payment can carry it. A mined record is trusted as the wallet
 database records it; a reorganization that the database's rewind handles clears
 its mined height.
 
+> **Status note (2026-11-18, Reloaded-original).** The send record of R39.11.26 is read from every wallet
+> database of the ticker in the login's database directory, not only the active one: the default file and
+> every per-key file of R39.8.0bd, the active one first. A recorded send that counts (the rule above) in
+> any of them answers "sent", so a swap step whose payment was recorded while another account or key was
+> active is not paid a second time. A file other than the active one that cannot be read is skipped with a
+> log line; an unreadable active file keeps the behavior above. The refusal of R39.8.0bd item 6 covers the
+> case in which that could matter. A per-key file that is not active is not scanned, so the mined heights
+> it holds are not rewound when the chain reorganizes; an unmined record in it still falls back to the
+> servers after its expiry (the rule above), so no second payment results.
+
 R39.11.27 **A fresh swap skips the already-sent question for a shielded coin's own
 payment.** *(binding; Reloaded-original, maintainer Decision AK of 2026-10-28;
 a divergence from R39.11.18's parity contract.)* When the paying coin is a shielded
@@ -8912,6 +9012,9 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   note after R39.8.0ba are Reloaded-original, clean side, written from this repository's
   own code and the public SQLite documentation of `VACUUM INTO`; no forbidden-class input,
   chapter 01 R38 not engaged.
+- *Clean-context addition (2026-11-18), §39.8.0.3:* R39.8.0bd, T39.8.0k and the status notes after R39.6.4,
+  D39.5.a and R39.11.26 are Reloaded-original, clean side, written from this repository's own code; no
+  forbidden-class input, chapter 01 R38 not engaged.
 - *Scoped addition (2026-11-18, Spec Reader round 0.5.0-14) -- §39.11.4W
   (R39.11.4W.1 -- R39.11.4W.7, the consequence note, the compatibility note,
   the not-established paragraph and T39.11.4W.1 -- T39.11.4W.6), the status

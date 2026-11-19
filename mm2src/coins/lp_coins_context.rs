@@ -187,6 +187,9 @@ pub struct CoinsContext {
     /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
     activation_locks: ActivationLocks,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
+    /// The swap layer's reader of the saved swaps that are not finished, registered at start; a shielded
+    /// coin's activation checks the key against it (CRD ch.39 R39.8.0bd).
+    unfinished_swaps_view: parking_lot::Mutex<Option<Arc<dyn crate::z_coin::UnfinishedSwapsView>>>,
     pub(crate) withdraw_task_manager: WithdrawTaskManagerShared,
     pub(crate) create_account_manager: CreateAccountTaskManagerShared,
     pub(crate) scan_addresses_manager: ScanAddressesTaskManagerShared,
@@ -209,6 +212,18 @@ pub struct PlatformIsAlreadyActivatedErr {
     pub ticker: String,
 }
 impl CoinsContext {
+    /// The registered reader of the unfinished swaps, if the swap layer has registered one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unfinished_swaps_view(&self) -> Option<Arc<dyn crate::z_coin::UnfinishedSwapsView>> {
+        self.unfinished_swaps_view.lock().clone()
+    }
+
+    pub(crate) fn has_unfinished_swaps_view(&self) -> bool { self.unfinished_swaps_view.lock().is_some() }
+
+    pub(crate) fn set_unfinished_swaps_view(&self, view: Arc<dyn crate::z_coin::UnfinishedSwapsView>) {
+        *self.unfinished_swaps_view.lock() = Some(view);
+    }
+
     /// Obtains a reference to this crate context, creating it if necessary.
     pub fn from_ctx(ctx: &MmArc) -> Result<Arc<CoinsContext>, String> {
         Ok(try_s!(from_ctx(&ctx.coins_ctx, move || {
@@ -218,6 +233,7 @@ impl CoinsContext {
                 coins: AsyncMutex::new(CoinRegistry::default()),
                 activation_locks: ActivationLocks::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
+                unfinished_swaps_view: parking_lot::Mutex::new(None),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
                 create_account_manager: CreateAccountTaskManager::new_shared(),
                 scan_addresses_manager: ScanAddressesTaskManager::new_shared(),

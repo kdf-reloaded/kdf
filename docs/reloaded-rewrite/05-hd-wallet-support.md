@@ -2492,3 +2492,12 @@ surface.
   any network access, with the task-level coin-creation error of the
   unsupported key policy, on the task and the legacy routes; it never activates
   a software-key coin.
+- *Status note added 2026-11-18 (under the key-policy rows of the activation request).* Reloaded-original,
+  clean side: it records this repository's behavior of the shielded (ZHTLC) activation request
+  `priv_key_policy`; no forbidden-class input, chapter 01 R38 not engaged. The reference's behavior for this
+  member is not recorded in this chapter, so the note claims no parity. Cleared sentences above are
+  unchanged. A shielded coin now reads `priv_key_policy` (the same spellings as the UTXO request). Under a
+  global-HD login `IguanaPrivKey` selects the node's internal key for both the shielded key (the ZIP32 master
+  of that secret) and the transparent key; an absent value and `ContextPrivKey` keep the HD derivation;
+  under a single-key login every value selects the single key. A hardware value is refused, an unknown
+  value fails the request. The wallet database of each key is kept apart (chapter 39 R39.8.0bd).

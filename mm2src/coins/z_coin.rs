@@ -1,5 +1,6 @@
 use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, CapabilityWordStatus,
                                       CAPABILITY_TX_V6};
+use crate::lp_coins_context::PrivKeyActivationPolicy;
 use crate::node_url::lightwalletd_endpoint_label;
 use crate::rpc_command::get_my_address::PathToAddress;
 #[cfg(not(target_arch = "wasm32"))]
@@ -94,6 +95,10 @@ use zcash_proofs::prover::LocalTxProver;
 #[cfg(not(target_arch = "wasm32"))] mod z_htlc;
 mod z_htlc_key;
 pub use z_htlc_key::derive_swap_htlc_key_pair;
+mod z_key_switch;
+#[cfg(not(target_arch = "wasm32"))]
+use z_key_switch::check_activation_against_unfinished_swaps;
+pub use z_key_switch::{UnfinishedSwapLeg, UnfinishedSwapsView};
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_htlc_live_probe;
 #[cfg(not(target_arch = "wasm32"))]
@@ -2034,6 +2039,7 @@ mod light_backend_tests {
             PathBuf::from("./for_tests"),
             None,
             ExtendedSpendingKey::master(&[7; 32]),
+            true,
             arrr_protocol_info(),
             backend,
         )
@@ -2182,12 +2188,17 @@ pub async fn z_coin_from_conf_and_params(
     params: &UtxoActivationParams,
     secp_priv_key: &[u8],
     account: u32,
+    priv_key_policy: PrivKeyActivationPolicy,
     #[cfg(not(target_arch = "wasm32"))] zcash_params_path: Option<PathBuf>,
     protocol_info: ZcoinProtocolInfo,
     backend: ZcoinBackend,
 ) -> Result<ZCoin, MmError<ZCoinBuildError>> {
-    let z_key = shielded_spending_key_for_policy(ctx, secp_priv_key, account, &protocol_info)?;
-    let transparent_secret = transparent_secret_for_policy(ctx, conf, secp_priv_key)?;
+    let z_key = shielded_spending_key_for_policy(ctx, secp_priv_key, account, priv_key_policy, &protocol_info)?;
+    let transparent_secret = transparent_secret_for_policy(ctx, conf, secp_priv_key, priv_key_policy)?;
+    let is_default_key = is_default_shielded_key(ctx, account, priv_key_policy)?;
+    // Before any wallet file is opened: a refusal leaves every file as it was (R39.8.0bd items 5 and 6).
+    #[cfg(not(target_arch = "wasm32"))]
+    check_activation_against_unfinished_swaps(ctx, ticker, &transparent_secret, &ctx.dbdir()).await?;
     z_coin_from_conf_and_params_with_z_key(
         ctx,
         ticker,
@@ -2199,10 +2210,41 @@ pub async fn z_coin_from_conf_and_params(
         #[cfg(not(target_arch = "wasm32"))]
         zcash_params_path,
         z_key,
+        is_default_key,
         protocol_info,
         backend,
     )
     .await
+}
+
+/// Whether the shielded key an activation selects is the login's default key (CRD ch.39 R39.8.0bd): the
+/// iguana key under a single-key login, and under a global-HD login the HD derivation of account 0.
+/// `IguanaPrivKey` under a global-HD login and any other HD account are not the default key. The default
+/// key's wallet database keeps the name it has always had; any other key's wallet database is named by
+/// the fingerprint of its viewing key.
+///
+/// # Errors
+/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, or for a
+/// hardware wallet policy, which a shielded coin does not support.
+pub(crate) fn is_default_shielded_key(
+    ctx: &MmArc,
+    account: u32,
+    priv_key_policy: PrivKeyActivationPolicy,
+) -> Result<bool, MmError<ZCoinBuildError>> {
+    if matches!(priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+        return MmError::err(hardware_policy_error());
+    }
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
+    Ok(match crypto_ctx.key_pair_policy() {
+        KeyPairPolicy::Iguana => true,
+        KeyPairPolicy::GlobalHDAccount(_) => {
+            matches!(priv_key_policy, PrivKeyActivationPolicy::ContextPrivKey) && account == 0
+        },
+    })
+}
+
+fn hardware_policy_error() -> ZCoinBuildError {
+    ZCoinBuildError::HdDerivationError("a shielded coin cannot be activated with a hardware wallet".to_owned())
 }
 
 /// Selects the coin's transparent secp256k1 secret according to the active key policy
@@ -2211,22 +2253,32 @@ pub async fn z_coin_from_conf_and_params(
 /// - **Iguana / legacy passphrase:** the coin's iguana secret, as before.
 /// - **HD (BIP39) wallet:** the key the UTXO builder activates for a UTXO coin's default
 ///   address, `m/<derivation_path>/0'/0/0` of the coins-file `derivation_path`; the
-///   activation request cannot change it (its `account` selects only the Sapling account).
+///   activation request's `account` selects only the Sapling account.
+/// - **HD wallet with `priv_key_policy` `IguanaPrivKey`:** the node's internal key
+///   (`mm2_internal_privkey_secret`), as under a single-key login (R39.6.4, status note of 2026-11-17).
 ///
 /// This secret is the coin's transparent key for every transparent use, and so the base key of
 /// the per-swap HTLC key (R39.5.9).
 ///
 /// # Errors
-/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, or
-/// when the HD policy is active and the coin entry has no usable `derivation_path`.
+/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, when the
+/// policy is a hardware wallet, or when the HD derivation is selected and the coin entry has no usable
+/// `derivation_path`.
 pub(crate) fn transparent_secret_for_policy(
     ctx: &MmArc,
     conf: &Json,
     secp_priv_key: &[u8],
+    priv_key_policy: PrivKeyActivationPolicy,
 ) -> Result<Vec<u8>, MmError<ZCoinBuildError>> {
+    if matches!(priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+        return MmError::err(hardware_policy_error());
+    }
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
     match crypto_ctx.key_pair_policy() {
         KeyPairPolicy::Iguana => Ok(secp_priv_key.to_vec()),
+        KeyPairPolicy::GlobalHDAccount(_) if matches!(priv_key_policy, PrivKeyActivationPolicy::IguanaPrivKey) => {
+            Ok(crypto_ctx.mm2_internal_privkey_secret().as_slice().to_vec())
+        },
         KeyPairPolicy::GlobalHDAccount(hd_ctx) => {
             if conf["derivation_path"].is_null() {
                 return MmError::err(ZCoinBuildError::HdDerivationError(
@@ -2251,19 +2303,29 @@ pub(crate) fn transparent_secret_for_policy(
 ///   seed along the coin's `z_derivation_path` with the activation `account`
 ///   appended as a hardened child (`m/<z_derivation_path>/account'`). In this
 ///   policy `z_derivation_path` is required; its absence is an error.
+/// - **HD wallet with `priv_key_policy` `IguanaPrivKey`:** the ZIP32 master of the node's internal key
+///   (`mm2_internal_privkey_secret`), as under a single-key login; `account` has no effect.
 ///
 /// # Errors
 /// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is
-/// unavailable or the HD policy is active but `z_derivation_path` is absent.
-fn shielded_spending_key_for_policy(
+/// unavailable, the policy is a hardware wallet, or the HD derivation is selected but
+/// `z_derivation_path` is absent.
+pub(crate) fn shielded_spending_key_for_policy(
     ctx: &MmArc,
     secp_priv_key: &[u8],
     account: u32,
+    priv_key_policy: PrivKeyActivationPolicy,
     protocol_info: &ZcoinProtocolInfo,
 ) -> Result<ExtendedSpendingKey, MmError<ZCoinBuildError>> {
+    if matches!(priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+        return MmError::err(hardware_policy_error());
+    }
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
     match crypto_ctx.key_pair_policy() {
         KeyPairPolicy::Iguana => Ok(ExtendedSpendingKey::master(secp_priv_key)),
+        KeyPairPolicy::GlobalHDAccount(_) if matches!(priv_key_policy, PrivKeyActivationPolicy::IguanaPrivKey) => Ok(
+            ExtendedSpendingKey::master(crypto_ctx.mm2_internal_privkey_secret().as_slice()),
+        ),
         KeyPairPolicy::GlobalHDAccount(hd_ctx) => {
             let z_derivation_path = protocol_info.z_derivation_path.as_ref().or_mm_err(|| {
                 ZCoinBuildError::HdDerivationError(
@@ -2850,6 +2912,9 @@ pub struct ZCoinBuilder<'a> {
     #[cfg(not(target_arch = "wasm32"))]
     zcash_params_path: Option<PathBuf>,
     z_spending_key: ExtendedSpendingKey,
+    /// Whether `z_spending_key` is the login's default key (R39.8.0bd); decides which wallet database
+    /// files the coin uses.
+    is_default_key: bool,
     protocol_info: ZcoinProtocolInfo,
     backend: ZcoinBackend,
 }
@@ -2961,6 +3026,7 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
                 consensus_params.clone(),
                 &extfvk,
                 self.protocol_info.check_point_block.as_ref(),
+                self.is_default_key,
                 &ShieldedDbUpgradePolicy::from_node_conf(&self.ctx.conf),
             )?;
             let scanned_through = shielded_history
@@ -3090,6 +3156,7 @@ impl<'a> ZCoinBuilder<'a> {
         #[cfg(not(target_arch = "wasm32"))] db_dir_path: PathBuf,
         #[cfg(not(target_arch = "wasm32"))] zcash_params_path: Option<PathBuf>,
         z_spending_key: ExtendedSpendingKey,
+        is_default_key: bool,
         protocol_info: ZcoinProtocolInfo,
         backend: ZcoinBackend,
     ) -> ZCoinBuilder<'a> {
@@ -3104,6 +3171,7 @@ impl<'a> ZCoinBuilder<'a> {
             #[cfg(not(target_arch = "wasm32"))]
             zcash_params_path,
             z_spending_key,
+            is_default_key,
             protocol_info,
             backend,
         }
@@ -3119,6 +3187,7 @@ async fn z_coin_from_conf_and_params_with_z_key(
     #[cfg(not(target_arch = "wasm32"))] db_dir_path: PathBuf,
     #[cfg(not(target_arch = "wasm32"))] zcash_params_path: Option<PathBuf>,
     z_spending_key: ExtendedSpendingKey,
+    is_default_key: bool,
     protocol_info: ZcoinProtocolInfo,
     backend: ZcoinBackend,
 ) -> Result<ZCoin, MmError<ZCoinBuildError>> {
@@ -3133,6 +3202,7 @@ async fn z_coin_from_conf_and_params_with_z_key(
         #[cfg(not(target_arch = "wasm32"))]
         zcash_params_path,
         z_spending_key,
+        is_default_key,
         protocol_info,
         backend,
     );

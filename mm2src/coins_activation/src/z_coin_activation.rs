@@ -281,6 +281,14 @@ pub struct ZcoinActivationParams {
     /// Iguana policy. Defaults to `0`.
     #[serde(default)]
     pub account: Option<u32>,
+    /// The key policy of the activation, in the shape the other coin families use (a bare name or
+    /// `{"type": name}`). Under a global-HD login `IguanaPrivKey` selects the node's internal key, the same
+    /// one a single-key login uses, for both the shielded key (the ZIP32 master of that secret) and the
+    /// transparent key; the wallet of that key is kept apart from the HD one (CRD ch.39 R39.8.0bd). Absent or
+    /// `ContextPrivKey`: the key the login selects, as before. `Trezor` is refused; an unknown value fails
+    /// the request. Under a single-key login every value selects the same key.
+    #[serde(default)]
+    pub priv_key_policy: Option<PrivKeyActivationPolicy>,
     /// Optional Sapling parameter directory (R39.6.2 `zcash_params_path`). When
     /// present it overrides the platform-default parameter location. Native
     /// only; ignored where shielded proving is unavailable.
@@ -707,6 +715,12 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         if SHIELDED_WALLET_UNAVAILABLE {
             return MmError::err(shielded_unavailable_error(&ticker));
         }
+        let priv_key_policy = activation_request
+            .priv_key_policy
+            .unwrap_or(PrivKeyActivationPolicy::ContextPrivKey);
+        if matches!(priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+            return MmError::err(ZcoinInitError::HardwareWalletsAreNotSupportedYet { ticker });
+        }
         let backend = zcoin_backend(&ticker, &activation_request.mode)?;
         let utxo_params = UtxoActivationParams {
             // Not consulted: the RPC client of a shielded coin is chosen by `backend`, so no Electrum
@@ -743,6 +757,7 @@ impl InitStandaloneCoinActivationOps for ZCoin {
             &utxo_params,
             priv_key.as_slice(),
             activation_request.account.unwrap_or(0),
+            priv_key_policy,
             // The Sapling parameter directory is a native-build setting; it is ignored on WASM
             // (CRD ch.39 R39.10.4).
             #[cfg(not(target_arch = "wasm32"))]
@@ -1089,6 +1104,36 @@ mod tests {
                 "light_wallet_d_servers": ["https://lightd1.example:443"]
             }
         })
+    }
+
+    #[test]
+    fn the_key_policy_member_takes_the_shape_of_the_other_families() {
+        // CRD ch.39 R39.6.4 (status note of 2026-11-17), R39.8.0bd.
+        let policy = |value: Json| {
+            serde_json::from_value::<ZcoinActivationParams>(json!({ "priv_key_policy": value }))
+                .map(|p| p.priv_key_policy)
+        };
+        assert!(matches!(
+            policy(json!("IguanaPrivKey")).unwrap(),
+            Some(PrivKeyActivationPolicy::IguanaPrivKey)
+        ));
+        assert!(matches!(
+            policy(json!({ "type": "IguanaPrivKey" })).unwrap(),
+            Some(PrivKeyActivationPolicy::IguanaPrivKey)
+        ));
+        assert!(matches!(
+            policy(json!("ContextPrivKey")).unwrap(),
+            Some(PrivKeyActivationPolicy::ContextPrivKey)
+        ));
+        assert!(matches!(
+            policy(json!("Trezor")).unwrap(),
+            Some(PrivKeyActivationPolicy::Trezor)
+        ));
+        // An unknown value fails the request.
+        assert!(policy(json!("SomethingElse")).is_err());
+        // Absent: the key the login selects.
+        let absent: ZcoinActivationParams = serde_json::from_value(json!({})).unwrap();
+        assert!(absent.priv_key_policy.is_none());
     }
 
     #[test]

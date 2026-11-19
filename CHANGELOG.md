@@ -21,9 +21,10 @@ or undo, and every change that needs a step from you.
   servers now report at another height shows that height and its block's time.
   - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
-  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
-  value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
-  with tokens and Lightning the key derived from the passphrase. A request that asks for `IguanaPrivKey` now gets a
+  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia, Lightning and shielded coins such as ARRR.** Until
+  now these families ignored the value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed
+  single-address HD key, BCH with tokens and Lightning the key derived from the passphrase, and shielded coins the key
+  the HD login derives (at `z_derivation_path` and `account`). A request that asks for `IguanaPrivKey` now gets a
   different address or Lightning identity.
   - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
     those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
@@ -36,6 +37,13 @@ or undo, and every change that needs a step from you.
     `IguanaPrivKey`.
   - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
     where it used to be ignored.
+  - *Shielded coins (ARRR):* under an HD login, `IguanaPrivKey` now activates the coin with the internal key, for the
+    shielded address and the transparent key, and with a wallet database of its own; the HD wallet stays in its own
+    file with its scan state, and the two never mix. If your ARRR activation requests already contain `IguanaPrivKey`,
+    the address changes after this upgrade and the balance of the HD wallet is not shown. To keep the HD wallet, leave
+    `priv_key_policy` out or send `ContextPrivKey`. If coins are not visible after the upgrade, read "Coins that are
+    no longer visible after an upgrade" below and start the previous version again before you move or spend
+    anything. A hardware value fails the request, where it used to be ignored.
 - **ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "77190ad9"`** (the branch id is
   accepted with or without `0x`). Since the Zcash network upgrade NU7 the network refuses version-4 transactions. This
   release builds version-5 ZEC transactions when the ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every
@@ -122,6 +130,21 @@ the previous version used. The safe way:
   has a versioned form, except `recover_funds_of_swap` (waits for the swap architecture decisions),
   `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
   purpose, and the test-only `sim_panic`. Detail: PR #387; CRD ch.43 §43.1R.
+
+#### Shielded coins
+
+- **ARRR and the other shielded coins accept `priv_key_policy`, and each key gets a wallet of its own.**
+  Under an HD login, `IguanaPrivKey` activates the shielded coin with the node's single internal key; leaving
+  the member out keeps the HD key. The shielded balance and history are per key and per `account`: switching
+  the policy or the `account` opens the other wallet instead of failing, and switching back reopens the first
+  one with its scan state, without a rescan. The existing wallet file keeps the name it has and keeps the key
+  it already holds; another key's wallet is stored in files whose names carry a short fingerprint of that key.
+  Amounts a swap step pays or receives appear in the account that was active when that step ran; activate that
+  account to see them. The coin is refused with a message that names the swaps and says what to do, in two
+  cases: when swaps of that coin that are not finished were started with another key (activate with the key they
+  were started with, let them finish or refund, then switch), and when a wallet database of the coin cannot be
+  read while a swap still has to send its payment or fee. Changing `account` alone is allowed.
+  Detail: PR #414; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
 
 #### Solana coins
 
@@ -628,7 +651,8 @@ the previous version used. The safe way:
   done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
   the plan.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
-  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
+  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family;
+  shielded coins read `priv_key_policy` as well (H7 row note of 2026-11-18).
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
