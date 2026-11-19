@@ -1777,8 +1777,7 @@ upgrade are the reference for the fixed fields.
 > that is not in the assembler's output: the published builder's default expiry delta, which the
 > assembler replaces with the explicit value of R39.6.5m.
 
-### 39.6.6 Reference behavior: Sapling parameter provisioning and shielded coins in the browser
-build
+### 39.6.6 Reference behavior: Sapling parameter provisioning and shielded coins in the browser build
 
 > **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
 > measure 0.01 (attestation in §39.9).**
