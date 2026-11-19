@@ -90,6 +90,9 @@ impl PreflightDecision {
 /// proceed, from the provider's `account` record, the locally derived custody address `derived_custody` and the
 /// on-chain `custody_balance` of the token (§63.7).
 ///
+/// The account record's `accountAddress` is deliberately not compared with the user: the custody-address check
+/// (R2) is what binds the record to this user.
+///
 /// The checks run in this order: the custody identity; the token's enrollment; its precision; the submit
 /// permission; the funds tests. Only the funds tests read `custody_balance`.
 ///

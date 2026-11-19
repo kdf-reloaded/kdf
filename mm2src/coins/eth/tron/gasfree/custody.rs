@@ -7,7 +7,8 @@
 //! # Invariants
 //!
 //! - The derivation is a pure function of the network and the user address.
-//! - Only a match is remembered by [`ControllerChecks`]; a mismatch or a failed read is asked again next time.
+//! - Only a match is remembered by [`ControllerChecks`], and for 10 minutes only; a mismatch or a failed read
+//!   drops what was remembered and is asked again next time.
 
 use super::super::api::{TronApiClient, TronApiError};
 use super::super::balance::trc20_balance_units;
@@ -16,8 +17,9 @@ use super::failure::GasFreeError;
 use super::networks::{gasfree_network, INITIALIZE_SELECTOR};
 use super::{address_word, keccak};
 use common::log::warn;
+use common::now_ms;
 use ethereum_types::U256;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
 /// The prefix byte of TRON's `CREATE2` preimage, where Ethereum uses `0xff` (§63.5 step 5).
@@ -89,13 +91,19 @@ fn usize_word(value: usize) -> [u8; 32] {
     word
 }
 
-/// The (network, user) pairs whose derived custody address the controller has confirmed (R25).
+/// How long a confirmation by the controller stays valid, in milliseconds (R25): 10 minutes.
+pub(crate) const CONFIRMATION_VALIDITY_MS: u64 = 600_000;
+
+/// The (network, user) pairs whose derived custody address the controller has confirmed, each with the time of
+/// its last confirmation (R25).
 ///
 /// The gasless rail uses the one [`ControllerChecks::process_wide`] instance, which lives as long as the process:
-/// the check runs again after a restart.
+/// the check runs again after a restart, and whenever the last confirmation is older than
+/// [`CONFIRMATION_VALIDITY_MS`].
 pub(crate) struct ControllerChecks {
-    /// (EIP-712 chain id, 20-byte user address). Never held across an `.await`.
-    confirmed: Mutex<BTreeSet<(u64, [u8; 20])>>,
+    /// (EIP-712 chain id, 20-byte user address) to the time of the last confirmation, in milliseconds. Never
+    /// held across an `.await`.
+    confirmed: Mutex<BTreeMap<(u64, [u8; 20]), u64>>,
 }
 
 static PROCESS_WIDE_CHECKS: ControllerChecks = ControllerChecks::new();
@@ -103,7 +111,7 @@ static PROCESS_WIDE_CHECKS: ControllerChecks = ControllerChecks::new();
 impl ControllerChecks {
     pub(crate) const fn new() -> Self {
         ControllerChecks {
-            confirmed: Mutex::new(BTreeSet::new()),
+            confirmed: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -114,18 +122,28 @@ impl ControllerChecks {
         (gasfree_network(network).chain_id, user.to_evm_address().0)
     }
 
-    fn is_confirmed(&self, network: &Network, user: &TronAddress) -> bool {
-        self.confirmed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&Self::key(network, user))
+    /// Whether a confirmation of the pair exists that is at most [`CONFIRMATION_VALIDITY_MS`] old at `now_ms`.
+    /// A confirmation stamped later than `now_ms` (the clock was set back) does not count.
+    fn is_confirmed(&self, network: &Network, user: &TronAddress, now_ms: u64) -> bool {
+        let confirmed = self.confirmed.lock().unwrap_or_else(PoisonError::into_inner);
+        confirmed
+            .get(&Self::key(network, user))
+            .and_then(|confirmed_ms| now_ms.checked_sub(*confirmed_ms))
+            .is_some_and(|age_ms| age_ms <= CONFIRMATION_VALIDITY_MS)
     }
 
-    fn confirm(&self, network: &Network, user: &TronAddress) {
+    fn confirm(&self, network: &Network, user: &TronAddress, now_ms: u64) {
         self.confirmed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(Self::key(network, user));
+            .insert(Self::key(network, user), now_ms);
+    }
+
+    fn forget(&self, network: &Network, user: &TronAddress) {
+        self.confirmed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&Self::key(network, user));
     }
 }
 
@@ -169,36 +187,54 @@ pub(crate) async fn read_controller_word(
 }
 
 /// Derives the custody address of `user` on `network` and requires the controller contract to derive the same
-/// one (R25). A match is remembered in `checks`, so the controller is asked once per (network, user).
+/// one (R25). A match is remembered in `checks` for [`CONFIRMATION_VALIDITY_MS`], so the controller is asked at
+/// most once per (network, user) in that time.
 ///
 /// # Errors
 ///
 /// - [`GasFreeError::DerivationMismatch`] when the controller reports another address; one warning line is
-///   logged and nothing is remembered.
-/// - [`GasFreeError::Node`] when the read fails; nothing is remembered.
+///   logged and the pair is no longer remembered.
+/// - [`GasFreeError::Node`] when the read fails; the pair is no longer remembered.
 pub(crate) async fn check_against_controller(
     api: &TronApiClient,
     checks: &ControllerChecks,
     network: &Network,
     user: &TronAddress,
 ) -> Result<TronAddress, GasFreeError> {
+    check_against_controller_at(api, checks, network, user, now_ms()).await
+}
+
+/// [`check_against_controller`] at the time `now_ms`, in milliseconds of the clock the confirmations are stamped
+/// with.
+async fn check_against_controller_at(
+    api: &TronApiClient,
+    checks: &ControllerChecks,
+    network: &Network,
+    user: &TronAddress,
+    now_ms: u64,
+) -> Result<TronAddress, GasFreeError> {
     let derived = derive_custody(network, user);
-    if checks.is_confirmed(network, user) {
+    if checks.is_confirmed(network, user, now_ms) {
         return Ok(derived.address);
     }
-    let word = read_controller_word(api, network, GET_GASFREE_ADDRESS, &hex::encode(derived.salt))
-        .await
-        .map_err(GasFreeError::Node)?;
+    let word = match read_controller_word(api, network, GET_GASFREE_ADDRESS, &hex::encode(derived.salt)).await {
+        Ok(word) => word,
+        Err(error) => {
+            checks.forget(network, user);
+            return Err(GasFreeError::Node(error));
+        },
+    };
     // The address is the last 20 bytes of the word.
     let mut payload = [0u8; 20];
     payload.copy_from_slice(&word[12..]);
     let reported = TronAddress::from_evm_address(payload.into());
     if reported != derived.address {
+        checks.forget(network, user);
         let name = gasfree_network(network).name;
         warn!("{}", mismatch_warning(name, user, &derived.address, &reported));
         return Err(GasFreeError::DerivationMismatch { network: name });
     }
-    checks.confirm(network, user);
+    checks.confirm(network, user, now_ms);
     Ok(derived.address)
 }
 
@@ -304,8 +340,8 @@ mod controller_check_tests {
         assert_eq!(bodies[0]["parameter"], hex::encode(derived.salt).as_str());
 
         // The match holds for this network and user only.
-        assert!(!checks.is_confirmed(&Network::Mainnet, &user));
-        assert!(!checks.is_confirmed(&Network::Nile, &address(USERS[1].address)));
+        assert!(!checks.is_confirmed(&Network::Mainnet, &user, now_ms()));
+        assert!(!checks.is_confirmed(&Network::Nile, &address(USERS[1].address), now_ms()));
     }
 
     #[test]
@@ -324,7 +360,7 @@ mod controller_check_tests {
         assert_eq!(GaslessMember::Unavailable.http_status(), 503);
         let text = error.to_string();
         assert!(text.contains("nile") && text.contains("no longer derives the expected address"));
-        assert!(!checks.is_confirmed(&Network::Nile, &user));
+        assert!(!checks.is_confirmed(&Network::Nile, &user, now_ms()));
 
         // Nothing was remembered: the next call asks the controller again.
         assert!(block_on(check_against_controller(&api, &checks, &Network::Nile, &user)).is_err());
@@ -351,7 +387,7 @@ mod controller_check_tests {
             block_on(check_against_controller(&client(&down), &checks, &Network::Nile, &user)).expect_err("no read");
         assert!(matches!(error, GasFreeError::Node(_)));
         assert_eq!(error.rpc_arm(), RpcArm::Transport);
-        assert!(!checks.is_confirmed(&Network::Nile, &user));
+        assert!(!checks.is_confirmed(&Network::Nile, &user, now_ms()));
 
         // An answer that is not one 32-byte word is a failed read too.
         let short = StubNode::start(|_, _| Reply::ok(r#"{"result":{"result":true},"constant_result":["00ff"]}"#));
@@ -363,7 +399,119 @@ mod controller_check_tests {
         ))
         .expect_err("a short word");
         assert!(matches!(error, GasFreeError::Node(_)));
-        assert!(!checks.is_confirmed(&Network::Nile, &user));
+        assert!(!checks.is_confirmed(&Network::Nile, &user, now_ms()));
+    }
+
+    /// A stub controller whose answer a test can change, with the number of requests it got.
+    fn switchable_controller(first: TronAddress) -> (StubNode, std::sync::Arc<std::sync::Mutex<TronAddress>>) {
+        let reported = std::sync::Arc::new(std::sync::Mutex::new(first));
+        let answer = reported.clone();
+        let node = StubNode::start(move |_, _| {
+            let address = *answer.lock().unwrap_or_else(PoisonError::into_inner);
+            let word = hex::encode(address_word(&address));
+            Reply::ok(&format!(
+                r#"{{"result":{{"result":true}},"constant_result":["{word}"]}}"#
+            ))
+        });
+        (node, reported)
+    }
+
+    #[test]
+    fn a_confirmation_is_reused_for_ten_minutes_and_then_read_again() {
+        let user = address(USERS[3].address);
+        let derived = derive_custody(&Network::Nile, &user).address;
+        let (node, _reported) = switchable_controller(derived);
+        let (api, checks) = (client(&node), ControllerChecks::new());
+        let start_ms = 1_000_000;
+        let check_at = |now_ms: u64| {
+            block_on(check_against_controller_at(
+                &api,
+                &checks,
+                &Network::Nile,
+                &user,
+                now_ms,
+            ))
+        };
+
+        assert_eq!(check_at(start_ms).expect("a match"), derived);
+        assert_eq!(node.requests().len(), 1);
+        // Within the validity, its last millisecond included: no request.
+        for now_ms in [start_ms, start_ms + 1, start_ms + CONFIRMATION_VALIDITY_MS] {
+            assert_eq!(check_at(now_ms).expect("a remembered match"), derived);
+        }
+        assert_eq!(node.requests().len(), 1);
+        // Older than the validity: the controller is read again, and the match counts from that time.
+        let later_ms = start_ms + CONFIRMATION_VALIDITY_MS + 1;
+        assert_eq!(check_at(later_ms).expect("a match"), derived);
+        assert_eq!(node.requests().len(), 2);
+        assert_eq!(
+            check_at(later_ms + CONFIRMATION_VALIDITY_MS).expect("a remembered match"),
+            derived
+        );
+        assert_eq!(node.requests().len(), 2);
+        // A clock that was set back does not keep a confirmation alive.
+        assert_eq!(check_at(start_ms).expect("a match"), derived);
+        assert_eq!(node.requests().len(), 3);
+    }
+
+    #[test]
+    fn an_expired_confirmation_followed_by_a_mismatch_is_refused_and_dropped() {
+        let user = address(USERS[4].address);
+        let derived = derive_custody(&Network::Nile, &user).address;
+        let (node, reported) = switchable_controller(derived);
+        let (api, checks) = (client(&node), ControllerChecks::new());
+        let start_ms = 1_000_000;
+        let check_at = |now_ms: u64| {
+            block_on(check_against_controller_at(
+                &api,
+                &checks,
+                &Network::Nile,
+                &user,
+                now_ms,
+            ))
+        };
+
+        assert_eq!(check_at(start_ms).expect("a match"), derived);
+        // The controller changes its answer; the confirmation still holds until it expires.
+        *reported.lock().unwrap_or_else(PoisonError::into_inner) = derive_custody(&Network::Mainnet, &user).address;
+        assert_eq!(
+            check_at(start_ms + CONFIRMATION_VALIDITY_MS).expect("a remembered match"),
+            derived
+        );
+        assert_eq!(node.requests().len(), 1);
+
+        let expired_ms = start_ms + CONFIRMATION_VALIDITY_MS + 1;
+        let error = check_at(expired_ms).expect_err("a mismatch");
+        assert!(matches!(error, GasFreeError::DerivationMismatch { network: "nile" }));
+        assert_eq!(error.rpc_arm(), RpcArm::Gasless(GaslessMember::Unavailable));
+        assert_eq!(GaslessMember::Unavailable.http_status(), 503);
+        assert_eq!(node.requests().len(), 2);
+        // The entry is gone: no time makes the pair confirmed, and the next call asks again.
+        for now_ms in [start_ms, start_ms + 1, expired_ms] {
+            assert!(!checks.is_confirmed(&Network::Nile, &user, now_ms));
+        }
+        assert!(check_at(start_ms + 1).is_err());
+        assert_eq!(node.requests().len(), 3);
+    }
+
+    #[test]
+    fn a_failed_read_drops_an_expired_confirmation() {
+        let user = address(USERS[0].address);
+        let checks = ControllerChecks::new();
+        let start_ms = 1_000_000;
+        checks.confirm(&Network::Shasta, &user, start_ms);
+        assert!(checks.is_confirmed(&Network::Shasta, &user, start_ms + CONFIRMATION_VALIDITY_MS));
+        let down = StubNode::start(|_, _| Reply::status(500, "{}"));
+        let error = block_on(check_against_controller_at(
+            &client(&down),
+            &checks,
+            &Network::Shasta,
+            &user,
+            start_ms + CONFIRMATION_VALIDITY_MS + 1,
+        ))
+        .expect_err("no read");
+        assert!(matches!(error, GasFreeError::Node(_)));
+        assert!(!checks.is_confirmed(&Network::Shasta, &user, start_ms));
     }
 
     #[test]
