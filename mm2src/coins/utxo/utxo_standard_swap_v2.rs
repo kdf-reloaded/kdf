@@ -239,7 +239,7 @@ impl ParseCoinAssocTypes for UtxoStandardCoin {
 
     fn parse_pubkey(&self, pubkey: &[u8]) -> Result<Self::Pubkey, Self::PubkeyParseError> { Public::from_slice(pubkey) }
 
-    fn parse_tx(&self, tx: &[u8]) -> Result<Self::Tx, Self::TxParseError> { deserialize(tx) }
+    fn parse_tx(&self, tx: &[u8]) -> Result<Self::Tx, Self::TxParseError> { crate::utxo::utxo_common::read_utxo_tx(tx) }
 
     fn parse_preimage(&self, preimage: &[u8]) -> Result<Self::Preimage, Self::PreimageParseError> {
         let tx: UtxoTx = deserialize(preimage)?;

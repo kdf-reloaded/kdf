@@ -7,7 +7,7 @@ use crate::rpc_command::init_scan_for_new_addresses::{InitScanAddressesRpcOps, S
                                                       ScanAddressesResponse};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::qtum::{qtum_coin_with_priv_key, QtumCoin, QtumDelegationOps, QtumDelegationRequest};
-use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClient, ElectrumClientImpl,
+use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClient, ElectrumClientImpl, ElectrumOwner,
                                GetAddressInfoRes, ListSinceBlockRes, ListTransactionsItem, NativeClient,
                                NativeClientImpl, NativeUnspent, NetworkInfo, UtxoRpcClientOps, ValidateAddressRes,
                                VerboseBlock};
@@ -219,6 +219,7 @@ pub(crate) fn utxo_coin_fields_for_test(
         dust_amount: UTXO_DUST_AMOUNT,
         tx_fee: TxFee::FixedPerKb(1000),
         rpc_client,
+        electrum_owner: ElectrumOwner::new_unique(),
         priv_key_policy,
         hw_ctx: None,
         derivation_method,

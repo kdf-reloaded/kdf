@@ -9,7 +9,7 @@ use common::jsonrpc_client::process_transport_single_result;
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Mutex as StdMutex;
 
 // Response/request data types and the `electrum_script_hash` helper live in
@@ -500,17 +500,34 @@ pub struct ElectrumClientImpl {
     /// Concurrent-request map of the R38.6.3a unspent-list batch, keyed by the P2PKH and P2PK script hashes.
     list_unspent_with_p2pk_concurrent_map:
         ConcurrentRequestMap<(String, String), (Vec<ElectrumUnspent>, Vec<ElectrumUnspent>)>,
-    /// Script hashes this client has asked its servers to watch (R38.6.5).
+    /// Script hashes this client has asked its servers to watch (R38.6.5), each with the instances that remember it.
     ///
     /// Held so every subscription can be placed again over another connection
     /// (R38.6.4h): a subscription belongs to one TCP session, so a dropped
     /// connection silently loses it. Nothing may assume a subscription
-    /// survived.
-    watched_script_hashes: AsyncMutex<HashSet<String>>,
+    /// survived. A client shared by several coin instances (CRD ch.38 D38.6.4Q.1 status note) keeps a subscription
+    /// only while an instance remembers it (item 6). Never held across an await.
+    watched_script_hashes: StdMutex<HashMap<String, HashSet<ElectrumOwner>>>,
     /// Contract events this client has asked its servers to watch, as the three parameters of
-    /// `blockchain.contract.event.subscribe`: the address, the contract and the topic (CRD ch.38 D38.6.4Q.3 status
-    /// note). Held so each can be placed again once over a newly maintained connection, as the script hashes are.
-    watched_contract_events: AsyncMutex<Vec<[Json; 3]>>,
+    /// `blockchain.contract.event.subscribe`: the address, the contract and the topic, each with the instances that
+    /// remember it (CRD ch.38 D38.6.4Q.3 status note, D38.6.4Q.1 status note item 6). Held so each can be placed again
+    /// once over a newly maintained connection, as the script hashes are. Never held across an await.
+    watched_contract_events: StdMutex<Vec<([Json; 3], HashSet<ElectrumOwner>)>>,
+}
+
+/// The identity of a coin instance towards an Electrum client that several instances share (CRD ch.38 D38.6.4Q.1
+/// status note, item 6). It is allocated once for each built instance from a process-wide counter and never given
+/// again, so a token that is disabled and enabled again is a different owner from the one that left, and the
+/// subscriptions the first one placed are never taken for the second one's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ElectrumOwner(u64);
+
+impl ElectrumOwner {
+    /// A new identity.
+    pub fn new_unique() -> ElectrumOwner {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        ElectrumOwner(NEXT.fetch_add(1, AtomicOrdering::Relaxed))
+    }
 }
 
 impl fmt::Debug for PoolShared {
@@ -1083,13 +1100,24 @@ impl ElectrumClient {
     /// A failure here is not fatal. The caller keeps its existing polling, so
     /// the effect of a lost subscription is added latency rather than a stale
     /// balance.
-    pub async fn subscribe_scripthash(&self, script_hash: String) -> Result<(), String> {
+    pub async fn subscribe_scripthash(&self, owner: ElectrumOwner, script_hash: String) -> Result<(), String> {
+        // A subscription this instance placed already is not placed twice (D38.6.4Q.1 status note, item 6).
+        if self
+            .lock_watched_script_hashes()
+            .get(&script_hash)
+            .is_some_and(|owners| owners.contains(&owner))
+        {
+            return Ok(());
+        }
         let epoch = self.pool.session_epoch();
         let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
             .compat()
             .await;
         res.map_err(|e| ERRL!("{}", e))?;
-        self.watched_script_hashes.lock().await.insert(script_hash);
+        self.lock_watched_script_hashes()
+            .entry(script_hash)
+            .or_default()
+            .insert(owner);
         // The connection that carried the subscription may have ended before the hash was remembered
         // (a call that had to open a connection of its own releases it when it is done).
         if self.pool.session_epoch() != epoch {
@@ -1102,7 +1130,7 @@ impl ElectrumClient {
     /// logged and skipped so one unusable server cannot stall the rest; `false` tells that some
     /// subscription could not be placed and the attempt is to be repeated.
     pub async fn resubscribe_watched_scripthashes(&self) -> bool {
-        let hashes: Vec<String> = self.watched_script_hashes.lock().await.iter().cloned().collect();
+        let hashes: Vec<String> = self.lock_watched_script_hashes().keys().cloned().collect();
         let mut all_placed = true;
         for script_hash in hashes {
             let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
@@ -1116,26 +1144,75 @@ impl ElectrumClient {
         all_placed
     }
 
+    fn lock_watched_script_hashes(&self) -> std::sync::MutexGuard<'_, HashMap<String, HashSet<ElectrumOwner>>> {
+        self.watched_script_hashes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_watched_contract_events(&self) -> std::sync::MutexGuard<'_, Vec<([Json; 3], HashSet<ElectrumOwner>)>> {
+        self.watched_contract_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Removes `owner`, the instance that was disabled, from every subscription this client remembers, script-hash and
+    /// contract-event alike; a subscription that no other instance remembers is forgotten and is not placed again
+    /// after a reconnect (CRD ch.38 D38.6.4Q.1 status note, item 6). No request is sent to any server.
+    pub fn forget_owner(&self, owner: ElectrumOwner) {
+        self.lock_watched_script_hashes().retain(|_, owners| {
+            owners.remove(&owner);
+            !owners.is_empty()
+        });
+        self.lock_watched_contract_events().retain_mut(|(_, owners)| {
+            owners.remove(&owner);
+            !owners.is_empty()
+        });
+    }
+
+    /// The instances that remember the script-hash subscription of `script_hash`.
+    #[cfg(test)]
+    pub(crate) fn script_hash_owners(&self, script_hash: &str) -> Option<HashSet<ElectrumOwner>> {
+        self.lock_watched_script_hashes().get(script_hash).cloned()
+    }
+
+    /// The number of contract-event subscriptions this client remembers.
+    #[cfg(test)]
+    pub(crate) fn contract_event_subscriptions(&self) -> usize { self.lock_watched_contract_events().len() }
+
     /// Asks the servers to notify this client when the contract event (`address`, `contract`, `topic`) is logged, and
-    /// remembers the subscription (once the answer is in) so that it is placed again over a newly maintained
-    /// connection (CRD ch.38 D38.6.4Q.3 status note, item 1; R38.6.4h for the script-hash ones).
+    /// remembers the subscription for `owner` (once the answer is in) so that it is placed again over a newly
+    /// maintained connection (CRD ch.38 D38.6.4Q.3 status note, item 1; R38.6.4h for the script-hash ones).
     ///
-    /// A failure is the caller's to ignore: nothing here retries, and a subscription that failed is not remembered.
+    /// A failure is the caller's to ignore: nothing here retries, and a subscription that failed is not remembered. A
+    /// subscription that `owner` placed already is not placed twice: no request is sent, and the answer is
+    /// `Json::Null` (D38.6.4Q.1 status note, item 6).
     pub async fn subscribe_contract_event(
         &self,
+        owner: ElectrumOwner,
         address: Json,
         contract: Json,
         topic: String,
     ) -> Result<Json, JsonRpcError> {
+        let entry = [address, contract, Json::String(topic)];
+        if self
+            .lock_watched_contract_events()
+            .iter()
+            .any(|(known, owners)| known == &entry && owners.contains(&owner))
+        {
+            return Ok(Json::Null);
+        }
         let epoch = self.pool.session_epoch();
-        let answer: Json = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &address, &contract, &topic)
+        let answer: Json = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &entry[0], &entry[1], &entry[2])
             .compat()
             .await?;
         {
-            let mut watched = self.watched_contract_events.lock().await;
-            let entry = [address, contract, Json::String(topic)];
-            if !watched.contains(&entry) {
-                watched.push(entry);
+            let mut watched = self.lock_watched_contract_events();
+            match watched.iter_mut().find(|(known, _)| known == &entry) {
+                Some((_, owners)) => {
+                    owners.insert(owner);
+                },
+                None => watched.push((entry, HashSet::from([owner]))),
             }
         }
         // The connection that carried the subscription may have ended before it was remembered.
@@ -1149,7 +1226,11 @@ impl ElectrumClient {
     /// status note, items 1 and 2). An error answer, a refusal or a failure is logged and not repeated: the pool asks
     /// for this once for each newly maintained session, and nothing here retries or fails anything else.
     pub async fn resubscribe_watched_contract_events(&self) {
-        let events = self.watched_contract_events.lock().await.clone();
+        let events: Vec<[Json; 3]> = self
+            .lock_watched_contract_events()
+            .iter()
+            .map(|(entry, _)| entry.clone())
+            .collect();
         for [address, contract, topic] in events {
             let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &address, &contract, &topic)
                 .compat()
@@ -1483,7 +1564,9 @@ impl UtxoRpcClientOps for ElectrumClient {
             for item in history.iter() {
                 let transaction = try_s!(selfi.get_transaction_bytes(&item.tx_hash).compat().await);
 
-                let maybe_spend_tx: UtxoTx = try_s!(deserialize(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                let maybe_spend_tx: UtxoTx = try_s!(
+                    crate::utxo::utxo_common::read_utxo_tx(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e))
+                );
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
@@ -1595,8 +1678,8 @@ impl ElectrumClientImpl {
             list_unspent_concurrent_map: ConcurrentRequestMap::new(),
             get_balance_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
             list_unspent_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
-            watched_script_hashes: AsyncMutex::new(HashSet::new()),
-            watched_contract_events: AsyncMutex::new(Vec::new()),
+            watched_script_hashes: StdMutex::new(HashMap::new()),
+            watched_contract_events: StdMutex::new(Vec::new()),
         }
     }
 

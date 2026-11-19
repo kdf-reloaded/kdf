@@ -19,7 +19,7 @@ use super::{EnableStreamingRequest, EnableStreamingResponse, StreamingError};
 use coins::qrc20::rpc_clients::Qrc20ElectrumOps;
 use coins::qrc20::{contract_addr_into_rpc_format, QRC20_TRANSFER_TOPIC};
 use coins::utxo::qtum::contract_addr_from_utxo_addr;
-use coins::utxo::rpc_clients::{electrum_script_hash, ElectrumClient, UtxoRpcClientEnum};
+use coins::utxo::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumOwner, UtxoRpcClientEnum};
 use coins::utxo::{output_script, ScriptType, UtxoCoinFields};
 use coins::{lp_coinfind, MarketCoinOps, MmCoinEnum};
 use mm2_core::mm_ctx::MmArc;
@@ -35,7 +35,7 @@ use rpc::v1::types::H160 as H160Json;
 /// (`output_script(.., P2PKH)` then `electrum_script_hash`), because a hash that
 /// does not match the one the balance read uses would subscribe successfully and
 /// then never fire — a silent failure indistinguishable from an idle address.
-async fn electrum_subscription_targets(coin: &MmCoinEnum) -> Option<(ElectrumClient, Vec<String>)> {
+async fn electrum_subscription_targets(coin: &MmCoinEnum) -> Option<(ElectrumClient, ElectrumOwner, Vec<String>)> {
     /// HD wallets have no single address, so every address the wallet currently
     /// knows about is watched. Without this an HD wallet subscribes to nothing
     /// and silently falls back to polling for its whole lifetime.
@@ -57,7 +57,7 @@ async fn electrum_subscription_targets(coin: &MmCoinEnum) -> Option<(ElectrumCli
     }
 
     let electrum = |fields: &UtxoCoinFields| match &fields.rpc_client {
-        UtxoRpcClientEnum::Electrum(client) => Some(client.clone()),
+        UtxoRpcClientEnum::Electrum(client) => Some((client.clone(), fields.electrum_owner)),
         UtxoRpcClientEnum::Native(_) => None,
         #[cfg(not(target_arch = "wasm32"))]
         UtxoRpcClientEnum::LightWalletD(_) => None,
@@ -65,27 +65,27 @@ async fn electrum_subscription_targets(coin: &MmCoinEnum) -> Option<(ElectrumCli
 
     match coin {
         MmCoinEnum::UtxoCoin(c) => {
-            let client = electrum(c.as_ref())?;
+            let (client, owner) = electrum(c.as_ref())?;
             let hashes = match single_address_script_hash(c.as_ref(), c.my_address().ok()) {
                 Some(hash) => vec![hash],
                 None => hd_targets(c).await,
             };
-            (!hashes.is_empty()).then_some((client, hashes))
+            (!hashes.is_empty()).then_some((client, owner, hashes))
         },
         MmCoinEnum::QtumCoin(c) => {
-            let client = electrum(c.as_ref())?;
+            let (client, owner) = electrum(c.as_ref())?;
             let hashes = match single_address_script_hash(c.as_ref(), c.my_address().ok()) {
                 Some(hash) => vec![hash],
                 None => hd_targets(c).await,
             };
-            (!hashes.is_empty()).then_some((client, hashes))
+            (!hashes.is_empty()).then_some((client, owner, hashes))
         },
         // BCH does not implement the HD wallet traits, so it has the
         // single-address path only.
         MmCoinEnum::Bch(c) => {
-            let client = electrum(c.as_ref())?;
+            let (client, owner) = electrum(c.as_ref())?;
             let hash = single_address_script_hash(c.as_ref(), c.my_address().ok())?;
-            Some((client, vec![hash]))
+            Some((client, owner, vec![hash]))
         },
         _ => None,
     }
@@ -106,7 +106,7 @@ fn single_address_script_hash(fields: &UtxoCoinFields, address: Option<String>) 
 /// Subscribing per token rather than per platform address is what makes token
 /// balances observable: a transfer changes the contract's storage and logs an
 /// event, without necessarily touching the holder's QTUM UTXOs.
-fn qrc20_subscription_target(coin: &MmCoinEnum) -> Option<(ElectrumClient, H160Json, H160Json, String)> {
+fn qrc20_subscription_target(coin: &MmCoinEnum) -> Option<(ElectrumClient, ElectrumOwner, H160Json, H160Json, String)> {
     let MmCoinEnum::Qrc20Coin(c) = coin else { return None };
     let electrum = match &c.as_ref().rpc_client {
         UtxoRpcClientEnum::Electrum(client) => client.clone(),
@@ -122,7 +122,7 @@ fn qrc20_subscription_target(coin: &MmCoinEnum) -> Option<(ElectrumClient, H160J
         &format!("{contract:#x}"),
         QRC20_TRANSFER_TOPIC,
     );
-    Some((electrum, address, contract, key))
+    Some((electrum, c.as_ref().electrum_owner, address, contract, key))
 }
 
 fn electrum_utxo_watch_address(coin: &MmCoinEnum) -> Option<String> {
@@ -260,12 +260,12 @@ impl EventStreamer for BalanceEventStreamer {
         // before, only slower to notice.
         let (wake_tx, mut wake_rx) = futures_mpsc::unbounded::<String>();
         let mut subscribed_keys: Vec<String> = Vec::new();
-        if let Some((electrum, script_hashes)) = electrum_subscription_targets(&coin).await {
+        if let Some((electrum, owner, script_hashes)) = electrum_subscription_targets(&coin).await {
             // An HD wallet contributes one subscription per known address, so a
             // partial failure is normal and non-fatal: whatever subscribes is a
             // strict improvement, and the poll below still covers the rest.
             for script_hash in script_hashes {
-                match electrum.subscribe_scripthash(script_hash.clone()).await {
+                match electrum.subscribe_scripthash(owner, script_hash.clone()).await {
                     Ok(()) => {
                         coins::utxo::rpc_clients::watch_scripthash(script_hash.clone(), wake_tx.clone());
                         subscribed_keys.push(script_hash);
@@ -277,9 +277,9 @@ impl EventStreamer for BalanceEventStreamer {
                     ),
                 }
             }
-        } else if let Some((electrum, address, contract, key)) = qrc20_subscription_target(&coin) {
+        } else if let Some((electrum, owner, address, contract, key)) = qrc20_subscription_target(&coin) {
             match electrum
-                .blockchain_contract_event_subscribe(&address, &contract, QRC20_TRANSFER_TOPIC)
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
                 .compat()
                 .await
             {

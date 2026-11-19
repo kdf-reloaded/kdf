@@ -570,6 +570,30 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   (status notes after D38.6.4Q.2 and D38.6.4Q.3, and after the
   code-quality finding of R38.6.4Q.6). Code: `coins/utxo/rpc_clients/electrum_pool.rs`,
   `coins/utxo/rpc_clients/electrum_rpc_client.rs`, `coins/qrc20/history.rs`.
+- **QTUM and its QRC20 tokens share one Electrum client when their client
+  inputs match.** No switch. GLEEC KDF gives every activated instance its
+  own client, so each server holds one session for QTUM and one for each
+  token. KDF Reloaded gives instances of the QTUM family one client when the
+  platform, the server list (in order and per entry), `min_connected`,
+  `max_connected`, `listed_order_for_spends`, `block_interval` and the
+  builder arguments are all equal; any difference gives the instance its own
+  client, as in GLEEC KDF. What stays the same: a token activates without
+  QTUM and keeps working after QTUM is disabled, and disabling one instance
+  or a failed activation closes no session another instance uses. What
+  differs on a shared client:
+  - *Sessions.* Each server holds one session for all sharing instances.
+  - *Naming.* Activation errors, transport error texts, log lines and
+    `CoinTransportMetrics` name the platform ticker, also for a token's
+    requests, and `electrum_servers` for a token reports the shared client.
+  - *Disagreeing servers.* A token that would reuse a client whose servers
+    disagree is refused with `ElectrumServersDisagree`, as a fresh build is.
+  - *Subscriptions.* A disabled instance's remembered subscriptions are
+    not placed again after a reconnect unless another live instance
+    remembers them.
+  Contract: [CRD ch.38 §38.6.4Q](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md)
+  (status note after D38.6.4Q.1). Code:
+  `coins/utxo/rpc_clients/electrum_client_registry.rs`,
+  `coins/utxo/utxo_builder/utxo_coin_builder.rs`, `coins/lp_coins_ops.rs`.
 - **A seed that is already connected is not dialed again.** A node short of relays dials each
   address at most once per 5 minutes, as GLEEC KDF does. GLEEC KDF also dials a seed that has
   connected to it by itself, because it compares addresses only, and the extra connection closes
@@ -727,9 +751,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Under a global-HD login `enable_eth_with_tokens` and `task::enable_eth::init` derive the TRX address under the
   `derivation_path` of the coin config (coin type 195), as GLEEC KDF does; the HD methods (`get_new_address`,
   `account_balance` and the task forms of `get_new_address`, `scan_for_new_addresses` and `account_balance`) answer
-  base58check addresses and a balance map over TRX and the enabled TRC20 tokens, and `task::create_new_account::init`
-  fails with `Internal`. A TRX address counts as used when the chain has created its account or an enabled TRC20 token
-  has a balance there. The legacy `enable` method keeps the node's internal key under a global-HD login, as Reloaded's
+  base58check addresses and a balance map (over TRX and the enabled TRC20 tokens for the TRX ticker, that token only for
+  a TRC20 ticker, as GLEEC KDF does), and `task::create_new_account::init` fails with `Internal`. An address counts as
+  used when the chain has created its account or an enabled TRC20 token has a balance there. For a scan asked for a
+  TRC20 ticker this differs from GLEEC KDF, which looks at the account only: receiving a TRC20 token does not create the
+  account, so GLEEC KDF's scan misses an address that holds only a token, and Reloaded's finds it (a superset, never
+  fewer addresses; not visible to peers). The legacy `enable` method keeps the node's internal key under a global-HD login, as Reloaded's
   EVM and UTXO legacy routes do, so its TRON address differs from the HD route's address for the same seed; GLEEC KDF
   refuses TRON on the legacy method, so a GLEEC client never reaches it. `withdraw` of a TRON coin takes an HD `from`
   and signs with that key, and refuses `from` on a single-key coin (it was ignored before). A TRC20 withdraw under a global-HD login takes an HD `from` resolved in the platform's HD wallet (any activated address of the platform); this is a Reloaded extension, and an EVM ERC-20 coin in Reloaded refuses `from`. No switch; row in

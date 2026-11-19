@@ -230,9 +230,12 @@ the previous version used. The safe way:
   `gap_limit`, `scan_policy` and `min_addresses_number`, the way every EVM platform does, for the default policy and for
   `ContextPrivKey`; a config without `derivation_path` is refused with `InvalidPayload`. `IguanaPrivKey` keeps the node's
   single internal key. The result lists the accounts with base58check addresses, their derivation paths and the balances
-  of TRX and the enabled TRC20 tokens. `get_new_address`, `account_balance`, `task::get_new_address::init`,
-  `task::scan_for_new_addresses::init` and `task::account_balance::init` work for TRX and TRC20 tickers; an address counts
-  as used when the chain has created its account or an enabled TRC20 token has a balance there.
+  of TRX and the enabled TRC20 tokens. `get_new_address`, `account_balance`, `task::scan_for_new_addresses::init` and
+  `task::account_balance::init` work for TRX and TRC20 tickers. Asked for TRX,
+  each balance map covers TRX and the enabled TRC20 tokens; asked for a TRC20 ticker, that token only, as for an ERC-20
+  ticker. For either ticker an address counts as used when the chain has created its account or an enabled TRC20 token
+  has a balance there. For a TRC20 ticker GLEEC KDF looks at the account only; receiving a TRC20 token does not create
+  the account, so Reloaded also looks at the token balances and finds an address that holds only a token.
   `task::create_new_account::init` fails with `Internal` for every TRON coin. `withdraw` and `task::withdraw` take an HD
   `from` for TRX and TRC20 and sign with the key of that path, and `show_priv_key` answers the key of the activated
   address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, which Reloaded's EVM
@@ -541,7 +544,13 @@ the previous version used. The safe way:
 - **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
   refunds of ZEC are built as version-5 transactions with the version-5 transaction id and signature, as the Zcash
   network requires since NU7. A Trezor refuses a version-5 ZEC transaction with a clear error. Incoming version-5
-  transactions are read; version 6 is not read yet. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+  transactions are read. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+- **Version-6 ZEC transactions are read.** The Zcash network accepts version 6 since NU7. The node now reads an
+  incoming version-6 transaction, with the transaction id of the Zcash library (version 5 stays on the node's own reader,
+  and a test checks that both readers give the same id and bytes). History rows, the input amounts of a transaction that
+  spends a version-6 output, validation of the counterparty's DEX fee and payments, spend detection and secret extraction
+  all work on it, where the transaction was skipped or the step failed before. A transaction that cannot be read by
+  either reader is still reported by the history. Detail: PR #422; CRD ch.39 D39.11.4V.3 status note of 2026-11-18.
 - **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
   The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
   and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
@@ -596,9 +605,9 @@ the previous version used. The safe way:
   the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
   as if it were complete. `sync_status` now lists each skipped transaction in
   `additional_info.unreadable_transactions`, with its `tx_hash` and a short `error`. This includes transactions skipped
-  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. Until a later release
-  reads ZEC version-6 transactions, they appear in this list. The BCH and SLP history also no longer pauses at a
-  transaction that does not parse; it skips it and stores the rest. Detail: PR #415; CRD ch.39 D39.11.4V.1.
+  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. The BCH and SLP
+  history also no longer pauses at a transaction that does not parse; it skips it and stores the rest. Detail: PR #415;
+  CRD ch.39 D39.11.4V.1.
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
   served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
@@ -681,6 +690,19 @@ the previous version used. The safe way:
   for up to about 40 s after `disable_coin`, and enabling the token again within that time left two
   of them running. It now ends when the token is disabled, and exactly one runs after the token is
   enabled again. Detail: PR #417; CRD ch.38 D38.6.4Q.5.
+- **QTUM and its QRC20 tokens now share one set of Electrum connections when their server settings
+  match.** Until now QTUM and each activated token opened their own connection to every server, so a
+  server held one session per instance. Instances that list the same servers in the same order and
+  have the same `min_connected`, `max_connected`, `listed_order_for_spends` and `block_interval` now
+  use one set of connections; any difference keeps a separate set, as before. A token still
+  activates without QTUM and keeps working after QTUM is disabled, and disabling one of them, or a
+  failed activation, closes no connection the others use. A subscription of a disabled instance is
+  no longer placed again after a reconnect unless another instance still uses it. A token that
+  would join a set whose servers disagree about the chain is refused with the same error as a new
+  activation. On a shared set, activation errors, transport error texts, log lines and transport
+  metrics name the platform (for example `QTUM`) also for a token, and `electrum_servers` for a token
+  reports the shared set. A shared record of spent coins is still planned. Detail: PR #427; CRD ch.38
+  D38.6.4Q.1 and its status note.
 
 ### Tests
 
@@ -739,6 +761,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
+  QTUM and its tokens, in PR #427; the Phase C items it leaves open are named under Phase C.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)
   done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
   the plan.

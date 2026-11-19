@@ -328,7 +328,10 @@ where
     let watched_script_hash = match (&coin.as_ref().rpc_client, coin.as_ref().derivation_method.iguana()) {
         (UtxoRpcClientEnum::Electrum(electrum), Some(address)) => {
             let script_hash = hex::encode(electrum_script_hash(&output_script(&address, ScriptType::P2PKH)));
-            match electrum.subscribe_scripthash(script_hash.clone()).await {
+            match electrum
+                .subscribe_scripthash(coin.as_ref().electrum_owner, script_hash.clone())
+                .await
+            {
                 Ok(()) => {
                     crate::utxo::rpc_clients::watch_scripthash(script_hash.clone(), wake_tx);
                     Some(script_hash)
@@ -855,7 +858,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     let ticker = &coin.as_ref().conf.ticker;
     let hash = H256Json::from(hash);
     let verbose_tx = try_other!(coin.as_ref().rpc_client.get_verbose_transaction(&hash).compat().await);
-    let mut tx: UtxoTx = match deserialize(verbose_tx.hex.as_slice()) {
+    let mut tx: UtxoTx = match read_utxo_tx(verbose_tx.hex.as_slice()) {
         Ok(tx) => tx,
         Err(e) => {
             return Err(TxDetailsByHashError::Unreadable(parse_failure_reason(
@@ -1054,7 +1057,7 @@ where
                 .await
                 .map_err(PrevTxError::Rpc)?;
             let tx = HistoryUtxoTx {
-                tx: deserialize(verbose.hex.as_slice()).map_err(PrevTxError::Unparsed)?,
+                tx: read_utxo_tx(verbose.hex.as_slice()).map_err(PrevTxError::Unparsed)?,
                 height: verbose.height,
             };
             e.insert(tx)
@@ -1987,13 +1990,15 @@ mod unreadable_report_tests {
         )
     }
 
-    /// An overwintered version-6 transaction, which the shared parser refuses.
-    fn v6_tx() -> String { format!("06000080{}{}", "85202f89", "00".repeat(16)) }
+    /// A version-6 transaction cut off inside its header: the version group id (0xD884B698) and the Nu7 branch id
+    /// (0x77190AD9) are valid, the lock time is complete and the expiry height is missing. The Zcash library reader,
+    /// which reads version 6, cannot read it, so it stays unreadable whatever versions the readers learn.
+    fn v6_tx() -> String { "0600008098b684d8d90a197700000000".to_owned() }
 
     /// The id under which the listing and the rows know the transaction `tx_hex`.
     fn id_of(tx_hex: &str) -> [u8; 32] {
         let coin = software_coin_for_test("IDS");
-        let mut tx: UtxoTx = deserialize(hex::decode(tx_hex).unwrap().as_slice()).unwrap();
+        let mut tx: UtxoTx = super::read_utxo_tx(hex::decode(tx_hex).unwrap().as_slice()).unwrap();
         tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
         let id: H256Json = tx.hash().reversed().into();
         id.0
@@ -2165,6 +2170,49 @@ mod unreadable_report_tests {
 
     fn plain_finished(status: &Json) -> bool { json::to_string(status).unwrap() == r#"{"state":"Finished"}"# }
 
+    /// A readable version-6 transaction (built with the Zcash library, NU7 branch): one null input and one P2PKH
+    /// output of `value`.
+    fn readable_v6_tx(value: u64) -> String {
+        let p2pkh = hex::decode(P2PKH).unwrap();
+        hex::encode(super::super::utxo_common_read::test_support::v6_transparent_tx_bytes(
+            None,
+            vec![0x51],
+            &[(value, p2pkh)],
+        ))
+    }
+
+    #[test]
+    fn a_version_6_transaction_gets_a_row_and_is_not_reported() {
+        let (a, v6) = (v4_tx(None, 100_000), readable_v6_tx(250_000));
+        let (a_id, v6_id) = (id_of(&a), id_of(&v6));
+        let served = backend(vec![(a_id, Served::Tx(a)), (v6_id, Served::Tx(v6))]);
+        let (rows, status) = drive_one_pass(&served, &[a_id, v6_id], vec![]);
+        assert_eq!(rows.len(), 2);
+        assert!(present(&rows, a_id) && present(&rows, v6_id));
+        assert!(
+            plain_finished(&status),
+            "a readable version-6 transaction is not reported: {status}"
+        );
+    }
+
+    #[test]
+    fn a_transaction_spending_a_version_6_output_gets_a_row_with_its_amounts() {
+        let v6 = readable_v6_tx(450_000);
+        let v6_id = id_of(&v6);
+        // The input names the previous transaction in internal byte order, the reverse of the id.
+        let mut internal = v6_id;
+        internal.reverse();
+        let spending = v4_tx(Some((internal, 0)), 400_000);
+        let spending_id = id_of(&spending);
+        let served = backend(vec![(v6_id, Served::Tx(v6)), (spending_id, Served::Tx(spending))]);
+        let (rows, status) = drive_one_pass(&served, &[spending_id], vec![]);
+        assert_eq!(rows.len(), 1);
+        assert!(present(&rows, spending_id));
+        // The input amount comes from the version-6 previous transaction's output.
+        assert!(rows[0].total_amount > BigDecimal::from(0), "{}", rows[0].total_amount);
+        assert!(plain_finished(&status), "{status}");
+    }
+
     #[test]
     fn an_unreadable_transaction_is_reported_and_drops_out_when_it_reads() {
         let (a, b, c) = (v4_tx(None, 100_000), v4_tx(None, 200_000), v4_tx(None, 300_000));
@@ -2176,7 +2224,7 @@ mod unreadable_report_tests {
             (b_id, Served::Tx(b)),
         ]);
 
-        // The first pass: both version-4 rows are stored, the version-6 transaction is reported.
+        // The first pass: both version-4 rows are stored, the cut-off version-6 transaction is reported.
         let listing = [a_id, unreadable_id, b_id];
         let (rows, status) = drive_one_pass(&served, &listing, vec![]);
         assert_eq!(rows.len(), 2);
@@ -2184,7 +2232,7 @@ mod unreadable_report_tests {
         let list = reported(&status);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, text(unreadable_id));
-        assert!(list[0].1.contains("unsupported transaction version 6"), "{}", list[0].1);
+        assert!(list[0].1.contains("Zcash reader"), "{}", list[0].1);
 
         // The next pass reads it as a version-4 transaction: it is stored and the list is empty.
         let c_id = id_of(&c);
@@ -2231,8 +2279,7 @@ mod unreadable_report_tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, text(spending_id));
         assert!(
-            list[0].1.contains("an input transaction cannot be parsed")
-                && list[0].1.contains("unsupported transaction version 6"),
+            list[0].1.contains("an input transaction cannot be parsed") && list[0].1.contains("Zcash reader"),
             "{}",
             list[0].1
         );

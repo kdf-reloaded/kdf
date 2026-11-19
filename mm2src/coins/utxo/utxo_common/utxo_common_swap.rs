@@ -260,7 +260,7 @@ pub fn send_maker_spends_taker_payment<T: UtxoCommonOps>(
         coin.addr_format().clone(),
     );
 
-    let mut prev_tx: UtxoTx = try_tx_fus!(deserialize(taker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_fus!(read_utxo_tx(taker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default()
         .push_data(secret)
@@ -332,7 +332,7 @@ pub fn send_taker_spends_maker_payment<T: UtxoCommonOps>(
         coin.addr_format().clone(),
     );
 
-    let mut prev_tx: UtxoTx = try_tx_fus!(deserialize(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_fus!(read_utxo_tx(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default()
         .push_data(secret)
@@ -405,7 +405,7 @@ pub fn send_taker_refunds_payment<T: UtxoCommonOps>(
     );
 
     let mut prev_tx: UtxoTx =
-        try_tx_fus!(deserialize(taker_payment_tx).map_err(|e| TransactionErr::Plain(format!("{:?}", e))));
+        try_tx_fus!(read_utxo_tx(taker_payment_tx).map_err(|e| TransactionErr::Plain(format!("{:?}", e))));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default().push_opcode(Opcode::OP_1).into_script();
     let redeem_script = payment_script(
@@ -474,7 +474,7 @@ pub fn send_maker_refunds_payment<T: UtxoCommonOps>(
         coin.addr_format().clone(),
     );
 
-    let mut prev_tx: UtxoTx = try_tx_fus!(deserialize(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_fus!(read_utxo_tx(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default().push_opcode(Opcode::OP_1).into_script();
     let redeem_script = payment_script(
@@ -753,7 +753,7 @@ pub fn validate_maker_payment<T: UtxoCommonOps>(
     input: ValidatePaymentInput,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let my_public = try_fus!(Public::from_slice(&input.taker_pub));
-    let mut tx: UtxoTx = try_fus!(deserialize(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_fus!(read_utxo_tx(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
 
     validate_payment(
@@ -775,7 +775,7 @@ pub fn validate_taker_payment<T: UtxoCommonOps>(
     input: ValidatePaymentInput,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let my_public = try_fus!(Public::from_slice(&input.maker_pub));
-    let mut tx: UtxoTx = try_fus!(deserialize(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_fus!(read_utxo_tx(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
 
     validate_payment(
@@ -816,7 +816,7 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
                 match history.first() {
                     Some(item) => {
                         let tx_bytes = try_s!(client.get_transaction_bytes(&item.tx_hash).compat().await);
-                        let mut tx: UtxoTx = try_s!(deserialize(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                        let mut tx: UtxoTx = try_s!(read_utxo_tx(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
                         tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
                         Ok(Some(tx.into()))
                     },
@@ -849,7 +849,7 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
                 for item in received_by_addr {
                     if item.address == target_addr && !item.txids.is_empty() {
                         let tx_bytes = try_s!(client.get_transaction_bytes(&item.txids[0]).compat().await);
-                        let mut tx: UtxoTx = try_s!(deserialize(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                        let mut tx: UtxoTx = try_s!(read_utxo_tx(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
                         tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
                         return Ok(Some(tx.into()));
                     }
@@ -910,7 +910,7 @@ pub async fn search_for_swap_tx_spend_other(
 /// Extract a secret from the `spend_tx`.
 /// Note spender could generate the spend with several inputs where the only one input is the p2sh script.
 pub fn extract_secret(secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
-    let spend_tx: UtxoTx = try_s!(deserialize(spend_tx).map_err(|e| ERRL!("{:?}", e)));
+    let spend_tx: UtxoTx = try_s!(read_utxo_tx(spend_tx).map_err(|e| ERRL!("{:?}", e)));
     extract_secret_from_script_sigs(
         secret_hash,
         spend_tx.inputs.into_iter().map(|input| input.script_sig.into()),
@@ -1078,7 +1078,7 @@ async fn search_for_swap_output_spend(
     output_index: usize,
     search_from_block: u64,
 ) -> Result<Option<FoundSwapTxSpend>, String> {
-    let mut tx: UtxoTx = try_s!(deserialize(tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_s!(read_utxo_tx(tx).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
     let tx_hash = tx.hash();
     let output0_script_pubkey = tx.outputs[0].script_pubkey.clone();
@@ -1684,7 +1684,7 @@ pub(crate) async fn build_and_broadcast_maker_v2_spend<T>(
 where
     T: UtxoCommonOps,
 {
-    let mut prev_tx: UtxoTx = try_tx_s!(deserialize(prev_tx_bytes).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_s!(read_utxo_tx(prev_tx_bytes).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let my_address = match &coin.as_ref().derivation_method {
         DerivationMethod::Iguana(address) => address.clone(),
@@ -2147,6 +2147,7 @@ pub(crate) fn build_funding_spend_preimage_tx(
         str_d_zeel: None,
         hash_algo: fields.tx_hash_algo.into(),
         sighash_suffix: fields.conf.sighash_suffix,
+        read_by_library: false,
     })
 }
 
@@ -2529,6 +2530,7 @@ pub(crate) fn build_taker_payment_spend_preimage_tx(
         str_d_zeel: None,
         hash_algo: fields.tx_hash_algo.into(),
         sighash_suffix: fields.conf.sighash_suffix,
+        read_by_library: false,
     })
 }
 

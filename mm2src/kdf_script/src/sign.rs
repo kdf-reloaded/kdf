@@ -171,6 +171,9 @@ pub enum SignatureHashError {
     /// `SIGHASH_SINGLE` needs an output with the same index as the input; ZIP 244 makes it invalid
     /// when there is none.
     SingleWithoutOutput { input_index: usize },
+    /// The signer comes from a transaction an external reader read (a version 6 transaction); its layout is not
+    /// built here, so there is no digest.
+    ReadByLibrary,
 }
 
 impl fmt::Display for SignatureHashError {
@@ -206,6 +209,12 @@ impl fmt::Display for SignatureHashError {
             },
             SignatureHashError::InputIndexOutOfRange { input_index } => {
                 write!(f, "input {input_index} is not an input of the transaction")
+            },
+            SignatureHashError::ReadByLibrary => {
+                write!(
+                    f,
+                    "the transaction was read by the Zcash library and cannot be signed here"
+                )
             },
             SignatureHashError::SingleWithoutOutput { input_index } => {
                 write!(
@@ -297,6 +306,9 @@ pub struct TransactionInputSigner {
     /// deliberately no `Default` and no `From<Transaction>`: every constructor of a signer has to
     /// state the suffix (R61.4.2), so that a signing site cannot silently omit it.
     pub sighash_suffix: u32,
+    /// The transaction this signer was made from was read by an external reader (`Transaction::opaque` was set):
+    /// its fields are a view of bytes this crate does not build, so every digest entry refuses it.
+    pub read_by_library: bool,
 }
 
 impl TransactionInputSigner {
@@ -324,6 +336,7 @@ impl TransactionInputSigner {
             str_d_zeel: t.str_d_zeel,
             hash_algo: t.tx_hash_algo.into(),
             sighash_suffix,
+            read_by_library: t.opaque.is_some(),
         }
     }
 
@@ -373,6 +386,7 @@ impl From<TransactionInputSigner> for Transaction {
             consensus_branch_id,
             sapling_v5: s.sapling_v5,
             orchard: s.orchard,
+            opaque: None,
         }
     }
 }
@@ -403,6 +417,9 @@ impl TransactionInputSigner {
         sigversion: SignatureVersion,
         sighashtype: u32,
     ) -> Result<H256, SignatureHashError> {
+        if self.read_by_library {
+            return Err(SignatureHashError::ReadByLibrary);
+        }
         if self.overwintered && self.version >= 5 {
             if self.version != 5 {
                 return Err(SignatureHashError::UnsupportedTransactionVersion { version: self.version });
@@ -567,6 +584,7 @@ impl TransactionInputSigner {
             consensus_branch_id: 0,
             sapling_v5: SaplingBundleV5::default(),
             orchard: OrchardBundle::default(),
+            opaque: None,
         };
 
         let mut s = Stream::default();
@@ -684,6 +702,9 @@ impl TransactionInputSigner {
         sighashtype: u32,
         sighash: Sighash,
     ) -> Result<H256, String> {
+        if self.read_by_library {
+            return Err(SignatureHashError::ReadByLibrary.to_string());
+        }
         if self.version >= 5 {
             return Err(format!(
                 "the ZIP-243 digest does not apply to version {}; use `signature_hash`",
@@ -1168,6 +1189,7 @@ mod tests {
             str_d_zeel: None,
             hash_algo: SignerHashAlgo::DSHA256,
             sighash_suffix: 0,
+            read_by_library: false,
         };
         let got = signer
             .signature_hash(

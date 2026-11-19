@@ -14,7 +14,8 @@ use super::{parse_trc20_contract, tron_coin_from_params, tron_coin_from_params_w
 use crate::coin_balance::{EnableCoinScanPolicy, HDAddressBalanceScanner, HDWalletBalanceOps};
 use crate::eth::{withdraw_impl, Erc20TokenInfo, EthCoin, EthCoinBuildError};
 use crate::hd_pubkey::{HDExtractPubkeyError, HDXPubExtractor};
-use crate::hd_wallet::{HDAccountOps, HDAddressId, HDWalletOps};
+use crate::hd_wallet::{GetNewHDAddressParams, HDAccountOps, HDAddressId, HDWalletOps, HDWalletRpcOps};
+use crate::rpc_command::account_balance::{AccountBalanceParams, AccountBalanceRpcOps};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::rpc_command::init_scan_for_new_addresses::{InitScanAddressesRpcOps, ScanAddressesParams};
 use crate::{lp_register_coin, CoinProtocol, DerivationMethod, MarketCoinOps, MmCoinEnum, RegisterCoinParams,
@@ -388,6 +389,108 @@ fn the_scan_stops_after_the_gap_and_reports_base58_addresses() {
         ]);
         assert_eq!(response.derivation_path.0.to_string(), "m/44'/195'/0'");
         assert_eq!(known_addresses_number(&coin).await, 3);
+    });
+}
+
+/// The tickers of a balance map, sorted.
+fn tickers_of(balance: &crate::coin_balance::CoinBalanceMap) -> Vec<&str> {
+    let mut tickers: Vec<&str> = balance.keys().map(String::as_str).collect();
+    tickers.sort_unstable();
+    tickers
+}
+
+/// The HD methods asked for a TRC20 ticker (the status note of 2026-11-19 in CRD ch.21 and the Reloaded note after
+/// it): the platform's wallet answers, every balance map holds that token's ticker only, and the scan finds an
+/// address that holds the token although the chain has not created its account. The TRX ticker keeps the map over
+/// the platform and its enabled tokens.
+#[test]
+fn a_trc20_ticker_answers_its_own_ticker_only_and_its_scan_finds_a_token_only_address() {
+    let ctx = hd_ctx();
+    // The account of ADDRESS_0 exists; ADDRESS_2 holds the token only and has no account.
+    let node = scripted_node(&[ADDRESS_0], &[ADDRESS_2]);
+    block_on(async {
+        let platform = hd_coin(&ctx, &node.url()).await;
+        enable_wallet(&platform, 0).await;
+        let registered = lp_register_coin(&ctx, MmCoinEnum::EthCoin(platform.clone()), RegisterCoinParams {
+            ticker: "TRX".to_owned(),
+            tx_history: false,
+        })
+        .await;
+        assert!(registered.is_ok(), "the platform registers");
+        let contract = parse_trc20_contract(TRC20_CONTRACT).expect("a contract");
+        platform.add_erc20_token_info("USDT-TRC20".to_owned(), Erc20TokenInfo {
+            token_addr: contract,
+            decimals: 6,
+        });
+        let token = platform
+            .trc20_token_from_conf_or_contract("USDT-TRC20".to_owned(), contract, 1)
+            .await
+            .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
+
+        // The scan asked for the token: ADDRESS_2 is found through its token balance alone.
+        let params: ScanAddressesParams =
+            serde_json::from_value(json!({ "account_index": 0, "gap_limit": 2 })).expect("scan parameters");
+        let response = token
+            .init_scan_for_new_addresses_rpc(params)
+            .await
+            .unwrap_or_else(|e| panic!("the scan must succeed: {}", e.get_inner()));
+        let found: Vec<&str> = response
+            .new_addresses
+            .iter()
+            .map(|address| address.address.as_str())
+            .collect();
+        assert_eq!(found, [ADDRESS_1, ADDRESS_2]);
+        for address in &response.new_addresses {
+            assert_eq!(tickers_of(&address.balance), ["USDT-TRC20"]);
+        }
+        assert_eq!(
+            response.new_addresses[1].balance["USDT-TRC20"].spendable,
+            "1.234567".parse().expect("a decimal")
+        );
+        assert_eq!(
+            known_addresses_number(&platform).await,
+            3,
+            "the platform's wallet took the scan"
+        );
+
+        // `get_new_address`: the token answers its ticker only, the platform the full map.
+        let next = |coin: EthCoin| async move {
+            coin.get_new_address_rpc(GetNewHDAddressParams {
+                account_id: 0,
+                chain: Bip44Chain::External,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("get_new_address must succeed: {}", e.get_inner()))
+            .new_address
+        };
+        let of_token = next(token.clone()).await;
+        assert_eq!(of_token.address, independent_address(&ctx, "m/44'/195'/0'/0/3"));
+        assert_eq!(tickers_of(&of_token.balance), ["USDT-TRC20"]);
+        let of_platform = next(platform.clone()).await;
+        assert_eq!(of_platform.address, independent_address(&ctx, "m/44'/195'/0'/0/4"));
+        assert_eq!(tickers_of(&of_platform.balance), ["TRX", "USDT-TRC20"]);
+
+        // `account_balance`: the same five addresses for both tickers, the maps as above.
+        let balances = |coin: EthCoin| async move {
+            let params: AccountBalanceParams =
+                serde_json::from_value(json!({ "account_index": 0, "chain": "External" })).expect("parameters");
+            coin.account_balance_rpc(params)
+                .await
+                .unwrap_or_else(|e| panic!("account_balance must succeed: {}", e.get_inner()))
+        };
+        let of_token = balances(token.clone()).await;
+        assert_eq!(of_token.addresses.len(), 5);
+        for address in &of_token.addresses {
+            assert_eq!(tickers_of(&address.balance), ["USDT-TRC20"]);
+        }
+        assert_eq!(of_token.addresses[2].address, ADDRESS_2);
+        assert_eq!(of_token.page_balance.spendable, "1.234567".parse().expect("a decimal"));
+        let of_platform = balances(platform.clone()).await;
+        assert_eq!(of_platform.addresses.len(), 5);
+        for address in &of_platform.addresses {
+            assert_eq!(tickers_of(&address.balance), ["TRX", "USDT-TRC20"]);
+        }
+        assert_eq!(of_platform.page_balance.spendable, "2.5".parse().expect("a decimal"));
     });
 }
 

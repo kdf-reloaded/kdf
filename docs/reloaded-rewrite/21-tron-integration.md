@@ -871,6 +871,35 @@ governs Reloaded.
   in base58check, while withdraw (chapter 47 R47.5.6a) and message signing
   refuse it. D21.10B.3.
 
+*Status note (2026-11-19), the HD methods for a TRC20 ticker (Spec Reader
+round 0.5.0-15; passed the KDF Dirty Gate).* The "HD methods" item of
+R21.10B.4 describes a TRX ticker. For a TRC20 ticker the reference answers
+from the platform's HD wallet, which the token shares, and each balance map
+holds that token's ticker only. The scan then counts an address as used
+when the chain has created its account, and no token balance is
+consulted. The shared wallet and the token-only ticker set match what
+chapter 49 §49.2.1 (R49.32) records for an ERC-20 ticker on an EVM
+platform; the used-address criterion does not. The sentences of
+R21.10B.4 above are unchanged.
+
+*Reloaded note (2026-11-19), the HD methods for a TRC20 ticker in this
+repository (its own code, not the reference; PR #428).* Asked for a TRC20
+ticker, `get_new_address`, `account_balance`,
+`task::account_balance::init` and `task::scan_for_new_addresses::init`
+answer from the HD wallet of the platform, and each balance map holds that
+token's ticker only, as chapter 49 §49.2.1 (R49.32) records for an ERC-20
+ticker on an EVM platform. Asked for the TRX ticker, each balance map
+covers TRX and the enabled TRC20 tokens. The activation result is the same
+as before. The used-address criterion is deliberately not the reference's:
+for a TRC20 ticker, as for the TRX ticker, an address counts as used when
+the chain has created its account or when any enabled TRC20 token has a
+non-zero balance at it. Receiving a TRC20 token does not create the
+account, so a scan that consulted no token balance would miss an address
+that holds only a token. The addresses found this way are a superset of
+those the account-only criterion finds, so no funds are found by the
+reference's criterion and missed by this one; the difference is not
+visible to peers and has no switch.
+
 **R21.10B.5** *Activation result (completes the §21.4 note and R-WP5).* The
 result has the EVM family's shape with no TRON-specific member. Single
 key: `current_block` is the TRON head block number from
@@ -1141,12 +1170,18 @@ unchanged: it still uses the node's internal key
 (`mm2_internal_privkey_secret`) and is a single-address coin, on both routes.
 The Trezor, WalletConnect and MetaMask refusals are unchanged under a
 global-HD login. The HD methods (`get_new_address`, `account_balance` and the
-task forms of `get_new_address`, `scan_for_new_addresses` and
-`account_balance`) answer for a TRX or TRC20 ticker with base58check addresses
-and a balance map over TRX and the enabled TRC20 tokens; a TRC20 ticker is
-served by the HD wallet of its platform. An address counts as used as R21.10B.4
-says. `task::create_new_account::init` ends with `Internal` in the task status
-for every TRON coin, before any account is created. `withdraw` and
+task forms of `scan_for_new_addresses` and `account_balance`) answer for a TRX
+or TRC20 ticker with base58check addresses
+and a balance map: over TRX and the enabled TRC20 tokens for the TRX ticker,
+over that token only for a TRC20 ticker, which is served by the HD wallet of
+its platform. For either ticker an address counts as used when the chain has
+created its account or when any enabled TRC20 token has a non-zero balance at
+it (the Reloaded note of 2026-11-19 after R21.10B.4, which records how this
+differs for a TRC20 ticker). This repository has no
+`task::get_new_address::init` for any coin, so that task form of R21.10B.4 is
+not served for TRON either. `task::create_new_account::init` ends with
+`Internal` in the task status for every TRON coin, before any account is
+created. `withdraw` and
 `task::withdraw::init` of a TRX or TRC20 coin take the HD `from` forms of the
 EVM withdraw (an address id or a derivation path, resolved in the HD wallet of
 the platform) and sign with the key of that path. For a TRC20 coin this is a
@@ -1937,3 +1972,14 @@ V3. The address encoding, protobuf transaction/contract formats,
   and `v2.6.0-beta` compared on the points attributed to them. Method:
   reading, combined with a mechanical word n-gram comparison (6-gram and
   4-gram) and a per-token inventory; the additions embed no code blocks.
+- *Status note added 2026-11-19 (Spec Reader round 0.5.0-15) -- after
+  R21.10B.4.* **KDF Dirty Gate: PASS on 2026-11-19, measure 0.02, no
+  findings** (with chapter 49 §49.2.1; the attestation is in chapter 49
+  §49.7). *Inputs:* the forbidden corpus at
+  the row `v3.0.0-beta` of chapter 02 §2.15A, consulted **only** to establish
+  which tickers the HD address methods carry, and what makes an address
+  used for the scan, when the request names a TRC20 ticker. The reading was
+  done together with chapter 49 §49.2.1, whose scoped record covers the
+  shared EVM-family surface. Behavior only; no private identifier, body,
+  error, log or comment text was reproduced. The sentences of R21.10B.4 are
+  unchanged.

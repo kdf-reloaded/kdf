@@ -34,7 +34,7 @@ use mm2_err_handle::prelude::*;
 #[cfg(test)] use mocktopus::macros::*;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
 use serde_json::{self as json, Value as Json};
-use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
+use serialization::{serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
                     SERIALIZE_TRANSACTION_WITNESS};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::Entry;
@@ -93,6 +93,9 @@ pub use electrum_pool::{with_call_budget, ElectrumPoolOptions, ElectrumPoolTimin
 #[path = "rpc_clients/electrum_rpc_client.rs"]
 pub(crate) mod electrum_rpc_client;
 pub use electrum_rpc_client::*;
+
+#[path = "rpc_clients/electrum_client_registry.rs"]
+pub(crate) mod electrum_client_registry;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "rpc_clients/electrum_stub_server.rs"]
