@@ -149,6 +149,28 @@ zcash_script = "=0.6.0"
 zcash_transparent = { version = "=0.11.1", features = ["transparent-inputs"] }
 zip32 = "=0.3.0"
 
+# Solana stack — modular `solana-*` 2.x crates plus `spl-token` 8 and
+# the `spl-associated-token-account-client` helper. The legacy
+# `solana-client` 1.x and `solana-sdk` 1.x crates were removed in P14
+# because their transitive deps (`solana-remote-wallet` -> `hidapi` ->
+# `libudev`) only build on Linux desktop. The modular crates carry no
+# hardware-wallet code and rely on a hand-rolled async JSON-RPC client
+# (`solana::rpc_client`) that runs on every target: it sends through
+# `mm2_net::transport`, which is the tokio client on native and `fetch` on WASM.
+solana-commitment-config = { version = "2", default-features = false, features = ["serde"] }
+solana-hash = { version = "2", default-features = false, features = ["serde"] }
+solana-keypair = { version = "2", default-features = false }
+solana-message = { version = "2", default-features = false, features = ["bincode"] }
+solana-native-token = { version = "2", default-features = false }
+solana-program-error = { version = "2", default-features = false }
+solana-pubkey = { version = "2", default-features = false, features = ["serde", "std"] }
+solana-signature = { version = "2", default-features = false, features = ["serde", "verify"] }
+solana-signer = { version = "2", default-features = false }
+solana-system-transaction = { version = "2", default-features = false }
+solana-transaction = { version = "2", default-features = false, features = ["bincode"] }
+spl-associated-token-account-client = { version = "2", default-features = false }
+spl-token = { version = "8", default-features = false }
+
 [dev-dependencies]
 # The get_private_keys tests install a hardware context beside a software login (`init_trezor_ctx_for_tests`).
 crypto = { path = "../crypto", features = ["test-helpers"] }
@@ -253,28 +275,6 @@ zcash_proofs = "=0.31.0"
 # by z_htlc.rs, now imports plain `secp256k1` instead) is gone -- Cargo
 # rejects depending on the same resolved (name, version) twice under two
 # local names. See docs/plans/secp256k1-migration.md.
-
-# Solana stack — modular `solana-*` 2.x crates plus `spl-token` 8 and
-# the `spl-associated-token-account-client` helper. The legacy
-# `solana-client` 1.x and `solana-sdk` 1.x crates were removed in P14
-# because their transitive deps (`solana-remote-wallet` -> `hidapi` ->
-# `libudev`) only build on Linux desktop. The modular crates carry no
-# hardware-wallet code and rely on a hand-rolled async JSON-RPC client
-# (`solana::rpc_client`) that runs on every native target. WASM stays
-# excluded because `mm2_net::native_http` is tokio-native.
-solana-commitment-config = { version = "2", default-features = false, features = ["serde"] }
-solana-hash = { version = "2", default-features = false, features = ["serde"] }
-solana-keypair = { version = "2", default-features = false }
-solana-message = { version = "2", default-features = false, features = ["bincode"] }
-solana-native-token = { version = "2", default-features = false }
-solana-program-error = { version = "2", default-features = false }
-solana-pubkey = { version = "2", default-features = false, features = ["serde", "std"] }
-solana-signature = { version = "2", default-features = false, features = ["serde", "verify"] }
-solana-signer = { version = "2", default-features = false }
-solana-system-transaction = { version = "2", default-features = false }
-solana-transaction = { version = "2", default-features = false, features = ["bincode"] }
-spl-associated-token-account-client = { version = "2", default-features = false }
-spl-token = { version = "8", default-features = false }
 
 [build-dependencies]
 prost-build = { version = "0.12", default-features = false, features = ["format"] }

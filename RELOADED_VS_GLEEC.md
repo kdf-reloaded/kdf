@@ -132,9 +132,9 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   `decimals`, `mint_address` and `program_id`), Reloaded reads its own older
   forms: `{"type": "SOLANA"}` without `protocol_data`, and `SPLTOKEN` with
   `platform`, `decimals` and `token_contract_address`, which means the SPL
-  Token program. The extra forms are additive and need no switch. Native
-  builds read all of these; browser (WASM) builds do not read Solana entries
-  yet. Solana stays switched off in this beta (see
+  Token program. The extra forms are additive and need no switch. Native and
+  browser (WASM) builds read all of these (browser builds since PR #N).
+  Solana stays switched off in this beta (see
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
@@ -144,8 +144,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   gets its normal answer (GLEEC KDF ends it without one); a wallet without a token account
   activates the token with balance `"0"` (GLEEC KDF fails the activation); the platform
   method also takes `hd_path_layout`, `path_to_address` and `priv_key_policy`; an inline
-  token `protocol` may also use Reloaded's `SPLTOKEN` form. Native builds only for now;
-  Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
+  token `protocol` may also use Reloaded's `SPLTOKEN` form. Native and browser (WASM)
+  builds (browser builds since PR #N); Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
 
 - **Solana node selection.** GLEEC KDF asks the nodes `getHealth` in list order before every
   request and uses the first healthy one. Reloaded draws a random node order once when the coin is

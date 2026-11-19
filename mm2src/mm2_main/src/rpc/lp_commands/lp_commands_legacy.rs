@@ -988,7 +988,6 @@ mod tests {
                 TRON_NOT_AVAILABLE,
             ),
         ];
-        #[cfg(not(target_arch = "wasm32"))]
         {
             coins.push(("SOL", json!({ "type": "SOLANA" }), SOLANA_NOT_AVAILABLE));
             coins.push((
