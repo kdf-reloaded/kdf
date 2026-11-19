@@ -45,6 +45,7 @@ fn node(mint_owner: Option<&'static str>) -> CountingNode {
     let inner = spawn_node(move |method, params| {
         counted.fetch_add(1, Ordering::SeqCst);
         match method {
+            "getHealth" => Reply::Result(json!("ok")),
             "getAccountInfo" => {
                 let value = match (params[0].as_str(), mint_owner) {
                     (Some(MINT), Some(owner)) => json!({ "owner": owner, "lamports": 1, "data": ["", "base64"],

@@ -255,7 +255,8 @@ pub mod solana;
 #[cfg(not(target_arch = "wasm32"))]
 pub use solana::spl::SplToken;
 #[cfg(not(target_arch = "wasm32"))]
-pub use solana::{solana_coin_from_conf_and_params, SolanaActivationParams, SolanaCoin, SolanaFeeDetails};
+pub use solana::{solana_coin_from_conf_and_params, solana_coin_with_node_order, SolanaActivationParams, SolanaCoin,
+                 SolanaFeeDetails};
 
 pub mod siacoin;
 pub mod tendermint;

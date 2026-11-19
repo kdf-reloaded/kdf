@@ -148,6 +148,17 @@ the previous version used. The safe way:
 
 #### Solana coins
 
+- **The Solana activation methods of GLEEC KDF are available.** `experimental::enable_solana_with_assets`
+  activates a Solana platform with its tokens and `experimental::enable_solana_token` a single SPL
+  token, with the requests, results and errors GLEEC KDF uses, in native builds. They share the
+  activation of `enable_solana_with_tokens` and `enable_spl`: a platform activated through either
+  method takes tokens through either token method, and `disable_coin` treats both the same. A token
+  can also be activated from a `protocol` given in the request; such a token is wallet-only. A coin
+  activated through these methods sends no commitment level, so the node's default applies.
+  `enable_solana_with_tokens` now also refuses an inline token whose platform is another coin
+  (`PlatformCoinMismatch`). Solana stays switched off in this build. Detail: PR #N; CRD ch.40
+  §40.2, §40.3, R40.3A.3.
+
 - **Solana activates under an HD login, at a path the request chooses.** Under an HD login the
   Solana key is now derived from the seed phrase at `m/44'/501'/N'/0'` by default, or at
   `m/44'/501'/N'` when the activation request sends `"hd_path_layout": "bip44"`; N comes from
@@ -365,6 +376,16 @@ the previous version used. The safe way:
   status note of 2026-11-17.
 
 #### Solana coins
+
+- **Solana nodes are checked before use and spread across users.** A Solana coin's nodes are now put
+  into a random order once when the coin is enabled, so users of one coins file spread over its
+  nodes; set the `MM2.json` string `solana_node_order` to `listed` to keep the listed order, as
+  GLEEC KDF does. A node is asked whether it is healthy (`getHealth`) before it is used when it has
+  not been checked in the last 30 seconds; a node that fails is skipped for 20 seconds, doubling up
+  to 12 hours, and a recovered node that ranks higher is used again. The reads of one withdraw go to
+  one node, and a sent transaction is never rebuilt: a failed broadcast is retried with the same
+  signed bytes, and the error names the transaction's signature. This applies to both Solana
+  activation surfaces. Solana stays switched off in this build. Detail: PR #N; CRD ch.40 R40.1.5.
 
 - **Solana withdraws send the right amounts and say what they cost.** An SPL withdraw with `max` now
   sends the whole token balance (it used to move the requested amount while the answer showed the
@@ -679,8 +700,8 @@ the previous version used. The safe way:
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S6 in PR #425; new package S6c (a rent-exempt guard for SOL withdraws); switch-on lab rows for
-  `disable_coin` and the Token-2022 refusal.
+  S6 in PR #425, S7 in PR #N; new package S6c (a rent-exempt guard for SOL withdraws); switch-on
+  lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

@@ -1459,6 +1459,132 @@ fn t40_6b_20_disable_coin_on_a_solana_platform_with_a_token_follows_the_other_fa
     assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned(), "USDC".to_owned()]);
 }
 
+/// A loopback Solana node that answers what an activation reads: a SOL balance, a block height and no account for any
+/// address (so a token balance is zero). It stops when `stop` is set.
+#[cfg(not(target_arch = "wasm32"))]
+fn solana_stub_node(stop: std::sync::Arc<AtomicBool>) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the stub node");
+    let port = listener.local_addr().expect("local address").port();
+    listener.set_nonblocking(true).expect("non-blocking listener");
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                },
+            };
+            stream.set_nonblocking(false).ok();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            let body = loop {
+                let n = match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break Json::Null,
+                    Ok(n) => n,
+                };
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                    let len = head
+                        .to_lowercase()
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if rest.len() >= len {
+                        break json::from_str(rest).unwrap_or(Json::Null);
+                    }
+                }
+            };
+            let result = match body["method"].as_str().unwrap_or_default() {
+                "getHealth" => json!("ok"),
+                "getBalance" => json!({ "context": { "slot": 1 }, "value": 1_000_000_000u64 }),
+                "getBlockHeight" => json!(42),
+                "getAccountInfo" => json!({ "context": { "slot": 1 }, "value": null }),
+                _ => Json::Null,
+            };
+            let reply = json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            stream.write_all(response.as_bytes()).ok();
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// T40.6B.20 for the compatibility surface: a platform activated through the compatibility platform method is
+/// disabled with `disable_coin` and leaves `get_enabled_coins`; a token activated through the compatibility token
+/// method is removed from its platform's token records. The activation entry points that skip the beta switch are
+/// used; the node is a loopback stub.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn t40_6b_20_disable_coin_on_coins_activated_through_the_compatibility_surface() {
+    use coins_activation::{activate_solana_token, activate_solana_with_assets, SolanaCompatPlatformRequest,
+                           SolanaCompatTokenRequest};
+    let mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    let program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let url = solana_stub_node(stop.clone());
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json!({ "rpc_password": "pw", "coins": [
+            { "coin": "SOL", "mm2": 1, "protocol": { "type": "SOLANA", "protocol_data": {} } },
+            { "coin": "USDC", "mm2": 1, "protocol": { "type": "SOLANATOKEN", "protocol_data": {
+                "platform": "SOL", "decimals": 6, "mint_address": mint, "program_id": program } } },
+        ] }))
+        .into_mm_arc();
+    crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "disable compat test passphrase")
+        .expect("initialize the crypto context");
+
+    let platform_request: SolanaCompatPlatformRequest =
+        json::from_value(json!({ "ticker": "SOL", "nodes": [{ "url": url }], "tokens_params": [] }))
+            .expect("a well-formed request");
+    block_on(activate_solana_with_assets(ctx.clone(), platform_request))
+        .map_err(|e| e.into_inner())
+        .expect("the platform activates");
+    let token_request: SolanaCompatTokenRequest =
+        json::from_value(json!({ "ticker": "USDC", "activation_params": {} })).expect("a well-formed request");
+    block_on(activate_solana_token(ctx.clone(), token_request))
+        .map_err(|e| e.into_inner())
+        .expect("the token activates");
+    assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned(), "USDC".to_owned()]);
+    let platform = match block_on(coins::lp_coinfind(&ctx, "SOL")).unwrap() {
+        Some(MmCoinEnum::SolanaCoin(platform)) => platform,
+        _ => panic!("the platform is not a Solana platform"),
+    };
+    assert!(
+        platform.get_spl_tokens_infos().contains_key("USDC"),
+        "the token is recorded"
+    );
+
+    let expected = json::to_string(&json!({ "result": { "coin": "USDC", "cancelled_orders": [] } })).unwrap();
+    same(
+        &legacy_success(&ctx, "disable_coin", json!({ "coin": "USDC" })),
+        &expected,
+        "the legacy token body",
+    );
+    assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned()]);
+    assert!(
+        platform.get_spl_tokens_infos().is_empty(),
+        "the platform no longer records the token"
+    );
+
+    let expected = json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [] } })).unwrap();
+    same(
+        &legacy_success(&ctx, "disable_coin", json!({ "coin": "SOL" })),
+        &expected,
+        "the legacy platform body",
+    );
+    assert!(enabled_tickers(&ctx).is_empty());
+    stop.store(true, Ordering::SeqCst);
+}
+
 /// T43.1E (coin not active) for the Solana tickers: the extended refusal body with empty lists, HTTP 500, legacy; the
 /// typed `NoSuchCoin`, versioned. A token and a platform that were disabled already answer the same.
 #[test]

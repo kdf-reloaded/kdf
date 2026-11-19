@@ -138,6 +138,22 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
+- **Solana compatibility activation methods.** `experimental::enable_solana_with_assets`
+  and `experimental::enable_solana_token` take GLEEC KDF's requests and answer its results
+  and errors. Where Reloaded differs, no switch exists: a request with `tx_history: true`
+  gets its normal answer (GLEEC KDF ends it without one); a wallet without a token account
+  activates the token with balance `"0"` (GLEEC KDF fails the activation); the platform
+  method also takes `hd_path_layout`, `path_to_address` and `priv_key_policy`; an inline
+  token `protocol` may also use Reloaded's `SPLTOKEN` form. Native builds only for now;
+  Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #N.
+
+- **Solana node selection.** GLEEC KDF asks the nodes `getHealth` in list order before every
+  request and uses the first healthy one. Reloaded draws a random node order once when the coin is
+  enabled (`solana_node_order: "listed"` keeps the listed order), asks a node `getHealth` at most
+  once per 30 seconds, sets a failing node aside for 20 seconds doubling up to 12 hours, and keeps
+  the reads of one withdraw on one node. A sent transaction is never rebuilt on another node. CRD
+  ch.40 R40.1.5; PR #N.
+
 - **Solana wallet methods answer.** On an active Solana coin or SPL token
   GLEEC KDF ends many requests without a JSON answer (`sign_message`,
   `verify_message`, `validateaddress`, `convertaddress`,
@@ -1000,6 +1016,8 @@ behavior, except for `swap_key_check`; the row of each switch in
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by measurement (`mixed`, the default since 2026-11-14; `random` gives the
   earlier default, a random draw).
+- `solana_node_order: "listed"` — a Solana coin's nodes are used in the order they are listed
+  instead of in a random order drawn once when the coin is enabled.
 - `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
   servers, does not fail an activation or refuse trades when they disagree about the chain: a server
   that is behind the chain or stopped following it keeps its place in reads, broadcasts and a swap's
