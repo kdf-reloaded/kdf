@@ -1563,7 +1563,9 @@ fn messages_per_server(servers: &[StubServer; 3]) -> Vec<usize> {
 }
 
 /// Every method this client sends that is a read-only query in the sense of R38.6.4a item 1 is on the list, and
-/// nothing else is: a broadcast, every subscription but the one-shot tip read, the ping and the negotiation.
+/// nothing else is: a broadcast, every subscription but the one-shot tip read, the ping and the negotiation. The three
+/// Qtum contract reads joined the list for Reloaded (D38.6.4Q.2 status note, item 3); before that
+/// `blockchain.contract.call` was among the methods that are not on it.
 #[test]
 fn t38_6_4_14_the_read_only_methods_are_the_closed_list_of_the_chapter() {
     use super::electrum_pool::is_read_only;
@@ -1577,6 +1579,9 @@ fn t38_6_4_14_the_read_only_methods_are_the_closed_list_of_the_chapter() {
         "blockchain.transaction.get",
         "blockchain.estimatefee",
         "blockchain.relayfee",
+        "blockchain.contract.call",
+        "blockchain.contract.event.get_history",
+        "blochchain.transaction.get_receipt",
     ] {
         assert!(is_read_only(&rpc(method, vec![])), "{method}");
     }
@@ -1587,7 +1592,9 @@ fn t38_6_4_14_the_read_only_methods_are_the_closed_list_of_the_chapter() {
         "server.ping",
         "server.version",
         "blockchain.transaction.get_merkle",
-        "blockchain.contract.call",
+        // The correctly spelled name is not the server's and is never sent (R38.6.4Q.8 item 3).
+        "blockchain.transaction.get_receipt",
+        "blockchain.token.get_info",
         "not.a.method",
     ] {
         assert!(!is_read_only(&rpc(method, vec![])), "{method}");
@@ -1644,6 +1651,206 @@ fn t38_6_4_14_the_other_read_methods_spread_too() {
         }
         // Six reads over three sessions: two each.
         assert_eq!(messages_per_server(&servers), vec![2, 2, 2]);
+    });
+}
+
+const CONTRACT_CALL: &str = "blockchain.contract.call";
+const CONTRACT_HISTORY: &str = "blockchain.contract.event.get_history";
+const CONTRACT_RECEIPT: &str = "blochchain.transaction.get_receipt";
+const CONTRACT_READS: [&str; 3] = [CONTRACT_CALL, CONTRACT_HISTORY, CONTRACT_RECEIPT];
+
+/// D38.6.4Q.2 status note, item 3: the three contract reads take turns among the maintained sessions like the other
+/// read-only queries (they were routed by priority before).
+#[test]
+fn t38_6_4q_2_the_contract_reads_spread_over_the_maintained_sessions_in_turn() {
+    block_on(async {
+        let (servers, client) = three_maintained(true).await;
+        let mut answered = Vec::new();
+        for method in CONTRACT_READS.iter().chain(CONTRACT_READS.iter()) {
+            answered.push(ask(&client, method).await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![addr(0), addr(1), addr(2), addr(0), addr(1), addr(2)]);
+    });
+}
+
+/// D38.6.4Q.2 status note, item 1: a JSON-RPC error answer to one of the three contract reads moves the request on to
+/// the next session, and neither closes the session nor demotes the server.
+#[test]
+fn t38_6_4q_2_an_error_answer_to_a_contract_read_moves_on_and_closes_nothing() {
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        for method in CONTRACT_READS {
+            servers[0].set_error_object(method, json!({"code": -32603, "message": "internal error"}));
+            let answered = ask(&client, method).await.unwrap();
+            assert_eq!(answered, servers[1].addr(), "{method}");
+            assert_eq!(
+                servers[0].requests(method),
+                1,
+                "{method}: asked once, in the maintained pass"
+            );
+            assert_eq!(servers[1].requests(method), 1, "{method}");
+            assert_eq!(servers[2].requests(method), 0, "{method}");
+        }
+        // The first server's session is still open and it is still maintained, in its rank.
+        assert_eq!(servers[0].open_connections(), 1);
+        assert_eq!(servers[0].accepted(), 1);
+        assert_eq!(maintained(&client), vec![0, 1, 2]);
+        // The error is not remembered: a server that recovers takes the next request.
+        for method in CONTRACT_READS {
+            servers[0].clear_error(method);
+            assert_eq!(ask(&client, method).await.unwrap(), servers[0].addr(), "{method}");
+        }
+    });
+}
+
+/// The exact error object `{"code": 1, "message": "history too large"}` is final: it comes back at once and no other
+/// server is asked. The same message with another code moves on.
+#[test]
+fn t38_6_4q_2_history_too_large_is_final_and_an_unreadable_answer_is_final() {
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        servers[0].set_error_object(CONTRACT_HISTORY, json!({"code": 1, "message": "history too large"}));
+        let budget = client.pool.timings.call_budget;
+        let (addr, response) = client.pool.route(rpc(CONTRACT_HISTORY, vec![]), budget).await.unwrap();
+        assert_eq!(addr.0, servers[0].addr());
+        let JsonRpcResponseEnum::Single(single) = response else {
+            panic!("a single answer")
+        };
+        assert_eq!(single.error, json!({"code": 1, "message": "history too large"}));
+        assert_eq!(
+            servers[1].requests(CONTRACT_HISTORY) + servers[2].requests(CONTRACT_HISTORY),
+            0
+        );
+
+        servers[0].set_error_object(CONTRACT_HISTORY, json!({"code": -1, "message": "history too large"}));
+        assert_eq!(ask(&client, CONTRACT_HISTORY).await.unwrap(), servers[1].addr());
+
+        // An answer that cannot be read as the expected shape is not judged by the pool: it is the answer.
+        servers[0].clear_error(CONTRACT_CALL);
+        servers[0].set_result(CONTRACT_CALL, json!("not what the caller expects"));
+        assert_eq!(ask(&client, CONTRACT_CALL).await.unwrap(), servers[0].addr());
+        assert_eq!(servers[1].requests(CONTRACT_CALL), 0);
+    });
+}
+
+/// Every server answers an error: the request fails as R38.6.4i binds, naming each server and its error, every session
+/// stays open, and each server is asked exactly once: a server that answered with an error is not asked again in the
+/// retry (D38.6.4Q.2 status note, item 1). The failure text says that every server answered with an error answer.
+#[test]
+fn t38_6_4q_2_every_server_answering_an_error_fails_the_request_naming_each_server() {
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        for (i, server) in servers.iter().enumerate() {
+            server.set_error_object(
+                CONTRACT_CALL,
+                json!({"code": -32603, "message": format!("internal {i}")}),
+            );
+        }
+        let error = ask(&client, CONTRACT_CALL).await.unwrap_err();
+        for (i, server) in servers.iter().enumerate() {
+            assert!(error.contains(&server.addr()), "{error}");
+            assert!(error.contains(&format!("internal {i}")), "{error}");
+            assert_eq!(server.requests(CONTRACT_CALL), 1, "server {i} is asked once");
+        }
+        let ticker = error.split(':').next().unwrap();
+        assert!(
+            super::electrum_pool::every_server_answered_an_error(ticker, &error),
+            "{error}"
+        );
+        assert!(servers.iter().all(|server| server.open_connections() == 1));
+        assert_eq!(maintained(&client), vec![0, 1, 2]);
+    });
+}
+
+/// A server that fails by transport among the servers that answered with an error: the failure does not say that every
+/// server answered with an error answer, and the servers that did are asked once.
+#[test]
+fn t38_6_4q_2_a_server_that_is_down_among_erroring_ones_makes_the_failure_a_transport_failure() {
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        for server in [&servers[0], &servers[2]] {
+            server.set_error_object(CONTRACT_CALL, json!({"code": -32603, "message": "internal error"}));
+        }
+        servers[1].set_behavior(StubBehavior::Down).await;
+        wait_until("the second session to end", || maintained(&client) == vec![0, 2]).await;
+
+        let error = ask(&client, CONTRACT_CALL).await.unwrap_err();
+        let ticker = error.split(':').next().unwrap();
+        assert!(
+            !super::electrum_pool::every_server_answered_an_error(ticker, &error),
+            "{error}"
+        );
+        assert!(error.contains(&servers[1].addr()), "{error}");
+        assert_eq!(
+            (servers[0].requests(CONTRACT_CALL), servers[2].requests(CONTRACT_CALL)),
+            (1, 1)
+        );
+    });
+}
+
+/// A server's own error message may contain the headline text of the marker, even the whole prefix of a marked failure;
+/// in a mixed failure (one server down) the check must still say `false`: only the pool's own headline, at the start of
+/// the text and after the ticker, marks a failure.
+#[test]
+fn t38_6_4q_2_an_error_message_that_contains_the_marker_text_does_not_mark_a_mixed_failure() {
+    use super::electrum_pool::{every_server_answered_an_error, EVERY_SERVER_ANSWERED_AN_ERROR};
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        servers[2].set_behavior(StubBehavior::Down).await;
+        wait_until("the third session to end", || maintained(&client) == vec![0, 1]).await;
+
+        // First the headline alone in the message, then the whole marked prefix (ticker taken from a first failure).
+        servers[0].set_error_object(
+            CONTRACT_CALL,
+            json!({"code": -32603, "message": EVERY_SERVER_ANSWERED_AN_ERROR}),
+        );
+        servers[1].set_error_object(
+            CONTRACT_CALL,
+            json!({"code": -32603, "message": EVERY_SERVER_ANSWERED_AN_ERROR}),
+        );
+        let error = ask(&client, CONTRACT_CALL).await.unwrap_err();
+        let ticker = error.split(':').next().unwrap().to_owned();
+        assert!(error.contains(EVERY_SERVER_ANSWERED_AN_ERROR), "{error}");
+        assert!(!every_server_answered_an_error(&ticker, &error), "{error}");
+
+        let spoof = format!("{ticker}: {EVERY_SERVER_ANSWERED_AN_ERROR} (3): x");
+        for server in [&servers[0], &servers[1]] {
+            server.set_error_object(CONTRACT_CALL, json!({"code": -32603, "message": spoof}));
+        }
+        let error = ask(&client, CONTRACT_CALL).await.unwrap_err();
+        assert!(error.contains(&spoof), "{error}");
+        assert!(!every_server_answered_an_error(&ticker, &error), "{error}");
+    });
+}
+
+/// Every server is down: transport failures only, so not an all-error-answer failure.
+#[test]
+fn t38_6_4q_2_every_server_down_is_not_an_all_error_answer_failure() {
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        for server in &servers {
+            server.set_behavior(StubBehavior::Down).await;
+        }
+        let error = ask(&client, CONTRACT_CALL).await.unwrap_err();
+        let ticker = error.split(':').next().unwrap();
+        assert!(
+            !super::electrum_pool::every_server_answered_an_error(ticker, &error),
+            "{error}"
+        );
+    });
+}
+
+/// Every other method keeps its behavior: an error answer ends the request, nothing moves on.
+#[test]
+fn t38_6_4q_2_an_error_answer_to_any_other_method_still_ends_the_request() {
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        for method in ["blockchain.transaction.get", "blockchain.contract.event.subscribe"] {
+            servers[0].set_error_object(method, json!({"code": -32603, "message": "internal error"}));
+            assert_eq!(ask(&client, method).await.unwrap(), servers[0].addr(), "{method}");
+            assert_eq!(servers[1].requests(method) + servers[2].requests(method), 0, "{method}");
+        }
     });
 }
 

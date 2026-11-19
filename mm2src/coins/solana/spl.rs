@@ -1,9 +1,7 @@
 use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, TradeFee, TransactionEnum, WatcherOps};
-use crate::solana::rpc_client::TokenAccountsFilter;
 use crate::solana::rpc_pool::SolanaRpcPool;
-use crate::solana::solana_common::{ui_amount_to_amount, PrepareTransferData, SufficientBalanceError};
-use crate::solana::{solana_common, swaps_unsupported, AccountError, SolanaCoinSettings, SolanaCommonOps,
-                    SolanaFeeDetails};
+use crate::solana::solana_common::{amount_to_units, parse_recipient, truncate_amount, units_to_amount};
+use crate::solana::{solana_common, swaps_unsupported, SolanaCoinSettings, SolanaCommonOps, SolanaFeeDetails};
 use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, RawTransactionError,
             RawTransactionFut, RawTransactionRequest, SignatureResult, SolanaCoin, TradePreimageError,
             TradePreimageFut, TradePreimageResult, TradePreimageValue, TransactionDetails, TransactionErr,
@@ -15,31 +13,102 @@ use bincode::serialize;
 use common::{mm_number::MmNumber, now_ms};
 use futures::{FutureExt, TryFutureExt};
 use futures01::Future;
+use kdf_crypto::sha256;
 use keys::KeyPair;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use rpc::v1::types::Bytes as BytesJson;
 use serde_json::Value as Json;
+use solana_hash::Hash;
 use solana_message::Message;
+use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
-use spl_associated_token_account_client::address::get_associated_token_address;
-use spl_associated_token_account_client::instruction::create_associated_token_account;
+use spl_associated_token_account_client::address::get_associated_token_address_with_program_id;
+use spl_associated_token_account_client::instruction::create_associated_token_account_idempotent;
 use std::{fmt::{Debug, Formatter, Result as FmtResult},
-          str::FromStr,
           sync::Arc};
 
 /// The SPL Token program id, the token program of a `SPLTOKEN` configuration.
 pub const SPL_TOKEN_PROGRAM_ID: Pubkey = spl_token::ID;
+
+/// The Token-2022 program id (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`). Token-2022 tokens are not supported
+/// yet (CRD ch.40 D40.6B.4); the id is needed to tell a token account of either program from a wallet.
+pub const TOKEN_2022_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    6, 221, 246, 225, 238, 117, 143, 222, 24, 66, 93, 188, 228, 108, 205, 218, 182, 26, 252, 77, 131, 185, 13, 39, 254,
+    189, 249, 40, 216, 161, 139, 252,
+]);
+
+/// The text of the activation refusal of a Token-2022 token, after the token ticker and a colon (CRD ch.40 D40.6B.4,
+/// the maintainer's decision of 2026-11-18). Both activation surfaces use it.
+pub const TOKEN_2022_NOT_SUPPORTED: &str = "Token-2022 tokens are not supported yet";
+
+/// The size in bytes of a classic token account: what the rent of a created recipient account is quoted for (CRD
+/// ch.40 R40.6B.10).
+pub const SPL_TOKEN_ACCOUNT_LEN: usize = 165;
+
+/// The associated token account of `wallet` for `mint` under the token program `program_id`: the account a balance
+/// is read from, a withdraw spends from and a withdraw pays into (CRD ch.40 D40.6B.2). The one place the address is
+/// derived.
+pub fn associated_token_account(wallet: &Pubkey, mint: &Pubkey, program_id: &Pubkey) -> Pubkey {
+    get_associated_token_address_with_program_id(wallet, mint, program_id)
+}
+
+/// What the message of a token withdraw is built from.
+pub struct TokenTransferParams<'a> {
+    /// The wallet: authority of the source account and payer of the fee and of the created account.
+    pub wallet: &'a Pubkey,
+    /// The recipient's wallet address; the destination is its associated token account.
+    pub recipient: &'a Pubkey,
+    pub mint: &'a Pubkey,
+    pub program_id: &'a Pubkey,
+    pub decimals: u8,
+    /// The amount in the token's smallest units.
+    pub amount: u64,
+    /// Whether the destination account does not exist and is created first.
+    pub create_destination: bool,
+}
+
+/// The legacy message of a token withdraw: the idempotent creation of the destination associated token account
+/// when it is to be created (paid by the wallet), then the checked transfer from the wallet's own associated token
+/// account (CRD ch.40 R40.6B.10). The one place the token instructions are built.
+pub fn token_transfer_message(params: &TokenTransferParams<'_>, blockhash: &Hash) -> Result<Message, ProgramError> {
+    let source = associated_token_account(params.wallet, params.mint, params.program_id);
+    let destination = associated_token_account(params.recipient, params.mint, params.program_id);
+    let mut instructions = Vec::with_capacity(2);
+    if params.create_destination {
+        instructions.push(create_associated_token_account_idempotent(
+            params.wallet,
+            params.recipient,
+            params.mint,
+            params.program_id,
+        ));
+    }
+    instructions.push(spl_token::instruction::transfer_checked(
+        params.program_id,
+        &source,
+        params.mint,
+        &destination,
+        params.wallet,
+        &[],
+        params.amount,
+        params.decimals,
+    )?);
+    Ok(Message::new_with_blockhash(
+        &instructions,
+        Some(params.wallet),
+        blockhash,
+    ))
+}
 
 #[derive(Debug)]
 pub struct SplTokenConf {
     pub decimals: u8,
     pub ticker: String,
     pub token_contract_address: Pubkey,
-    /// The token program that owns the mint (SPL Token or Token-2022). Stored only; the token's account, balance
-    /// and transfer computations do not use it yet.
+    /// The token program that owns the mint (SPL Token or Token-2022). The token's account, balance and transfer are
+    /// derived with it; only the classic program can be withdrawn so far (CRD ch.40 D40.6B.4).
     pub program_id: Pubkey,
     /// The confirmation settings of this token (`set_required_confirmations`, `set_requires_notarization`).
     pub settings: SolanaCoinSettings,
@@ -98,81 +167,137 @@ impl SplToken {
     }
 }
 
-async fn withdraw_spl_token_impl(coin: SplToken, req: WithdrawRequest) -> WithdrawResult {
-    let (hash, fees) = coin.platform_coin.estimate_withdraw_fees().await.mm_err(Into::into)?;
-    let res = coin
-        .check_balance_and_prepare_transfer(req.max, req.amount.clone(), fees)
-        .await
-        .mm_err(Into::into)?;
-    let system_destination_pubkey =
-        Pubkey::from_str(&req.to).map_err(|e| WithdrawError::InvalidAddress(format!("{:?}", e)))?;
-    let contract_key = coin.get_underlying_contract_pubkey();
-    let auth_key = coin.platform_coin.key_pair.pubkey();
-    let funding_address = coin.get_pubkey().await.mm_err(Into::into)?;
-    let dest_token_address = get_associated_token_address(&system_destination_pubkey, &contract_key);
-    let mut instructions = Vec::with_capacity(1);
-    let dest_exists = coin.rpc().get_account_exists(&dest_token_address).await?;
-    if !dest_exists {
-        let instruction_creation =
-            create_associated_token_account(&auth_key, &system_destination_pubkey, &contract_key, &spl_token::ID);
-        instructions.push(instruction_creation);
+/// `withdraw` of a classic SPL token (CRD ch.40 R40.6B.10, D40.6B.3, D40.6B.6).
+async fn withdraw_impl(coin: SplToken, req: WithdrawRequest) -> WithdrawResult {
+    let recipient = parse_recipient(&req.to)?;
+    // Token-2022 is not supported yet (D40.6B.4): its transfer, account size and rent differ, so no transaction is
+    // built for a token of any other program than the classic one.
+    if coin.conf.program_id != SPL_TOKEN_PROGRAM_ID {
+        return MmError::err(WithdrawError::UnsupportedError(format!(
+            "Withdrawing {} is not supported: only tokens of the SPL Token program can be withdrawn, Token-2022 \
+             tokens are not supported yet",
+            coin.conf.ticker
+        )));
     }
-    let amount = ui_amount_to_amount(req.amount, coin.conf.decimals).mm_err(Into::into)?;
-    let instruction_transfer_checked = spl_token::instruction::transfer_checked(
-        &spl_token::ID,
-        &funding_address,
-        &contract_key,
-        &dest_token_address,
-        &auth_key,
-        &[&auth_key],
-        amount,
-        coin.conf.decimals,
-    )?;
-    instructions.push(instruction_transfer_checked);
-    let msg = Message::new(&instructions, Some(&auth_key));
-    let signers = vec![&coin.platform_coin.key_pair];
-    let tx = Transaction::new(&signers, msg, hash);
-    let serialized_tx = serialize(&tx).map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
-    let received_by_me = if req.to == coin.platform_coin.my_address {
-        res.to_send.clone()
+    let platform = &coin.platform_coin;
+    let rpc = platform.rpc();
+    // D40.6B.6 (a): `to` is an owner (wallet) address; an existing account owned by a token program is refused.
+    if let Some(owner) = rpc.get_account_owner(&recipient).await? {
+        if owner == SPL_TOKEN_PROGRAM_ID || owner == TOKEN_2022_PROGRAM_ID {
+            return MmError::err(WithdrawError::InvalidAddress(
+                "The recipient is a token account; give the address of its owner (a wallet)".to_string(),
+            ));
+        }
+    }
+
+    let info = coin.get_info();
+    let decimals = coin.conf.decimals;
+    let balance = platform.spl_token_balance(&info).await.mm_err(WithdrawError::from)?;
+    let threshold = coin.min_tx_amount();
+    // D40.6B.3 (a): with `max` the transfer carries the account's whole raw amount.
+    let units = if req.max {
+        if balance.raw == 0 {
+            return MmError::err(WithdrawError::AmountTooLow {
+                amount: 0.into(),
+                threshold,
+            });
+        }
+        balance.raw
     } else {
-        0.into()
+        let amount = truncate_amount(&req.amount, decimals);
+        if amount <= BigDecimal::from(0) {
+            return MmError::err(WithdrawError::AmountTooLow { amount, threshold });
+        }
+        match amount_to_units(&amount, decimals) {
+            Ok(units) if units <= balance.raw => units,
+            _ => {
+                return MmError::err(WithdrawError::NotSufficientBalance {
+                    coin: coin.conf.ticker.clone(),
+                    available: balance.amount,
+                    required: amount,
+                })
+            },
+        }
     };
+
+    let wallet = platform.key_pair.pubkey();
+    let destination = associated_token_account(&recipient, &info.token_contract_address, &info.program_id);
+    let create_destination = !rpc.get_account_exists(&destination).await?;
+    let rent = if create_destination {
+        rpc.get_minimum_balance_for_rent_exemption(SPL_TOKEN_ACCOUNT_LEN)
+            .await?
+    } else {
+        0
+    };
+    let blockhash = rpc.get_latest_blockhash().await?;
+    let message = token_transfer_message(
+        &TokenTransferParams {
+            wallet: &wallet,
+            recipient: &recipient,
+            mint: &info.token_contract_address,
+            program_id: &info.program_id,
+            decimals,
+            amount: units,
+            create_destination,
+        },
+        &blockhash,
+    )?;
+    let fee = rpc.get_fee_for_message(&message).await?;
+
+    // The fee and the rent are paid in SOL by the wallet (R40.6B.10).
+    let sol_balance = rpc.get_balance(&wallet).await?;
+    let sol_required = fee
+        .checked_add(rent)
+        .or_mm_err(|| WithdrawError::InternalError("The fee and the rent overflow".to_string()))?;
+    if sol_required > sol_balance {
+        return MmError::err(WithdrawError::NotSufficientPlatformBalanceForFee {
+            coin: platform.ticker.clone(),
+            available: units_to_amount(sol_balance, platform.decimals),
+            required: units_to_amount(sol_required, platform.decimals),
+        });
+    }
+
+    let signers = vec![&platform.key_pair];
+    let mut tx = Transaction::new_unsigned(message);
+    tx.try_sign(&signers, blockhash)
+        .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
+    let serialized_tx = serialize(&tx).map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
+    let tx_hash = tx
+        .signatures
+        .first()
+        .map(ToString::to_string)
+        .or_mm_err(|| WithdrawError::InternalError("The transaction carries no signature".to_string()))?;
+
+    let amount = units_to_amount(units, decimals);
+    let received_by_me = if recipient == wallet { amount.clone() } else { 0.into() };
     Ok(TransactionDetails {
         unsigned: None,
         tx_json: None,
         tx_hex: serialized_tx.into(),
-        tx_hash: tx.signatures[0].to_string(),
-        from: vec![coin.platform_coin.my_address.clone()],
+        internal_id: tx_hash.as_bytes().to_vec().into(),
+        tx_hash,
+        from: vec![platform.my_address.clone()],
         to: vec![req.to],
-        total_amount: res.to_send.clone(),
-        spent_by_me: res.to_send.clone(),
-        my_balance_change: &received_by_me - &res.to_send,
+        total_amount: amount.clone(),
+        spent_by_me: amount.clone(),
+        my_balance_change: &received_by_me - &amount,
         received_by_me,
         block_height: 0,
         timestamp: now_ms() / 1000,
         fee_details: Some(
-            SolanaFeeDetails {
-                amount: res.sol_required,
-            }
+            SolanaFeeDetails::new(
+                units_to_amount(fee, platform.decimals),
+                units_to_amount(rent, platform.decimals),
+            )
             .into(),
         ),
         coin: coin.conf.ticker.clone(),
-        internal_id: vec![].into(),
         kmd_rewards: None,
-        transaction_type: TransactionType::StandardTransfer,
+        transaction_type: TransactionType::TokenTransfer(
+            sha256(&info.token_contract_address.to_bytes()).to_vec().into(),
+        ),
         memo: None,
     })
-}
-
-async fn withdraw_impl(coin: SplToken, req: WithdrawRequest) -> WithdrawResult {
-    let validate_address_result = coin.validate_address(&*req.to);
-    if !validate_address_result.is_valid {
-        return MmError::err(WithdrawError::InvalidAddress(
-            validate_address_result.reason.unwrap_or_else(|| "Unknown".to_string()),
-        ));
-    }
-    withdraw_spl_token_impl(coin, req).await
 }
 
 #[async_trait]
@@ -180,45 +305,12 @@ impl SolanaCommonOps for SplToken {
     fn rpc(&self) -> &SolanaRpcPool { &self.platform_coin.client }
 
     fn is_token(&self) -> bool { true }
-
-    async fn check_balance_and_prepare_transfer(
-        &self,
-        max: bool,
-        amount: BigDecimal,
-        fees: u64,
-    ) -> Result<PrepareTransferData, MmError<SufficientBalanceError>> {
-        solana_common::check_balance_and_prepare_transfer(self, max, amount, fees).await
-    }
 }
 
 impl SplToken {
-    fn get_underlying_contract_pubkey(&self) -> Pubkey { self.conf.token_contract_address }
-
-    async fn get_pubkey(&self) -> Result<Pubkey, MmError<AccountError>> {
-        let token_accounts = self
-            .rpc()
-            .get_token_accounts_by_owner(
-                &self.platform_coin.key_pair.pubkey(),
-                TokenAccountsFilter::Mint(self.get_underlying_contract_pubkey()),
-            )
-            .await?;
-        if token_accounts.is_empty() {
-            return MmError::err(AccountError::NotFundedError("account_not_funded".to_string()));
-        }
-        Ok(Pubkey::from_str(&*token_accounts[0].pubkey)?)
-    }
-
     fn my_balance_impl(&self) -> BalanceFut<CoinBalance> {
         let coin = self.clone();
-        let fut = async move {
-            coin.platform_coin
-                .my_balance_spl(&SplTokenInfo {
-                    token_contract_address: coin.conf.token_contract_address,
-                    program_id: coin.conf.program_id,
-                    decimals: coin.conf.decimals,
-                })
-                .await
-        };
+        let fut = async move { coin.platform_coin.my_balance_spl(&coin.get_info()).await };
         Box::new(fut.boxed().compat())
     }
 }

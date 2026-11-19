@@ -405,6 +405,13 @@ on this surface today, so its `Transport` row (HTTP 502) is not reached; it
 is reached once the mint-owner check of R40.2.2 is built (plan
 `solana-support`, the compatibility-methods package).
 
+> *Reloaded status (clean side, 2026-11-18):* the mint-owner check of
+> R40.2.2 is built for both methods of this surface (PR #425). Initialising an
+> inline token now contacts a node, so a node failure there, or a mint owned
+> by another program than the token's `program_id`, answers the `Transport`
+> row (HTTP 502) instead of `PlatformCoinCreationError`. `enable_spl`
+> answers `Transport` (HTTP 500) for the same cases.
+
 **R40.3A.4** *`enable_spl`.* Request: `ticker` (string, **required**) and
 `activation_params` (object, **required**, may be `{}`; members ignored);
 there is no `protocol` member. Result (HTTP 200): `{balances,
@@ -536,6 +543,11 @@ refuses every request; see the availability note at the top of this chapter):
 >
 > `docs/plans/solana-support.md` schedules each of them before Solana is
 > switched back on.
+
+> *Reloaded status (clean side, 2026-11-18):* of the four gaps above, the
+> SPL `max` withdraw and the rent are fixed in PR #425, and a Token-2022 token
+> is refused at activation (D40.6B.4 (a)) until its own package; the
+> unimplemented operations answered from PR #401 on.
 
 > **Decision recorded (informative).** The baseline-inherited
 > `enable_solana_with_tokens` / `enable_spl` methods stay routed as the primary
@@ -940,6 +952,12 @@ R40.6B.10 assumes the classic account size and would understate the rent
 of a Token-2022 account that carries extensions. The registry branch
 publishes no Token-2022 entry (§40.6B.8).
 
+> *Reloaded status (clean side, 2026-11-18):* Reloaded refuses a Token-2022
+> token at activation (D40.6B.4 (a)), so its withdraw is not reached. Where a
+> token with another `program_id` than the classic Token program reaches the
+> withdraw anyway, the answer is `UnsupportedError` (HTTP 400, string; ch. 49
+> R49.27a), before any transaction is built, not `InternalError`. PR #425.
+
 **R40.6B.12** *`fee_details`.* For both Solana kinds the member is an
 object of four members:
 
@@ -1018,6 +1036,12 @@ exhaustive (§40.6B.11).
 > `NotSufficientBalance` naming the platform coin where the reference
 > answers `NotSufficientPlatformBalanceForFee`. D40.6B.3 and T40.6B.9
 > cover both.
+
+> *Reloaded status (clean side, 2026-11-18):* both parts of this finding are
+> fixed in PR #425: `max` moves the token account's whole amount (D40.6B.3),
+> and a short SOL balance answers `NotSufficientPlatformBalanceForFee`
+> (T40.6B.9). The classic Token program remains the only one supported
+> (D40.6B.4 (a)).
 
 ### 40.6B.6 Transaction history
 
@@ -1272,10 +1296,25 @@ R40.1.4 reports and the account a withdraw spends from; (b) copy the
 reference's failure. *Recommendation:* (a). It also settles the Token-2022
 balance finding of §40.6.
 
+> *Reloaded status (clean side, 2026-11-18):* settled as option (a) by the
+> maintainer's decisions of 2026-11-15 and built in PR #425. A token's balance
+> is read from the associated token account derived from the wallet address,
+> the mint and the token's `program_id`; when that account does not exist
+> the balance is zero, and a node failure stays an error. Withdraws spend
+> from the same account.
+
 **D40.6B.3** *The SPL "max" withdraw (R40.6B.10 and both findings).*
 Requirement: with `max`, the transaction moves the token account's whole
 amount and the answer reports the amount the transaction moves. Options:
 (a) that; (b) copy the reference. *Recommendation:* (a).
+
+> *Reloaded status (clean side, 2026-11-18):* settled as option (a) and
+> built in PR #425. With `max` the transfer carries the account's whole amount
+> in the token's smallest units, and `total_amount` reports it. By the
+> owner's choice of 2026-11-18, `AmountTooLow` names the coin's own minimum
+> transaction amount as its threshold: one lamport for SOL and one smallest
+> unit of the token's decimals for an SPL token (the `min_tx_amount` of
+> §40.6A's status note), where the reference names one lamport for both.
 
 **D40.6B.4** *Token-2022 (R40.6B.5, R40.6B.11).* Options: (a) until it is
 supported, refuse a token whose `program_id` is the Token-2022 program at
@@ -1286,6 +1325,16 @@ mints with a transfer fee; (c) copy the reference (a node error at
 activation, `InternalError` at withdraw). *Recommendation:* (a) for the
 return of Solana, (b) as its own work package. The registry branch
 publishes no Token-2022 entry, so (a) costs no coverage today.
+
+> *Reloaded status (clean side, 2026-11-18):* settled as option (a) for the
+> return of Solana and built in PR #425. A token whose `program_id` is the
+> Token-2022 program is refused before any node is contacted, and nothing
+> is registered: `enable_solana_with_tokens` answers
+> `PlatformCoinCreationError` (`{ticker, error}`, the platform ticker, HTTP
+> 500) and `enable_spl` answers `Internal` (string, HTTP 500), both with the
+> text "<token>: Token-2022 tokens are not supported yet" (maintainer
+> decision of 2026-11-18, the shapes Reloaded uses while TRON is switched
+> off). Option (b) is a later package of the plan `solana-support`.
 
 **D40.6B.5** *The `fee_details` object (R40.6B.12).* This repository
 answers `{type, amount}`, the reference
@@ -1298,6 +1347,11 @@ shape. Choose (c) only if a client is found that reads `amount`, and then
 check the stored-form reader, which tells the families' fee objects apart
 by their members, not by `type`.
 
+> *Reloaded status (clean side, 2026-11-18):* settled as option (a) and
+> built in PR #425, for both Solana kinds and in the history decoder; the
+> reader of stored fee objects tells the new shape apart by its
+> `fee_amount` member, which no other family's fee object has.
+
 **D40.6B.6** *A recipient that is a token account (second finding of
 R40.6B.10).* Requirement: tokens must not land in an account owned by a
 token account. Options: (a) accept owner addresses only, and refuse a `to`
@@ -1305,6 +1359,11 @@ that is an existing account owned by a token program with
 `InvalidAddress`; (b) as (a), except that a `to` which is a token account
 of the same mint is paid directly; (c) copy the reference.
 *Recommendation:* (a) for the return of Solana; (b) can follow.
+
+> *Reloaded status (clean side, 2026-11-18):* settled as option (a) and
+> built in PR #425: a `to` that is an existing account owned by the classic
+> Token or the Token-2022 program answers `InvalidAddress`, and no
+> transaction is built.
 
 **D40.6B.7** *Solana under a global-HD login (the consistency note of
 §40.6B.3; continues D40.2).* Options: (a) follow chapter 05 R46 item 3 on
@@ -1762,3 +1821,9 @@ with the shapes listed in §40.6 items 3-5.
 - *Clean-context addition (2026-11-18, forbidden corpus not consulted):*
   the status note on `disable_coin` after D40.6B.1 records this repository's
   own code and chapter 43 §43.1E as cleared.
+- *Clean-context addition (2026-11-18, forbidden corpus not consulted):*
+  the status notes on the withdraw, the balance, Token-2022 and the
+  mint-owner check (after R40.3A.3, after §40.6's gap list, after R40.6B.11,
+  after the last finding of §40.6B.5 and after D40.6B.2 to D40.6B.6) record
+  this repository's own code and the maintainer's decisions of 2026-11-15
+  and 2026-11-18.

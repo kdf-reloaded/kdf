@@ -11,15 +11,14 @@ impl SolanaCommonOps for SolanaCoin {
     fn rpc(&self) -> &SolanaRpcPool { &self.client }
 
     fn is_token(&self) -> bool { false }
+}
 
-    async fn check_balance_and_prepare_transfer(
-        &self,
-        max: bool,
-        amount: BigDecimal,
-        fees: u64,
-    ) -> Result<PrepareTransferData, MmError<SufficientBalanceError>> {
-        solana_common::check_balance_and_prepare_transfer(self, max, amount, fees).await
-    }
+/// The balance of a token account in both forms: the raw amount in smallest units (what a withdraw with `max`
+/// moves) and the amount in token units.
+#[derive(Clone, Debug)]
+pub(crate) struct SplTokenBalance {
+    pub(crate) raw: u64,
+    pub(crate) amount: BigDecimal,
 }
 
 impl SolanaCoin {
@@ -31,29 +30,60 @@ impl SolanaCoin {
         Ok((hash, fees))
     }
 
-    pub async fn my_balance_spl(&self, infos: &SplTokenInfo) -> Result<CoinBalance, MmError<BalanceError>> {
-        let token_accounts = self
-            .rpc()
-            .get_token_accounts_by_owner(
-                &self.key_pair.pubkey(),
-                TokenAccountsFilter::Mint(infos.token_contract_address),
-            )
-            .await?;
-        if token_accounts.is_empty() {
-            return Ok(CoinBalance {
-                spendable: Default::default(),
-                unspendable: Default::default(),
+    /// The wallet's associated token account for the token `infos`, derived with the token's `program_id` (CRD ch.40
+    /// D40.6B.2). The account a balance is read from and a withdraw spends from.
+    pub fn token_account_address(&self, infos: &SplTokenInfo) -> Pubkey {
+        crate::solana::spl::associated_token_account(
+            &self.key_pair.pubkey(),
+            &infos.token_contract_address,
+            &infos.program_id,
+        )
+    }
+
+    /// The wallet's balance of a token, from the associated token account derived with the token's `program_id`. A
+    /// wallet without such an account has balance zero, which is not an error (CRD ch.40 D40.6B.2); a node failure
+    /// is.
+    pub(crate) async fn spl_token_balance(
+        &self,
+        infos: &SplTokenInfo,
+    ) -> Result<SplTokenBalance, MmError<BalanceError>> {
+        let account = self.token_account_address(infos);
+        if !self.rpc().get_account_exists(&account).await? {
+            return Ok(SplTokenBalance {
+                raw: 0,
+                amount: 0.into(),
             });
         }
-        let actual_token_pubkey =
-            Pubkey::from_str(&token_accounts[0].pubkey).map_err(|e| BalanceError::Internal(format!("{:?}", e)))?;
-        let amount = self.rpc().get_token_account_balance(&actual_token_pubkey).await?;
-        let balance =
-            BigDecimal::from_str(&amount.ui_amount_string).map_to_mm(|e| BalanceError::Internal(e.to_string()))?;
+        let balance = self.rpc().get_token_account_balance(&account).await?;
+        let raw = balance
+            .amount
+            .parse::<u64>()
+            .map_to_mm(|_| BalanceError::InvalidResponse("The token account amount is not a number".to_string()))?;
+        let amount =
+            BigDecimal::from_str(&balance.ui_amount_string).map_to_mm(|e| BalanceError::Internal(e.to_string()))?;
+        Ok(SplTokenBalance { raw, amount })
+    }
+
+    pub async fn my_balance_spl(&self, infos: &SplTokenInfo) -> Result<CoinBalance, MmError<BalanceError>> {
+        let balance = self.spl_token_balance(infos).await?;
         Ok(CoinBalance {
-            spendable: balance,
+            spendable: balance.amount,
             unspendable: Default::default(),
         })
+    }
+
+    /// The mint-owner check of activation (CRD ch.40 R40.2.2): when the mint account exists, the token's
+    /// `program_id` must own it. A mint account that does not exist is accepted.
+    pub async fn check_mint_owner(&self, mint: &Pubkey, program_id: &Pubkey) -> Result<(), MmError<MintOwnerError>> {
+        let owner = self
+            .rpc()
+            .get_account_owner(mint)
+            .await
+            .map_to_mm(|e| MintOwnerError::Node(crate::node_url::scrub_urls_in_text(&e.to_string())))?;
+        match owner {
+            Some(owner) if owner != *program_id => MmError::err(MintOwnerError::WrongOwner),
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn my_balance_impl(&self) -> BalanceFut<BigDecimal> {

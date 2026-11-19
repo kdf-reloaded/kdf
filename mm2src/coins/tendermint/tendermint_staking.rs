@@ -5,6 +5,7 @@
 
 use super::rpc::*;
 use super::tendermint_types::*;
+use super::wc_integration::signed_fee_of;
 use crate::rpc_command::tendermint::staking::{ClaimRewardsPayload, Delegation, DelegationPayload,
                                               DelegationsQueryResponse, Undelegation, UndelegationEntry,
                                               UndelegationsQueryResponse, ValidatorStatus};
@@ -317,8 +318,8 @@ impl TendermintCoin {
 impl TendermintCoin {
     /// Signs and broadcasts the message, answering the raw transaction and its hash; a watch-only coin signs and
     /// broadcasts nothing and answers its unsigned document instead, with an empty transaction and hash
-    /// (CRD ch.36 R36.14.17). With the Ledger flag the build fails: the Amino form covers the bank send only
-    /// (R36.14.18 item 3).
+    /// (CRD ch.36 R36.14.17); a WalletConnect coin has the wallet sign (R36.14.15). With the Ledger flag the build
+    /// fails: the Amino form covers the bank send only (R36.14.18 item 3).
     async fn send_or_unsigned(
         &self,
         msg: cosmrs::Any,
@@ -326,6 +327,20 @@ impl TendermintCoin {
         timeout_height: u64,
         memo: &str,
     ) -> MmResult<(BytesJson, String, Option<UnsignedTransaction>), DelegationError> {
+        // CRD ch.36 R36.14.15: a WalletConnect coin has the wallet sign and broadcasts the transaction as a coin with
+        // a key does. With the Ledger flag the build fails before any wallet request, as for a watch-only coin.
+        if self.activation_policy.wallet_connect_session().is_some() {
+            let tx_bytes = self
+                .wc_sign_message(msg, fee, timeout_height, memo)
+                .await
+                .map_err(DelegationError::from)?;
+            let tx_id = self
+                .send_raw_tx_bytes(&tx_bytes)
+                .compat()
+                .await
+                .map_err(|e| DelegationError::InternalError(format!("Transaction failed: {e}")))?;
+            return Ok((tx_bytes.into(), tx_id, None));
+        }
         if self.activation_policy.watch_only_ledger_flag().is_some() {
             let unsigned = self
                 .build_unsigned_transaction(msg, fee, timeout_height, memo)
@@ -342,6 +357,21 @@ impl TendermintCoin {
             .map_err(|e| DelegationError::InternalError(e.to_string()))?
             .into();
         Ok((tx_hex, tx_id, None))
+    }
+
+    /// The fee carried by the transaction a WalletConnect wallet signed (amount in the smallest unit, gas limit), read
+    /// from the answered transaction; `None` for a result that is unsigned or that a key of this node signed.
+    fn wc_signed_fee(
+        &self,
+        tx_hex: &BytesJson,
+        unsigned: &Option<UnsignedTransaction>,
+    ) -> MmResult<Option<(u64, u64)>, DelegationError> {
+        if unsigned.is_some() || self.activation_policy.wallet_connect_session().is_none() {
+            return Ok(None);
+        }
+        signed_fee_of(tx_hex, &self.protocol_info.denom.to_string())
+            .map(Some)
+            .map_to_mm(DelegationError::InternalError)
     }
 
     /// Send a delegation (stake) transaction.
@@ -442,6 +472,16 @@ impl TendermintCoin {
         .map_err(|e| DelegationError::InternalError(e.to_string()))?;
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // CRD ch.36 R36.14.15, as-built note of 2026-11-17: the fee of a transaction a wallet signed is the one the signed
+        // transaction carries.
+        let (fee_amount_u64, fee_amount_dec, gas_limit) = match self.wc_signed_fee(&tx_hex, &unsigned)? {
+            Some((signed_amount, signed_gas_limit)) => (
+                signed_amount,
+                big_decimal_from_sat_unsigned(signed_amount, self.decimals()),
+                signed_gas_limit,
+            ),
+            None => (fee_amount_u64, fee_amount_dec, gas_limit),
+        };
         // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
         let (internal_id, result_memo) = match &unsigned {
             Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),
@@ -556,6 +596,16 @@ impl TendermintCoin {
         }
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // CRD ch.36 R36.14.15, as-built note of 2026-11-17: the fee of a transaction a wallet signed is the one the signed
+        // transaction carries.
+        let (fee_amount_u64, fee_amount_dec, gas_limit) = match self.wc_signed_fee(&tx_hex, &unsigned)? {
+            Some((signed_amount, signed_gas_limit)) => (
+                signed_amount,
+                big_decimal_from_sat_unsigned(signed_amount, self.decimals()),
+                signed_gas_limit,
+            ),
+            None => (fee_amount_u64, fee_amount_dec, gas_limit),
+        };
         // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
         let (internal_id, result_memo) = match &unsigned {
             Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),
@@ -658,6 +708,16 @@ impl TendermintCoin {
         }
 
         let (tx_hex, tx_id, unsigned) = self.send_or_unsigned(msg, fee, timeout_height, &req.memo).await?;
+        // CRD ch.36 R36.14.15, as-built note of 2026-11-17: the fee of a transaction a wallet signed is the one the signed
+        // transaction carries.
+        let (fee_amount_u64, fee_amount_dec, gas_limit) = match self.wc_signed_fee(&tx_hex, &unsigned)? {
+            Some((signed_amount, signed_gas_limit)) => (
+                signed_amount,
+                big_decimal_from_sat_unsigned(signed_amount, self.decimals()),
+                signed_gas_limit,
+            ),
+            None => (fee_amount_u64, fee_amount_dec, gas_limit),
+        };
         // An unsigned result carries the constant identifier and the memo of R36.14.29; a signed one its transaction.
         let (internal_id, result_memo) = match &unsigned {
             Some(_) => (unsigned_internal_id(None), Some(req.memo.clone())),

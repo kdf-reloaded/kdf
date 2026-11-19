@@ -1164,7 +1164,7 @@ pub trait UtxoStandardOps {
         &self,
         hash: &[u8],
         input_transactions: &mut HistoryUtxoTxMap,
-    ) -> Result<TransactionDetails, String>;
+    ) -> Result<TransactionDetails, utxo_common::TxDetailsByHashError>;
 
     async fn request_tx_history(&self, metrics: MetricsArc) -> RequestTxHistoryResult;
 

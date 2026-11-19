@@ -232,6 +232,12 @@ determining the error of R36.1.6:
 
 No failure leaves the platform or any of its tokens partially registered.
 
+*Pointer (2026-11-18).* A `ticker` that is registered but passive (chapter 43
+R43.1E.6), a requested token that is already registered, and
+`enable_tendermint_token` against a passive platform are the subject of
+chapter 43 §43.1F (R43.1F.2 -- R43.1F.6; passed the KDF Dirty Gate on 2026-11-18). This
+pointer binds nothing of its own.
+
 R36.1.5 **Success result** (HTTP 200):
 
 | Field | JSON type | Presence | Content |
@@ -760,6 +766,16 @@ terms; the clean implementer works from this list):
    (form 1) is built (§36.14.3, as-built note) and malformed input is now
    `InvalidRequest`; the interim refusal above remains for the WalletConnect
    forms (forms 2 and 3) only, until their activation is built.
+   *Status note (2026-11-16, Reloaded-original; closes the note above).* The
+   WalletConnect forms (forms 2 and 3) are built (§36.14.2, as-built note): the
+   interim refusal of this section no longer exists and item 5 is closed.
+   The top-level `priv_key_policy` request member keeps refusing the WalletConnect
+   spelling `{"type": "WalletConnect", "data": ...}` at request parsing
+   (`InvalidRequest`), because R36.1.3 binds form 3 inside `activation_params`
+   only; this supersedes the clause "accepted only once its activation (plan item 1)
+   is built" of the 2026-11-15 note above. The existing test
+   `an_unknown_priv_key_policy_fails_request_parsing` (wire tests of
+   `tendermint_with_tokens_activation`) keeps asserting the refusal.
 7. **Token platform check.** Reloaded does not check that an inline token's
    `platform` equals the activated platform. Bound: `PlatformCoinMismatch`
    (unit, HTTP 400).
@@ -1369,6 +1385,11 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   mechanical comparison (identifier-shaped token intersection at both rows;
   5-, 4- and 3-word sequence comparison against comment and string-literal
   text; row-to-row difference); the additions embed no code blocks.
+- *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
+  R36.1.4.* It names chapter 43 R43.1F.2 -- R43.1F.6 and states no behavior
+  of its own; it travels with chapter 43 §43.1F for the KDF Dirty Gate.
+  **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter 43's
+  provenance footer.
 
 ---
 
@@ -2005,6 +2026,20 @@ part of the decision; the same for the staking requests. Recommended: (b);
 no client written against the reference can depend on a type the
 reference never sent for this case.
 
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15: (b).
+> Neither `WithdrawError` nor `DelegationError` had a signing variant; both now
+> have `SigningError` (a string, HTTP 500, wire `error_type` `SigningError`).
+> The request fails with it when the external wallet did not sign: a refusal
+> (an answer that carries an error), no answer within the time-to-live, a
+> session that is gone or no longer grants the chain (no request is sent), a
+> relay that could not carry the request, an answer without a usable signature,
+> and an echoed body that differs from the requested one (§36.14.2, as-built
+> note). It is used for `withdraw` and for the staking requests (delegate,
+> undelegate, claim rewards). Every other failure of those requests keeps its
+> type: a node that does not answer is not a signing error, and a message the
+> Amino form does not cover fails with the request's internal-error type before
+> any wallet request.
+
 D36.16 *(maintainer decision.)* *Which key record, and the address
 check.* Options: (a) the reference: the first key record, no comparison
 with the session's account (R36.14.14 items 4, 6 and 7); (b) the key
@@ -2012,6 +2047,132 @@ record whose chain id is the coin's, falling back to `cosmos_getAccounts`
 when there is none, and a refusal with `PlatformCoinCreationError` when
 the address derived from the key differs from the session's account for
 that chain. Recommended: (b).
+
+> **Status note (2026-11-16, Reloaded-original).** Decided 2026-11-15: (b), as
+> built in the note at the end of this subsection.
+
+> **As built (Reloaded, 2026-11-16, 0.5.0; informative).** Both
+> WalletConnect spellings of R36.1.3 (form 2 and form 3, treated exactly alike)
+> activate a coin the paired wallet signs for, and the interim refusal of §36.7 is
+> removed for them.
+>
+> - *Activation.* The activation policy holds the session topic, the wallet's
+>   account key and the Ledger flag, and no private key; the node's login plays
+>   no part. The node set is validated before the wallet is contacted
+>   (R36.1.4 step 3). The WalletConnect subsystem is initialised on first use,
+>   as a `wc_*` request does, so a session restored from storage can be used
+>   without an earlier `wc_*` request; a build without the subsystem configured
+>   fails as `PlatformCoinCreationError`. Every failure below is
+>   `PlatformCoinCreationError` and registers no coin, platform or token.
+> - *Reading the session (R36.14.14 with D36.16 (b)).* The order is the one of
+>   R36.14.14. A key record matches the coin when its `chainId` is the coin's
+>   `chain_id` or its CAIP-2 form `cosmos:<chain_id>`; the first matching record
+>   supplies the key, the algorithm and the Ledger flag, and a record of another
+>   chain is never used, whatever its position. Without a matching record exactly
+>   one `cosmos_getAccounts` with no parameter (an empty object) is sent for the
+>   coin's chain; the entry used is the one whose address is one of the session's
+>   accounts for the chain, else the first entry, and its Ledger flag is false.
+>   The session's accounts for the chain are the CAIP-10 accounts of the `cosmos`
+>   namespace and of a namespace keyed by the full chain identifier whose chain
+>   reference is the coin's. The address derived from the key under
+>   `account_prefix` must be one of those accounts, otherwise the activation is
+>   refused. The text of a key is read as hex when every character is a hex
+>   digit and the length is even, as base64 otherwise (item 5); an enumeration
+>   entry may give it as an array of byte values.
+> - *Signing (R36.14.15).* `withdraw` and the staking requests ask the wallet for
+>   one signature each: `cosmos_signAmino` when the Ledger flag is set,
+>   `cosmos_signDirect` otherwise; the flag is the one read at activation. Before
+>   the request the session of the activation is looked up again and must grant
+>   the chain; if not, the request fails with the typed error of D36.15 and no
+>   request is sent. The fee is the fixed assumed one (Chapter 18 R18.11.9), no
+>   simulation; the `from` selector is ignored. `withdraw` answers the signed
+>   transaction (`tx_hex`, its upper-case SHA-256 as `tx_hash`) and broadcasts
+>   nothing. The staking requests broadcast the signed transaction through the
+>   node's own broadcast, as they do for a local key; a rejected broadcast is
+>   not a signing error.
+> - *Direct mode: the echoed body (finding 3, Reloaded-original).* The broadcast
+>   transaction is assembled from the body and auth-info bytes the wallet echoes
+>   (Chapter 22 §22.8.1.2). The echoed body is compared byte for byte with the
+>   body that was requested, and the request fails with the typed error of D36.15
+>   on a difference. The echoed auth-info bytes are used as they are and are not
+>   compared. The echo of the Amino document is not compared.
+> - *Amino mode and R36.14.31.* One function builds the Amino sign document for
+>   both producers, the unsigned result of the public-key form and the
+>   `cosmos_signAmino` request: the members `account_number`, `chain_id`, `fee`
+>   (`amount`, one coin object also at zero, and `gas`), `memo` (also when
+>   empty), `msgs` and `sequence`, every number a decimal string, and no
+>   `timeout_height`. The transaction body that is broadcast carries no timeout
+>   height (R36.14.31 item 4), the signer entry has the Amino sign mode and the
+>   document's sequence, and the fee of the platform coin is three times the fixed
+>   one; a token carries it once (item 5). A test compares the document sent to the
+>   wallet with the `legacy_amino_json` a public-key coin of the same key, flag,
+>   node and request answers.
+> - *The Ledger flag (R36.14.18).* The platform coin and its tokens are
+>   wallet-only; the Amino form exists for the bank send only, so a staking
+>   request fails when it is built, with the request's internal-error type and
+>   before any wallet request (this tree has no IBC `withdraw`); the fee of a
+>   platform-coin `withdraw` is three times the fixed one.
+> - *Orders and refused paths (R18.11.23a, D18.11.10 (a)).* Orders of the coin and
+>   of a token are refused as wallet-only, with or without the flag. Every path
+>   that would sign with a node-held key is refused with the typed error
+>   `PrivKeyNotAllowed::WalletConnectCoin` ("The coin signs through a WalletConnect
+>   wallet and holds no signing key"). Swap transactions are not signed through
+>   the wallet in this change (Chapter 18 R18.11.51).
+> - *Tests.* T36.40 and T36.41 are covered by the tests of
+>   `tendermint_swap_flow_tests/wallet_connect_tests.rs` (the session scripted
+>   behind a narrow wallet trait, the node scripted as in the other tests of that
+>   directory), the wire tests of `SigningError` by `withdraw_error_wire_tests` and
+>   the parse and activation tests of the form by the wire tests of
+>   `tendermint_with_tokens_activation`. T36.44 (ii) and the lab rows with a real
+>   wallet (activation by key record and by enumeration, a withdraw signed in the
+>   wallet and broadcast, a refusal, a Ledger-backed wallet) are lab rows and
+>   open. The top-level `priv_key_policy` request member keeps failing request
+>   parsing for the WalletConnect spelling (§36.7, status note of 2026-11-15);
+>   only the two spellings of `activation_params` activate.
+
+> **As built (Reloaded, 2026-11-17, 0.5.0; informative; amends the "Signing"
+> and "Amino mode" items of the note above).** A lab run with a mobile wallet
+> (Cosmos Hub mainnet) signed and rejected requests as described, and found
+> three defects of the fee that this note records.
+>
+> - *Fee and gas limit from a simulation (a Reloaded divergence from
+>   R18.11.9).* The fixed assumed gas is no longer used for a transaction a
+>   wallet signs. A send of the lab used 125,865 gas under the fixed limit
+>   125,000, ran out of gas and still lost its fee. For `withdraw` (platform
+>   coin and token) and for the staking requests the node now simulates the
+>   message through the node's simulation request with the activated public key
+>   in the signer info and one empty signature slot, and prices from the gas
+>   reported. The local-key fee computation simulates too, and multiplies the
+>   reported gas by 1.5 for the fee amount; it keeps the fixed (or requested)
+>   gas limit. The wallet path applies the same 1.5: a request without a gas
+>   limit gets the limit ceil(gas x 1.5) and the amount ceil(limit x price); a
+>   request with an explicit gas limit keeps it, and its amount is
+>   ceil(gas x 1.5 x price), the local-key formula. When the simulation fails,
+>   the request fails (its transport error) and the wallet is not asked; no
+>   guessed limit is signed. The unsigned results of a watch-only coin keep the
+>   fixed fee and gas bound by §36.14.8, and swap and trade-fee pricing are
+>   unchanged. The Ledger factor three of R36.14.18 item 4 is applied to the
+>   amount as before. No compatibility switch exists: a fixed limit that runs
+>   out of gas loses the fee, so the old figure is no option worth keeping.
+> - *The reported fee is the signed one.* In Direct mode the wallet may answer
+>   an auth-info that differs from the requested one (the note above lets the
+>   echoed auth-info bytes through), so the fee of the transaction that is
+>   answered can differ from the one that was computed. `fee_details` (`amount`,
+>   `uamount`, `gas_limit`) of a signed result of `withdraw` and of the staking
+>   requests is read from the auth-info of the transaction answered, in Direct
+>   and in Amino mode; the totals of a platform-coin result follow the signed
+>   fee; a token's totals do not include the fee.
+> - *Broadcast of a transaction the node already holds.* The broadcast helper of
+>   the coin treats the answer "tx already exists in cache" as "already
+>   broadcast": it answers the transaction's hash (computed from the bytes), or
+>   the error of a delivery that the chain shows as failed. Every other error
+>   of the broadcast stays an error. The helper serves every broadcast of the
+>   coin, the swap sends included; a repeated send of the same bytes is
+>   correct there too.
+> - *Tests.* The gas limit and the amounts (`fee_tests` of the wallet module
+>   and the wallet-connect tests of the coin, with a scripted simulation), the
+>   simulated transaction (activated key, empty signature), a failed simulation,
+>   `fee_details` against the signed auth-info, and the repeated broadcast.
 
 ### 36.14.3 Public-key activation, the `WithPubkey` form
 

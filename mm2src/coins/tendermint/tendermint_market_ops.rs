@@ -25,6 +25,9 @@ use mm2_err_handle::prelude::*;
 use rpc::v1::types::Bytes as BytesJson;
 use std::str::FromStr;
 
+/// Whether a node's answer to a broadcast says it already holds the transaction (its cache has it).
+fn broadcast_error_is_already_known(error: &str) -> bool { error.contains("tx already exists in cache") }
+
 impl MarketCoinOps for TendermintCoin {
     fn ticker(&self) -> &str { &self.ticker }
 
@@ -94,7 +97,23 @@ impl MarketCoinOps for TendermintCoin {
         let coin = self.clone();
         let tx_bytes = tx.to_owned();
         let fut = async move {
-            let broadcast_res = try_s!(try_s!(coin.rpc_client().await).broadcast_tx_commit(tx_bytes).await);
+            let client = try_s!(coin.rpc_client().await);
+            let outcome = client.broadcast_tx_commit(tx_bytes.clone()).await;
+            // The node already holds this exact transaction (broadcast before, possibly already included): the
+            // broadcast succeeded earlier, so the answer is the transaction's hash, unless the chain shows it failed
+            // (CRD ch.36 R36.14.15, as-built note of 2026-11-17). It serves every broadcast of this coin.
+            if let Err(e) = &outcome {
+                if broadcast_error_is_already_known(&e.to_string()) {
+                    let hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
+                    if let Ok(Some(cosmrs::tendermint::abci::Code::Err(code))) =
+                        coin.get_tx_status_code_or_none(hash.clone()).await
+                    {
+                        return ERR!("Tx deliver failed with code {}", code);
+                    }
+                    return Ok(hash);
+                }
+            }
+            let broadcast_res = try_s!(outcome);
 
             if broadcast_res.check_tx.log.contains(ACCOUNT_SEQUENCE_ERR)
                 || broadcast_res.tx_result.log.contains(ACCOUNT_SEQUENCE_ERR)

@@ -404,12 +404,16 @@ impl Qrc20ElectrumOps for ElectrumClient {
         contract_addr: &H160Json,
         topic: &str,
     ) -> RpcRes<Json> {
-        rpc_func!(
-            self,
-            "blockchain.contract.event.subscribe",
-            address,
-            contract_addr,
-            topic
+        // The subscription is remembered by the client once the answer is in, so that it is placed again after a
+        // reconnect (CRD ch.38 D38.6.4Q.3 status note).
+        let client = self.clone();
+        let address = json::to_value(address).expect("a hash serializes");
+        let contract_addr = json::to_value(contract_addr).expect("a hash serializes");
+        let topic = topic.to_owned();
+        Box::new(
+            async move { client.subscribe_contract_event(address, contract_addr, topic).await }
+                .boxed()
+                .compat(),
         )
     }
 

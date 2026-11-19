@@ -48,6 +48,7 @@ use crate::mm2::lp_network::{lp_network_ports, p2p_event_process_loop, subscribe
 use crate::mm2::lp_ordermatch::{broadcast_maker_orders_keep_alive_loop, clean_memory_loop, init_ordermatch_context,
                                 lp_ordermatch_loop, maker_outbox_loop, orders_kick_start,
                                 BalanceUpdateOrdermatchHandler, OrdermatchInitError};
+use crate::mm2::lp_swap::unfinished_swaps_view::register_for_node as register_unfinished_swaps_view_for_node;
 use crate::mm2::lp_swap::{clear_running_swaps, swap_kick_starts};
 use crate::mm2::rpc::spawn_rpc;
 use crate::mm2::version_text;
@@ -479,6 +480,9 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
 
     let balance_update_ordermatch_handler = BalanceUpdateOrdermatchHandler::new(ctx.clone());
     register_balance_update_handler(ctx.clone(), Box::new(balance_update_ordermatch_handler)).await;
+    // The shielded coins' activation checks its key against the swaps that are not finished (CRD ch.39
+    // R39.8.0bd); registered before the RPC is available and before the swaps are kick-started.
+    register_unfinished_swaps_view_for_node(&ctx).map_to_mm(MmInitError::Internal)?;
 
     ctx.initialized.pin(true).map_to_mm(MmInitError::Internal)?;
 

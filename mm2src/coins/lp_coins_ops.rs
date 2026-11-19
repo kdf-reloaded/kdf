@@ -774,17 +774,41 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
-        Some(_removed) => {
+        Some(removed) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
-            // A disabled SPL token leaves the record its platform keeps of its tokens, so that the platform no
-            // longer reports it (CRD ch.40 T40.6B.20). The platform and its other tokens are untouched.
-            #[cfg(not(target_arch = "wasm32"))]
-            if let MmCoinEnum::SplToken(token) = &_removed {
-                token.platform_coin.remove_spl_token_info(ticker);
+            // A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's
+            // Electrum client closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
+            if let MmCoinEnum::Qrc20Coin(token) = &removed {
+                token.end_history_collector();
             }
+            forget_token_records(&coins, &removed, ticker);
             Ok(())
         },
         None => ERR!("{} is disabled already", ticker),
+    }
+}
+
+/// Takes a disabled token out of the record its platform keeps of its tokens, so that the platform no longer
+/// reports it (CRD ch.40 T40.6B.20 for SPL; CRD ch.43 §43.1E for the other families). The platform and its other
+/// tokens are untouched. Calling it again, or when the platform is not registered, changes nothing.
+///
+/// `registry` is the registry after the token was removed. Only the EVM and TRON families look the platform up
+/// there, because their token holds just the platform ticker; the other families hold the platform itself.
+pub(crate) fn forget_token_records(registry: &CoinRegistry, removed: &MmCoinEnum, ticker: &str) {
+    match removed {
+        MmCoinEnum::EthCoin(token) => {
+            use crate::eth::EthCoinType;
+            if let EthCoinType::Erc20 { platform, .. } | EthCoinType::Trc20 { platform, .. } = &token.coin_type {
+                if let Some(MmCoinEnum::EthCoin(platform_coin)) = registry.get(platform) {
+                    platform_coin.remove_erc20_token_info(ticker);
+                }
+            }
+        },
+        MmCoinEnum::SlpToken(token) => token.platform_coin().remove_slp_token_info(ticker),
+        MmCoinEnum::TendermintToken(token) => token.platform_coin.remove_activated_token_info(ticker),
+        #[cfg(not(target_arch = "wasm32"))]
+        MmCoinEnum::SplToken(token) => token.platform_coin.remove_spl_token_info(ticker),
+        _ => (),
     }
 }
 /// The request of `set_required_confirmations` (legacy members, unchanged).
@@ -874,6 +898,28 @@ pub async fn register_balance_update_handler(
 ) {
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx.balance_update_handlers.lock().await.push(handler);
+}
+/// Registers the swap layer's reader of the saved swaps that are not finished, which the activation of a
+/// shielded coin checks its key against (CRD ch.39 R39.8.0bd). A second registration replaces the first.
+///
+/// # Errors
+///
+/// Returns the reason when the coins context cannot be created.
+pub fn register_unfinished_swaps_view(
+    ctx: &MmArc,
+    view: Arc<dyn crate::z_coin::UnfinishedSwapsView>,
+) -> Result<(), String> {
+    let coins_ctx = CoinsContext::from_ctx(ctx)?;
+    coins_ctx.set_unfinished_swaps_view(view);
+    Ok(())
+}
+/// Whether a reader of the unfinished swaps is registered in this context.
+///
+/// # Errors
+///
+/// Returns the reason when the coins context cannot be created.
+pub fn unfinished_swaps_view_registered(ctx: &MmArc) -> Result<bool, String> {
+    Ok(CoinsContext::from_ctx(ctx)?.has_unfinished_swaps_view())
 }
 pub fn update_coins_config(mut config: Json) -> Result<Json, String> {
     let coins = match config.as_array_mut() {

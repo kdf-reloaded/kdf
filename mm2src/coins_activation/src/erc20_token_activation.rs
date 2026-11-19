@@ -635,7 +635,7 @@ async fn enable_erc20_token(
 
     let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(EnableTokenError::Internal)?;
     coins_ctx
-        .add_coin(token.clone().into())
+        .add_token(platform_coin.ticker(), token.clone().into())
         .await
         .mm_err(|e| EnableTokenError::TokenIsAlreadyActivated(e.ticker))?;
     // The token is recorded on its platform only once it is registered (CRD R35.2.6).

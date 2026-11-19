@@ -168,7 +168,8 @@ where
     let (_, token_protocol): (_, Token::ProtocolInfo) =
         coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
 
-    let platform_coin = lp_coinfind_or_err(&ctx, token_protocol.platform_coin_ticker())
+    let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
+    let platform_coin = lp_coinfind_or_err(&ctx, &platform_ticker)
         .await
         .mm_err(|_| EnableTokenError::PlatformCoinIsNotActivated(token_protocol.platform_coin_ticker().to_owned()))?;
 
@@ -186,7 +187,7 @@ where
 
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx
-        .add_coin(token.clone().into())
+        .add_token(&platform_ticker, token.clone().into())
         .await
         .mm_err(|e| EnableTokenError::TokenIsAlreadyActivated(e.ticker))?;
     Token::on_token_registered(&platform_coin, &token);

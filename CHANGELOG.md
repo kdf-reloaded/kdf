@@ -39,9 +39,10 @@ or undo, and every change that needs a step from you.
   servers now report at another height shows that height and its block's time.
   - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
-  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
-  value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
-  with tokens and Lightning the key derived from the passphrase. A request that asks for `IguanaPrivKey` now gets a
+  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia, Lightning and shielded coins such as ARRR.** Until
+  now these families ignored the value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed
+  single-address HD key, BCH with tokens and Lightning the key derived from the passphrase, and shielded coins the key
+  the HD login derives (at `z_derivation_path` and `account`). A request that asks for `IguanaPrivKey` now gets a
   different address or Lightning identity.
   - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
     those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
@@ -54,6 +55,13 @@ or undo, and every change that needs a step from you.
     `IguanaPrivKey`.
   - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
     where it used to be ignored.
+  - *Shielded coins (ARRR):* under an HD login, `IguanaPrivKey` now activates the coin with the internal key, for the
+    shielded address and the transparent key, and with a wallet database of its own; the HD wallet stays in its own
+    file with its scan state, and the two never mix. If your ARRR activation requests already contain `IguanaPrivKey`,
+    the address changes after this upgrade and the balance of the HD wallet is not shown. To keep the HD wallet, leave
+    `priv_key_policy` out or send `ContextPrivKey`. If coins are not visible after the upgrade, read "Coins that are
+    no longer visible after an upgrade" below and start the previous version again before you move or spend
+    anything. A hardware value fails the request, where it used to be ignored.
 - **ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "77190ad9"`** (the branch id is
   accepted with or without `0x`). Since the Zcash network upgrade NU7 the network refuses version-4 transactions. This
   release builds version-5 ZEC transactions when the ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every
@@ -63,6 +71,20 @@ or undo, and every change that needs a step from you.
   entry: an invalid consensus branch id).
   - *Activation:* a Zcash-family (`overwintered`) entry whose `txversion` is not 4 or 5, and a version-5 entry without
     `consensus_branch_id`, are now refused with an error that names the field.
+
+- **WalletConnect sessions paired with an earlier version must be paired again.** The node now keeps one relay
+  identity across reconnects and restarts. Sessions made by an earlier version were made under a different identity,
+  so the relay refuses requests on them after the upgrade: remove them in the wallet and pair again.
+  - *Browser (WASM) builds:* the WalletConnect store in the browser is upgraded to a new format at the first start.
+    An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
+    in the browser first, then pair again.
+
+- **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
+  handler produced them. A client that decoded those entities itself to get the original text must stop doing so,
+  or it will now change text that really contains such a sequence.
+  - *What you see:* URLs with query strings, memos, error texts and labels in answers arrive with their plain
+    characters.
+  - Detail: PR #421; CRD ch.55 status note of 2026-11-18.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -126,6 +148,21 @@ the previous version used. The safe way:
   has a versioned form, except `recover_funds_of_swap` (waits for the swap architecture decisions),
   `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
   purpose, and the test-only `sim_panic`. Detail: PR #387; CRD ch.43 §43.1R.
+
+#### Shielded coins
+
+- **ARRR and the other shielded coins accept `priv_key_policy`, and each key gets a wallet of its own.**
+  Under an HD login, `IguanaPrivKey` activates the shielded coin with the node's single internal key; leaving
+  the member out keeps the HD key. The shielded balance and history are per key and per `account`: switching
+  the policy or the `account` opens the other wallet instead of failing, and switching back reopens the first
+  one with its scan state, without a rescan. The existing wallet file keeps the name it has and keeps the key
+  it already holds; another key's wallet is stored in files whose names carry a short fingerprint of that key.
+  Amounts a swap step pays or receives appear in the account that was active when that step ran; activate that
+  account to see them. The coin is refused with a message that names the swaps and says what to do, in two
+  cases: when swaps of that coin that are not finished were started with another key (activate with the key they
+  were started with, let them finish or refund, then switch), and when a wallet database of the coin cannot be
+  read while a swap still has to send its payment or fee. Changing `account` alone is allowed.
+  Detail: PR #414; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
 
 #### Solana coins
 
@@ -214,8 +251,31 @@ the previous version used. The safe way:
   three times the computed fee (for the coin, not for a token), and the staking requests fail. A `memo` in the `withdraw` request is carried in the transaction: `memo` is now a typed member of every withdraw request: a `memo` that is not a string is refused as a malformed request for every coin (it was ignored before); only Tendermint coins and tokens read it. Placing an order with the coin or one
   of its tokens, message signing, private-key display, and every swap payment, claim and refund are
   refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
-  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36
+  parsing with `InvalidRequest`. Detail: PR #382; CRD ch.36
   §36.14.3.
+- **A Tendermint coin can be activated with a WalletConnect wallet, and the wallet signs its
+  withdrawals.** `activation_params` of `enable_tendermint_with_assets` (and the task form) now accepts
+  `{"type": "WalletConnect", "params": {"session_topic": "..."}}` and the form the public docs show,
+  `{"priv_key_policy": {"type": "WalletConnect", "data": "..."}}`; both do the same. The node reads the
+  account and its public key for the coin's chain from the paired session: from the key record the wallet
+  delivered with the session when it has one for that chain, otherwise by asking the wallet once for its
+  accounts. When the key does not give the account the session granted for that chain, the activation
+  fails (`PlatformCoinCreationError`) instead of activating another account. The coin holds no private
+  key. `withdraw` and the delegation, undelegation and reward-claim requests are signed in the wallet (the
+  Ledger-backed account of a wallet signs the Amino form, which covers a plain send only, and a Ledger
+  `withdraw` costs three times the computed fee, for the coin and not for a token). A `withdraw` answers
+  the signed transaction (`tx_hex`, `tx_hash`) and broadcasts nothing; the staking requests broadcast the
+  signed transaction. The wallet's answer must carry the transaction body that was asked to be signed;
+  an echo of another body fails the request. A request the wallet refuses, does not answer within five
+  minutes, or cannot receive because the session is gone fails with the new error `SigningError` (HTTP
+  500) for `withdraw` and for the staking requests, where GLEEC KDF answers a general internal error.
+  Placing an order with such a coin or one of its tokens is refused, as for a watch-only coin, and swaps
+  do not sign through the wallet. The top-level `priv_key_policy` member of the request still refuses the
+  WalletConnect spelling. The fee and the gas limit of such a request come from the node's gas simulation
+  (gas limit = simulated gas x 1.5, fee = limit x gas price; an explicit gas limit is kept), because the fixed
+  limit of 125,000 ran out of gas for a real send and lost the fee; a failed simulation fails the request.
+  A test with a real wallet is still to be run. Detail: PR #393; CRD ch.36
+  R36.14.13--R36.14.15.
 
 ### Changed
 
@@ -245,6 +305,17 @@ the previous version used. The safe way:
   or `HardwareWalletInternal`; a device condition answers `HwError` (410) with the same words as above, and a
   device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
   answer `Internal` (500). Detail: PR #386; CRD ch.05 §5.9B R35c.
+- **A disabled token no longer stays in its platform's token list.** After `disable_coin` of an ERC-20 or TRC20,
+  SLP or Tendermint token, its platform no longer reports or serves that token, as was already the case for SPL
+  tokens. A single SPL token enabled with `enable_spl` is now listed by its platform, as a token enabled together
+  with the platform already was. Disabling a platform that still has active tokens works as before: the platform
+  is removed and its tokens stay. Detail: PR #418; CRD ch.43 R43.1E.5 status note of 2026-11-18.
+
+- **RPC answers are sent as the handler produced them.** `<`, `>` and `&` in answer strings are no longer replaced
+  with `&lt;`, `&gt;` and `&amp;`, for every method including the `wc_*` ones. The visible effect: URLs with query
+  strings, memos, error texts and labels reach the client with their plain characters. A request body that
+  contains `<`, `>` or `&` is still refused, as before. Every answer now carries `X-Content-Type-Options: nosniff`, and
+  `Content-Type: application/json` where the method set no content type. Detail: PR #421; CRD ch.55 status note of 2026-11-18.
 
 #### Shielded coins
 
@@ -321,6 +392,19 @@ the previous version used. The safe way:
 
 #### Solana coins
 
+- **Solana withdraws send the right amounts and say what they cost.** An SPL withdraw with `max` now
+  sends the whole token balance (it used to move the requested amount while the answer showed the
+  whole balance). Creating the recipient's token account is paid in SOL: the rent is checked against
+  the SOL balance together with the fee, a short balance answers the new error
+  `NotSufficientPlatformBalanceForFee` naming SOL, and `fee_details` shows `fee_amount`,
+  `rent_amount` and `total_amount` for SOL and SPL withdraws alike, instead of a single `amount`.
+  A token balance is read from the wallet's own token account for that token, and is zero when the
+  wallet has none. A recipient that is a token account rather than a wallet address is refused. An
+  amount below the coin's minimum transaction amount answers `AmountTooLow`. Activation now checks
+  that the token's mint belongs to its token program, so a node failure while an inline token is
+  checked answers `Transport`; a Token-2022 token is refused at activation until it is supported.
+  Solana stays switched off in this build. Detail: PR #425; CRD ch.40 R40.6B.9-R40.6B.12,
+  D40.6B.2-D40.6B.6; ch.43 R43.1D.2.
 - **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
   are removed and can be activated again; a removed token no longer stays in its platform's token
   records. A platform with active tokens is handled as for every other family: the platform is
@@ -357,6 +441,34 @@ the previous version used. The safe way:
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
 ### Fixed
+
+#### WalletConnect
+
+- **The pairing link of `wc_new_connection` is usable by a wallet.** Every `&` after the first was
+  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The link now arrives
+  with plain `&` separators, as every RPC answer does (see "RPC answers are sent as the handler produced them"
+  under Changed). Detail: PR #393; CRD ch.22 §22.2.
+- **The node reconnects to the WalletConnect relay.** The relay closes the connection about every ten
+  minutes; the node did not reopen it, and a new connection request failed until a restart. It now
+  reconnects with a growing wait and subscribes again to its pairings and sessions. Detail: PR #393;
+  CRD ch.22 §22.5.2.
+- **A WalletConnect session keeps working after the relay reconnects or the node restarts.** The node now
+  keeps one relay client identity, stored with its sessions, instead of a new one for every connection.
+  Field-checked with a wallet after a relay reconnect and after a restart. Detail: PR #393; CRD ch.22 §22.5.2.
+- **A wallet lists each node as "KDF Reloaded" with a short identifier.** The wallet used to list every
+  paired node as "Komodo DeFi Framework", so nodes could not be told apart. The name is now
+  `KDF Reloaded <identifier>`, where the identifier is the first eight characters of the node's relay
+  client key, the one the connect log prints; it does not change between restarts. An operator can set a
+  name of their own with `walletconnect.app_name` in `MM2.json`. Detail: PR #393; CRD ch.22 §22.5.2.
+
+#### Tendermint (Cosmos) coins
+
+- **The fee reported for a transaction signed by a WalletConnect wallet is the fee of that transaction.**
+  `fee_details` of `withdraw` and the staking requests is read from the signed transaction; it showed the
+  computed fee even when the wallet signed another one. Detail: PR #393; CRD ch.36 R36.14.15.
+- **Sending a Tendermint transaction the node already holds answers its hash.** A repeated
+  `send_raw_transaction` was answered with an error ("tx already exists in cache") although the transaction
+  was included. Detail: PR #393; CRD ch.36 R36.14.15.
 
 #### ZEC
 
@@ -413,6 +525,14 @@ the previous version used. The safe way:
   the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
 
 #### Transaction history
+
+- **The history of a UTXO coin says which transactions it skipped.** A transaction the node cannot read is left out of
+  the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
+  as if it were complete. `sync_status` now lists each skipped transaction in
+  `additional_info.unreadable_transactions`, with its `tx_hash` and a short `error`. This includes transactions skipped
+  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. Until a later release
+  reads ZEC version-6 transactions, they appear in this list. The BCH and SLP history also no longer pauses at a
+  transaction that does not parse; it skips it and stores the rest. Detail: PR #415; CRD ch.39 D39.11.4V.1.
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
   served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
@@ -471,6 +591,30 @@ the previous version used. The safe way:
   answer before it has seen the send, and a token that lists other servers than QTUM does not share
   its first server. A shared connection and a shared record of spent coins for QTUM and its tokens
   are planned. Detail: PR #368; CRD ch.38 R38.6.4a.
+- **A QRC20 token keeps working when one of its Electrum servers answers a contract request with an
+  error.** Some public QTUM servers answer the token balance, history and receipt requests with an
+  internal error. One such answer used to fail the activation, the balance read or the history
+  request, although another listed server would have answered. The request now moves on to the next
+  server, without dropping the connection, and fails only when every server tried has answered with
+  an error. These three requests now also take turns among the servers, as other reads do. Detail:
+  PR #417; CRD ch.38 D38.6.4Q.2.
+- **QRC20 token history no longer misses a transfer whose details a server failed to deliver.** Such
+  a transfer was left out, and the history was not asked for again until the token balance changed.
+  The history is now asked for again after a short delay, which grows while details keep failing.
+  Detail: PR #417; CRD ch.38 R38.6.4Q.6.
+- **QRC20 token history now stops with a clear status when no listed server serves it.** When three
+  history passes in a row get an error answer from every server tried, the token's history stops,
+  and `my_tx_history` reports it in `sync_status` with code `-2`. Activating the token again starts
+  it again. Passes that fail because a server cannot be reached never count, so a node that is
+  offline keeps its history. Detail: PR #417; CRD ch.38 amendment after R38.6.4Q.6.
+- **A QRC20 token's balance subscription is placed again after a reconnect.** With the balance
+  stream on, the token's subscription was lost when its server connection dropped, and the token
+  fell back to polling. It is now placed again once on the new connection; a server that refuses it
+  changes nothing else. Detail: PR #417; CRD ch.38 D38.6.4Q.3.
+- **Disabling a QRC20 token now ends its history work at once.** The token's history kept running
+  for up to about 40 s after `disable_coin`, and enabling the token again within that time left two
+  of them running. It now ends when the token is disabled, and exactly one runs after the token is
+  enabled again. Detail: PR #417; CRD ch.38 D38.6.4Q.5.
 
 ### Tests
 
@@ -533,7 +677,8 @@ the previous version used. The safe way:
   done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
   the plan.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
-  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
+  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family;
+  shielded coins read `priv_key_policy` as well (H7 row note of 2026-11-18).
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
@@ -559,20 +704,22 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
+  S6 in PR #425; new package S6c (a rent-exempt guard for SOL withdraws); switch-on lab rows for
+  `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
-  store-served coin family (PR #380).
+  store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #393).
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
   (PR #405).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
-  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); history skip of
-  unreadable transactions and the coins entry follow.
+  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
+  unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
