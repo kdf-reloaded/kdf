@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 in PR #P5PR; P7, P8 and P9 next) — **Last reviewed:** 2026-11-19
+**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 in PR #427; P7, P8 and P9 next) — **Last reviewed:** 2026-11-19
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -201,7 +201,7 @@ which serves one wallet, so no client crosses wallet identities.
 5. Add bounded INFO diagnostics for ownership creation/reuse/release and TRACE
    attribution for individual calls. Avoid periodic success logs.
 
-*P5 (2026-11-19).* PR #P5PR implements the shared client of D38.6.4Q.1 as its
+*P5 (2026-11-19).* PR #427 implements the shared client of D38.6.4Q.1 as its
 status note in CRD ch.38 records it: items 1 and 4, and item 3 for QTUM and a
 token activating at the same time. Still open: a test of a repeated activation
 of one instance (item 3), and the INFO lines for creating, reusing and releasing

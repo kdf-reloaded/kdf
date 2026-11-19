@@ -551,7 +551,7 @@ the previous version used. The safe way:
   would join a set whose servers disagree about the chain is refused with the same error as a new
   activation. On a shared set, transport error texts, log lines and transport metrics name the
   platform (for example `QTUM`) also for a token's requests, and `electrum_servers` for a token
-  reports the shared set. A shared record of spent coins is still planned. Detail: PR #P5PR; CRD
+  reports the shared set. A shared record of spent coins is still planned. Detail: PR #427; CRD
   ch.38 D38.6.4Q.1 and its status note.
 
 ### Tests
@@ -612,7 +612,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
-  QTUM and its tokens, in PR #P5PR; the Phase C items it leaves open are named under Phase C.
+  QTUM and its tokens, in PR #427; the Phase C items it leaves open are named under Phase C.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)
   done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
   the plan.
