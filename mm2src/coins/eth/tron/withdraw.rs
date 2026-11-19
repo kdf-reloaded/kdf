@@ -25,7 +25,7 @@ use super::sign::sign_transaction_raw;
 use super::tx_builder::{abi_encode_trc20_transfer, build_trc20_transfer, build_trx_transfer};
 use super::{TronAddress, TRX_DECIMALS};
 
-use crate::eth::{u256_to_big_decimal, wei_from_big_decimal, EthCoin, EthCoinType};
+use crate::eth::{u256_to_big_decimal, wei_from_big_decimal, EthCoin, EthCoinType, EvmWithdrawSender};
 use crate::{BytesJson, TransactionDetails, WithdrawError, WithdrawRequest, WithdrawResult};
 
 use bigdecimal::BigDecimal;
@@ -47,14 +47,15 @@ const TRC20_TRANSFER_ENERGY_DEFAULT: i64 = 35_000;
 /// plain TRC20 `transfer`.
 const TRC20_DEFAULT_FEE_LIMIT_SUN: i64 = 100_000_000;
 
-/// Entry point for TRX / TRC20 withdrawals.
+/// Entry point for TRX / TRC20 withdrawals. `sender` is the address the transaction is sent from and the key that
+/// signs it: the activated address, or the HD address a `from` member selected (CRD ch.21 R21.10B.4, ch.47).
 ///
 /// # Errors
 ///
 /// [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor, before a node is asked: the TRON fee is
 /// estimated from the account's bandwidth and energy (CRD ch.21 R-W3), and no `WithdrawFee` variant describes
 /// it. Other errors are those of the pipeline below.
-pub async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest) -> WithdrawResult {
+pub(crate) async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest, sender: EvmWithdrawSender) -> WithdrawResult {
     if let Some(fee) = &req.fee {
         return MmError::err(WithdrawError::InvalidFeePolicy(format!(
             "TRON withdraw takes no 'fee' descriptor, its fee is estimated from the account's bandwidth and \
@@ -68,7 +69,8 @@ pub async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest) -> WithdrawResul
         .clone()
         .ok_or_else(|| WithdrawError::InternalError("TRON API client missing on this coin".to_owned()))?;
 
-    let sender = TronAddress::from_evm_address(coin.my_address);
+    let signer = sender;
+    let sender = TronAddress::from_evm_address(signer.address());
     let receiver = parse_tron_address(&req.to)?;
 
     if receiver.to_evm_address().is_zero() {
@@ -78,10 +80,10 @@ pub async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest) -> WithdrawResul
     }
 
     match &coin.coin_type {
-        EthCoinType::Tron => withdraw_native_trx(coin.clone(), api, sender, receiver, req).await,
+        EthCoinType::Tron => withdraw_native_trx(coin.clone(), api, signer, sender, receiver, req).await,
         EthCoinType::Trc20 { token_addr, .. } => {
             let contract = TronAddress::from_evm_address(*token_addr);
-            withdraw_trc20_token(coin.clone(), api, sender, receiver, contract, req).await
+            withdraw_trc20_token(coin.clone(), api, signer, sender, receiver, contract, req).await
         },
         _ => MmError::err(WithdrawError::InternalError(
             "withdraw_tron invoked on non-TRON coin".to_owned(),
@@ -92,6 +94,7 @@ pub async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest) -> WithdrawResul
 async fn withdraw_native_trx(
     coin: EthCoin,
     api: TronApiClient,
+    signer: EvmWithdrawSender,
     sender: TronAddress,
     receiver: TronAddress,
     req: WithdrawRequest,
@@ -123,9 +126,8 @@ async fn withdraw_native_trx(
     let now_ms_i = now_ms() as i64;
     let raw = build_trx_transfer(&sender, &receiver, amount_sun, &tapos, now_ms_i);
 
-    let secret = coin
-        .signer
-        .local_secret()
+    let secret = signer
+        .local_secret(&coin)
         .ok_or_else(|| WithdrawError::InternalError("TRON requires a local private key".to_string()))?;
     let (hash, sig) = sign_transaction_raw(secret, &raw)
         .map_err(|e| WithdrawError::InternalError(format!("TRON signing failed: {e}")))?;
@@ -171,6 +173,7 @@ async fn withdraw_native_trx(
 async fn withdraw_trc20_token(
     coin: EthCoin,
     api: TronApiClient,
+    signer: EvmWithdrawSender,
     sender: TronAddress,
     receiver: TronAddress,
     contract: TronAddress,
@@ -213,9 +216,8 @@ async fn withdraw_trc20_token(
         TRC20_DEFAULT_FEE_LIMIT_SUN,
     );
 
-    let secret = coin
-        .signer
-        .local_secret()
+    let secret = signer
+        .local_secret(&coin)
         .ok_or_else(|| WithdrawError::InternalError("TRON requires a local private key".to_string()))?;
     let (hash, sig) = sign_transaction_raw(secret, &raw)
         .map_err(|e| WithdrawError::InternalError(format!("TRON signing failed: {e}")))?;

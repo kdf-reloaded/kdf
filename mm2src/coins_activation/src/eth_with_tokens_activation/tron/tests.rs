@@ -1,5 +1,5 @@
-//! Tests of the TRON platform on the mmrpc 2.0 route (CRD ch.21 R21.10B.2, R21.10B.4, R21.10B.5, T21.10B.1 --
-//! T21.10B.4, T21.10B.9, D21.10B.3 (b), F21.B3, D21.B7).
+//! Tests of the TRON platform on the mmrpc 2.0 route (CRD ch.21 R-A2, R21.10B.2, R21.10B.4, R21.10B.5,
+//! R21.10B.8, T21.10B.1 -- T21.10B.4, T21.10B.8, T21.10B.9, D21.10B.3 (b), F21.B3, D21.B7).
 //!
 //! The activation routines run end to end against a loopback stub of a TRON node. The build switch
 //! `TRON_ACTIVATION_AVAILABLE` stays `false`; a context opens the gate for itself with [`TRON_TEST_OVERRIDE_KEY`].
@@ -9,6 +9,7 @@ use crate::erc20_token_activation::{enable_evm_token, EnableEvmTokenRequest, Evm
 use crate::init_platform_coin_with_tokens::{init_platform_coin_with_tokens, init_platform_coin_with_tokens_status};
 use crate::init_token::{init_token, init_token_status};
 use crate::token::EnableTokenError;
+use coins::rpc_command::init_account_balance::{InitAccountBalanceParams, InitAccountBalanceRpcOps};
 use coins::{lp_coinfind, MmCoin as _};
 use common::{block_on, HttpStatusCode, StatusCode};
 use mm2_core::mm_ctx::MmCtxBuilder;
@@ -16,6 +17,7 @@ use rpc_task::rpc_common::RpcTaskStatusRequest;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,6 +25,11 @@ use std::time::Duration;
 const USDT_CONTRACT: &str = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+// The addresses at `m/44'/195'/0'/0/0` and `/0/1` of `TEST_MNEMONIC`: values computed with a stand-alone BIP-39 /
+// BIP-32 / keccak-256 / base58check implementation written for these tests (pure Python, no web source). The tests
+// also recompute each address from the seed with the crypto crate (`independent_address`), so a wrong literal fails.
+const HD_ADDRESS_0: &str = "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH";
+const HD_ADDRESS_1: &str = "TSeJkUh4Qv67VNFwY8LaAxERygNdy6NQZK";
 
 type Req = EnablePlatformCoinWithTokensReq<EthWithTokensActivationRequest>;
 
@@ -181,6 +188,7 @@ fn coins_conf() -> Json {
             "coin": "TRX",
             "name": "tron",
             "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } },
+            "derivation_path": "m/44'/195'",
             "wallet_only": true,
             "required_confirmations": 2,
             "mm2": 1
@@ -189,6 +197,14 @@ fn coins_conf() -> Json {
             "coin": "TRXT",
             "name": "tron-trading",
             "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } },
+            "derivation_path": "m/44'/195'",
+            "mm2": 1
+        },
+        {
+            "coin": "TRXNP",
+            "name": "tron-no-path",
+            "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } },
+            "wallet_only": true,
             "mm2": 1
         },
         {
@@ -249,11 +265,19 @@ fn tron_ctx_with(extra: Json) -> MmArc {
     ctx
 }
 
-/// A global-HD context whose TRON gate is open.
-fn tron_hd_ctx() -> MmArc {
-    let conf = json!({ "enable_hd": true, "coins": coins_conf(), (TRON_TEST_OVERRIDE_KEY): true });
+/// A global-HD context whose TRON gate is open, with an in-memory HD wallet database.
+fn tron_hd_ctx() -> MmArc { tron_hd_ctx_with(json!({ (TRON_TEST_OVERRIDE_KEY): true })) }
+
+/// A global-HD context with the `extra` top-level `MM2.json` settings and an in-memory HD wallet database.
+fn tron_hd_ctx_with(extra: Json) -> MmArc {
+    let mut conf = json!({ "enable_hd": true, "coins": coins_conf() });
+    if let (Some(conf), Some(extra)) = (conf.as_object_mut(), extra.as_object()) {
+        conf.extend(extra.clone());
+    }
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
     crypto::CryptoCtx::init_with_global_hd_account(ctx.clone(), TEST_MNEMONIC).expect("initialize the crypto context");
+    let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().expect("in-memory database");
+    let _ = ctx.sqlite_connection.pin(Arc::new(Mutex::new(connection)));
     ctx
 }
 
@@ -875,35 +899,27 @@ fn d21_10b_3_the_metamask_policy_and_rpc_mode_are_refused_with_internal() {
             ..Default::default()
         },
     ] {
-        let refusal = key_policy_refusal(facts, false).expect("refused");
+        let refusal = key_policy_refusal(facts).expect("refused");
         assert_eq!(refusal, KeyPolicyRefusal::MetaMask);
         match refusal.into_error() {
             ActivationErr::Internal(text) => assert!(text.contains("MetaMask"), "{text}"),
             other => panic!("expected Internal, got {other}"),
         }
-        // Whatever the login.
-        assert_eq!(key_policy_refusal(facts, true), Some(KeyPolicyRefusal::MetaMask));
     }
     // The other policies and no policy.
-    assert_eq!(key_policy_refusal(KeyPolicyFacts::default(), false), None);
+    assert_eq!(key_policy_refusal(KeyPolicyFacts::default()), None);
     assert_eq!(
-        key_policy_refusal(
-            KeyPolicyFacts {
-                wallet_connect: true,
-                ..Default::default()
-            },
-            false
-        ),
+        key_policy_refusal(KeyPolicyFacts {
+            wallet_connect: true,
+            ..Default::default()
+        }),
         Some(KeyPolicyRefusal::WalletConnect)
     );
     assert_eq!(
-        key_policy_refusal(
-            KeyPolicyFacts {
-                trezor: true,
-                ..Default::default()
-            },
-            false
-        ),
+        key_policy_refusal(KeyPolicyFacts {
+            trezor: true,
+            ..Default::default()
+        }),
         Some(KeyPolicyRefusal::Trezor)
     );
     // The facts of a request that names none of them.
@@ -911,36 +927,576 @@ fn d21_10b_3_the_metamask_policy_and_rpc_mode_are_refused_with_internal() {
     assert_eq!(req.request.key_policy_facts(), KeyPolicyFacts::default());
 }
 
-/// The interim rule of this change: under a global-HD login the default and the `ContextPrivKey` policies are
-/// refused with a typed error naming TRON HD as not yet available, before any node is contacted.
+// ---------------------------------------------------------------------------------------------------------------
+// R-A2, R21.10B.4, R21.10B.5, T21.10B.8: the HD wallet
+// ---------------------------------------------------------------------------------------------------------------
+
+fn global_hd_of(ctx: &MmArc) -> crypto::GlobalHDAccountArc {
+    match crypto::CryptoCtx::from_ctx(ctx)
+        .expect("a crypto context")
+        .key_pair_policy()
+    {
+        KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd.clone(),
+        KeyPairPolicy::Iguana => panic!("an HD context is expected"),
+    }
+}
+
+/// The base58check address at `path`, computed from the seed with the crypto crate alone: the public key at the
+/// path, and the TRON address of that key. It does not go through the coin.
+fn independent_address(ctx: &MmArc, path: &str) -> String {
+    let pubkey = global_hd_of(ctx)
+        .derive_account_extended_pubkey(&crypto::DerivationPath::from_str(path).expect("a derivation path"))
+        .expect("the path derives");
+    let uncompressed = pubkey.public_key().serialize_uncompressed();
+    coins::eth::tron::addr_from_pubkey_str(&hex::encode(uncompressed)).expect("an address of the key")
+}
+
+/// The 20-byte payload of a base58check address, as 40 lowercase hex digits.
+fn payload_hex(base58: &str) -> String {
+    format!(
+        "{:x}",
+        TronAddress::from_base58(base58)
+            .expect("a valid address")
+            .to_evm_address()
+    )
+}
+
+/// A node for the HD tests: the accounts of `accounts` (base58check) exist on chain with 2.5 TRX and every other
+/// account is the documented empty answer; the `holders` (base58check) hold 1.234567 of the 6-decimal token and
+/// every other address holds none. Everything else is the answer of [`healthy`].
+fn hd_node(accounts: &[String], holders: &[String]) -> TronStub {
+    let accounts = accounts.to_vec();
+    let holders: Vec<String> = holders.iter().map(|address| payload_hex(address)).collect();
+    TronStub::start(move |path, body| {
+        let request: Json = serde_json::from_str(body).unwrap_or(Json::Null);
+        match path {
+            "/wallet/getaccount" => {
+                let address = request["address"].as_str().unwrap_or_default();
+                if accounts.iter().any(|known| known == address) {
+                    (200, json!({ "balance": 2_500_000, "create_time": 1 }).to_string())
+                } else {
+                    (200, "{}".to_owned())
+                }
+            },
+            "/wallet/triggerconstantcontract" if request["function_selector"] == "balanceOf(address)" => {
+                // The parameter is one ABI word: 12 zero bytes and the 20-byte owner.
+                let parameter = request["parameter"].as_str().unwrap_or_default();
+                let owner = parameter.get(24..).unwrap_or_default();
+                let units = if holders.iter().any(|holder| holder == owner) {
+                    1_234_567
+                } else {
+                    0
+                };
+                (200, json!({ "constant_result": [word(units)] }).to_string())
+            },
+            _ => healthy(path, body),
+        }
+    })
+}
+
+fn dec(text: &str) -> BigDecimal { BigDecimal::from_str(text).expect("a decimal") }
+
+/// The `spendable` member of a balance object as a number: a zero balance may be rendered with trailing zeros.
+fn spendable_of(balance: &Json) -> BigDecimal {
+    BigDecimal::from_str(balance["spendable"].as_str().expect("a decimal string")).expect("a decimal")
+}
+
+/// The tickers of a balance map, sorted.
+fn tickers_of(balance: &Json) -> Vec<&str> {
+    let mut tickers: Vec<&str> = balance
+        .as_object()
+        .expect("a balance map")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    tickers.sort_unstable();
+    tickers
+}
+
+fn poll_status(mut status: impl FnMut() -> Json) -> Json {
+    for _ in 0..400 {
+        let polled = status();
+        if matches!(polled["status"].as_str(), Some("Ok") | Some("Error")) {
+            return polled;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the task did not finish");
+}
+
+fn status_request(task_id: u64) -> RpcTaskStatusRequest {
+    serde_json::from_value(json!({ "task_id": task_id, "forget_if_finished": false })).expect("a status request")
+}
+
+/// `task::scan_for_new_addresses` through the task manager, for `ticker`.
+fn scan_task(ctx: &MmArc, ticker: &str, gap_limit: u32) -> Json {
+    use coins::rpc_command::init_scan_for_new_addresses::{init_scan_for_new_addresses,
+                                                          init_scan_for_new_addresses_status};
+    let request = serde_json::from_value(json!({ "coin": ticker, "account_index": 0, "gap_limit": gap_limit }))
+        .expect("a scan request");
+    let response = block_on(init_scan_for_new_addresses(ctx.clone(), request))
+        .unwrap_or_else(|e| panic!("the scan task must start: {}", e.get_inner()));
+    poll_status(|| {
+        let status = block_on(init_scan_for_new_addresses_status(
+            ctx.clone(),
+            status_request(response.task_id),
+        ))
+        .unwrap_or_else(|e| panic!("status failed: {e}"));
+        serde_json::to_value(&status).expect("a serializable status")
+    })
+}
+
+fn hd_request(node: &TronStub, extra: Json) -> Req {
+    let mut body = json!({ "scan_policy": "do_not_scan" });
+    for (key, value) in extra.as_object().expect("an object").iter() {
+        body[key] = value.clone();
+    }
+    request("TRX", std::slice::from_ref(&node.url), body)
+}
+
+/// T21.10B.8 (R-A2, R21.10B.5 Global HD): under a global-HD login a config with `derivation_path` `m/44'/195'`
+/// activates the address at `m/44'/195'/0'/0/0`, for the default policy and for `ContextPrivKey`, on both routes.
+/// The result is the HD shape with base58check addresses, derivation paths and the balances of the platform and its
+/// enabled tokens. The address is recomputed from the seed with the crypto crate, and agrees with the pinned
+/// literal.
 #[test]
-fn an_hd_login_is_refused_for_the_default_and_context_policies_until_the_tron_hd_wallet_is_built() {
+fn t21_10b_8_a_global_hd_login_activates_the_address_at_the_coin_derivation_path() {
+    let policies = [json!({}), json!({ "priv_key_policy": { "type": "ContextPrivKey" } })];
+    for policy in policies {
+        let ctx = tron_hd_ctx();
+        let expected = independent_address(&ctx, "m/44'/195'/0'/0/0");
+        assert_eq!(expected, HD_ADDRESS_0, "the pinned vector");
+        assert_eq!(independent_address(&ctx, "m/44'/195'/0'/0/1"), HD_ADDRESS_1);
+        let node = hd_node(std::slice::from_ref(&expected), std::slice::from_ref(&expected));
+
+        let mut extra = json!({ "erc20_tokens_requests": tokens(&["USDT-TRC20"]) });
+        for (key, value) in policy.as_object().expect("an object") {
+            extra[key] = value.clone();
+        }
+        let result = activated(&ctx, hd_request(&node, extra));
+
+        assert_eq!(result["current_block"], 4242, "the head block of the node");
+        assert_eq!(result["ticker"], "TRX");
+        assert_eq!(result["nfts_infos"], json!({}));
+        assert!(result.get("eth_addresses_infos").is_none(), "the HD shape: {result}");
+        assert_eq!(result["wallet_balance"]["wallet_type"], "HD");
+        let account = &result["wallet_balance"]["accounts"][0];
+        assert_eq!(account["account_index"], 0);
+        assert_eq!(account["derivation_path"], "m/44'/195'/0'");
+        let first = &account["addresses"][0];
+        assert_eq!(first["address"], expected.as_str());
+        assert_eq!(first["derivation_path"], "m/44'/195'/0'/0/0");
+        assert_eq!(first["chain"], "External");
+        assert_eq!(spendable_of(&first["balance"]["TRX"]), dec("2.5"));
+        assert_eq!(
+            spendable_of(&first["balance"]["USDT-TRC20"]),
+            dec("1.234567"),
+            "the balance maps cover the platform and its enabled tokens"
+        );
+        assert!(account["total_balance"]["TRX"].is_object() && account["total_balance"]["USDT-TRC20"].is_object());
+
+        let coin = registered(&ctx, "TRX");
+        assert_eq!(coin.my_address().expect("an address"), expected);
+        assert!(matches!(coin.derivation_method, coins::DerivationMethod::HDWallet(_)));
+        assert_eq!(coin.display_priv_key().expect("a local key").len(), 66);
+        assert!(coin.get_erc20_tokens_infos().contains_key("USDT-TRC20"));
+    }
+
+    // The task route gives the same address.
+    let ctx = tron_hd_ctx();
+    let node = hd_node(&[HD_ADDRESS_0.to_owned()], &[]);
+    let status = run_task(&ctx, hd_request(&node, json!({})));
+    assert_eq!(status["status"], "Ok", "{status}");
+    assert_eq!(
+        status["details"]["wallet_balance"]["accounts"][0]["addresses"][0]["address"],
+        HD_ADDRESS_0
+    );
+    assert_eq!(registered(&ctx, "TRX").my_address().expect("an address"), HD_ADDRESS_0);
+}
+
+/// `path_to_address` selects the enabled address below the coin's derivation path, as for every EVM platform.
+#[test]
+fn path_to_address_selects_the_enabled_tron_address() {
+    let ctx = tron_hd_ctx();
+    let node = hd_node(&[], &[]);
+    let result = activated(
+        &ctx,
+        hd_request(
+            &node,
+            json!({ "path_to_address": { "account_id": 0, "chain": "External", "address_id": 1 } }),
+        ),
+    );
+    assert_eq!(registered(&ctx, "TRX").my_address().expect("an address"), HD_ADDRESS_1);
+    let paths: Vec<&str> = result["wallet_balance"]["accounts"][0]["addresses"]
+        .as_array()
+        .expect("addresses")
+        .iter()
+        .map(|address| address["derivation_path"].as_str().expect("a path"))
+        .collect();
+    assert_eq!(paths, ["m/44'/195'/0'/0/0", "m/44'/195'/0'/0/1"]);
+}
+
+/// A config without `derivation_path` answers `InvalidPayload`, HTTP 400, under a global-HD login, before any node
+/// is contacted; nothing is registered. Under an iguana login the same config activates (R21.10B.4).
+#[test]
+fn a_config_without_a_derivation_path_is_invalid_payload_under_a_global_hd_login() {
     let node = untouched_stub();
     let ctx = tron_hd_ctx();
-    for extra in [json!({}), json!({ "priv_key_policy": { "type": "ContextPrivKey" } })] {
-        let (body, status) = failure(&ctx, request("TRX", std::slice::from_ref(&node.url), extra.clone()));
-        assert_eq!(body["error_type"], "PrivKeyPolicyNotAllowed", "{extra}: {body}");
-        assert!(
-            body["error_data"]
-                .as_str()
-                .is_some_and(|text| text.contains("not yet available")),
-            "{body}"
+    let no_path = request(
+        "TRXNP",
+        std::slice::from_ref(&node.url),
+        json!({ "scan_policy": "do_not_scan" }),
+    );
+    let wire = failure(&ctx, no_path);
+    assert_error(&wire, "InvalidPayload", StatusCode::BAD_REQUEST);
+    assert_eq!(node.request_count(), 0);
+    assert!(!is_registered(&ctx, "TRXNP"));
+
+    let ctx = tron_ctx();
+    activated(&ctx, request("TRXNP", std::slice::from_ref(&node.url), json!({})));
+    assert!(is_registered(&ctx, "TRXNP"));
+}
+
+/// The HD methods for a TRX and a TRC20 ticker (CRD ch.21 R21.10B.4): `get_new_address` derives the next address,
+/// `account_balance` and `task::account_balance::init` list the known addresses, all in base58check. Asked for the
+/// TRX ticker, each balance map covers the platform and its enabled token; asked for a TRC20 ticker, that token only
+/// (the status note of 2026-11-19, as CRD ch.49 R49.32 records for an ERC-20 ticker).
+#[test]
+fn the_hd_methods_answer_base58_addresses_and_a_balance_map_over_the_platform_and_its_tokens() {
+    use coins::hd_wallet::get_new_address;
+    use coins::rpc_command::account_balance::account_balance;
+
+    let ctx = tron_hd_ctx();
+    let address = |id: u32| independent_address(&ctx, &format!("m/44'/195'/0'/0/{id}"));
+    // The first address holds the token, the second has its account on chain.
+    let node = hd_node(&[address(1)], &[address(0)]);
+    activated(
+        &ctx,
+        hd_request(&node, json!({ "erc20_tokens_requests": tokens(&["USDT-TRC20"]) })),
+    );
+
+    let new_address = |ticker: &str| -> Json {
+        let request = serde_json::from_value(json!({ "coin": ticker, "account_id": 0, "chain": "External" }))
+            .expect("a get_new_address request");
+        let response = block_on(get_new_address(ctx.clone(), request))
+            .unwrap_or_else(|e| panic!("get_new_address failed: {}", e.get_inner()));
+        serde_json::to_value(&response).expect("a serializable answer")["new_address"].clone()
+    };
+    // The TRX ticker derives address 1, the token ticker address 2: both use the platform's wallet.
+    let first = new_address("TRX");
+    assert_eq!(first["address"], address(1).as_str());
+    assert_eq!(first["derivation_path"], "m/44'/195'/0'/0/1");
+    assert_eq!(first["chain"], "External");
+    assert_eq!(
+        spendable_of(&first["balance"]["TRX"]),
+        BigDecimal::from_str("2.5").expect("a decimal")
+    );
+    assert_eq!(spendable_of(&first["balance"]["USDT-TRC20"]), BigDecimal::from(0));
+    assert_eq!(tickers_of(&first["balance"]), ["TRX", "USDT-TRC20"]);
+    let second = new_address("USDT-TRC20");
+    assert_eq!(second["address"], address(2).as_str());
+    assert_eq!(second["derivation_path"], "m/44'/195'/0'/0/2");
+    assert_eq!(
+        tickers_of(&second["balance"]),
+        ["USDT-TRC20"],
+        "the token's ticker only"
+    );
+    assert_eq!(spendable_of(&second["balance"]["USDT-TRC20"]), BigDecimal::from(0));
+
+    // `account_balance`: the page balance is the ticker's own.
+    let balances = |ticker: &str| -> Json {
+        let request = serde_json::from_value(json!({ "coin": ticker, "account_index": 0, "chain": "External" }))
+            .expect("an account_balance request");
+        let response = block_on(account_balance(ctx.clone(), request))
+            .unwrap_or_else(|e| panic!("account_balance failed: {}", e.get_inner()));
+        serde_json::to_value(&response).expect("a serializable answer")
+    };
+    let trx = balances("TRX");
+    let listed: Vec<&str> = trx["addresses"]
+        .as_array()
+        .expect("addresses")
+        .iter()
+        .map(|entry| entry["address"].as_str().expect("an address"))
+        .collect();
+    assert_eq!(listed, [address(0), address(1), address(2)]);
+    assert_eq!(trx["derivation_path"], "m/44'/195'/0'");
+    assert_eq!(
+        spendable_of(&trx["addresses"][0]["balance"]["TRX"]),
+        BigDecimal::from(0)
+    );
+    assert_eq!(
+        spendable_of(&trx["addresses"][0]["balance"]["USDT-TRC20"]),
+        BigDecimal::from_str("1.234567").expect("a decimal")
+    );
+    assert_eq!(
+        spendable_of(&trx["addresses"][1]["balance"]["TRX"]),
+        BigDecimal::from_str("2.5").expect("a decimal")
+    );
+    assert_eq!(
+        spendable_of(&trx["page_balance"]),
+        BigDecimal::from_str("2.5").expect("a decimal")
+    );
+    for entry in trx["addresses"].as_array().expect("addresses") {
+        assert_eq!(tickers_of(&entry["balance"]), ["TRX", "USDT-TRC20"], "{entry}");
+    }
+    let token = balances("USDT-TRC20");
+    assert_eq!(
+        spendable_of(&token["page_balance"]),
+        dec("1.234567"),
+        "the token's own balance"
+    );
+    assert_eq!(token["addresses"][0]["address"], address(0).as_str());
+    let token_addresses = token["addresses"].as_array().expect("addresses");
+    assert_eq!(token_addresses.len(), 3, "the platform's wallet: the same addresses");
+    for entry in token_addresses {
+        assert_eq!(tickers_of(&entry["balance"]), ["USDT-TRC20"], "{entry}");
+    }
+    assert_eq!(
+        spendable_of(&token_addresses[0]["balance"]["USDT-TRC20"]),
+        dec("1.234567")
+    );
+    assert_eq!(
+        spendable_of(&token_addresses[1]["balance"]["USDT-TRC20"]),
+        BigDecimal::from(0)
+    );
+
+    // `task::account_balance::init` for both tickers.
+    for ticker in ["TRX", "USDT-TRC20"] {
+        let params: InitAccountBalanceParams = serde_json::from_value(json!({ "account_index": 0 })).expect("params");
+        let result = block_on(registered(&ctx, ticker).init_account_balance_rpc(params))
+            .unwrap_or_else(|e| panic!("init_account_balance failed: {}", e.get_inner()));
+        let result = serde_json::to_value(&result).expect("a serializable answer");
+        assert_eq!(result["addresses"][1]["address"], address(1).as_str(), "{ticker}");
+        // The TRX ticker reports the platform and its token, a TRC20 ticker that token only.
+        let expected: &[&str] = if ticker == "TRX" {
+            &["TRX", "USDT-TRC20"]
+        } else {
+            &["USDT-TRC20"]
+        };
+        assert_eq!(tickers_of(&result["total_balance"]), expected, "{ticker}");
+        for entry in result["addresses"].as_array().expect("addresses") {
+            assert_eq!(tickers_of(&entry["balance"]), expected, "{ticker}: {entry}");
+        }
+        if ticker == "TRX" {
+            assert_eq!(
+                spendable_of(&result["total_balance"]["TRX"]),
+                BigDecimal::from_str("2.5").expect("a decimal")
+            );
+        }
+        assert_eq!(
+            spendable_of(&result["total_balance"]["USDT-TRC20"]),
+            dec("1.234567"),
+            "{ticker}"
         );
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+/// The used-address rule through the scan task (CRD ch.21 R21.10B.4): the chain having created an account marks an
+/// address used, and so does a non-zero balance of an enabled TRC20 token alone; a token that is not enabled does
+/// not count.
+#[test]
+fn task_scan_for_new_addresses_follows_the_used_address_rule() {
+    // (a) The account at index 3 exists: the scan reports 1, 2 (empty) and 3, then stops after the gap.
+    let ctx = tron_hd_ctx();
+    let address = |id: u32| independent_address(&ctx, &format!("m/44'/195'/0'/0/{id}"));
+    let node = hd_node(&[address(0), address(3)], &[]);
+    activated(
+        &ctx,
+        hd_request(&node, json!({ "erc20_tokens_requests": tokens(&["USDT-TRC20"]) })),
+    );
+    let status = scan_task(&ctx, "TRX", 3);
+    assert_eq!(status["status"], "Ok", "{status}");
+    let found = status["details"]["new_addresses"].as_array().expect("new addresses");
+    let paths: Vec<&str> = found
+        .iter()
+        .map(|entry| entry["derivation_path"].as_str().expect("a path"))
+        .collect();
+    assert_eq!(paths, ["m/44'/195'/0'/0/1", "m/44'/195'/0'/0/2", "m/44'/195'/0'/0/3"]);
+    assert_eq!(found[2]["address"], address(3).as_str());
+    assert_eq!(found[0]["address"], address(1).as_str());
+    assert_eq!(spendable_of(&found[0]["balance"]["USDT-TRC20"]), BigDecimal::from(0));
+    assert_eq!(
+        spendable_of(&found[2]["balance"]["TRX"]),
+        BigDecimal::from_str("2.5").expect("a decimal")
+    );
+    for entry in found {
+        assert_eq!(tickers_of(&entry["balance"]), ["TRX", "USDT-TRC20"], "{entry}");
+    }
+
+    // (b) Only a token balance at index 2, where the chain has created no account: with the token enabled the
+    // address is used, also when the task is asked for a TRC20 ticker (the status note of 2026-11-19 and the
+    // Reloaded note after it). The answer for a TRC20 ticker holds that token's ticker only.
+    let ctx = tron_hd_ctx();
+    let address = |id: u32| independent_address(&ctx, &format!("m/44'/195'/0'/0/{id}"));
+    let node = hd_node(&[address(0)], &[address(2)]);
+    activated(
+        &ctx,
+        hd_request(&node, json!({ "erc20_tokens_requests": tokens(&["USDT-TRC20"]) })),
+    );
+    let status = scan_task(&ctx, "USDT-TRC20", 2);
+    assert_eq!(status["status"], "Ok", "{status}");
+    let found = status["details"]["new_addresses"].as_array().expect("new addresses");
+    assert_eq!(found.len(), 2, "{status}");
+    assert_eq!(found[1]["address"], address(2).as_str());
+    for entry in found {
+        assert_eq!(tickers_of(&entry["balance"]), ["USDT-TRC20"], "{entry}");
+    }
+    assert_eq!(
+        spendable_of(&found[1]["balance"]["USDT-TRC20"]),
+        BigDecimal::from_str("1.234567").expect("a decimal")
+    );
+
+    // (c) The same node, the token not enabled: nothing is used beyond the enabled address.
+    let ctx = tron_hd_ctx();
+    let address = |id: u32| independent_address(&ctx, &format!("m/44'/195'/0'/0/{id}"));
+    let node = hd_node(&[address(0)], &[address(2)]);
+    activated(&ctx, hd_request(&node, json!({})));
+    let status = scan_task(&ctx, "TRX", 2);
+    assert_eq!(status["status"], "Ok", "{status}");
+    assert_eq!(status["details"]["new_addresses"], json!([]), "{status}");
+}
+
+/// `task::create_new_account::init` fails for TRX and for a TRC20 ticker with `Internal` in the task status, and no
+/// account is created (CRD ch.21 R21.10B.4).
+#[test]
+fn task_create_new_account_is_internal_for_every_tron_coin() {
+    use coins::rpc_command::account_balance::account_balance;
+    use coins::rpc_command::init_create_account::{init_create_new_account, init_create_new_account_status};
+
+    let ctx = tron_hd_ctx();
+    let node = hd_node(&[HD_ADDRESS_0.to_owned()], &[]);
+    activated(
+        &ctx,
+        hd_request(&node, json!({ "erc20_tokens_requests": tokens(&["USDT-TRC20"]) })),
+    );
+    for ticker in ["TRX", "USDT-TRC20"] {
+        let request = serde_json::from_value(json!({ "coin": ticker, "scan": false })).expect("a request");
+        let response = block_on(init_create_new_account(ctx.clone(), request))
+            .unwrap_or_else(|e| panic!("the task must start: {}", e.get_inner()));
+        let status = poll_status(|| {
+            let status = block_on(init_create_new_account_status(
+                ctx.clone(),
+                status_request(response.task_id),
+            ))
+            .unwrap_or_else(|e| panic!("status failed: {e}"));
+            serde_json::to_value(&status).expect("a serializable status")
+        });
+        assert_eq!(status["status"], "Error", "{ticker}: {status}");
+        assert_eq!(status["details"]["error_type"], "Internal", "{ticker}: {status}");
+    }
+    // Account 1 was not created.
+    let request = serde_json::from_value(json!({ "coin": "TRX", "account_index": 1, "chain": "External" }))
+        .expect("an account_balance request");
+    match block_on(account_balance(ctx.clone(), request)) {
+        Ok(_) => panic!("account 1 must not exist"),
+        Err(e) => assert_eq!(
+            serde_json::to_value(e.get_inner()).expect("a serializable error")["error_type"],
+            "UnknownAccount"
+        ),
+    }
+}
+
+/// `enable_erc20` of a TRC20 token on an HD TRX platform reports the base58check addresses of the platform's wallet.
+#[test]
+fn enable_erc20_on_an_hd_platform_reports_base58_addresses() {
+    let ctx = tron_hd_ctx();
+    let node = hd_node(&[HD_ADDRESS_0.to_owned()], &[HD_ADDRESS_0.to_owned()]);
+    activated(&ctx, hd_request(&node, json!({})));
+    let result = enable_token(&ctx, "USDT-TRC20").unwrap_or_else(|e| panic!("enable_erc20 failed: {e}"));
+    let result = serde_json::to_value(&result).unwrap();
+    assert_eq!(result["token_contract_address"], USDT_CONTRACT);
+    assert_eq!(
+        result["balances"][HD_ADDRESS_0],
+        json!({ "spendable": "1.234567", "unspendable": "0" }),
+        "{result}"
+    );
+}
+
+/// The key-policy refusals hold under a global-HD login: Trezor, WalletConnect and MetaMask are refused as they are
+/// under an iguana login, before any node is contacted.
+#[test]
+fn the_key_policy_refusals_hold_under_a_global_hd_login() {
+    let node = untouched_stub();
+    let ctx = tron_hd_ctx();
+    let policy = json!({ "priv_key_policy": { "type": "WalletConnect", "params": { "session_topic": "topic" } } });
+    let wire = failure(&ctx, hd_request(&node, policy.clone()));
+    assert_error(&wire, "Internal", StatusCode::INTERNAL_SERVER_ERROR);
+    let status = run_task(&ctx, hd_request(&node, policy));
+    assert_eq!(status["status"], "Error", "{status}");
+    assert_eq!(status["details"]["error_type"], "Internal");
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+    {
+        let policy = json!({ "priv_key_policy": { "type": "Trezor" } });
+        let wire = failure(&ctx, hd_request(&node, policy.clone()));
+        assert_error(&wire, "UnexpectedDeviceActivationPolicy", StatusCode::BAD_REQUEST);
+        let status = run_task(&ctx, hd_request(&node, policy));
+        assert_eq!(status["status"], "Error", "{status}");
+        assert_eq!(status["details"]["error_type"], "Internal");
     }
     assert_eq!(node.request_count(), 0);
     assert!(!is_registered(&ctx, "TRX"));
-    // The rule on its facts: only `IguanaPrivKey` passes an HD login.
-    let iguana = KeyPolicyFacts {
-        iguana_priv_key: true,
-        ..Default::default()
-    };
-    assert_eq!(
-        key_policy_refusal(KeyPolicyFacts::default(), true),
-        Some(KeyPolicyRefusal::HdLogin)
+
+    // MetaMask exists on the browser build only; the rule reads its facts, and no longer depends on the login.
+    for facts in [
+        KeyPolicyFacts {
+            metamask_policy: true,
+            ..Default::default()
+        },
+        KeyPolicyFacts {
+            metamask_rpc_mode: true,
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(key_policy_refusal(facts), Some(KeyPolicyRefusal::MetaMask));
+    }
+}
+
+/// The availability constant still refuses every route while it is `false`, under a global-HD login as well: no
+/// node is contacted, no key is derived and nothing is registered.
+#[test]
+fn the_gate_refuses_an_hd_activation_while_tron_is_switched_off() {
+    const { assert!(!TRON_ACTIVATION_AVAILABLE, "the build switch stays off") };
+    let node = untouched_stub();
+    let ctx = tron_hd_ctx_with(json!({}));
+    assert!(!tron_activation_available(&ctx));
+    let wire = failure(&ctx, hd_request(&node, json!({})));
+    assert_eq!(wire.0["error_type"], "PlatformCoinCreationError", "{:?}", wire.0);
+    assert_eq!(wire.0["error_data"]["error"], TRON_NOT_AVAILABLE, "{:?}", wire.0);
+    let status = run_task(&ctx, hd_request(&node, json!({})));
+    assert_eq!(status["status"], "Error", "{status}");
+    assert_eq!(node.request_count(), 0);
+    assert!(!is_registered(&ctx, "TRX"));
+}
+
+/// The legacy `enable` route keeps the node's internal key under a global-HD login (a Reloaded extension, as the EVM
+/// and UTXO legacy routes do), so its address differs from the HD route's address for the same seed. The legacy
+/// entry itself sits behind the availability constant; this test drives the builder it calls with the key it passes,
+/// `mm2_internal_privkey_slice`.
+#[test]
+fn the_legacy_route_under_a_global_hd_login_keeps_the_internal_key() {
+    let ctx = tron_hd_ctx();
+    let node = TronStub::start(healthy);
+    let crypto_ctx = crypto::CryptoCtx::from_ctx(&ctx).expect("a crypto context");
+    let internal = coins::eth::tron::addr_from_pubkey_str(&crypto_ctx.mm2_internal_pubkey_hex())
+        .expect("the TRON address of the internal key");
+    let coin = block_on(coins::eth::tron::tron_coin_from_conf_and_request(
+        &ctx,
+        "TRX",
+        &coins::coin_conf(&ctx, "TRX"),
+        &json!({ "urls": [node.url] }),
+        crypto_ctx.mm2_internal_privkey_slice(),
+        CoinProtocol::TRX {
+            network: TronNetwork::Nile,
+        },
+    ))
+    .unwrap_or_else(|e| panic!("the legacy builder failed: {e}"));
+    assert_eq!(coin.my_address().expect("an address"), internal);
+    assert_ne!(
+        internal, HD_ADDRESS_0,
+        "the HD route gives another address for the same seed"
     );
-    assert_eq!(key_policy_refusal(iguana, true), None);
-    assert_eq!(key_policy_refusal(iguana, false), None);
+    assert!(matches!(coin.derivation_method, coins::DerivationMethod::Iguana(_)));
 }
 
 /// Under a global-HD login `IguanaPrivKey` is honored: the coin uses the node's internal key, the key the UTXO

@@ -85,6 +85,9 @@ impl EthCoinImpl {
     /// Whether this coin is the native gas coin of an EVM chain (not a token, not TRON).
     pub fn is_evm_platform_coin(&self) -> bool { matches!(self.coin_type, EthCoinType::Eth) }
 
+    /// Whether this coin is TRX or a TRC20 token.
+    pub fn is_tron_family(&self) -> bool { matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) }
+
     /// Whether this coin signs with a hardware wallet.
     pub fn uses_hardware_signer(&self) -> bool {
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
@@ -566,6 +569,22 @@ pub(crate) struct EvmWithdrawSender {
 impl EvmWithdrawSender {
     pub(crate) fn address(&self) -> Address { self.address }
 
+    /// The activated address of `coin`, signed with the coin's own key: the sender of a withdraw without `from`.
+    pub(crate) fn activated(coin: &EthCoin) -> Self {
+        EvmWithdrawSender {
+            address: coin.my_address,
+            key_pair: None,
+        }
+    }
+
+    /// The secret that signs for this sender: the derived key of an HD `from`, else the coin's own local key.
+    pub(crate) fn local_secret<'a>(&'a self, coin: &'a EthCoin) -> Option<&'a mm2_eth::keys::Secret> {
+        match &self.key_pair {
+            Some(key_pair) => Some(key_pair.secret()),
+            None => coin.signer.local_secret(),
+        }
+    }
+
     fn checksum_address(&self) -> String { checksum_address(&format!("{:#02x}", self.address)) }
 
     fn sign_tx(&self, coin: &EthCoin, tx: UnSignedEthTx) -> Result<SignedEthTx, EthSignerError> {
@@ -632,7 +651,13 @@ pub(crate) async fn resolve_evm_withdraw_sender(
         .derive_address(&hd_account, chain, address_id)
         .mm_err(|e| WithdrawError::UnexpectedFromAddress(e.to_string()))?;
     if !is_address_activated {
-        let error = format!("'{}' address is not activated", hd_address.address);
+        // A TRON address is shown in base58check (CRD ch.21 §21.5); the EVM text keeps its form.
+        let shown = if coin.is_tron_family() {
+            coin.hd_address_string(&hd_address.address)
+        } else {
+            hd_address.address.to_string()
+        };
+        let error = format!("'{}' address is not activated", shown);
         return MmError::err(WithdrawError::UnexpectedFromAddress(error));
     }
 
@@ -662,6 +687,23 @@ pub(crate) async fn resolve_evm_withdraw_sender(
         address: hd_address.address,
         key_pair: Some(key_pair),
     })
+}
+
+/// Resolves the sender of a withdraw whose `from` selects an address of the platform's HD wallet. `coin` may be a
+/// token or its platform: a token is resolved through its platform coin. `req.from` selects the address in the
+/// platform's HD wallet, and the key is derived from the software HD wallet.
+///
+/// # Errors
+///
+/// [`WithdrawError::InternalError`] when the platform of a token cannot be found; otherwise the errors of
+/// [`resolve_evm_withdraw_sender`].
+pub(crate) async fn resolve_withdraw_sender_in_platform_wallet(
+    ctx: &MmArc,
+    coin: &EthCoin,
+    req: &WithdrawRequest,
+) -> MmResult<EvmWithdrawSender, WithdrawError> {
+    let wallet_coin = coin.hd_serving_coin().await.map_to_mm(WithdrawError::InternalError)?;
+    resolve_evm_withdraw_sender(ctx, &wallet_coin, req).await
 }
 
 #[cfg_attr(test, mockable)]
@@ -938,8 +980,14 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
                     .to_owned(),
             ));
         }
-        let _ = ctx;
-        return crate::eth::tron::withdraw::withdraw_tron(coin, req).await;
+        // The sender is the activated address, or the HD address a `from` selects (CRD ch.47 `from`, ch.21
+        // R21.10B.4); both resolve before any node request.
+        let sender = if req.from.is_some() {
+            resolve_withdraw_sender_in_platform_wallet(&ctx, &coin, &req).await?
+        } else {
+            EvmWithdrawSender::activated(&coin)
+        };
+        return crate::eth::tron::withdraw::withdraw_tron(coin, req, sender).await;
     }
 
     validate_evm_withdraw_request(&coin, &req)?;

@@ -17,11 +17,15 @@ use super::balance::trc20_decimals;
 use super::nodes::{parse_nodes, TronApiKey, TronNode};
 use super::{Network, TronAddress, TRX_DECIMALS};
 
-use crate::eth::{rpc_event_handlers_for_eth_transport, Erc20BuildError, EthCoin, EthCoinBuildError, EthCoinImpl,
-                 EthCoinType, EthGasLimit, EthGasLimitV2, EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
+use crate::eth::{build_eth_hd_wallet, derive_eth_hd_activation_key, rpc_event_handlers_for_eth_transport,
+                 Erc20BuildError, EthCoin, EthCoinBuildError, EthCoinImpl, EthCoinType, EthGasLimit, EthGasLimitV2,
+                 EthHDWallet, EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
+use crate::hd_wallet_storage::HDWalletStorageKeyPolicy;
+use crate::rpc_command::get_my_address::PathToAddress;
 use crate::{CoinProtocol, DerivationMethod, HistorySyncState, MarketCoinOps};
 
 use common::log::warn;
+use crypto::GlobalHDAccountArc;
 use ethereum_types::Address;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -144,6 +148,62 @@ pub async fn tron_coin_from_params(
     priv_key: &[u8],
     protocol: CoinProtocol,
 ) -> Result<EthCoin, MmError<EthCoinBuildError>> {
+    let key_pair = KeyPair::from_secret_slice(priv_key)
+        .map_to_mm(|e| EthCoinBuildError::Internal(format!("Failed to derive TRON key pair: {e}")))?;
+    let derivation_method = DerivationMethod::Iguana(key_pair.address());
+    build_tron_coin(ctx, ticker, conf, params, key_pair, derivation_method, protocol).await
+}
+
+/// Assemble the [`EthCoinImpl`] of the TRX platform coin of a software HD wallet (CRD ch.21 R-A2, R21.10B.4): the
+/// coin's configured `derivation_path` (coin type 195 in practice) extended by `path_to_address` selects the enabled
+/// address, and the wallet is the same HD wallet an EVM platform has, with `gap_limit`. A TRC20 token is built on
+/// the platform and uses its wallet, so this builds a TRX platform only.
+///
+/// # Errors
+///
+/// [`EthCoinBuildError::InvalidPayload`] for a coin config without a usable `derivation_path` or a path that cannot
+/// be derived; [`EthCoinBuildError::Internal`] for a protocol that is not TRX, a wallet storage that cannot be
+/// opened, or a provider that cannot be built.
+pub async fn tron_coin_from_params_with_global_hd(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    params: TronCoinParams,
+    global_hd: &GlobalHDAccountArc,
+    path_to_address: &PathToAddress,
+    gap_limit: u32,
+    protocol: CoinProtocol,
+) -> Result<EthCoin, MmError<EthCoinBuildError>> {
+    if !matches!(protocol, CoinProtocol::TRX { .. }) {
+        return MmError::err(EthCoinBuildError::Internal(format!(
+            "the TRON HD wallet is built for a TRX platform, not for {ticker}"
+        )));
+    }
+    let key_pair = derive_eth_hd_activation_key(global_hd, conf, path_to_address)?;
+    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit, HDWalletStorageKeyPolicy::Software).await?;
+    build_tron_coin(
+        ctx,
+        ticker,
+        conf,
+        params,
+        key_pair,
+        DerivationMethod::HDWallet(hd_wallet),
+        protocol,
+    )
+    .await
+}
+
+/// The coin builder behind [`tron_coin_from_params`] and [`tron_coin_from_params_with_global_hd`]: `key_pair` is the
+/// key of the enabled address, and `derivation_method` the wallet it belongs to.
+async fn build_tron_coin(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    params: TronCoinParams,
+    key_pair: KeyPair,
+    derivation_method: DerivationMethod<Address, EthHDWallet>,
+    protocol: CoinProtocol,
+) -> Result<EthCoin, MmError<EthCoinBuildError>> {
     let TronCoinParams {
         nodes,
         required_confirmations,
@@ -151,8 +211,6 @@ pub async fn tron_coin_from_params(
     } = params;
     let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
 
-    let key_pair = KeyPair::from_secret_slice(priv_key)
-        .map_to_mm(|e| EthCoinBuildError::Internal(format!("Failed to derive TRON key pair: {e}")))?;
     let my_address = key_pair.address();
 
     let tron_api = TronApiClient::new(ticker, nodes);
@@ -225,7 +283,7 @@ pub async fn tron_coin_from_params(
         chain_id: conf["chain_id"].as_u64(),
         logs_block_range: 0,
         logs_window: Default::default(),
-        derivation_method: DerivationMethod::Iguana(my_address),
+        derivation_method,
         swap_v2_contracts: None,
         // TRON has no V1 or V2 EVM swap and no EVM gas model (energy and bandwidth instead): the gas-limit
         // blocks of CRD ch. 57 do not apply, so the defaults stand.

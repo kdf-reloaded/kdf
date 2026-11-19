@@ -563,13 +563,13 @@ pub struct GetNewHDAddressRequest {
 
 #[derive(Deserialize)]
 pub struct GetNewHDAddressParams {
-    account_id: u32,
-    chain: Bip44Chain,
+    pub(crate) account_id: u32,
+    pub(crate) chain: Bip44Chain,
 }
 
 #[derive(Serialize)]
 pub struct GetNewHDAddressResponse {
-    new_address: HDAddressBalance,
+    pub(crate) new_address: HDAddressBalance,
 }
 
 #[async_trait]

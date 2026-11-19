@@ -8,7 +8,7 @@
 use super::test_node::{Reply, StubNode};
 use super::withdraw::withdraw_tron;
 use super::{tron_coin_from_conf_and_request, Network, TronAddress, TRX_DECIMALS};
-use crate::eth::{EthCoin, EthCoinType};
+use crate::eth::{EthCoin, EthCoinType, EvmWithdrawSender};
 use crate::{BalanceError, CoinProtocol, MarketCoinOps, MmCoin, MmCoinEnum, WithdrawError, WithdrawFee, WithdrawRequest};
 use bigdecimal::BigDecimal;
 use common::block_on;
@@ -668,7 +668,7 @@ fn withdraw_with_any_fee_descriptor_is_refused_before_a_node_is_asked() {
             ];
             for fee in fees {
                 let req = withdraw_request(&coin, Some(fee));
-                match withdraw_tron(coin.clone(), req).await {
+                match withdraw_tron(coin.clone(), req, EvmWithdrawSender::activated(&coin)).await {
                     Err(e) => assert!(
                         matches!(e.get_inner(), WithdrawError::InvalidFeePolicy(_)),
                         "a fee descriptor must answer InvalidFeePolicy"
@@ -694,7 +694,12 @@ fn withdraw_without_a_fee_descriptor_still_reaches_the_node() {
             } else {
                 trx_coin(&node.url()).await
             };
-            withdraw_tron(coin.clone(), withdraw_request(&coin, None)).await
+            withdraw_tron(
+                coin.clone(),
+                withdraw_request(&coin, None),
+                EvmWithdrawSender::activated(&coin),
+            )
+            .await
         });
         // The stub refuses the endpoints after the balance read, so the withdraw ends in an error, but not the
         // fee-policy one, and only after the node was asked for the balance.
@@ -740,7 +745,12 @@ fn withdraw_gets_past_tapos_with_the_nodes_getnowblock_form() {
             } else {
                 trx_coin(&node.url()).await
             };
-            withdraw_tron(coin.clone(), withdraw_request(&coin, None)).await
+            withdraw_tron(
+                coin.clone(),
+                withdraw_request(&coin, None),
+                EvmWithdrawSender::activated(&coin),
+            )
+            .await
         });
         let details = result.unwrap_or_else(|e| panic!("the withdraw must succeed (trc20={trc20}): {e:?}"));
         assert!(!details.tx_hex.0.is_empty());
@@ -817,7 +827,12 @@ fn withdraw_balance_read_of_a_node_error_answer_is_an_error_not_zero() {
     let node = getaccount_node(200, NODE_ERROR_BODY);
     let result = block_on(async {
         let (_ctx, coin) = trx_coin(&node.url()).await;
-        withdraw_tron(coin.clone(), withdraw_request(&coin, None)).await
+        withdraw_tron(
+            coin.clone(),
+            withdraw_request(&coin, None),
+            EvmWithdrawSender::activated(&coin),
+        )
+        .await
     });
     match result {
         Err(e) => assert!(matches!(e.get_inner(), WithdrawError::Transport(_))),
