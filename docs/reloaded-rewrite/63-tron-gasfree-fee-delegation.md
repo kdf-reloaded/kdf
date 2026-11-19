@@ -721,7 +721,7 @@ The withdraw pipeline gains a gasless branch selected by
    and position in the withdraw result -- are stated one by one in
    §63.8A (R25-R28, T15-T16, D63.8). Where this step and §63.8A
    differ in precision, §63.8A is the more precise statement. §63.8A
-   is not cleared until the KDF Dirty Gate passes it.
+   passed the KDF Dirty Gate on 2026-11-19.
 6. **Fallback.** With `fee_method = gasless` and
    `fallback_to_native = true`, a *deterministic* unavailability
    (the rail is not configured for the coin, the token is not
@@ -746,9 +746,9 @@ observable and is not bound.
 ## 63.8A The Sign-Only Result: Members Around the Signed Authorization
 
 *(Added 2026-11-19 by the KDF Spec Reader; reference facts at the
-rows of chapter 02 §2.15A named below; not cleared until the KDF
-Dirty Gate passes this section. It adds to §63.8 step 5 and replaces
-none of its sentences.)*
+rows of chapter 02 §2.15A named below; passed the KDF Dirty Gate on
+2026-11-19, measure 0.01, attestation in §63.15. It adds to §63.8 step 5
+and replaces none of its sentences.)*
 
 **Reference states.** At the row `dev (as of 2026-03-16)` there is
 no GasFree withdraw: no fee-rail selector, no gasless rail and no
@@ -1457,3 +1457,29 @@ V2. The baseline withdraw request has no fee-rail selector and no
   only in that branch's commit message of 2026-06-26, against a
   reference state that was not tabled at the time. Neither that
   verdict nor the two failed passes carry to this revision.
+- *Scoped addition (2026-11-19, Spec Reader round 0.5.0-16) -- §63.8A
+  (R25 -- R28, the read-back note, the code-quality finding, D63.8, T15
+  and T16) and the status note under §63.8 step 5, cleared together with
+  the pointer after chapter 49 R49.26; no other text of this chapter was
+  changed.* **KDF Dirty Gate: PASS on 2026-11-19, measure 0.01, no
+  findings** (chapter 01 R40; the attestation closes this item).
+  *Inputs:* the forbidden corpus at the row `feat/tron-gasfree (as of
+  2026-05-04)` of chapter 02 §2.15A, read read-only and consulted **only**
+  to establish how the sign-only result of the gasless withdraw is
+  assembled and serialized (its members, their JSON types, value sources,
+  presence and order, and the nested signed authorization), and the row
+  `dev (as of 2026-03-16)`, searched whole-tree, to establish that it has
+  no GasFree withdraw. D63.8, T15 and T16 are original to this section. No
+  row was added to chapter 02 §2.15A: both states already have rows.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-19, measure
+  0.01, no findings, in a main pass and a delta pass after the options of
+  D63.8 were reworded for neutrality. *Extent:* the Tron GasFree gasless
+  withdraw surface of §63.8 and §63.8A -- the assembly and serialization
+  of the sign-only withdraw result, the off-chain payload and the nested
+  signed authorization -- at the row `feat/tron-gasfree (as of
+  2026-05-04)`; the row `dev (as of 2026-03-16)` searched whole-tree (no
+  GasFree withdraw). *Method:* reading plus mechanical comparison (a
+  per-token lookup, an identifier scan, and word n-gram overlap at lengths
+  4, 5 and 6); the repository's clean-room gate tool was not applicable
+  because the additions embed no code blocks. *Measure:* 0.01, on the
+  discretionary-expression basis.

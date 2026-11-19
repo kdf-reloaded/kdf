@@ -830,8 +830,7 @@ absence is not an error.
 > additional top-level members hold an off-chain authorization instead. Those
 > members are stated by [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8A
 > (R25-R28). R49.25's "mandatory for a completed withdrawal transaction" does
-> not reach that result. §63.8A is not cleared until the KDF Dirty Gate passes
-> it.
+> not reach that result. §63.8A passed the KDF Dirty Gate on 2026-11-19.
 
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
@@ -1221,3 +1220,9 @@ addresses.
   inventory and a targeted phrase search; the repository's clean-room gate
   tool was not applicable because the additions embed no code blocks.
   *Measure:* 0.02, on the discretionary-expression basis.
+- *Pointer added 2026-11-19 (Spec Reader round 0.5.0-16) -- after R49.26.*
+  It names chapter 63 §63.8A (R25 -- R28) and states that the members
+  R49.25 makes mandatory do not reach the sign-only result; it travels with
+  chapter 63 §63.8A for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
+  2026-11-19, measure 0.01, no findings**, as recorded for §63.8A in chapter
+  63's provenance footer.
