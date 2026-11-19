@@ -309,6 +309,23 @@ impl SolanaRpcClient {
         Ok(resp.value.is_some())
     }
 
+    /// `getAccountInfo` — the owner program of an account: `None` when the account does not exist. Used by the
+    /// mint-owner check of activation and by the recipient check of an SPL withdraw.
+    pub async fn get_account_owner(&self, address: &Pubkey) -> Result<Option<Pubkey>, RpcError> {
+        let resp: ContextResponse<Option<AccountOwnerValue>> = self
+            .call(
+                "getAccountInfo",
+                json!([address.to_string(), { "commitment": self.commitment_str(), "encoding": "base64" }]),
+            )
+            .await?;
+        match resp.value {
+            None => Ok(None),
+            Some(account) => Pubkey::from_str(&account.owner)
+                .map(Some)
+                .map_err(|e| RpcError::decode("getAccountInfo", format!("{e:?}"), account.owner.as_bytes())),
+        }
+    }
+
     fn commitment_param(&self) -> Json { json!({ "commitment": self.commitment_str() }) }
 
     fn commitment_str(&self) -> &'static str {
@@ -355,6 +372,12 @@ struct ContextResponse<T> {
     #[allow(dead_code)]
     context: Option<Json>,
     value: T,
+}
+
+/// The one member of a `getAccountInfo` value that `get_account_owner` reads.
+#[derive(Debug, Deserialize)]
+struct AccountOwnerValue {
+    owner: String,
 }
 
 #[derive(Debug, Deserialize)]

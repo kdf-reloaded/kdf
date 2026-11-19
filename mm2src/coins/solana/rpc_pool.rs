@@ -271,6 +271,12 @@ impl SolanaRpcPool {
         self.dispatch(move |c| async move { c.get_account_exists(&address).await })
             .await
     }
+
+    pub async fn get_account_owner(&self, address: &Pubkey) -> Result<Option<Pubkey>, RpcError> {
+        let address = *address;
+        self.dispatch(move |c| async move { c.get_account_owner(&address).await })
+            .await
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────

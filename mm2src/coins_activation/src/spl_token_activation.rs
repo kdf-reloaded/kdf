@@ -1,7 +1,7 @@
 use crate::prelude::{TryFromCoinProtocol, TryPlatformCoinFromMmCoinEnum};
 use crate::token::{enable_token, EnableTokenError, EnableTokenRequest, TokenActivationOps, TokenProtocolParams};
 use async_trait::async_trait;
-use coins::solana::spl::{SplProtocolConf, SPL_TOKEN_PROGRAM_ID};
+use coins::solana::spl::{SplProtocolConf, SPL_TOKEN_PROGRAM_ID, TOKEN_2022_NOT_SUPPORTED, TOKEN_2022_PROGRAM_ID};
 use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, SolanaCoin, SplToken,
             SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
 use common::Future01CompatExt;
@@ -88,6 +88,11 @@ pub struct SplInitResult {
 pub enum SplInitError {
     GetBalanceError(BalanceError),
     MyAddressError(String),
+    /// The mint account could not be read, or another program than the token's `program_id` owns it (CRD ch.40
+    /// R40.2.2, R40.3.4): the surface's `Transport` row.
+    MintCheckError(String),
+    /// A Token-2022 token (CRD ch.40 D40.6B.4): refused with `Internal` and the text, before any node contact.
+    Token2022(String),
 }
 
 impl From<SplInitError> for EnableTokenError {
@@ -95,6 +100,8 @@ impl From<SplInitError> for EnableTokenError {
         match err {
             SplInitError::GetBalanceError(rpc_err) => rpc_err.into(),
             SplInitError::MyAddressError(e) => EnableTokenError::Internal(e),
+            SplInitError::MintCheckError(e) => EnableTokenError::Transport(e),
+            SplInitError::Token2022(e) => EnableTokenError::Internal(e),
         }
     }
 }
@@ -114,6 +121,19 @@ impl TokenActivationOps for SplToken {
         _activation_params: Self::ActivationParams,
         protocol_conf: Self::ProtocolInfo,
     ) -> Result<(Self, Self::ActivationResult), MmError<Self::ActivationError>> {
+        // D40.6B.4: a Token-2022 token is refused before any node is contacted and nothing is registered.
+        if protocol_conf.program_id == TOKEN_2022_PROGRAM_ID {
+            return MmError::err(SplInitError::Token2022(format!(
+                "{}: {}",
+                ticker, TOKEN_2022_NOT_SUPPORTED
+            )));
+        }
+        // R40.2.2: before anything is read or registered, the mint account, if it exists, must be owned by the
+        // token's program; a mint account that does not exist is accepted.
+        platform_coin
+            .check_mint_owner(&protocol_conf.token_contract_address, &protocol_conf.program_id)
+            .await
+            .map_err(|e| SplInitError::MintCheckError(e.into_inner().to_string()))?;
         let token = Self::new(
             protocol_conf.decimals,
             ticker,

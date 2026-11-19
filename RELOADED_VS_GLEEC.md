@@ -151,6 +151,21 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   it while Solana cannot trade. No switch: an abnormal end cannot be a
   compatibility target. CRD ch.40 D40.6B.1, R40.6B.14; PR #401.
 
+- **Solana withdraws and token balances.** The withdraw answers have GLEEC
+  KDF's shape, `fee_details` with `fee_amount`, `rent_amount` and
+  `total_amount` included, and a short SOL balance answers
+  `NotSufficientPlatformBalanceForFee` as there. Reloaded differs where GLEEC
+  KDF moves the wrong amount, fails or builds a wrong transaction:
+  - an SPL `max` sends the whole token balance;
+  - a wallet that holds no account for a token reads balance zero instead of
+    failing the activation or `my_balance`;
+  - a recipient that is a token account is refused with `InvalidAddress`;
+  - a Token-2022 token is refused at activation with a text that says so;
+  - `AmountTooLow` for an SPL token names one smallest unit of the token's
+    decimals as its threshold, not one lamport.
+  No switch: none of these is a compatibility target. CRD ch.40 D40.6B.2 to
+  D40.6B.6; PR #425.
+
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the
   key from the seed phrase at `m/44'/501'/N'/0'` by default, or at
