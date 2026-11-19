@@ -280,6 +280,15 @@ In the HD shape `get_balances` has no effect (balances are always reported)
 (G: the reference shows no HD example with `get_balances: false`; the reference
 version ignores the flag in HD mode).
 
+> **Pointer (2026-11-19, Spec Reader round 0.5.0-15; travels with chapter 49
+> §49.2.1 for the KDF Dirty Gate).** After activation, the HD address
+> methods `get_new_address`, `account_balance`, `task::account_balance::init`
+> and `task::scan_for_new_addresses::init` carry the same per-address ticker
+> set as (b) for a platform ticker, and the token's ticker alone for a token
+> ticker. Their address form and the token `from` selector of a withdraw are
+> bound by [Chapter 49](49-withdrawal-task-path.md) R49.32 -- R49.34. This
+> note binds nothing of its own.
+
 The success HTTP status is 200.
 
 ### 35.1.D Signing policy, RPC mode, inline NFT
@@ -2859,3 +2868,9 @@ is decided together with this item.
   no behavior of its own; it travels with chapter 43 §43.1F for the KDF
   Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
   43's provenance footer.
+- *Pointer added 2026-11-19 (Spec Reader round 0.5.0-15) -- the note after
+  R35.1.3.* It names chapter 49 R49.32 -- R49.34 and restates their ticker
+  set in one sentence; it states no behavior of its own and travels with
+  chapter 49 §49.2.1 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
+  2026-11-19, measure 0.02, no findings**, as recorded for §49.2.1 in chapter
+  49's provenance footer.

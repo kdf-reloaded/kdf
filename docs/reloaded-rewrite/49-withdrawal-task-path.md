@@ -174,6 +174,15 @@ balance checks, nonce selection, signing, and the completed transaction's
 sender. When `from` is present, both paths shall resolve it as an HD address
 selector and use the selected activated HD address and derived key instead.
 
+*Status note (2026-11-19), the token half of R49.5 (passed the KDF Dirty
+Gate).* §49.2.1 records the reference contract for an ERC-20 token under HD.
+The token's `from` is resolved against its platform's HD wallet (R49.34),
+and the platform's HD address methods list every activated token
+(R49.32). In this repository a token activated on an HD platform refuses
+`from` on both routes, so R49.5 and T49.9 are not met for a token obtained
+through the public activation RPCs (the Reloaded status note of §49.2.1).
+The sentences of R49.5 above are unchanged.
+
 R49.6. EVM-family Trezor/hardware-wallet native-coin and ERC20-like fungible
 token withdrawals shall be supported through `task::withdraw::init`. The direct
 legacy `withdraw` method is not required to support Trezor user-action signing;
@@ -292,6 +301,169 @@ T49.11. Start a TRON-family native or TRC20-like token withdrawal task under a
 Trezor/hardware-wallet signing policy. The task shall reach a terminal
 structured unsupported withdrawal error and shall not require a Trezor PIN or
 passphrase user action.
+
+### 49.2.1 EVM HD: token balances in the HD address methods and the token `from` selector (reference behavior)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-19, measure 0.02**
+> (chapter 01 R40; attestation in the Provenance Footer). This subsection was
+> written by the
+> dirty-side specification author on 2026-11-19 (Spec Reader round 0.5.0-15)
+> under the two-team procedure of chapter 01 §1.4A, from the rows
+> `v2.6.0-beta`, `v3.0.0-beta` and `main (as of 2026-10-07)` of chapter 02
+> §2.15A, and from this repository's own tree. Every reference statement
+> below holds **identically at all three rows**; the source tree of the third
+> row equals that of `v3.0.0-beta`. It edits no sentence of R49.5, R49.7,
+> R49.8 or T49.9, which it completes. Its rules continue this chapter's
+> sequence (R49.32 onward) although they sit before §49.2A.
+
+R49.32. *Balance maps of the HD address methods on an EVM platform
+(reference contract).* For an EVM platform activated with an HD wallet --
+the software global-HD login and the `Trezor` policy alike -- the following
+answers carry, per address, a balance map keyed by ticker whose values are
+`{spendable, unspendable}` with `unspendable` always `0`:
+`get_new_address` and `task::get_new_address::init` (the `balance` of
+`new_address`); `account_balance` (each entry of `addresses`, and
+`page_balance`); `task::account_balance::init` (each entry of `addresses`,
+and `total_balance`); `task::scan_for_new_addresses::init` (each entry of
+`new_addresses`). When the request's `coin` is the **platform ticker**:
+
+1. *Tickers.* The map of every address whose balance is queried holds the
+   platform ticker and **every ERC-20 token activated on that platform at
+   call time**, a token with a zero balance included. The set does not depend
+   on the activation route (`enable_eth_with_tokens`, `enable_erc20` or
+   `task::enable_erc20::init`); a token removed by `disable_coin` no longer
+   appears. It is the same set the HD activation report of
+   [Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.3(b) carries, and the
+   page and account totals sum each ticker over the listed addresses. If the
+   balance query of the platform or of any one token fails, the request
+   fails as a whole; no partial map is returned.
+2. *Scan entries that were not queried.* Besides each newly found used
+   address, the scan lists the unused addresses that lie between the end of
+   the previously known range and that used address. Those intervening
+   entries carry an **empty** map (`{}`), not a zero entry per ticker. A
+   used address carries the full map of item 1.
+3. *When the scan counts an address as used.* An address is used when its
+   outgoing-transaction count (nonce) is non-zero, its platform balance is
+   non-zero, or the balance of any activated token at it is non-zero. An
+   address that has only ever received an ERC-20 token is therefore found.
+
+When the request's `coin` is an **activated ERC-20 token ticker** on the
+same HD platform, the same methods answer from the platform's HD wallet: the
+token has no HD wallet of its own and shares the platform's accounts and
+known-address counts, so an address generated or found through the token
+ticker is afterwards known to the platform as well and is listed by the
+platform's `account_balance`. Each map then holds **that token's ticker
+only**, as in the token activation report of chapter 35 R35.3A.5, and the
+scan counts an address as used when its nonce or that token's balance is
+non-zero.
+
+R49.33. *Address form (reference contract).* In every answer of R49.32 the
+`address` member is the full 20-byte address written as `0x` followed by 40
+hexadecimal digits in the EIP-55 mixed-case checksum form: never all lower
+case, never abbreviated. The reference writes the addresses of the HD
+activation report (chapter 35 R35.1.3(b)) and the `from` and `to` members of
+an EVM withdraw result (R49.25) in the same form. Software HD and `Trezor` do not differ in
+the balance maps or in the address form; under `Trezor`,
+`task::get_new_address::init` additionally has the device confirm the new
+address (chapter 05 R54).
+
+R49.34. *`from` on an ERC-20 withdraw under HD (reference contract).* For an
+ERC-20 token on an HD-activated EVM platform, the reference treats `from`
+exactly as for the platform coin: native-coin and token withdraws share one
+sender-resolution step, on the direct `withdraw` method and on
+`task::withdraw::init` alike.
+
+1. *Accepted, against the platform's wallet.* Both selector forms of R49.2
+   are accepted. The selector is resolved against the **platform's** HD
+   wallet: its accounts, its known-address counts, and the coin type of the
+   platform's `derivation_path`. A derivation-path selector must carry that
+   coin type; the token's own coins-file entry plays no part.
+2. *What the sender is used for.* The resolved address is the sender for the
+   balance check (the token's balance at that address), for gas estimation
+   and the nonce, and it is the completed transaction's `from` (R49.33's
+   form). The fee is paid in the platform coin from the same address. Under
+   software HD the key derived at the selected path signs (R49.5). Under
+   `Trezor` on the task route the device signs at the selected path (R49.8,
+   T49.9). Under `Trezor` on the direct route the withdraw is refused with
+   `UnsupportedError` (R49.27a). That refusal comes at the signing step, so
+   on this route the selector errors of item 3, and the request's other
+   errors raised before signing, are answered first.
+3. *A selector that does not resolve.* As in R49.27b item 3, the token
+   being no exception: a derivation path that is not a standard five-level
+   address path, or that carries another coin type, answers
+   `UnexpectedFromAddress`. An account the platform's wallet does not hold
+   answers `UnknownAccount` with `account_id`. An address whose index is at
+   or above its chain's known-address count answers `UnexpectedFromAddress`.
+   Such an address is one that was not created at activation, not generated
+   by `get_new_address`, and not found by a scan. Each refusal is HTTP 400
+   on the direct method and sits in `details` of an `Error` status on the
+   task route. It is raised before any balance or nonce query and before any
+   device exchange. Nothing is recorded, so the address is still unknown
+   afterwards (chapter 05 R35a item 4).
+4. *`from` absent.* The sender is the platform's enabled address (the
+   address at `path_to_address`), with its key or its device path, for the
+   token as for the platform (R49.5, R49.7). Unlike the UTXO family
+   (R49.4's reference note), the EVM family does not answer
+   `FromAddressNotFound` when an HD withdraw omits `from`.
+
+> **Reloaded status (this repository, 2026-11-19; not corpus-sourced).**
+> (a) For a platform ticker, the answers of R49.32 carry the platform ticker
+> only: no activated token appears. The scan counts an address as used by
+> its nonce and platform balance only, so an address that holds only a token
+> is not found. The intervening unused entries of a scan carry a zero entry
+> for the platform ticker where the reference has `{}`. The address form
+> already matches R49.33 in all three answers. (b) An ERC-20 token activated
+> on an HD platform is built on a single-address derivation fixed at the
+> platform's enabled address. The methods of R49.32 therefore answer a token
+> ticker with the error for a coin not activated with an HD wallet, and a
+> `from` on its withdraw is refused with `UnexpectedFromAddress` on both
+> routes and under both policies. That contradicts R49.5 and T49.9 as well as
+> R49.34. Closing the gap means resolving a token's HD surfaces against its
+> platform's HD wallet (R49.32's last paragraph, R49.34 item 1).
+
+> **Code-quality finding (informative; this repository).** The Trezor
+> emulator test that stands for T49.9 builds the ERC-20 coin directly with
+> an HD derivation instead of activating it on a Trezor platform. It
+> therefore passes although a token obtained through the public activation
+> RPCs refuses `from` (the status note above, item (b)). The implementation
+> status note after R49.9 reads as if T49.9 held end to end. Proposed fix:
+> drive T49.9, and the software-HD half of T49.7 for a token, through the
+> public token activation, so that the test fails until item (b) is closed.
+
+T49.31. *(Reloaded-original; R49.32, R49.33.)* Against a mocked EVM node,
+under a software global-HD login, activate a platform with two ERC-20
+tokens, one of them holding a balance only at address `2` of account `0`
+(nonce `0`, platform balance `0`). Then:
+- `get_new_address` for the platform answers a `balance` map with exactly
+  the platform ticker and both token tickers, and an `address` that is the
+  EIP-55 form of the derived address.
+- `account_balance` lists the same three tickers for every address, and
+  `page_balance` sums each of them.
+- `task::scan_for_new_addresses::init` from a known count of `1` finds
+  address `2`, lists address `1` with an empty map, and lists address `2`
+  with all three tickers.
+- After `disable_coin` of one token, `account_balance` lists two tickers
+  per address.
+- `get_new_address` with a token ticker answers a map with that token only,
+  and the platform's `account_balance` afterwards counts the new address.
+Repeat the first two assertions under the `Trezor` policy on the task
+routes; the maps and address forms are the same.
+
+T49.32. *(Reloaded-original; R49.34.)* Under a software global-HD login,
+with three known external addresses in account `0` of an EVM platform and
+one activated ERC-20 token:
+- A direct `withdraw` and a `task::withdraw::init` of the token, each with
+  `from` naming address `1` (address-id form, then derivation-path form),
+  build a `transfer` from address `1`. The nonce, the balance check and the
+  transaction's `from` all belong to address `1`, and the key of address
+  `1` signs.
+- `from` naming `address_id: 3` answers `UnexpectedFromAddress`, and
+  `account_id: 1` answers `UnknownAccount`. A derivation path with another
+  coin type answers `UnexpectedFromAddress`. Each of these is HTTP 400 on
+  the direct method and in `details.error_type` on the task route, no node
+  is queried for balance or nonce, and `account_balance` afterwards still
+  lists three addresses.
+- Without `from`, both routes send from the enabled address.
 
 ### 49.2A Cosmos-family fee descriptors (gated text; passed the KDF Dirty Gate on 2026-11-08)
 
@@ -651,6 +823,15 @@ is fed back to the legacy broadcast method, and the Sia-specific
 not by this chapter. `tx_json` is absent for every other coin family, and its
 absence is not an error.
 
+> **Sign-only gasless result (pointer, 2026-11-19).** The sign-only result of
+> the Tron gasless rail is a second result, after the unsigned results of
+> [Chapter 36](36-tendermint-v2-activation-rpcs.md) R36.14.17, that carries
+> neither `tx_hex` nor `tx_hash`: nothing in it can be broadcast, and its
+> additional top-level members hold an off-chain authorization instead. Those
+> members are stated by [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8A
+> (R25-R28). R49.25's "mandatory for a completed withdrawal transaction" does
+> not reach that result. §63.8A passed the KDF Dirty Gate on 2026-11-19.
+
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
 `withdraw` result with the `details` payload of a successful task withdrawal.
@@ -1003,3 +1184,45 @@ addresses.
 - *Status note added 2026-11-16 (before §49.7).* Reloaded-original, clean side:
   it records the maintainer's 2026-11-16 decision on the `Transport` status;
   no forbidden-class input, chapter 01 R38 not engaged.
+- *Scoped addition (2026-11-19, Spec Reader round 0.5.0-15) -- §49.2.1
+  (R49.32 -- R49.34, the Reloaded status note, the code-quality finding,
+  T49.31, T49.32) and the status note after R49.5.* **KDF Dirty Gate:
+  PASS on 2026-11-19, measure 0.02, no findings** (chapter 01 R40; the
+  attestation closes this item). *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta`,
+  `v3.0.0-beta` and `main (as of 2026-10-07)` of chapter 02 §2.15A, identical
+  on this surface at all three, consulted **only** to establish, for an EVM
+  platform under an HD wallet (software global HD and the `Trezor` policy),
+  which tickers the per-address balance maps of `get_new_address`,
+  `account_balance`, `task::account_balance::init` and
+  `task::scan_for_new_addresses::init` carry, what an address must show to
+  count as used by the scan, how those answers render an address, and how
+  `from` on an ERC-20 withdraw is resolved on the direct and task routes:
+  against which HD wallet, with which discriminants when it does not
+  resolve, and what is recorded. Behavior and dictated request and response
+  members, error discriminants and the public EIP-55 address form only; no
+  private identifier, function body, helper decomposition, error, log,
+  comment or test text was reproduced. The Reloaded status note, the
+  code-quality finding, T49.31 and T49.32 rest on this repository's own tree
+  and are Reloaded-original. No row was added to chapter 02 §2.15A: all three
+  states read already have rows. *Dirty Gate clearance (chapter 01 T1,
+  R40):* PASS, 2026-11-19, measure 0.02, no findings, in a main pass and a
+  delta pass after one sentence of the chapter 21 note was narrowed; the
+  pointer in chapter 35 and the note in chapter 21 passed with this item.
+  *Extent:* the EVM-family HD wallet surface: the per-address balance maps
+  of the HD address methods for platform and token tickers, the scan's
+  used-address criterion (EVM and TRON), the address form in HD answers,
+  the resolution and refusals of the withdraw `from` selector on the direct
+  and task routes, and the platform HD wallet shared with a token at
+  activation; the row `v3.0.0-beta` in full, `v2.6.0-beta` on the same
+  points for EVM, and `main (as of 2026-10-07)` confirmed equal to
+  `v3.0.0-beta`. *Method:* reading, a per-token forced-versus-free
+  inventory and a targeted phrase search; the repository's clean-room gate
+  tool was not applicable because the additions embed no code blocks.
+  *Measure:* 0.02, on the discretionary-expression basis.
+- *Pointer added 2026-11-19 (Spec Reader round 0.5.0-16) -- after R49.26.*
+  It names chapter 63 §63.8A (R25 -- R28) and states that the members
+  R49.25 makes mandatory do not reach the sign-only result; it travels with
+  chapter 63 §63.8A for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
+  2026-11-19, measure 0.01, no findings**, as recorded for §63.8A in chapter
+  63's provenance footer.

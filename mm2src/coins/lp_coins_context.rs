@@ -2,6 +2,7 @@ use super::*;
 use crate::activation_locks::{ActivationGuard, ActivationLocks};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 use crate::rpc_command::get_my_address::PathToAddress;
+use crate::utxo::rpc_clients::electrum_client_registry::ElectrumClientRegistry;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
@@ -186,6 +187,8 @@ pub struct CoinsContext {
     pub(crate) coins: AsyncMutex<CoinRegistry>,
     /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
     activation_locks: ActivationLocks,
+    /// The Electrum clients that QTUM and its QRC20 tokens share, by weak reference (CRD ch.38 D38.6.4Q.1 status note).
+    pub(crate) electrum_clients: ElectrumClientRegistry,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
     /// The swap layer's reader of the saved swaps that are not finished, registered at start; a shielded
     /// coin's activation checks the key against it (CRD ch.39 R39.8.0bd).
@@ -232,6 +235,7 @@ impl CoinsContext {
             Ok(CoinsContext {
                 coins: AsyncMutex::new(CoinRegistry::default()),
                 activation_locks: ActivationLocks::default(),
+                electrum_clients: ElectrumClientRegistry::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
                 unfinished_swaps_view: parking_lot::Mutex::new(None),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),

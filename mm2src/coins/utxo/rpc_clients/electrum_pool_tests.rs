@@ -796,7 +796,7 @@ fn t38_6_4_9_a_subscription_is_placed_again_on_a_remaining_connection() {
         let (watcher_tx, mut watcher_rx) = futures_mpsc::unbounded();
         watch_scripthash(script_hash.clone(), watcher_tx);
         ElectrumClient(client.clone())
-            .subscribe_scripthash(script_hash.clone())
+            .subscribe_scripthash(ElectrumOwner::new_unique(), script_hash.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -840,7 +840,7 @@ fn t38_6_4_9_with_no_connection_left_the_subscription_waits_for_one() {
 
         let script_hash = "5a11e2e1bd0ac1b0a6f1f3a1c0aa0002".to_owned();
         ElectrumClient(client.clone())
-            .subscribe_scripthash(script_hash.clone())
+            .subscribe_scripthash(ElectrumOwner::new_unique(), script_hash.clone())
             .await
             .unwrap();
         assert_eq!(server.requests(BLOCKCHAIN_SCRIPTHASH_SUB_ID), 1);
@@ -3607,7 +3607,7 @@ fn t38_6_4l_12_the_replacement_takes_the_poor_servers_place() {
             replacement_scenario(ServerOrder::Mixed, vec![0.99, 0.99, 0.99, 0., 0., 0., 0., 0.99]).await;
         // A watched script hash exists while the servers are measured (T38.6.4l.14).
         ElectrumClient(client.clone())
-            .subscribe_scripthash("aa".to_owned())
+            .subscribe_scripthash(ElectrumOwner::new_unique(), "aa".to_owned())
             .await
             .unwrap();
         make_second_server_slow(&servers, &client).await;
