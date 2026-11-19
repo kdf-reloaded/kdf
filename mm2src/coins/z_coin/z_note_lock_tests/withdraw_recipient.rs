@@ -37,7 +37,10 @@ async fn submit(fixture: &LightCoinFixture, details: &TransactionDetails) {
 fn other_sapling_address(fixture: &LightCoinFixture, seed: u8) -> String {
     encode_payment_address(
         fixture.coin.z_fields.consensus_params.hrp_sapling_payment_address(),
-        &ExtendedSpendingKey::master(&[seed; 32]).default_address().1,
+        &ExtendedSpendingKey::master(&[seed; 32])
+            .expect("a valid master key")
+            .default_address()
+            .1,
     )
 }
 

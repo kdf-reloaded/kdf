@@ -128,6 +128,7 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for Qrc20CoinBuilder<'a> {
             contract_address: self.token_contract_address,
             swap_contract_address: self.activation_params.swap_contract_address,
             fallback_swap_contract: self.activation_params.fallback_swap_contract,
+            history_abort: HistoryAbort::new(),
         };
         Ok(Qrc20Coin(Arc::new(inner)))
     }

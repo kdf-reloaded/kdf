@@ -3,6 +3,19 @@
 
 use super::*;
 
+/// Sends the signed transaction `tx` exactly as it is. The pool resends the same bytes on the next node after a
+/// transport failure; the transaction is never rebuilt or re-signed (CRD ch.40 R40.1.5). When no node takes it, the
+/// error carries the transaction's signature, so that the caller can find out whether it landed.
+async fn send_signed(coin: &SolanaCoin, tx: &Transaction) -> Result<String, String> {
+    match coin.rpc().send_transaction(tx).await {
+        Ok(signature) => Ok(signature.to_string()),
+        Err(e) => Err(match tx.signatures.first() {
+            Some(signature) => format!("{:?}; transaction signature: {}", e, signature),
+            None => format!("{:?}", e),
+        }),
+    }
+}
+
 impl MarketCoinOps for SolanaCoin {
     fn ticker(&self) -> &str { &self.ticker }
 
@@ -47,8 +60,7 @@ impl MarketCoinOps for SolanaCoin {
         let fut = async move {
             let bytes = hex::decode(tx).map_err(|e| format!("{:?}", e))?;
             let tx: Transaction = deserialize(bytes.as_slice()).map_err(|e| format!("{:?}", e))?;
-            let signature = coin.rpc().send_transaction(&tx).await.map_err(|e| format!("{:?}", e))?;
-            Ok(signature.to_string())
+            send_signed(&coin, &tx).await
         };
         Box::new(fut.boxed().compat())
     }
@@ -58,8 +70,7 @@ impl MarketCoinOps for SolanaCoin {
         let tx = tx.to_owned();
         let fut = async move {
             let tx: Transaction = try_s!(deserialize(tx.as_slice()));
-            let signature = coin.rpc().send_transaction(&tx).await.map_err(|e| format!("{:?}", e))?;
-            Ok(signature.to_string())
+            send_signed(&coin, &tx).await
         };
         Box::new(fut.boxed().compat())
     }

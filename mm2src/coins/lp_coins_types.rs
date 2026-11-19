@@ -709,6 +709,11 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
         // was reported but the same oversight. Genuine Utxo entries have no
         // `gas_limit` field, so this reordering can't misclassify them.
         //
+        // `Solana { fee_amount, rent_amount, total_amount }` (CRD ch.40 R40.6B.12) needs no particular place: all
+        // three members are required and `fee_amount` is in no other family's fee object, so it reads no other
+        // family's entry (Sia has a `total_amount` but no `fee_amount`) and no other arm reads its entry (every
+        // other family requires a member it lacks: `amount`, `coin`, `gas`, `miner_fee`, `total_fee_sun`).
+        //
         // `Slp { amount, coin: String }` is deliberately NOT added: its shape
         // is *identical* to Utxo's whenever `coin` is present, so no
         // placement in this list can distinguish the two structurally --
@@ -1262,6 +1267,63 @@ pub enum HistorySyncState {
     InProgress(Json),
     Error(Json),
     Finished,
+    /// A finished pass of a UTXO history collector that skipped transactions it could not read (CRD ch.39
+    /// D39.11.4V.1). It serializes with the state name `Finished`, and its `additional_info` is the object
+    /// `{"unreadable_transactions": [...]}`. A pass that skipped nothing is [`HistorySyncState::Finished`], which has
+    /// no `additional_info`.
+    #[serde(rename = "Finished")]
+    FinishedWithUnreadable(Json),
+}
+
+/// A transaction that a UTXO history collector skipped in the current pass because it cannot be read (CRD ch.39
+/// D39.11.4V.1, R38.5A.9). The list of them lives in memory only and is rebuilt on every pass.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnreadableTransaction {
+    /// The transaction hash as the history rows show it.
+    pub tx_hash: String,
+    /// A short fixed reason. It never carries a transaction body, hex or key.
+    pub error: String,
+}
+
+impl HistorySyncState {
+    /// `InProgress` of a UTXO history collector: `transactions_left`, and the `unreadable_transactions` member only
+    /// when the pass has skipped a transaction. With nothing skipped the answer is exactly `{"transactions_left": n}`.
+    pub(crate) fn utxo_in_progress(transactions_left: usize, unreadable: &[UnreadableTransaction]) -> Self {
+        let mut info = json!({ "transactions_left": transactions_left });
+        if !unreadable.is_empty() {
+            info["unreadable_transactions"] = json!(unreadable);
+        }
+        HistorySyncState::InProgress(info)
+    }
+
+    /// The finished state of a UTXO history collector: plain `Finished` when the pass skipped nothing.
+    pub(crate) fn utxo_finished(unreadable: &[UnreadableTransaction]) -> Self {
+        if unreadable.is_empty() {
+            HistorySyncState::Finished
+        } else {
+            HistorySyncState::FinishedWithUnreadable(json!({ "unreadable_transactions": unreadable }))
+        }
+    }
+
+    /// The running `InProgress` state with the `unreadable_transactions` member set, so that a skip shows at once;
+    /// `None` for any other state (a pass that is not running has no `transactions_left` to keep).
+    pub(crate) fn in_progress_with_unreadable(&self, unreadable: &[UnreadableTransaction]) -> Option<Self> {
+        let HistorySyncState::InProgress(info) = self else {
+            return None;
+        };
+        let mut info = info.clone();
+        info.as_object_mut()?
+            .insert("unreadable_transactions".to_owned(), json!(unreadable));
+        Some(HistorySyncState::InProgress(info))
+    }
+
+    /// Whether the history is finished, with or without skipped transactions.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self,
+            HistorySyncState::Finished | HistorySyncState::FinishedWithUnreadable(_)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1298,6 +1360,95 @@ mod tx_fee_details_tests {
             uamount: 0,
             gas_limit: 100000,
         }));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn solana_details() -> SolanaFeeDetails {
+        SolanaFeeDetails::new("0.000005".parse().unwrap(), "0.00203928".parse().unwrap())
+    }
+
+    /// T40.6B.13: the Solana object is exactly the tag and the three members, the last three decimal strings, and
+    /// the total is the sum.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_solana_fee_details_wire_shape() {
+        let details = TxFeeDetails::Solana(solana_details());
+        let wire: Json = json::to_value(&details).unwrap();
+        let members: std::collections::BTreeSet<&str> = wire.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            members,
+            ["type", "fee_amount", "rent_amount", "total_amount"]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(wire["type"], "Solana");
+        assert_eq!(wire["fee_amount"], "0.000005");
+        assert_eq!(wire["rent_amount"], "0.00203928");
+        assert_eq!(wire["total_amount"], "0.00204428");
+        let no_rent = json::to_value(TxFeeDetails::Solana(SolanaFeeDetails::new(
+            "0.000005".parse().unwrap(),
+            0.into(),
+        )))
+        .unwrap();
+        assert_eq!(no_rent["rent_amount"], "0");
+        assert_eq!(no_rent["total_amount"], "0.000005");
+    }
+
+    /// T40.6B.13: the untagged reader reads the new shape back as Solana, with and without rent.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_solana_fee_details_roundtrip() {
+        roundtrip(TxFeeDetails::Solana(solana_details()));
+        roundtrip(TxFeeDetails::Solana(SolanaFeeDetails::new(
+            "0.000005".parse().unwrap(),
+            0.into(),
+        )));
+    }
+
+    /// T40.6B.13: every other family's sample still reads as its own family, and none of them as Solana.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_other_families_are_not_read_as_solana() {
+        roundtrip(TxFeeDetails::Utxo(UtxoFeeDetails {
+            coin: None,
+            amount: "0.0001".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Eth(EthTxFeeDetails {
+            coin: "ETH".to_owned(),
+            gas: 21000,
+            gas_price: "20".parse().unwrap(),
+            total_fee: "0.00042".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Qrc20(Qrc20FeeDetails {
+            coin: "QTUM".to_owned(),
+            miner_fee: "0.0001".parse().unwrap(),
+            gas_limit: 100000,
+            gas_price: 40,
+            total_gas_fee: "0.04".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Tron(crate::eth::tron::fee::TronTxFeeDetails {
+            total_fee_sun: 1000,
+            bandwidth_used: 270,
+            bandwidth_fee_sun: 1000,
+            energy_used: 0,
+            energy_fee_sun: 0,
+            activation_fee_sun: 0,
+        }));
+        roundtrip(TxFeeDetails::Sia(siacoin::SiaFeeDetails {
+            coin: "SC".to_owned(),
+            policy: siacoin::SiaFeePolicy::Fixed,
+            total_amount: "0.001".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Tendermint(tendermint::TendermintFeeDetails {
+            coin: "ATOM".to_owned(),
+            amount: "0.002".parse().unwrap(),
+            uamount: 0,
+            gas_limit: 100000,
+        }));
+        // A Sia object next to a Solana-looking `total_amount`: it is still Sia.
+        let sia: TxFeeDetails =
+            json::from_str(r#"{"type":"Sia","coin":"SC","policy":"Fixed","total_amount":"0.001"}"#).unwrap();
+        assert!(matches!(sia, TxFeeDetails::Sia(_)));
     }
 
     /// A real Utxo entry (no `gas_limit`) must keep deserializing as `Utxo`
@@ -1355,5 +1506,91 @@ mod transaction_details_wire_tests {
         assert_eq!(wire["legacy_amino_json"], json!({}));
         assert_eq!(wire["original_tx_type_url"], "/x");
         assert!(wire.get("internal_id").is_some());
+    }
+}
+
+#[cfg(test)]
+mod history_sync_state_tests {
+    use super::*;
+
+    fn skipped(hash: &str, error: &str) -> UnreadableTransaction {
+        UnreadableTransaction {
+            tx_hash: hash.to_owned(),
+            error: error.to_owned(),
+        }
+    }
+
+    #[test]
+    fn finished_without_a_skip_is_exactly_the_state_member() {
+        let wire = json::to_string(&HistorySyncState::utxo_finished(&[])).unwrap();
+        assert_eq!(wire, r#"{"state":"Finished"}"#);
+        assert_eq!(
+            json::to_string(&HistorySyncState::Finished).unwrap(),
+            r#"{"state":"Finished"}"#
+        );
+    }
+
+    #[test]
+    fn in_progress_without_a_skip_is_exactly_the_old_answer() {
+        let wire = json::to_string(&HistorySyncState::utxo_in_progress(3, &[])).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"state":"InProgress","additional_info":{"transactions_left":3}}"#
+        );
+        let old = json::to_string(&HistorySyncState::InProgress(json!({ "transactions_left": 3 }))).unwrap();
+        assert_eq!(wire, old);
+    }
+
+    #[test]
+    fn finished_with_a_skip_carries_the_list_under_the_finished_state() {
+        let state = HistorySyncState::utxo_finished(&[skipped("ab", "unreadable")]);
+        assert!(state.is_finished());
+        assert_eq!(
+            json::to_value(&state).unwrap(),
+            json!({
+                "state": "Finished",
+                "additional_info": { "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }] },
+            })
+        );
+    }
+
+    #[test]
+    fn a_running_state_gains_the_list_and_keeps_transactions_left() {
+        let running = HistorySyncState::InProgress(json!({ "transactions_left": 4 }));
+        let next = running
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .expect("a running state takes the list");
+        assert_eq!(
+            json::to_value(&next).unwrap(),
+            json!({
+                "state": "InProgress",
+                "additional_info": {
+                    "transactions_left": 4,
+                    "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }],
+                },
+            })
+        );
+        assert!(HistorySyncState::Finished
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .is_none());
+        assert!(HistorySyncState::NotStarted
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .is_none());
+    }
+
+    #[test]
+    fn in_progress_with_a_skip_has_the_list_beside_transactions_left() {
+        let state = HistorySyncState::utxo_in_progress(2, &[skipped("ab", "unreadable")]);
+        assert!(!state.is_finished());
+        assert_eq!(
+            json::to_value(&state).unwrap(),
+            json!({
+                "state": "InProgress",
+                "additional_info": {
+                    "transactions_left": 2,
+                    "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }],
+                },
+            })
+        );
     }
 }

@@ -4,6 +4,7 @@ use super::z_tx_addresses::{AddressSide, TxAddressStore, TxAddresses};
 use super::{CheckPointBlockInfo, ShieldedFetchError, ZCoinBuildError, ZcoinConsensusParams, ZcoinDecryptionParams};
 use crate::node_url::{host_only, lightwalletd_endpoint_url, scrub_node_url, scrub_urls_in_text, UNNAMED_NODE};
 use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
+use crate::z_coin::os_rng;
 use common::mm_number::BigDecimal;
 use common::{calc_total_pages, log, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
@@ -12,7 +13,6 @@ use lazy_static::lazy_static;
 use mm2_err_handle::prelude::*;
 use parking_lot::Mutex;
 use prost_14::Message as ProstMessage;
-use rand::rngs::OsRng;
 use sapling::zip32::ExtendedFullViewingKey;
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -93,7 +93,8 @@ const SAPLING_COMMITMENT_ROOT_LEN: usize = 32;
 const BALANCE_READ_ATTEMPTS: usize = 3;
 
 pub(crate) type LightwalletdClient = z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient<Channel>;
-type ReloadedWalletDb = WalletDb<Connection, ZcoinConsensusParams, SystemClock, OsRng>;
+type ReloadedWalletDb =
+    WalletDb<Connection, ZcoinConsensusParams, SystemClock, rand_core::UnwrapErr<getrandom::SysRng>>;
 
 /// The chain's view of the Sapling tree state at a given height.
 ///
@@ -163,6 +164,7 @@ pub(crate) struct KnownTransaction {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ZCoinShieldedHistory {
+    ticker: String,
     compact_blocks_path: PathBuf,
     wallet_db_path: PathBuf,
     /// The node's own record of the addresses a transaction names (R39.8.9d2), in a file of its own
@@ -277,12 +279,15 @@ impl ZCoinShieldedHistory {
             consensus_params,
             extfvk,
             check_point_block,
+            true,
             &ShieldedDbUpgradePolicy::default(),
         )
     }
 
-    /// Opens the shielded wallet database of `ticker`, creating, upgrading or rebuilding it as its
-    /// recognized generation requires.
+    /// Opens the shielded wallet database of `ticker` that belongs to `extfvk`, creating, upgrading or
+    /// rebuilding it as its recognized generation requires (R39.8.0bd): `<TICKER>_RELOADED_WALLET.db` if it
+    /// holds this key's account, or is empty and `is_default_key` is set; otherwise the per-key files named
+    /// by the fingerprint of the viewing key.
     ///
     /// # Errors
     ///
@@ -296,14 +301,37 @@ impl ZCoinShieldedHistory {
         consensus_params: ZcoinConsensusParams,
         extfvk: &ExtendedFullViewingKey,
         check_point_block: Option<&CheckPointBlockInfo>,
+        is_default_key: bool,
         upgrade_policy: &ShieldedDbUpgradePolicy,
     ) -> MmResult<Self, ZCoinBuildError> {
-        let paths = ZCoinShieldedHistoryPaths::new(ticker, db_dir_path);
-        if let Some(parent) = paths.wallet_db_path.parent() {
+        let default_paths = ZCoinShieldedHistoryPaths::new(ticker, db_dir_path.clone());
+        if let Some(parent) = default_paths.wallet_db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        paths.log_legacy_databases_left_untouched();
+        default_paths.log_legacy_databases_left_untouched();
+
+        // The default wallet file is brought to the current schema whichever key is activated: the
+        // backup of R39.8.0bc covers it, and which file belongs to the key is decided from its content
+        // (R39.8.0bd).
+        prepare_wallet_file(&default_paths.wallet_db_path, &consensus_params, upgrade_policy)?;
+        let ufvk = sapling_ufvk(extfvk).map_err(|e| MmError::new(ZCoinBuildError::SaplingCacheError(e)))?;
+        let holding = wallet_db_key_holding(&default_paths.wallet_db_path, &consensus_params, &ufvk)
+            .map_err(|e| MmError::new(ZCoinBuildError::SaplingCacheError(e)))?;
+        let paths = match select_key_files(holding, is_default_key) {
+            KeyFiles::Default => default_paths,
+            KeyFiles::PerKey => {
+                let fingerprint = viewing_key_fingerprint(extfvk, &consensus_params);
+                let paths = ZCoinShieldedHistoryPaths::per_key(ticker, db_dir_path, &fingerprint);
+                log::info!(
+                    "Shielded wallet database {} belongs to another key or to the default key; this key uses {}",
+                    default_paths.wallet_db_path.display(),
+                    paths.wallet_db_path.display()
+                );
+                prepare_wallet_file(&paths.wallet_db_path, &consensus_params, upgrade_policy)?;
+                paths
+            },
+        };
 
         match classify_compact_db(&paths.compact_blocks_path) {
             CompactDbGeneration::AbsentOrEmpty | CompactDbGeneration::Recognized => {},
@@ -321,53 +349,6 @@ impl ZCoinShieldedHistory {
             },
         }
 
-        match classify_wallet_db(&paths.wallet_db_path, consensus_params.clone()) {
-            WalletDbGeneration::AbsentOrEmpty | WalletDbGeneration::SelectedCurrent => {},
-            WalletDbGeneration::UpgradeablePreviousReloaded => {
-                let mutation_lock = wallet_db_mutation_lock(&paths.wallet_db_path);
-                let _guard = mutation_lock.lock();
-                upgrade_previous_reloaded_wallet(&paths.wallet_db_path, consensus_params.clone(), upgrade_policy)
-                    .map_err(|error| MmError::new(error.into_build_error(&paths.wallet_db_path)))?;
-            },
-            WalletDbGeneration::ReferenceLegacy => {
-                // Renaming the wallet database aside is a rebuild path (R39.8.0ad).
-                // This runs during activation, so it is exactly the party that can
-                // race a background scan still finishing on a previous instance.
-                let mutation_lock = wallet_db_mutation_lock(&paths.wallet_db_path);
-                let _guard = mutation_lock.lock();
-                let backup_path = preserve_database_for_rebuild(&paths.wallet_db_path, "legacy-v2")
-                    .map_err(|reason| {
-                        MmError::new(ZCoinBuildError::ShieldedDbSchema {
-                            path: paths.wallet_db_path.display().to_string(),
-                            reason,
-                        })
-                    })?
-                    .ok_or_else(|| {
-                        MmError::new(ZCoinBuildError::ShieldedDbSchema {
-                            path: paths.wallet_db_path.display().to_string(),
-                            reason: "recognized legacy wallet disappeared before it could be preserved".to_owned(),
-                        })
-                    })?;
-                log::info!(
-                    "Preserved legacy shielded wallet database {} as {}; a fresh Reloaded wallet will be rebuilt and rescanned",
-                    paths.wallet_db_path.display(),
-                    backup_path.display()
-                );
-            },
-            WalletDbGeneration::Unknown => {
-                return MmError::err(ZCoinBuildError::ShieldedDbSchema {
-                    path: paths.wallet_db_path.display().to_string(),
-                    reason: "unrecognized shielded wallet schema; file was left unchanged".to_owned(),
-                });
-            },
-            WalletDbGeneration::Corrupt => {
-                return MmError::err(ZCoinBuildError::ShieldedDbSchema {
-                    path: paths.wallet_db_path.display().to_string(),
-                    reason: "shielded wallet database is corrupt or unreadable; file was left unchanged".to_owned(),
-                });
-            },
-        }
-
         let compact_db = BlockDb::for_path(&paths.compact_blocks_path)
             .map_err(|e| MmError::new(ZCoinBuildError::SaplingCacheError(e.to_string())))?;
         init_cache_database(&compact_db)
@@ -378,7 +359,6 @@ impl ZCoinShieldedHistory {
         init_wallet_db(&mut wallet_db, None)
             .map_err(|e| MmError::new(ZCoinBuildError::SaplingCacheError(e.to_string())))?;
 
-        let ufvk = sapling_ufvk(extfvk).map_err(|e| MmError::new(ZCoinBuildError::SaplingCacheError(e)))?;
         let account_ids = wallet_db
             .get_account_ids()
             .map_err(|e| MmError::new(ZCoinBuildError::SaplingCacheError(e.to_string())))?;
@@ -425,6 +405,7 @@ impl ZCoinShieldedHistory {
             });
 
         Ok(ZCoinShieldedHistory {
+            ticker: ticker.to_owned(),
             compact_blocks_path: paths.compact_blocks_path,
             wallet_db_path: paths.wallet_db_path,
             tx_addresses: TxAddressStore::new(paths.tx_addresses_path),
@@ -1597,10 +1578,7 @@ impl ZCoinShieldedHistory {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(
-                params![
-                    target_height,
-                    zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA
-                ],
+                params![target_height, crate::z_coin::z_lightwalletd::BUILDER_EXPIRY_DELTA],
                 |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .map_err(|e| e.to_string())?;
@@ -2178,7 +2156,7 @@ fn chain_state_from_tree_state(
         checkpoint_height,
         sapling_activation,
     )?;
-    Ok(ChainState::new(
+    Ok(chain_state_of_sapling_only_wallet(
         checkpoint_height,
         BlockHash(hash),
         commitment_tree.to_frontier(),
@@ -2272,8 +2250,9 @@ fn convert_compact_output(output: z_coin_grpc::CompactOutput) -> zcash_compact::
 enum WalletDbGeneration {
     AbsentOrEmpty,
     ReferenceLegacy,
-    /// A wallet created by the previous Reloaded build (`zcash_client_sqlite 0.21.1`,
-    /// 48 migrations). The current migrator can bring it forward (R39.8.0ba).
+    /// A wallet created by an earlier Reloaded build (`zcash_client_sqlite 0.21.1` with 48 migrations,
+    /// or `0.22.0` with 71 migrations and no `orchard` feature). The current migrator can bring it
+    /// forward (R39.8.0ba).
     UpgradeablePreviousReloaded,
     SelectedCurrent,
     Unknown,
@@ -2368,13 +2347,21 @@ struct PreviousReloadedWalletGeneration {
 }
 
 /// The generations recognized as upgradeable. The first is the schema of `zcash_client_sqlite 0.21.1`
-/// (`user_version = 8`, 467 canonical records, 48 migrations).
-const PREVIOUS_RELOADED_WALLET_GENERATIONS: [PreviousReloadedWalletGeneration; 1] =
-    [PreviousReloadedWalletGeneration {
+/// (`user_version = 8`, 467 canonical records, 48 migrations); the second is that of `0.22.0` built without
+/// its `orchard` feature (`user_version = 8`, 727 canonical records, 71 migrations), the generation before
+/// the wallet-library upgrade to 0.23.0 with `orchard`.
+const PREVIOUS_RELOADED_WALLET_GENERATIONS: [PreviousReloadedWalletGeneration; 2] = [
+    PreviousReloadedWalletGeneration {
         user_version: 8,
         record_count: 467,
         digest: "dfba9135b6d5ae446e88d83d162e9458730b5b098051d8565fdd91fe6be5bea8",
-    }];
+    },
+    PreviousReloadedWalletGeneration {
+        user_version: 8,
+        record_count: 727,
+        digest: "4ebc85f7ea3516d019b3d0d4680a6cb75ec980bfe81437abb4913d50b3407350",
+    },
+];
 
 const RECOGNIZED_COMPACT_CACHE_SCHEMA: &str = r#"
 CREATE TABLE compactblocks (
@@ -2840,6 +2827,68 @@ fn prune_upgrade_backups(wallet_db_path: &Path, current: &Path, keep: usize) {
     }
 }
 
+/// Brings the wallet database at `wallet_db_path` to the current schema or refuses it, as its
+/// classification requires (R39.8.0x, R39.8.0ba, R39.8.0bc). An absent or empty file is left for the
+/// caller to create.
+///
+/// # Errors
+///
+/// Returns a [`ZCoinBuildError`] for an unrecognized or corrupt file, for the refusals of R39.8.0bc and
+/// for a failure to preserve a legacy file.
+fn prepare_wallet_file(
+    wallet_db_path: &Path,
+    consensus_params: &ZcoinConsensusParams,
+    upgrade_policy: &ShieldedDbUpgradePolicy,
+) -> MmResult<(), ZCoinBuildError> {
+    match classify_wallet_db(wallet_db_path, consensus_params.clone()) {
+        WalletDbGeneration::AbsentOrEmpty | WalletDbGeneration::SelectedCurrent => {},
+        WalletDbGeneration::UpgradeablePreviousReloaded => {
+            let mutation_lock = wallet_db_mutation_lock(wallet_db_path);
+            let _guard = mutation_lock.lock();
+            upgrade_previous_reloaded_wallet(wallet_db_path, consensus_params.clone(), upgrade_policy)
+                .map_err(|error| MmError::new(error.into_build_error(wallet_db_path)))?;
+        },
+        WalletDbGeneration::ReferenceLegacy => {
+            // Renaming the wallet database aside is a rebuild path (R39.8.0ad).
+            // This runs during activation, so it is exactly the party that can
+            // race a background scan still finishing on a previous instance.
+            let mutation_lock = wallet_db_mutation_lock(wallet_db_path);
+            let _guard = mutation_lock.lock();
+            let backup_path = preserve_database_for_rebuild(wallet_db_path, "legacy-v2")
+                .map_err(|reason| {
+                    MmError::new(ZCoinBuildError::ShieldedDbSchema {
+                        path: wallet_db_path.display().to_string(),
+                        reason,
+                    })
+                })?
+                .ok_or_else(|| {
+                    MmError::new(ZCoinBuildError::ShieldedDbSchema {
+                        path: wallet_db_path.display().to_string(),
+                        reason: "recognized legacy wallet disappeared before it could be preserved".to_owned(),
+                    })
+                })?;
+            log::info!(
+                    "Preserved legacy shielded wallet database {} as {}; a fresh Reloaded wallet will be rebuilt and rescanned",
+                    wallet_db_path.display(),
+                    backup_path.display()
+                );
+        },
+        WalletDbGeneration::Unknown => {
+            return MmError::err(ZCoinBuildError::ShieldedDbSchema {
+                path: wallet_db_path.display().to_string(),
+                reason: "unrecognized shielded wallet schema; file was left unchanged".to_owned(),
+            });
+        },
+        WalletDbGeneration::Corrupt => {
+            return MmError::err(ZCoinBuildError::ShieldedDbSchema {
+                path: wallet_db_path.display().to_string(),
+                reason: "shielded wallet database is corrupt or unreadable; file was left unchanged".to_owned(),
+            });
+        },
+    }
+    Ok(())
+}
+
 fn classify_compact_db(path: &Path) -> CompactDbGeneration {
     if !path.exists() || path.metadata().is_ok_and(|metadata| metadata.len() == 0) {
         return CompactDbGeneration::AbsentOrEmpty;
@@ -2883,7 +2932,7 @@ fn selected_current_wallet_fingerprint(consensus_params: ZcoinConsensusParams) -
     let mut conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
     db_common::sqlite::rusqlite::vtab::array::load_module(&conn).map_err(|e| e.to_string())?;
     {
-        let mut wallet_db = WalletDb::from_connection(&mut conn, consensus_params, SystemClock, OsRng);
+        let mut wallet_db = WalletDb::from_connection(&mut conn, consensus_params, SystemClock, os_rng());
         init_wallet_db(&mut wallet_db, None).map_err(|e| e.to_string())?;
     }
     schema_fingerprint(&conn)
@@ -3131,7 +3180,7 @@ fn canonical_sql_value(value: ValueRef<'_>) -> String {
 fn quote_sql_identifier(identifier: &str) -> String { format!("\"{}\"", identifier.replace('"', "\"\"")) }
 
 fn open_wallet_db(path: &Path, consensus_params: ZcoinConsensusParams) -> Result<ReloadedWalletDb, String> {
-    WalletDb::for_path(path, consensus_params, SystemClock, OsRng).map_err(|e| e.to_string())
+    WalletDb::for_path(path, consensus_params, SystemClock, os_rng()).map_err(|e| e.to_string())
 }
 
 fn initialize_compact_db(path: &Path) -> Result<(), String> {
@@ -3148,10 +3197,34 @@ fn sapling_ufvk(extfvk: &ExtendedFullViewingKey) -> Result<UnifiedFullViewingKey
     UnifiedFullViewingKey::from_sapling_extended_full_viewing_key(extfvk.clone()).map_err(|e| e.to_string())
 }
 
+/// The chain state a sync anchor describes, for a wallet that holds Sapling notes only. The wallet library built
+/// with `orchard` also takes the Orchard and Ironwood commitment-tree frontiers of the anchor; this wallet neither
+/// receives nor spends notes of those pools (R39.6.5g), so it tracks them as empty trees and never reads them back.
+///
+/// This is correct only while two things hold together: `convert_compact_tx` passes no Orchard or Ironwood
+/// actions of a compact block on to the scanner, and `PirateChainMetadataBlockSource` supplies zero Orchard and
+/// Ironwood tree sizes on the first block of every scan batch. The scanner takes the prior sizes of those pools
+/// from the wallet database and the block's metadata, never from this chain state; the empty frontiers only seed
+/// the (empty) Orchard and Ironwood commitment trees of the wallet. If either of the two changes, this helper
+/// must take the real frontiers instead.
+fn chain_state_of_sapling_only_wallet(
+    height: BlockHeight,
+    hash: BlockHash,
+    sapling_frontier: incrementalmerkletree::frontier::Frontier<sapling::Node, { sapling::NOTE_COMMITMENT_TREE_DEPTH }>,
+) -> ChainState {
+    ChainState::new(
+        height,
+        hash,
+        sapling_frontier,
+        incrementalmerkletree::frontier::Frontier::empty(),
+        incrementalmerkletree::frontier::Frontier::empty(),
+    )
+}
+
 fn chain_state_from_checkpoint(check_point: &CheckPointBlockInfo) -> Result<ChainState, String> {
     let commitment_tree: sapling::CommitmentTree = read_commitment_tree(check_point.sapling_tree.as_slice())
         .map_err(|e| format!("Invalid Sapling checkpoint tree: {}", e))?;
-    Ok(ChainState::new(
+    Ok(chain_state_of_sapling_only_wallet(
         BlockHeight::from_u32(check_point.height),
         BlockHash(check_point.hash.0),
         commitment_tree.to_frontier(),
@@ -3186,7 +3259,11 @@ fn wallet_chain_state_before(wallet_db: &mut ReloadedWalletDb, from_height: Bloc
     let sapling_frontier = wallet_db
         .with_sapling_tree_mut(|tree| tree.frontier())
         .map_err(|e| e.to_string())?;
-    Ok(ChainState::new(prior_height, block_hash, sapling_frontier))
+    Ok(chain_state_of_sapling_only_wallet(
+        prior_height,
+        block_hash,
+        sapling_frontier,
+    ))
 }
 
 /// Adapts Pirate lightwalletd's legacy compact-block wire to the modern scanner.
@@ -3377,7 +3454,7 @@ fn validated_cached_block_chain_state(
             initial_sapling_tree_size,
             sapling_frontier.tree_size()
         );
-        Ok(Some(ChainState::new(
+        Ok(Some(chain_state_of_sapling_only_wallet(
             expected_height - 1,
             expected_prev_hash,
             sapling_frontier,
@@ -3484,6 +3561,143 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     suffixed.into()
 }
 
+/// What a wallet database file holds with respect to the key being activated (R39.8.0bd).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WalletDbKeyHolding {
+    /// Absent, empty, or created without an account.
+    NoAccount,
+    /// Holds the account of the key being activated.
+    ThisKey,
+    /// Holds an account of another key.
+    OtherKey,
+}
+
+/// Which set of wallet files a key uses (R39.8.0bd).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyFiles {
+    /// `<TICKER>_RELOADED_WALLET.db` and its two companions.
+    Default,
+    /// The same three names with the viewing-key fingerprint before the extension.
+    PerKey,
+}
+
+/// R39.8.0bd: the default file serves the key whose account it holds, and an account-less default file
+/// serves the login's default key; every other case uses the key's own files. The default file is never
+/// renamed and never given another key's account.
+fn select_key_files(default_file: WalletDbKeyHolding, is_default_key: bool) -> KeyFiles {
+    match default_file {
+        WalletDbKeyHolding::ThisKey => KeyFiles::Default,
+        WalletDbKeyHolding::NoAccount if is_default_key => KeyFiles::Default,
+        WalletDbKeyHolding::NoAccount | WalletDbKeyHolding::OtherKey => KeyFiles::PerKey,
+    }
+}
+
+/// Reads whether the (already current) wallet database at `path` holds the account of `ufvk`. A file that
+/// is absent, empty or not of the current schema holds no account here: the caller has refused or upgraded
+/// those before.
+fn wallet_db_key_holding(
+    path: &Path,
+    consensus_params: &ZcoinConsensusParams,
+    ufvk: &UnifiedFullViewingKey,
+) -> Result<WalletDbKeyHolding, String> {
+    if classify_wallet_db(path, consensus_params.clone()) != WalletDbGeneration::SelectedCurrent {
+        return Ok(WalletDbKeyHolding::NoAccount);
+    }
+    let wallet_db = open_wallet_db(path, consensus_params.clone())?;
+    let account_ids = wallet_db.get_account_ids().map_err(|e| e.to_string())?;
+    if account_ids.is_empty() {
+        return Ok(WalletDbKeyHolding::NoAccount);
+    }
+    let matching = wallet_db.get_account_for_ufvk(ufvk).map_err(|e| e.to_string())?;
+    Ok(if matching.is_some() {
+        WalletDbKeyHolding::ThisKey
+    } else {
+        WalletDbKeyHolding::OtherKey
+    })
+}
+
+/// The first 8 bytes of the SHA-256 of the Bech32 encoding of the Sapling extended full viewing key, in
+/// lowercase hex (16 characters): the name part of a non-default key's wallet files (R39.8.0bd). It is a
+/// hash; the viewing key itself is not in the name.
+fn viewing_key_fingerprint(extfvk: &ExtendedFullViewingKey, consensus_params: &ZcoinConsensusParams) -> String {
+    use sha2::{Digest, Sha256};
+
+    let encoded = zcash_keys::encoding::encode_extended_full_viewing_key(
+        consensus_params.hrp_sapling_extended_full_viewing_key(),
+        extfvk,
+    );
+    let digest = Sha256::digest(encoded.as_bytes());
+    hex::encode(&digest[..8])
+}
+
+/// The wallet databases of `ticker` in `dir` that cannot be opened and read now, each with the reason
+/// (R39.8.0bd item 6): locked, being migrated, corrupt. An empty file holds no record and counts as readable.
+pub(crate) fn unreadable_wallet_files(dir: &Path, ticker: &str) -> Vec<(PathBuf, String)> {
+    per_key_wallet_files(dir, ticker)
+        .into_iter()
+        .filter(|path| !path.metadata().is_ok_and(|metadata| metadata.len() == 0))
+        .filter_map(|path| {
+            let probe = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .and_then(|conn| conn.query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get::<_, i64>(0)));
+            probe.err().map(|e| (path, e.to_string()))
+        })
+        .collect()
+}
+
+/// The wallet databases of `ticker` in `dir`: the default file and every per-key file (R39.8.0bd), sorted.
+/// Only names of exactly those two shapes count; backups and other files do not.
+fn per_key_wallet_files(dir: &Path, ticker: &str) -> Vec<PathBuf> {
+    let default_name = format!("{}_RELOADED_WALLET.db", ticker);
+    let key_prefix = format!("{}_RELOADED_WALLET.", ticker);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return false;
+            };
+            name == default_name
+                || name
+                    .strip_prefix(&key_prefix)
+                    .and_then(|rest| rest.strip_suffix(".db"))
+                    .is_some_and(|fingerprint| {
+                        fingerprint.len() == 16
+                            && fingerprint
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    })
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// The transactions held in full by the wallet database at `path` whose bytes contain `script_pubkey`, in
+/// the order they were recorded. An error is the database's, never an empty answer.
+fn recorded_transactions_in(path: &Path, script_pubkey: &[u8]) -> Result<Vec<RecordedTransaction>, String> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT raw, mined_height FROM transactions
+             WHERE raw IS NOT NULL AND instr(raw, ?1) > 0
+             ORDER BY id_tx",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![script_pubkey], |row| {
+            Ok(RecordedTransaction {
+                raw: row.get(0)?,
+                mined_height: row.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
 struct ZCoinShieldedHistoryPaths {
     compact_blocks_path: PathBuf,
     wallet_db_path: PathBuf,
@@ -3493,16 +3707,25 @@ struct ZCoinShieldedHistoryPaths {
 }
 
 impl ZCoinShieldedHistoryPaths {
-    fn new(ticker: &str, mut db_dir_path: PathBuf) -> Self {
+    /// The files of the login's default key, named as they always were.
+    fn new(ticker: &str, db_dir_path: PathBuf) -> Self { Self::named(ticker, db_dir_path, "") }
+
+    /// The files of a key that is not the default key: the three Reloaded file names with the viewing-key
+    /// fingerprint before the extension (R39.8.0bd).
+    fn per_key(ticker: &str, db_dir_path: PathBuf, fingerprint: &str) -> Self {
+        Self::named(ticker, db_dir_path, &format!(".{}", fingerprint))
+    }
+
+    fn named(ticker: &str, mut db_dir_path: PathBuf, key_part: &str) -> Self {
         let mut compact_blocks_path = db_dir_path.clone();
-        compact_blocks_path.push(format!("{}_RELOADED_COMPACT_BLOCKS.db", ticker));
+        compact_blocks_path.push(format!("{}_RELOADED_COMPACT_BLOCKS{}.db", ticker, key_part));
         let mut legacy_compact_blocks_path = db_dir_path.clone();
         legacy_compact_blocks_path.push(format!("{}_COMPACT_BLOCKS.db", ticker));
         let mut legacy_wallet_db_path = db_dir_path.clone();
         legacy_wallet_db_path.push(format!("{}_WALLET.db", ticker));
         let mut tx_addresses_path = db_dir_path.clone();
-        tx_addresses_path.push(format!("{}_RELOADED_TX_ADDRESSES.db", ticker));
-        db_dir_path.push(format!("{}_RELOADED_WALLET.db", ticker));
+        tx_addresses_path.push(format!("{}_RELOADED_TX_ADDRESSES{}.db", ticker, key_part));
+        db_dir_path.push(format!("{}_RELOADED_WALLET{}.db", ticker, key_part));
         ZCoinShieldedHistoryPaths {
             compact_blocks_path,
             wallet_db_path: db_dir_path,
@@ -3566,7 +3789,35 @@ pub(crate) mod tests {
     use super::*;
     use common::log::log_crate::Level;
     use db_common::sqlite::rusqlite::params;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand_core::{TryCryptoRng, TryRng};
+    use std::convert::Infallible;
+
+    /// A deterministic generator for fixtures (SplitMix64); never used for keys of a real wallet.
+    struct FixtureRng(u64);
+
+    impl TryRng for FixtureRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> { Ok(self.try_next_u64()? as u32) }
+
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            Ok(z ^ (z >> 31))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+            for chunk in dst.chunks_mut(8) {
+                let bytes = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for FixtureRng {}
     use sapling::{note_encryption::{sapling_note_encryption, SaplingDomain},
                   value::NoteValue,
                   zip32::ExtendedSpendingKey,
@@ -3592,7 +3843,7 @@ pub(crate) mod tests {
     }
 
     fn test_extfvk(seed: u8) -> ExtendedFullViewingKey {
-        let extsk = ExtendedSpendingKey::master(&[seed; 32]);
+        let extsk = ExtendedSpendingKey::master(&[seed; 32]).expect("a valid master key");
         #[allow(deprecated)]
         extsk.to_extended_full_viewing_key()
     }
@@ -3698,7 +3949,7 @@ pub(crate) mod tests {
         extfvk: &ExtendedFullViewingKey,
         notes: &[(u64, u8, u8)],
     ) -> zcash_compact::CompactBlock {
-        let mut rng = StdRng::from_seed([7; 32]);
+        let mut rng = FixtureRng(7);
         let vtx = notes
             .iter()
             .enumerate()
@@ -3709,7 +3960,7 @@ pub(crate) mod tests {
                     Rseed::AfterZip212([*rseed_byte; 32]),
                 );
                 let encryptor = sapling_note_encryption(
-                    Some(extfvk.fvk.ovk),
+                    Some(extfvk.fvk().ovk),
                     note.clone(),
                     MemoBytes::empty().into_bytes(),
                     &mut rng,
@@ -3718,7 +3969,7 @@ pub(crate) mod tests {
                 let output = zcash_compact::CompactSaplingOutput {
                     cmu: note.cmu().to_bytes().to_vec(),
                     ephemeral_key: SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),
-                    ciphertext: ciphertext[..52].to_vec(),
+                    ciphertext: ciphertext.as_ref()[..52].to_vec(),
                 };
                 zcash_compact::CompactTx {
                     index: index as u64 + 1,
@@ -4684,7 +4935,10 @@ pub(crate) mod tests {
     fn recipient_destinations() -> Vec<String> {
         let sapling = zcash_keys::encoding::encode_payment_address(
             "zs",
-            &ExtendedSpendingKey::master(&[3; 32]).default_address().1,
+            &ExtendedSpendingKey::master(&[3; 32])
+                .expect("a valid master key")
+                .default_address()
+                .1,
         );
         vec![sapling, crate::z_coin::z_pirate1_tests::MAIN_ADDRESS.to_owned()]
     }
@@ -6524,7 +6778,7 @@ pub(crate) mod tests {
     #[test]
     fn t39_8_0i_a_deposit_with_ironwood_actions_scans_to_the_note_the_tree_and_the_balance() {
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let checkpoint = CheckPointBlockInfo {
@@ -6608,7 +6862,7 @@ pub(crate) mod tests {
         use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
 
@@ -6622,7 +6876,7 @@ pub(crate) mod tests {
         let streamed = z_coin_grpc::CompactTx::decode(wire.as_slice()).unwrap();
         assert_field_6_is_dropped(wire.len(), carried.actions.len(), streamed.encoded_len());
 
-        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk().vk.ivk());
         let enforcement = zip212_enforcement(&ZcoinDecryptionParams::new(params.clone()), BlockHeight::from_u32(11));
         let receipts = pending_receipts_in_tx(&ivk, enforcement, &streamed);
         assert_eq!(
@@ -6637,7 +6891,7 @@ pub(crate) mod tests {
 
         // Another wallet's key finds nothing in the same transaction.
         let other = test_extfvk(31);
-        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk.vk.ivk());
+        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk().vk.ivk());
         assert!(pending_receipts_in_tx(&other_ivk, enforcement, &streamed).is_empty());
 
         // It counts as pending while the wallet database has not scanned it, and the mined note
@@ -6674,7 +6928,7 @@ pub(crate) mod tests {
     fn pirate_compact_block_without_chain_metadata_scans_received_note() {
         let db_dir = test_db_dir("pirate-compact-metadata-adapter");
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[15; 32]);
+        let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let checkpoint = CheckPointBlockInfo {
@@ -6985,7 +7239,7 @@ pub(crate) mod tests {
         let paths = ZCoinShieldedHistoryPaths::new("ARRR", db_dir.clone());
         create_legacy_wallet(&paths.wallet_db_path);
         let params = test_params_with_zip212();
-        let extsk = ExtendedSpendingKey::master(&[13; 32]);
+        let extsk = ExtendedSpendingKey::master(&[13; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let checkpoint = CheckPointBlockInfo {
@@ -7419,7 +7673,7 @@ pub(crate) mod tests {
         let migrations: u32 = conn
             .query_row("SELECT COUNT(*) FROM schemer_migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(migrations, 71, "48 previous + 23 new migrations");
+        assert_eq!(migrations, 75, "48 previous + 27 new migrations");
         let accounts: u32 = conn
             .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
             .unwrap();
@@ -7430,6 +7684,147 @@ pub(crate) mod tests {
         assert_is_previous_generation_backup_of_fixture(&backups[0]);
         assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.upgrade-failed.").is_empty());
         assert!(!path_with_suffix(&paths.wallet_db_path, ".upgrade-work").exists());
+    }
+
+    /// A wallet created by the build before the wallet-library upgrade (`zcash_client_sqlite 0.22.0` without
+    /// `orchard`): one account imported from `test_extfvk(8)` at a checkpoint at height 10 (hash
+    /// `deterministic_compact_hash(10)`, empty Sapling tree, time 10), captured by running that build's normal
+    /// initialisation path. It cannot be rebuilt here: the 0.22 migrator is no longer in the tree.
+    const PREVIOUS_022_WALLET_FIXTURE: &[u8] = include_bytes!("test-fixtures/wallet-zcsqlite-0.22.0-checkpointed.db");
+
+    /// T39.8.0k: a wallet of the `0.22.0` generation is recognized, backed up and migrated on its first open, and
+    /// the first blocks scanned afterwards store zero Orchard and Ironwood tree sizes, not NULL (the blocks of
+    /// that generation carry NULL there, and the scanner needs a size for each pool at its first block).
+    #[test]
+    fn previous_022_wallet_is_migrated_and_scans_with_zero_orchard_and_ironwood_sizes() {
+        let db_dir = test_db_dir("schema-previous-022");
+        let params = test_params_with_zip212();
+        let paths = ZCoinShieldedHistoryPaths::new("ARRR", db_dir.clone());
+        std::fs::write(&paths.wallet_db_path, PREVIOUS_022_WALLET_FIXTURE).unwrap();
+        assert_eq!(
+            classify_wallet_db(&paths.wallet_db_path, params.clone()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+
+        let checkpoint = CheckPointBlockInfo {
+            height: 10,
+            hash: rpc::v1::types::H256(deterministic_compact_hash(10).try_into().unwrap()),
+            time: 10,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        };
+        let history = ZCoinShieldedHistory::open_or_create(
+            "ARRR",
+            db_dir.clone(),
+            params.clone(),
+            &test_extfvk(8),
+            Some(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(
+            classify_wallet_db(history.wallet_db_path(), params.clone()),
+            WalletDbGeneration::SelectedCurrent
+        );
+        let backups = backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.pre-upgrade.");
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            classify_wallet_db(&backups[0], params.clone()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+
+        let blocks = (11u64..=12)
+            .map(|height| zcash_compact::CompactBlock {
+                height,
+                hash: deterministic_compact_hash(height),
+                prev_hash: deterministic_compact_hash(height - 1),
+                time: u32::try_from(height).unwrap(),
+                header: Vec::new(),
+                vtx: Vec::new(),
+                chain_metadata: None,
+            })
+            .collect::<Vec<_>>();
+        history.insert_compact_blocks(&blocks).unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(params, 12, 1_000, 0, |_, _| {})
+                .unwrap(),
+            12
+        );
+
+        let conn = Connection::open(history.wallet_db_path()).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT height, orchard_commitment_tree_size, ironwood_commitment_tree_size
+                 FROM blocks WHERE height > 10 ORDER BY height",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![(11, Some(0), Some(0)), (12, Some(0), Some(0))]);
+    }
+
+    /// R39.8.0bd with R39.8.0bc: the wallet file of a non-default key (`<TICKER>_RELOADED_WALLET.<fingerprint>.db`)
+    /// of the `0.22.0` generation is recognized, backed up under its own name, verified and migrated like the
+    /// default file. With no default file present, none is created or backed up.
+    #[test]
+    fn previous_022_per_key_wallet_is_backed_up_and_migrated_on_its_own() {
+        let db_dir = test_db_dir("schema-previous-022-per-key");
+        let params = test_params_with_zip212();
+        let extfvk = test_extfvk(8);
+        let fingerprint = viewing_key_fingerprint(&extfvk, &params);
+        let per_key = ZCoinShieldedHistoryPaths::per_key("ARRR", db_dir.clone(), &fingerprint);
+        let default = ZCoinShieldedHistoryPaths::new("ARRR", db_dir.clone());
+        std::fs::write(&per_key.wallet_db_path, PREVIOUS_022_WALLET_FIXTURE).unwrap();
+        assert_eq!(
+            classify_wallet_db(&per_key.wallet_db_path, params.clone()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+
+        let history = ZCoinShieldedHistory::open_or_create_with_policy(
+            "ARRR",
+            db_dir.clone(),
+            params.clone(),
+            &extfvk,
+            None,
+            false,
+            &ShieldedDbUpgradePolicy::default(),
+        )
+        .unwrap();
+        assert!(
+            history.wallet_db_path() == per_key.wallet_db_path.as_path(),
+            "the non-default key uses its own wallet file"
+        );
+        assert_eq!(
+            classify_wallet_db(&per_key.wallet_db_path, params.clone()),
+            WalletDbGeneration::SelectedCurrent
+        );
+
+        let own_prefix = format!("ARRR_RELOADED_WALLET.{}.db.pre-upgrade.", fingerprint);
+        let backups = backups_with_prefix(&db_dir, &own_prefix);
+        assert_eq!(backups.len(), 1, "the per-key file has its own backup");
+        assert_eq!(
+            classify_wallet_db(&backups[0], params.clone()),
+            WalletDbGeneration::UpgradeablePreviousReloaded
+        );
+        let conn = Connection::open(&per_key.wallet_db_path).unwrap();
+        let migrations: u32 = conn
+            .query_row("SELECT COUNT(*) FROM schemer_migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(migrations, 75);
+
+        assert!(!default.wallet_db_path.exists(), "no default wallet file was created");
+        assert!(
+            backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.pre-upgrade.").is_empty(),
+            "the default file has no backup"
+        );
     }
 
     /// Forces the migration attempt to fail before it starts (the working-copy path is
@@ -7486,6 +7881,7 @@ pub(crate) mod tests {
             test_params(),
             &test_extfvk(8),
             None,
+            true,
             policy,
         )
     }
@@ -7753,16 +8149,315 @@ pub(crate) mod tests {
         assert!(backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.").is_empty());
     }
 
-    /// R39.8.0bc: the list of recognized previous generations holds the one pinned digest today.
+    /// R39.8.0bc: the list of recognized previous generations holds the pinned digests of the `0.21.1` and the
+    /// `0.22.0` schemas.
     #[test]
-    fn one_previous_generation_is_recognized() {
-        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS.len(), 1);
+    fn two_previous_generations_are_recognized() {
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS.len(), 2);
         assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[0].user_version, 8);
         assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[0].record_count, 467);
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[1].user_version, 8);
+        assert_eq!(PREVIOUS_RELOADED_WALLET_GENERATIONS[1].record_count, 727);
     }
 
-    // Re-pinned for zcash_client_sqlite 0.22.0 (was 467 records / 48 migrations on 0.21.1).
-    // Wallet DBs created by the 0.21.1 schema no longer match this fingerprint; they are
+    fn key_test_checkpoint() -> CheckPointBlockInfo {
+        CheckPointBlockInfo {
+            height: 10,
+            hash: rpc::v1::types::H256([9u8; 32]),
+            time: 1234,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        }
+    }
+
+    /// Opens the wallet of the key made from `seed` the way an activation does.
+    fn open_for_key(db_dir: &Path, seed: u8, is_default_key: bool) -> ZCoinShieldedHistory {
+        ZCoinShieldedHistory::open_or_create_with_policy(
+            "ARRR",
+            db_dir.to_path_buf(),
+            test_params(),
+            &test_extfvk(seed),
+            Some(&key_test_checkpoint()),
+            is_default_key,
+            &ShieldedDbUpgradePolicy::default(),
+        )
+        .unwrap()
+    }
+
+    fn file_names(db_dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(db_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn name_of(path: &Path) -> String { path.file_name().unwrap().to_string_lossy().into_owned() }
+
+    fn fingerprint_of(seed: u8) -> String { viewing_key_fingerprint(&test_extfvk(seed), &test_params()) }
+
+    /// R39.8.0bd: which file a key uses, for every holding of the default file.
+    #[test]
+    fn the_default_file_serves_its_own_key_and_a_default_key_without_an_account() {
+        use WalletDbKeyHolding::{NoAccount, OtherKey, ThisKey};
+        assert_eq!(select_key_files(ThisKey, true), KeyFiles::Default);
+        assert_eq!(select_key_files(ThisKey, false), KeyFiles::Default);
+        assert_eq!(select_key_files(NoAccount, true), KeyFiles::Default);
+        assert_eq!(select_key_files(NoAccount, false), KeyFiles::PerKey);
+        assert_eq!(select_key_files(OtherKey, true), KeyFiles::PerKey);
+        assert_eq!(select_key_files(OtherKey, false), KeyFiles::PerKey);
+    }
+
+    #[test]
+    fn the_key_fingerprint_is_sixteen_lowercase_hex_characters_and_differs_per_key() {
+        let first = fingerprint_of(1);
+        assert_eq!(first.len(), 16);
+        assert!(first.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(first == fingerprint_of(1), "the fingerprint of a key is stable");
+        assert!(first != fingerprint_of(2), "another key has another fingerprint");
+    }
+
+    /// R39.8.0bd, test: the default key uses the default files.
+    #[test]
+    fn the_default_key_uses_the_default_files() {
+        let db_dir = test_db_dir("key-default");
+        let history = open_for_key(&db_dir, 1, true);
+        assert_eq!(name_of(history.wallet_db_path()), "ARRR_RELOADED_WALLET.db");
+        assert_eq!(
+            name_of(history.compact_blocks_path()),
+            "ARRR_RELOADED_COMPACT_BLOCKS.db"
+        );
+        assert_eq!(name_of(history.tx_addresses_path()), "ARRR_RELOADED_TX_ADDRESSES.db");
+        assert!(file_names(&db_dir)
+            .iter()
+            .all(|name| !name.contains(&fingerprint_of(1))));
+    }
+
+    /// R39.8.0bd, test: a key that is not the default key, with no wallet yet, uses the per-key files and
+    /// does not create the default ones.
+    #[test]
+    fn a_non_default_key_uses_per_key_files_and_leaves_the_default_files_alone() {
+        let db_dir = test_db_dir("key-non-default");
+        let history = open_for_key(&db_dir, 2, false);
+        let fingerprint = fingerprint_of(2);
+        assert!(
+            name_of(history.wallet_db_path()) == format!("ARRR_RELOADED_WALLET.{fingerprint}.db"),
+            "the wallet file is named by the key fingerprint"
+        );
+        assert!(
+            name_of(history.compact_blocks_path()) == format!("ARRR_RELOADED_COMPACT_BLOCKS.{fingerprint}.db"),
+            "the compact-block file is named by the key fingerprint"
+        );
+        assert!(
+            name_of(history.tx_addresses_path()) == format!("ARRR_RELOADED_TX_ADDRESSES.{fingerprint}.db"),
+            "the address file is named by the key fingerprint"
+        );
+        assert!(!db_dir.join("ARRR_RELOADED_WALLET.db").exists());
+    }
+
+    /// R39.8.0bd, test: switching back and forth keeps both wallets; nothing is created on the way back.
+    #[test]
+    fn switching_between_keys_reopens_each_wallet() {
+        let db_dir = test_db_dir("key-switch");
+        let first = open_for_key(&db_dir, 1, true);
+        let first_path = first.wallet_db_path().to_path_buf();
+        drop(first);
+        let second = open_for_key(&db_dir, 2, false);
+        let second_path = second.wallet_db_path().to_path_buf();
+        drop(second);
+        assert!(first_path != second_path, "each key has its own wallet file");
+        let files_after_both = file_names(&db_dir);
+
+        for _ in 0..2 {
+            assert!(
+                open_for_key(&db_dir, 1, true).wallet_db_path() == first_path,
+                "the first key reopens its wallet"
+            );
+            assert!(
+                open_for_key(&db_dir, 2, false).wallet_db_path() == second_path,
+                "the second key reopens its wallet"
+            );
+        }
+
+        assert_eq!(
+            file_names(&db_dir),
+            files_after_both,
+            "no file is created on the way back"
+        );
+        // Each file holds only its own key's account.
+        for (path, seed) in [(&first_path, 1u8), (&second_path, 2u8)] {
+            let ufvk = sapling_ufvk(&test_extfvk(seed)).unwrap();
+            assert!(
+                wallet_db_key_holding(path, &test_params(), &ufvk).unwrap() == WalletDbKeyHolding::ThisKey,
+                "each file holds its own key"
+            );
+            let other = sapling_ufvk(&test_extfvk(seed % 2 + 1)).unwrap();
+            assert!(
+                wallet_db_key_holding(path, &test_params(), &other).unwrap() == WalletDbKeyHolding::OtherKey,
+                "each file does not hold the other key"
+            );
+        }
+    }
+
+    /// R39.8.0bd, test: a default file that already holds a key that is no longer the default key keeps
+    /// it, and the login's default key then gets its own files; the file is never renamed.
+    #[test]
+    fn an_existing_default_file_keeps_the_key_it_holds() {
+        let db_dir = test_db_dir("key-default-file-keeps");
+        let created = open_for_key(&db_dir, 5, true);
+        let default_path = created.wallet_db_path().to_path_buf();
+        drop(created);
+
+        // The same key, now judged a non-default key: still the default file, no per-key file.
+        let again = open_for_key(&db_dir, 5, false);
+        assert!(
+            again.wallet_db_path() == default_path,
+            "the key keeps the default file it holds"
+        );
+        drop(again);
+        assert!(file_names(&db_dir)
+            .iter()
+            .all(|name| !name.contains(&fingerprint_of(5))));
+
+        // Another key that is the default key goes to its own files.
+        let other = open_for_key(&db_dir, 6, true);
+        assert!(
+            name_of(other.wallet_db_path()) == format!("ARRR_RELOADED_WALLET.{}.db", fingerprint_of(6)),
+            "the default key gets its own file when the default file holds another key"
+        );
+        assert!(default_path.exists());
+        let ufvk = sapling_ufvk(&test_extfvk(5)).unwrap();
+        assert!(
+            wallet_db_key_holding(&default_path, &test_params(), &ufvk).unwrap() == WalletDbKeyHolding::ThisKey,
+            "the default file still holds its key"
+        );
+    }
+
+    /// R39.8.0bd: the Z-1 backup and upgrade apply to the default file whichever key is activated, and the
+    /// per-key file of the key is then created next to it.
+    #[test]
+    fn a_previous_generation_default_file_is_backed_up_when_a_non_default_key_is_activated() {
+        let db_dir = test_db_dir("key-default-upgrade");
+        let paths = place_previous_reloaded_wallet(&db_dir);
+
+        // `test_extfvk(8)` owns the fixture's account; seed 9 is another key.
+        let history = open_for_key(&db_dir, 9, false);
+
+        assert!(
+            name_of(history.wallet_db_path()) == format!("ARRR_RELOADED_WALLET.{}.db", fingerprint_of(9)),
+            "the other key gets its own file"
+        );
+        assert_eq!(
+            classify_wallet_db(&paths.wallet_db_path, test_params()),
+            WalletDbGeneration::SelectedCurrent
+        );
+        assert_eq!(
+            backups_with_prefix(&db_dir, "ARRR_RELOADED_WALLET.db.pre-upgrade.").len(),
+            1
+        );
+        let owner = sapling_ufvk(&test_extfvk(8)).unwrap();
+        assert!(
+            wallet_db_key_holding(&paths.wallet_db_path, &test_params(), &owner).unwrap()
+                == WalletDbKeyHolding::ThisKey,
+            "the upgraded default file keeps its key"
+        );
+    }
+
+    fn insert_recorded_send(path: &Path, id_tx: i64, txid_byte: u8, raw: &[u8], mined_height: Option<u32>) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO transactions (id_tx, txid, block, mined_height, tx_index, min_observed_height, raw)
+             VALUES (?1, ?2, NULL, ?3, NULL, 10, ?4)",
+            params![id_tx, vec![txid_byte; 32], mined_height, raw],
+        )
+        .unwrap();
+    }
+
+    /// R39.11.26, R39.8.0bd, test: a send recorded in another key's wallet database answers the lookup of the
+    /// active one, so a restart under another account does not make a second payment.
+    #[test]
+    fn the_send_record_lookup_reads_the_wallets_of_every_key() {
+        let db_dir = test_db_dir("key-record-lookup");
+        let script = [
+            0xa9u8, 0x14, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 0x87,
+        ];
+        let mut raw = vec![1u8, 2, 3];
+        raw.extend_from_slice(&script);
+
+        let default_wallet = open_for_key(&db_dir, 1, true);
+        insert_recorded_send(default_wallet.wallet_db_path(), 1, 0xaa, &raw, None);
+        let mined_elsewhere = open_for_key(&db_dir, 3, false);
+        insert_recorded_send(mined_elsewhere.wallet_db_path(), 1, 0xbb, &raw, Some(12));
+        drop(default_wallet);
+        drop(mined_elsewhere);
+
+        // The active wallet is the third, with no record of its own.
+        let active = open_for_key(&db_dir, 4, false);
+        assert!(active.recorded_transactions_containing(&script).unwrap().is_empty());
+        let all = active.recorded_transactions_containing_in_any_wallet(&script).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|record| record.mined_height.is_none()));
+        assert!(all.iter().any(|record| record.mined_height == Some(12)));
+        assert!(active
+            .recorded_transactions_containing_in_any_wallet(&[0xde, 0xad])
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A sibling wallet database that cannot be read is skipped with a warning; the active one's error
+    /// still propagates.
+    #[test]
+    fn an_unreadable_sibling_is_skipped_and_an_unreadable_active_wallet_is_an_error() {
+        let db_dir = test_db_dir("key-record-unreadable");
+        let script = [
+            0xa9u8, 0x14, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0x87,
+        ];
+        let mut raw = vec![5u8];
+        raw.extend_from_slice(&script);
+        let active = open_for_key(&db_dir, 1, true);
+        insert_recorded_send(active.wallet_db_path(), 1, 0xcc, &raw, None);
+        let sibling = open_for_key(&db_dir, 2, false);
+        let sibling_path = sibling.wallet_db_path().to_path_buf();
+        drop(sibling);
+        std::fs::write(&sibling_path, vec![0x5a; 8192]).unwrap();
+
+        let found = active.recorded_transactions_containing_in_any_wallet(&script).unwrap();
+
+        assert_eq!(found.len(), 1);
+        std::fs::write(active.wallet_db_path(), vec![0x5a; 8192]).unwrap();
+        assert!(active.recorded_transactions_containing_in_any_wallet(&script).is_err());
+    }
+
+    #[test]
+    fn only_wallet_files_of_the_two_shapes_are_listed_as_wallets_of_a_ticker() {
+        let db_dir = test_db_dir("key-file-listing");
+        for name in [
+            "ARRR_RELOADED_WALLET.db",
+            "ARRR_RELOADED_WALLET.0123456789abcdef.db",
+            "ARRR_RELOADED_WALLET.0123456789ABCDEF.db",
+            "ARRR_RELOADED_WALLET.0123.db",
+            "ARRR_RELOADED_WALLET.db.pre-upgrade.1.bak",
+            "ARRR_RELOADED_WALLET.0123456789abcdef.db-wal",
+            "ARRR_RELOADED_COMPACT_BLOCKS.0123456789abcdef.db",
+            "ARRR_WALLET.db",
+            "ZEC_RELOADED_WALLET.0123456789abcdef.db",
+        ] {
+            std::fs::write(db_dir.join(name), b"x").unwrap();
+        }
+
+        let listed: Vec<String> = per_key_wallet_files(&db_dir, "ARRR")
+            .iter()
+            .map(|path| name_of(path))
+            .collect();
+
+        assert_eq!(listed, vec![
+            "ARRR_RELOADED_WALLET.0123456789abcdef.db".to_owned(),
+            "ARRR_RELOADED_WALLET.db".to_owned()
+        ]);
+    }
+
+    // Re-pinned for zcash_client_sqlite 0.23.0 with `orchard` (was 727 records / 71 migrations on 0.22.0).
+    // Wallet DBs created by the 0.21.1 or 0.22.0 schema no longer match this fingerprint; they are
     // upgraded by R39.8.0ba (see previous_reloaded_wallet_is_backed_up_and_migrated_in_place).
     #[test]
     fn selected_current_schema_identity_is_pinned() {
@@ -7779,7 +8474,7 @@ pub(crate) mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         db_common::sqlite::rusqlite::vtab::array::load_module(&conn).unwrap();
         {
-            let mut wallet_db = WalletDb::from_connection(&mut conn, test_params(), SystemClock, OsRng);
+            let mut wallet_db = WalletDb::from_connection(&mut conn, test_params(), SystemClock, os_rng());
             init_wallet_db(&mut wallet_db, None).unwrap();
         }
         let mut stmt = conn
@@ -7796,15 +8491,15 @@ pub(crate) mod tests {
             migration_hasher.update(b"\n");
         }
         assert_eq!(fingerprint.user_version, 8);
-        assert_eq!(fingerprint.records.len(), 727);
+        assert_eq!(fingerprint.records.len(), 742);
         assert_eq!(
             hex::encode(hasher.finalize()),
-            "4ebc85f7ea3516d019b3d0d4680a6cb75ec980bfe81437abb4913d50b3407350"
+            "cd761cd6e27b229154defd8dbeba4bb255c653829ae872a8096ea6d22250f9b3"
         );
-        assert_eq!(migration_ids.len(), 71);
+        assert_eq!(migration_ids.len(), 75);
         assert_eq!(
             hex::encode(migration_hasher.finalize()),
-            "1142e14a2d3103f1cabbbcbc2d686000e021bf88bcbcce2d34f7d0a040e2d08b"
+            "27a9d204fdadbcd108dcd56cd3d2a527057454caeb0bb2c0c44dd3ce0cf95bce"
         );
     }
 
@@ -7820,16 +8515,17 @@ pub(crate) mod tests {
     #[test]
     fn pending_receipt_detection_recovers_the_note_value() {
         use sapling::keys::PreparedIncomingViewingKey;
+        use sapling::note_encryption::COMPACT_NOTE_SIZE;
         use sapling::note_encryption::{sapling_note_encryption, try_sapling_compact_note_decryption,
                                        CompactOutputDescription, Zip212Enforcement};
         use sapling::value::NoteValue;
         use sapling::{Note, Rseed};
-        use zcash_note_encryption::{Domain, COMPACT_NOTE_SIZE};
+        use zcash_note_encryption::Domain;
 
         const VALUE: u64 = 123_456_789;
 
-        let mut rng = OsRng;
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0u8; 32]);
+        let mut rng = os_rng();
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[0u8; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let (_, payment_address) = extfvk.default_address();
@@ -7846,12 +8542,12 @@ pub(crate) mod tests {
         let compact = CompactOutputDescription {
             ephemeral_key: epk,
             cmu: note.cmu(),
-            enc_ciphertext: enc_ciphertext[..COMPACT_NOTE_SIZE]
+            enc_ciphertext: enc_ciphertext.as_ref()[..COMPACT_NOTE_SIZE]
                 .try_into()
                 .expect("compact prefix is COMPACT_NOTE_SIZE bytes"),
         };
 
-        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk().vk.ivk());
         let (decrypted, _addr) = try_sapling_compact_note_decryption(&ivk, &compact, Zip212Enforcement::On)
             .expect("a wallet-owned output must trial-decrypt with the wallet's own viewing key");
 
@@ -7864,8 +8560,10 @@ pub(crate) mod tests {
         // A different wallet's key must not match, or every mempool output on
         // the network would be reported as an incoming payment.
         #[allow(deprecated)]
-        let other = sapling::zip32::ExtendedSpendingKey::master(&[7u8; 32]).to_extended_full_viewing_key();
-        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk.vk.ivk());
+        let other = sapling::zip32::ExtendedSpendingKey::master(&[7u8; 32])
+            .expect("a valid master key")
+            .to_extended_full_viewing_key();
+        let other_ivk = PreparedIncomingViewingKey::new(&other.fvk().vk.ivk());
         assert!(
             try_sapling_compact_note_decryption(&other_ivk, &compact, Zip212Enforcement::On).is_none(),
             "an output belonging to another wallet must not decrypt"
@@ -7919,7 +8617,7 @@ pub(crate) mod tests {
             let prover = zcash_proofs::prover::LocalTxProver::new(&spend, &output);
 
             let params = test_params_with_zip212();
-            let extsk = ExtendedSpendingKey::master(&[15; 32]);
+            let extsk = ExtendedSpendingKey::master(&[15; 32]).expect("a valid master key");
             #[allow(deprecated)]
             let extfvk = extsk.to_extended_full_viewing_key();
             let checkpoint = CheckPointBlockInfo {
@@ -7945,7 +8643,10 @@ pub(crate) mod tests {
             );
             assert_eq!(history.balance(params.clone()).unwrap(), Self::NOTE_VALUE);
 
-            let to_addr = ExtendedSpendingKey::master(&[99; 32]).default_address().1;
+            let to_addr = ExtendedSpendingKey::master(&[99; 32])
+                .expect("a valid master key")
+                .default_address()
+                .1;
             let my_addr = extsk.default_address().1;
             Some(WithdrawFixture {
                 history,
@@ -8518,9 +9219,10 @@ fn pending_receipts_in_tx(
     tx: &z_coin_grpc::CompactTx,
 ) -> Vec<PendingReceipt> {
     use sapling::note::ExtractedNoteCommitment;
+    use sapling::note_encryption::COMPACT_NOTE_SIZE;
     use sapling::note_encryption::{try_sapling_compact_note_decryption, CompactOutputDescription};
     use sapling::Note;
-    use zcash_note_encryption::{EphemeralKeyBytes, COMPACT_NOTE_SIZE};
+    use zcash_note_encryption::EphemeralKeyBytes;
 
     let mut found = Vec::new();
     let txid: [u8; 32] = match tx.hash.as_slice().try_into() {
@@ -8579,7 +9281,7 @@ impl ZCoinShieldedHistory {
         use sapling::keys::PreparedIncomingViewingKey;
         use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 
-        let ivk = PreparedIncomingViewingKey::new(&self.extfvk.fvk.vk.ivk());
+        let ivk = PreparedIncomingViewingKey::new(&self.extfvk.fvk().vk.ivk());
         // Mempool transactions will be mined at the next height at the
         // earliest, so enforcement is evaluated against the tip.
         // Same reason as the scanner: a mempool note from a modern Pirate wallet
@@ -8687,26 +9389,36 @@ impl ZCoinShieldedHistory {
         &self,
         script_pubkey: &[u8],
     ) -> Result<Vec<RecordedTransaction>, String> {
-        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT raw, mined_height FROM transactions
-                 WHERE raw IS NOT NULL AND instr(raw, ?1) > 0
-                 ORDER BY id_tx",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![script_pubkey], |row| {
-                Ok(RecordedTransaction {
-                    raw: row.get(0)?,
-                    mined_height: row.get(1)?,
-                })
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        Ok(rows)
+        recorded_transactions_in(&self.wallet_db_path, script_pubkey)
+    }
+
+    /// [`Self::recorded_transactions_containing`] over every wallet database of this ticker in the login's
+    /// directory, the active one first (R39.11.26, R39.8.0bd): a send recorded while another key or account
+    /// was active still answers "sent". An error of the active database is returned, as for the single
+    /// lookup; a sibling that cannot be read is logged and skipped, so its records are missing from the answer.
+    pub(crate) fn recorded_transactions_containing_in_any_wallet(
+        &self,
+        script_pubkey: &[u8],
+    ) -> Result<Vec<RecordedTransaction>, String> {
+        let mut records = self.recorded_transactions_containing(script_pubkey)?;
+        let Some(dir) = self.wallet_db_path.parent() else {
+            return Ok(records);
+        };
+        for sibling in per_key_wallet_files(dir, &self.ticker) {
+            if sibling == self.wallet_db_path {
+                continue;
+            }
+            match recorded_transactions_in(&sibling, script_pubkey) {
+                Ok(found) => records.extend(found),
+                Err(e) => log::warn!(
+                    "ZCoin {}: the send record of {} could not be read ({}); its records are not consulted",
+                    self.ticker,
+                    sibling.display(),
+                    e
+                ),
+            }
+        }
+        Ok(records)
     }
 
     /// Total value of the wallet's notes that the transaction `txid` spends, as recorded in

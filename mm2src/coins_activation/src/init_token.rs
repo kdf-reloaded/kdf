@@ -253,7 +253,7 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
         // Registering is the last step (CRD R48.11.7): a concurrent registration of the same ticker ends the task.
         let coins_ctx = CoinsContext::from_ctx(&self.ctx).map_to_mm(InitTokenError::Internal)?;
         coins_ctx
-            .add_coin(token.clone().into())
+            .add_token(self.protocol_info.platform_coin_ticker(), token.clone().into())
             .await
             .mm_err(|e| InitTokenError::TokenIsAlreadyActivated { ticker: e.ticker })?;
         self.registered_by_task.store(true, Ordering::SeqCst);

@@ -8,7 +8,7 @@ use db_common::sqlite::rusqlite::Error as SqliteError;
 use derive_more::Display;
 use rpc::v1::types::Bytes as BytesJson;
 #[cfg(not(target_arch = "wasm32"))]
-type ZTxBuilderError = zcash_primitives::transaction::builder::Error<std::convert::Infallible>;
+type ZTxBuilderError = super::z_tx_assembler::AssemblerError;
 
 #[derive(Debug, Display)]
 pub enum GenTxError {
@@ -288,6 +288,48 @@ pub enum ZCoinBuildError {
         path: String,
         needed_bytes: u64,
         available_bytes: u64,
+    },
+    /// Swaps of this coin that are not finished were started with another key, so with the key being
+    /// activated they could not be completed or refunded (CRD ch.39 R39.8.0bd item 5).
+    #[display(
+        fmt = "{0} cannot be activated with this key while these swaps are unfinished: {1}. They were \
+               started with another key; with this key they could not be completed or refunded. Activate \
+               {0} with the key they were started with, let them finish or refund, then switch",
+        ticker,
+        swaps
+    )]
+    KeyBlockedByUnfinishedSwaps {
+        ticker: String,
+        /// The swap UUIDs, separated by `, `.
+        swaps: String,
+    },
+    /// A wallet database of this coin cannot be read while swaps have not yet sent their payment or fee, so it
+    /// cannot be checked whether it was sent from another account (CRD ch.39 R39.8.0bd item 6).
+    #[display(
+        fmt = "{0} cannot be activated now: the wallet database {1} cannot be read, and these swaps have \
+               not sent their {0} payment or fee yet: {2}. Whether a payment was already sent from \
+               another account cannot be checked. Make the database readable (it may be in use or damaged), or \
+               activate {0} with the key those swaps were started with until they have sent it",
+        ticker,
+        files,
+        swaps
+    )]
+    WalletUnreadableWithUnsentSwaps {
+        ticker: String,
+        /// The unreadable files, separated by `, `.
+        files: String,
+        /// The swap UUIDs, separated by `, `.
+        swaps: String,
+    },
+    /// The saved swaps could not be read, so the activation cannot be checked against them (CRD ch.39 R39.8.0bd).
+    #[display(
+        fmt = "{0} cannot be activated now: the saved swaps could not be read to check them against this key: {1}",
+        ticker,
+        reason
+    )]
+    UnfinishedSwapsUnreadable {
+        ticker: String,
+        reason: String,
     },
     #[display(fmt = "Sapling cache DB does not exist at {}. Please download it.", path)]
     SaplingCacheDbDoesNotExist {

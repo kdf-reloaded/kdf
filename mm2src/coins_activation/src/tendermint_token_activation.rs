@@ -204,7 +204,8 @@ pub async fn enable_tendermint_token(
     let token_protocol = resolve_tendermint_token_protocol(&ctx, &req.ticker, req.protocol.as_ref())
         .map_to_mm(EnableTokenError::from)?;
 
-    let platform_coin = lp_coinfind_or_err(&ctx, token_protocol.platform_coin_ticker())
+    let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
+    let platform_coin = lp_coinfind_or_err(&ctx, &platform_ticker)
         .await
         .mm_err(|_| EnableTokenError::PlatformCoinIsNotActivated(token_protocol.platform_coin_ticker().to_owned()))?;
 
@@ -219,7 +220,7 @@ pub async fn enable_tendermint_token(
 
     let coins_ctx = CoinsContext::from_ctx(&ctx).map_to_mm(EnableTokenError::Internal)?;
     coins_ctx
-        .add_coin(token.clone().into())
+        .add_token(&platform_ticker, token.clone().into())
         .await
         .mm_err(|e| EnableTokenError::TokenIsAlreadyActivated(e.ticker))?;
     TendermintToken::on_token_registered(&platform_coin, &token);

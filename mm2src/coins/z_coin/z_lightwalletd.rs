@@ -61,7 +61,6 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tonic::Code;
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_primitives::transaction::Transaction as ZTransaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkType, NetworkUpgrade, Parameters};
 
@@ -79,9 +78,11 @@ pub(crate) const TADDR_HISTORY_WINDOW_BLOCKS: u64 = 1_000;
 /// Upper bound on a median-time-past window (R39.11.4f): each height is a separate request.
 pub(crate) const MEDIAN_TIME_WINDOW_MAX: u64 = 64;
 
-/// The builder's transaction expiry delta, re-exported so the staleness bound below cannot drift
-/// from the dependency it describes (R39.11.8(e)).
-pub(crate) const BUILDER_EXPIRY_DELTA: u32 = DEFAULT_TX_EXPIRY_DELTA;
+/// The transaction expiry delta the wallet sets explicitly on every transaction it builds (R39.11.8(e)). The
+/// value is the one the transaction builder used up to the library upgrade (40 blocks); it is fixed here, not
+/// taken from the library's per-branch default, so that a later upgrade of the library or of the consensus
+/// branch cannot move the expiry or the staleness bound derived from it.
+pub(crate) const BUILDER_EXPIRY_DELTA: u32 = 40;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);

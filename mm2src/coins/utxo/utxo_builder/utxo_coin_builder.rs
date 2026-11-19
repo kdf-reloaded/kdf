@@ -480,7 +480,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         &self,
         hd_wallet_storage: &HDWalletCoinStorage,
         derivation_path: &HDPathToCoin,
-        software_master: Option<&bip32::ExtendedPrivateKey<secp256k1::SecretKey>>,
+        software_master: Option<&crypto::Secp256k1ExtendedPrivateKey>,
     ) -> UtxoCoinBuildResult<HDAccountsMap<UtxoHDAccount>> {
         utxo_common::load_hd_accounts_from_storage(hd_wallet_storage, derivation_path, software_master)
             .await

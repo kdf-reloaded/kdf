@@ -230,6 +230,7 @@ pub(crate) mod history_absence;
 #[cfg(not(target_arch = "wasm32"))] pub mod lightning;
 // R39.6.1: z_coin is available on WASM (with IndexedDB storage backend).
 pub(crate) mod endpoint_suspension;
+#[cfg(test)] mod lp_coins_dependents_tests;
 pub mod my_tx_history_v2;
 pub mod nft;
 pub mod node_url;
@@ -254,7 +255,8 @@ pub mod solana;
 #[cfg(not(target_arch = "wasm32"))]
 pub use solana::spl::SplToken;
 #[cfg(not(target_arch = "wasm32"))]
-pub use solana::{solana_coin_from_conf_and_params, SolanaActivationParams, SolanaCoin, SolanaFeeDetails};
+pub use solana::{solana_coin_from_conf_and_params, solana_coin_with_node_order, SolanaActivationParams, SolanaCoin,
+                 SolanaFeeDetails};
 
 pub mod siacoin;
 pub mod tendermint;

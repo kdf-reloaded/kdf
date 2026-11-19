@@ -125,6 +125,8 @@ pub mod nft_maker_swap_v2;
 #[path = "lp_swap/taker_swap.rs"] mod taker_swap;
 #[path = "lp_swap/taker_swap_v2.rs"] pub mod taker_swap_v2;
 #[path = "lp_swap/trade_preimage.rs"] mod trade_preimage;
+#[path = "lp_swap/unfinished_swaps_view.rs"]
+pub(crate) mod unfinished_swaps_view;
 
 #[cfg(target_arch = "wasm32")]
 #[path = "lp_swap/swap_wasm_db.rs"]

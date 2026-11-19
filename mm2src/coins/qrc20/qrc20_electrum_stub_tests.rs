@@ -176,6 +176,24 @@ async fn wait_until(what: &str, secs: f64, cond: impl Fn() -> bool) {
 
 fn balance_of(units: u64) -> BigDecimal { big_decimal_from_sat(units as i64, 8) }
 
+fn electrum_client_of(coin: &Qrc20Coin) -> ElectrumClient {
+    let UtxoRpcClientEnum::Electrum(client) = coin.utxo.rpc_client.clone() else {
+        panic!("an Electrum activation builds an Electrum client")
+    };
+    client
+}
+
+/// Waits until `count` sessions of the token's client are maintained, so that a test that counts the sessions or the
+/// requests of a request that goes over them starts from the maintained set.
+async fn wait_maintained(coin: &Qrc20Coin, count: usize) {
+    let client = electrum_client_of(coin);
+    let started = std::time::Instant::now();
+    while client.count_connected().await != count {
+        assert!(started.elapsed().as_secs() < 10, "{count} sessions must be maintained");
+        Timer::sleep(0.02).await;
+    }
+}
+
 // ---- T38.6.4Q.2: methods at activation ----
 
 #[test]
@@ -230,6 +248,9 @@ fn t38_6_4q_2_activation_without_decimals_asks_for_decimals_before_the_balance()
 
 // ---- T38.6.4Q.3: an error answer at activation ----
 
+/// D38.6.4Q.2 status note, item 1: the error answer moves the request on, but a server that answered a request with an
+/// error is not asked again within it, the retry included, so the one listed server is asked once per attempt, and the
+/// failure is R38.6.4i's. (Before the decision the error answer ended the request, also asked once.)
 #[test]
 fn t38_6_4q_3_error_answer_to_the_activation_balance_read_fails_it_and_a_retry_fails_the_same_way() {
     block_on(async {
@@ -240,12 +261,15 @@ fn t38_6_4q_3_error_answer_to_the_activation_balance_read_fails_it_and_a_retry_f
         let (first, coin) = activate_like_electrum(&env, &[&server], false).await;
         let first = first.unwrap_err();
         assert!(first.contains("stub contract error"), "{first}");
+        // The failure names the server and its error (R38.6.4i).
+        assert!(first.contains(&server.addr()), "{first}");
         // The token is not active (deregistered again), and the stub's session is still open: the error answer
         // did not close the session of the client that is still held here.
         assert!(!is_registered(&env).await);
         let coin = coin.unwrap();
         assert!(server.open_connections() >= 1);
-        assert_eq!(server.requests(CALL), 1, "nothing is repeated inside the activation");
+        let after_first = server.requests(CALL);
+        assert_eq!(after_first, 1);
 
         // A second attempt fails the same way: not as "already initialized".
         let (second, _coin) = activate_like_electrum(&env, &[&server], false).await;
@@ -253,11 +277,13 @@ fn t38_6_4q_3_error_answer_to_the_activation_balance_read_fails_it_and_a_retry_f
         assert!(second.contains("stub contract error"), "{second}");
         assert!(!second.contains("already"), "{second}");
         assert!(!is_registered(&env).await);
-        assert_eq!(server.requests(CALL), 2);
+        let asked_second = server.requests(CALL) - after_first;
+        assert_eq!(asked_second, 1);
         drop(coin);
     });
 }
 
+/// As above for the `decimals()` read of the build: the build fails with the failure of R38.6.4i and registers nothing.
 #[test]
 fn t38_6_4q_3_error_answer_to_the_decimals_read_fails_the_build_and_registers_nothing() {
     block_on(async {
@@ -271,13 +297,13 @@ fn t38_6_4q_3_error_answer_to_the_decimals_read_fails_the_build_and_registers_no
             .expect("the build fails");
         assert!(first.contains("stub contract error"), "{first}");
         assert!(!is_registered(&env).await);
-        assert_eq!(server.requests(CALL), 1, "nothing is repeated");
-        // Only the `decimals()` call was asked.
-        assert_eq!(server.request_params(CALL), [json!([
-            TOKEN_CONTRACT,
-            DECIMALS_CALL_DATA,
-            ""
-        ])]);
+        // Asked once (see above), and only the `decimals()` call.
+        let after_first = server.requests(CALL);
+        assert_eq!(after_first, 1);
+        assert!(server
+            .request_params(CALL)
+            .iter()
+            .all(|params| params == &json!([TOKEN_CONTRACT, DECIMALS_CALL_DATA, ""])));
 
         // A second attempt fails the same way, not as "already initialized".
         let second = init_token(&env, &[&server], false)
@@ -286,12 +312,15 @@ fn t38_6_4q_3_error_answer_to_the_decimals_read_fails_the_build_and_registers_no
             .expect("the build fails again");
         assert!(second.contains("stub contract error"), "{second}");
         assert!(!second.contains("already"), "{second}");
-        assert_eq!(server.requests(CALL), 2);
+        assert_eq!(server.requests(CALL) - after_first, 1);
     });
 }
 
+/// D38.6.4Q.2 status note, item 1: the first server answers the contract call with an error, the second answers it
+/// correctly, later. The activation succeeds from the second server, the token is registered, and the first server's
+/// session is not closed. (Before the decision the error answer ended the activation.)
 #[test]
-fn t38_6_4q_3_first_error_answer_ends_the_activation_although_another_server_answers_correctly() {
+fn t38_6_4q_2_error_answer_of_the_first_server_moves_the_activation_on_to_the_second() {
     block_on(async {
         let env = token_env(Some(8));
         // Listed first: answers the contract call with an error at once. Listed second: answers it correctly, later.
@@ -300,60 +329,99 @@ fn t38_6_4q_3_first_error_answer_ends_the_activation_although_another_server_ans
         let correct = token_stub(5).await;
         correct.set_reply_delay(CALL, Duration::from_millis(400));
 
-        let (outcome, _coin) = activate_like_electrum(&env, &[&erring, &correct], false).await;
+        let (outcome, coin) = activate_like_electrum(&env, &[&erring, &correct], false).await;
+        assert_eq!(outcome.unwrap().spendable, balance_of(5));
+        assert!(is_registered(&env).await);
+        let _coin = coin.unwrap();
+        assert_eq!(erring.requests(CALL), 1, "not asked again within the request");
+        assert_eq!(correct.requests(CALL), 1);
+        // That the error answer closes no session is tested where the sessions are maintained before the request
+        // (`t38_6_4q_4_error_answer_to_a_balance_read_moves_on_and_only_every_server_failing_fails_the_read`): during an
+        // activation the first request may be the one that connects the servers, and a connection that request opened
+        // to a server that is not maintained is released afterwards (R38.6.4f item 2).
+    });
+}
+
+/// Every listed server answers an error: the activation fails with the failure of R38.6.4i, naming each server.
+#[test]
+fn t38_6_4q_2_every_server_answering_an_error_fails_the_activation_naming_each_server() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let first = token_stub(1).await;
+        first.set_error(CALL, "first stub error");
+        let second = token_stub(2).await;
+        second.set_error(CALL, "second stub error");
+
+        let (outcome, _coin) = activate_like_electrum(&env, &[&first, &second], false).await;
         let error = outcome.unwrap_err();
-        assert!(error.contains("stub contract error"), "{error}");
+        let (first_addr, second_addr) = (first.addr(), second.addr());
+        for expected in [
+            "first stub error",
+            "second stub error",
+            first_addr.as_str(),
+            second_addr.as_str(),
+        ] {
+            assert!(error.contains(expected), "{error}");
+        }
         assert!(!is_registered(&env).await);
-        assert_eq!(erring.requests(CALL), 1);
-        // The request is one request: the error answer ended it. Observed: the second server was not asked at all
-        // (the request went to the highest-ranked session). Were it asked, it would be once and its answer unused.
-        assert!(correct.requests(CALL) <= 1);
     });
 }
 
 // ---- T38.6.4Q.4: an error answer to a balance read ----
 
+/// D38.6.4Q.2 status note, item 1 (before it, one server's error answer failed the read although the other answered).
+/// The read goes on to the second server and succeeds; only when every server answers an error does it fail, and the
+/// next read asks again.
 #[test]
-fn t38_6_4q_4_error_answer_to_a_balance_read_fails_the_read_and_the_next_read_asks_again() {
+fn t38_6_4q_4_error_answer_to_a_balance_read_moves_on_and_only_every_server_failing_fails_the_read() {
     block_on(async {
         let env = token_env(Some(8));
         let first = token_stub(100).await;
         let second = token_stub(200).await;
         let coin = init_token(&env, &[&first, &second], false).await.unwrap();
-        let UtxoRpcClientEnum::Electrum(client) = coin.utxo.rpc_client.clone() else {
-            panic!("an Electrum activation builds an Electrum client")
-        };
-        let started = std::time::Instant::now();
-        while client.count_connected().await != 2 {
-            assert!(started.elapsed().as_secs() < 10, "both sessions must be maintained");
-            Timer::sleep(0.02).await;
-        }
+        wait_maintained(&coin, 2).await;
 
         // The higher-ranked (first listed) server takes the read.
         assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(100));
         assert_eq!((first.requests(CALL), second.requests(CALL)), (1, 0));
 
-        // It starts answering with an error: the read fails, no other server is asked, no earlier value is served.
+        // It starts answering with an error: the read goes on to the second server and succeeds with its value.
         first.set_error(CALL, "stub contract error");
         let sessions = first.open_connections();
-        let error = coin.my_balance().compat().await.unwrap_err().to_string();
-        assert!(error.contains("stub contract error"), "{error}");
-        assert_eq!((first.requests(CALL), second.requests(CALL)), (2, 0));
-        // The session stays open and the token stays enabled.
+        assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(200));
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (2, 1));
+        // The session stays open, the server stays maintained and the token stays enabled.
         assert_eq!(first.open_connections(), sessions);
-        assert!(sessions >= 1);
+        assert_eq!(sessions, 1);
+        assert_eq!(first.accepted(), 1);
         assert!(is_registered(&env).await);
 
-        // Still failing: asked again, fails again (no value kept from the first read).
+        // Every server answers an error: the read fails with the failure of R38.6.4i, and no earlier value is served.
+        second.set_error(CALL, "second stub error");
+        let error = coin.my_balance().compat().await.unwrap_err().to_string();
+        let (first_addr, second_addr) = (first.addr(), second.addr());
+        for expected in [
+            "stub contract error",
+            "second stub error",
+            first_addr.as_str(),
+            second_addr.as_str(),
+        ] {
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(is_registered(&env).await);
+        // Each server is asked once per read: an error answer is not asked again within the request.
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (3, 2));
         let error = coin.my_balance().compat().await.unwrap_err().to_string();
         assert!(error.contains("stub contract error"), "{error}");
-        assert_eq!((first.requests(CALL), second.requests(CALL)), (3, 0));
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (4, 3));
+        assert_eq!((first.open_connections(), second.open_connections()), (1, 1));
 
         // After the recovery the next read asks again and succeeds with the new value.
         first.clear_error(CALL);
+        second.clear_error(CALL);
         serve_balance(&first, 300);
         assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(300));
-        assert_eq!((first.requests(CALL), second.requests(CALL)), (4, 0));
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (5, 3));
     });
 }
 
@@ -610,26 +678,263 @@ fn t38_6_4q_6_history_request_error_is_a_retry_and_only_the_exact_history_too_la
     });
 }
 
+/// A pass whose history request failed is repeated after the backoff, and the state is not an error while fewer than
+/// three passes in a row failed. Each failed pass asks the one listed server once.
 #[test]
 fn t38_6_4q_6_history_request_error_is_asked_again_after_the_backoff_and_the_state_is_not_an_error() {
     block_on(async {
         let env = token_env(Some(8));
         let server = token_stub(1).await;
         server.set_error(GET_HISTORY, "stub history error");
-        // `tx_history` true: the collector of the token runs (the real activation path).
-        let coin = init_token(&env, &[&server], true).await.unwrap();
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        // The collector of the token runs (the real activation path starts it with `tx_history`; here by hand, on the
+        // coin whose session is maintained, so that the asks are counted exactly).
+        let collector = coin.clone();
+        let ctx = env.ctx.clone();
+        common::executor::spawn(async move { collector.history_loop(ctx).await });
 
         wait_until("the first history request", 10., || server.requests(GET_HISTORY) == 1).await;
         // The collector backs off 10 s (this tree's first retry delay); it does not ask again at once.
         Timer::sleep(4.).await;
         assert_eq!(server.requests(GET_HISTORY), 1);
-        // The history state is not an error: the failed request leaves it where it was.
-        assert!(matches!(coin.history_sync_status(), HistorySyncState::NotStarted));
+        // The history state is not an error (the coin was built without `tx_history`, so its state is not `NotStarted`):
+        // the failed request leaves it where it was.
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
 
         wait_until("the second history request", 12., || server.requests(GET_HISTORY) == 2).await;
-        assert!(matches!(coin.history_sync_status(), HistorySyncState::NotStarted));
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
         // Every pass began with its own balance read.
         assert_eq!(server.requests(CALL), 2);
+    });
+}
+
+/// The classification the collector counts by (amendment after R38.6.4Q.6, "Counting"): a call on which every server
+/// tried answered with an error answer is `EveryServerAnsweredAnError`; a call on which a server failed by transport is
+/// `TransportFailure`; an answer, an unreadable answer and `history too large` are `Other`.
+#[test]
+fn t38_6_4q_6_the_history_request_is_classified_by_what_the_servers_did() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let metrics = || env.ctx.metrics.clone();
+
+        server.set_error(GET_HISTORY, "stub history error");
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::EveryServerAnsweredAnError);
+
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!("not a list"));
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::Other, "an unreadable answer is an answer");
+
+        server.set_error_object(GET_HISTORY, json!({"code": 1, "message": "history too large"}));
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::HistoryTooLarge));
+        assert_eq!(kind, HistoryPassKind::Other);
+
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!([]));
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Ok(..)));
+        assert_eq!(kind, HistoryPassKind::Other);
+
+        // The only server is down: a transport failure, which neither counts nor resets.
+        server
+            .set_behavior(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Down)
+            .await;
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::TransportFailure);
+    });
+}
+
+/// A mix of one server that answers with an error and one that is down is a transport failure too: the pass neither
+/// counts nor resets. The erroring server is asked once, not again in the retry.
+#[test]
+fn t38_6_4q_6_one_erroring_and_one_down_server_neither_count_nor_reset() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let erring = token_stub(1).await;
+        let down = token_stub(1).await;
+        let coin = init_token(&env, &[&erring, &down], false).await.unwrap();
+        wait_maintained(&coin, 2).await;
+        erring.set_error(GET_HISTORY, "stub history error");
+        down.set_behavior(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Down)
+            .await;
+
+        let (outcome, kind) = coin.request_tx_history_counted(env.ctx.metrics.clone()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::TransportFailure);
+        assert_eq!(erring.requests(GET_HISTORY), 1);
+    });
+}
+
+/// The counter: three passes in a row whose every server answered with an error end the collector; a pass that gets
+/// any other outcome resets the count; a pass with a transport failure neither counts nor resets it.
+#[test]
+fn t38_6_4q_6_three_all_error_passes_in_a_row_end_the_collector_a_transport_pass_changes_nothing() {
+    use HistoryPassKind::*;
+    let mut passes = AllErrorPasses::default();
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(Other), "an answer resets the count");
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(TransportFailure), "a transport pass does not count");
+    assert!(!passes.pass(TransportFailure), "and does not reset");
+    assert!(
+        passes.pass(EveryServerAnsweredAnError),
+        "the third counted pass in a row ends the collector"
+    );
+    // An offline node: transport failures alone never end it.
+    let mut offline = AllErrorPasses::default();
+    for _ in 0..100 {
+        assert!(!offline.pass(TransportFailure));
+    }
+    assert_eq!(ALL_ERROR_PASSES_LIMIT, 3);
+}
+
+/// With the server down (transport failures only) the collector goes on: it is still running after the time in which
+/// three error-answer passes would have ended it, and the history state is not an error.
+#[test]
+fn t38_6_4q_6_passes_with_the_server_down_do_not_end_the_collector() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        server
+            .set_behavior(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Down)
+            .await;
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = coin.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+        // The balance read fails too while the server is down, so these are passes that fail before the history
+        // request; what is observed is that nothing ends the collector or sets an error.
+        Timer::sleep(25.).await;
+        assert!(!ended.load(AtomicOrdering::SeqCst));
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
+    });
+}
+
+/// CRD ch.38 amendment of 2026-11-17 after R38.6.4Q.6: three passes in a row whose history request failed on every
+/// server tried end the collector. The token's history state is an error that names the cause, `history too large`
+/// keeps its own code, no further history request follows, and activating the token again starts a fresh collector.
+#[test]
+fn t38_6_4q_6_three_all_error_passes_end_the_collector_with_the_named_sync_status_error_and_a_new_activation_starts_again(
+) {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(42).await;
+        server.set_error(GET_HISTORY, "stub history error");
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = coin.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+
+        // Pass one, a 10 s backoff, pass two, a 20 s backoff, pass three.
+        wait_until("the collector to end", 45., || ended.load(AtomicOrdering::SeqCst)).await;
+        let HistorySyncState::Error(error) = coin.history_sync_status() else {
+            panic!("the history state is an error")
+        };
+        // Its own message (the cause), not the one of `history too large` and not its code.
+        assert_eq!(error["code"], json!(HISTORY_NO_SERVER_ANSWERS_ERR_CODE));
+        assert_ne!(error["code"], json!(HISTORY_TOO_LARGE_ERR_CODE));
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("No listed Electrum server answers"), "{message}");
+        assert!(!message.contains("history too large"), "{message}");
+        // Three passes, one ask each; no further history request, and no further pass.
+        assert_eq!(server.requests(GET_HISTORY), 3);
+        assert_eq!(server.requests(CALL), 3);
+        Timer::sleep(2.).await;
+        assert_eq!((server.requests(GET_HISTORY), server.requests(CALL)), (3, 3));
+
+        // The balance still answers, and activating the token again starts a fresh collector.
+        assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(42));
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!([]));
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        let again = init_token(&env, &[&server], true).await.unwrap();
+        wait_until("the new collector's history", 10., || {
+            matches!(again.history_sync_status(), HistorySyncState::Finished)
+        })
+        .await;
+    });
+}
+
+/// A pass that gets a history answer resets the count: two failed passes, a pass that gets an answer, then a failed
+/// pass do not end the collector (without the reset the failed pass after the answer would be the third in a row).
+#[test]
+fn t38_6_4q_6_a_pass_that_gets_a_history_answer_resets_the_count_of_all_error_passes() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1_200).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let (a, b) = two_served_txs(&coin);
+        serve_tx(&server, &a);
+        serve_tx(&server, &b);
+        // Pass three lists A and B, and A's details fail, so that pass four follows pass three after the retry delay.
+        server.set_params_error(
+            GET_RECEIPT,
+            json!([txid_of(&a.tx)]),
+            json!({"code": 3, "message": "no receipt"}),
+        );
+        wait_maintained(&coin, 1).await;
+        server.set_error(GET_HISTORY, "stub history error");
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = coin.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+
+        // Passes one and two fail (one ask each); the third pass, after the 20 s backoff, gets an answer.
+        wait_until("two failed passes", 20., || server.requests(GET_HISTORY) == 2).await;
+        // The stub has answered the last ask with its error by now; the next pass is 20 s away.
+        Timer::sleep(0.5).await;
+        server.clear_error(GET_HISTORY);
+        server.set_result(
+            GET_HISTORY,
+            json!([history_item(&a, 0), history_item(&b, 0), history_item(&b, 1)]),
+        );
+        wait_until("the pass that gets the answer", 30., || {
+            server.requests(GET_HISTORY) == 3
+        })
+        .await;
+        // Back to an error; pass four follows after the retry delay of the incomplete pass.
+        Timer::sleep(0.5).await;
+        server.set_error(GET_HISTORY, "stub history error");
+        wait_until("the failed pass after the answer", 20., || {
+            server.requests(GET_HISTORY) == 4
+        })
+        .await;
+        Timer::sleep(1.).await;
+        // Not the third failed pass in a row: the collector goes on and the state is not an error.
+        assert!(!ended.load(AtomicOrdering::SeqCst));
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
     });
 }
 
@@ -668,6 +973,7 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
         let env = token_env(Some(8));
         let server = token_stub(1).await;
         let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
         let (a, b) = two_served_txs(&coin);
         serve_tx(&server, &a);
         serve_tx(&server, &b);
@@ -690,12 +996,16 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
         let stored: Vec<_> = history_map.values().flat_map(|rows| rows.values().cloned()).collect();
         assert_eq!(row_ids(&stored), [(txid_of(&b.tx), 0, 0), (txid_of(&b.tx), 0, 1),]);
         assert!(matches!(coin.history_sync_status(), HistorySyncState::Finished));
+        // A's receipt is asked once (the error answer moves the request on, and the one server is not asked again,
+        // D38.6.4Q.2 status note), B's once.
         assert_eq!(server.requests(GET_RECEIPT), 2);
         // A's verbose transaction was never asked: the receipt comes first and its failure leaves the transaction out.
         assert!(!server.request_params(GET_TX).contains(&json!([txid_of(&a.tx), true])));
 
-        // It stays absent while the balance is unchanged: the pass is not repeated (R38.6.4Q.6 item 1 and the
-        // code-quality finding after item 5). The same balance and no row without timestamp or height: no update.
+        // The balance and the stored rows alone do not ask for the history again (R38.6.4Q.6 item 1): the same balance
+        // and no row without timestamp or height: no update. The collector asks again for another reason, the
+        // incomplete pass (`must_ask`, the status note after the code-quality finding of R38.6.4Q.6), tested in
+        // `t38_6_4q_6_a_pass_that_left_a_transaction_out_asks_for_the_history_again_after_the_retry_delay`.
         let balance = CoinBalance {
             spendable: balance_of(1),
             unspendable: BigDecimal::from(0),
@@ -720,6 +1030,72 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
             false
         ));
         assert!(coin.check_if_history_update_is_needed(&history_map, &None, &balance, &AbsenceMarks::default(), false));
+        // An incomplete pass asks for it whatever the balance.
+        assert!(coin.check_if_history_update_is_needed(
+            &history_map,
+            &Some(balance.clone()),
+            &balance,
+            &AbsenceMarks::default(),
+            true
+        ));
+    });
+}
+
+/// Status note after the code-quality finding of R38.6.4Q.6: a pass that left a listed transaction out, because a
+/// detail request failed, is incomplete, and the next pass asks for the history again after the retry delay, whatever
+/// the balance. Once the details succeed the collector goes back to balance-only passes. (Before the decision the
+/// transaction stayed out until the balance changed.)
+#[test]
+fn t38_6_4q_6_a_pass_that_left_a_transaction_out_asks_for_the_history_again_after_the_retry_delay() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1_200).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        let (a, b) = two_served_txs(&coin);
+        serve_tx(&server, &a);
+        serve_tx(&server, &b);
+        server.set_result(
+            GET_HISTORY,
+            json!([history_item(&a, 0), history_item(&b, 0), history_item(&b, 1)]),
+        );
+        // A's receipt fails (an error object); B's is fine.
+        server.set_params_error(
+            GET_RECEIPT,
+            json!([txid_of(&a.tx)]),
+            json!({"code": 3, "message": "no receipt"}),
+        );
+        let collector = coin.clone();
+        let ctx = env.ctx.clone();
+        common::executor::spawn(async move { collector.history_loop(ctx).await });
+
+        // Pass one: the balance, the history, A's receipt (an error answer) and B's.
+        wait_until("pass one", 10., || server.requests(GET_RECEIPT) == 2).await;
+        let pass_one_done = std::time::Instant::now();
+        assert_eq!(server.requests(GET_HISTORY), 1);
+        // The balance is unchanged all along. A's details succeed from now on.
+        serve_tx(&server, &a);
+
+        // The next pass comes after the retry delay (10 s) and asks for the history again: its balance read, its
+        // history request, A's receipt (now succeeding), and not B's (stored).
+        wait_until("pass two", 15., || server.requests(GET_HISTORY) == 2).await;
+        assert!(
+            pass_one_done.elapsed().as_secs_f64() >= 8.0,
+            "{:?}",
+            pass_one_done.elapsed()
+        );
+        wait_until("pass three's balance read", 10., || server.requests(CALL) == 3).await;
+        assert_eq!(server.requests(GET_RECEIPT), 3);
+
+        // Pass three is balance-only: nothing is left out and the balance is unchanged, so it waits.
+        Timer::sleep(1.).await;
+        assert_eq!((server.requests(GET_HISTORY), server.requests(CALL)), (2, 3));
+        let rows = coin.load_history_from_file(&env.ctx).compat().await.unwrap();
+        assert_eq!(row_ids(&rows), [
+            (txid_of(&a.tx), 0, 0),
+            (txid_of(&b.tx), 0, 0),
+            (txid_of(&b.tx), 0, 1),
+        ]);
     });
 }
 
@@ -1056,76 +1432,127 @@ async fn token_with_collector_in_the_idle_wait(env: &TokenEnv, server: &StubServ
     std::time::Instant::now() - Duration::from_millis(500)
 }
 
+/// D38.6.4Q.5 status note, items 1 and 3 (R38.6.4Q.10 item 1). Before the decision the disable stopped nothing: the
+/// collector held the client and its session until its next registry check, 30 s after its last read.
+/// Now the collector ends at the disable, wherever it is, and the client closes with it; the stub receives no further
+/// request from the token.
 #[test]
-fn t38_6_4q_10_disable_keeps_the_collectors_session_until_its_next_registry_check_and_sends_nothing() {
+fn t38_6_4q_10_disable_ends_the_collector_and_closes_the_session_at_once_and_sends_nothing() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
-        let idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
+        let _idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
         assert_eq!(server.open_connections(), 1);
         let requests_before = server.ordinary_requests();
 
         disable_coin(&env.ctx, TICKER).await.unwrap();
-        let disabled_at = std::time::Instant::now();
-        // This tree stops nothing at the disable (differs from R38.6.4Q.10 item 1): the collector holds the client, so
-        // the session is still open, and it stays open while the collector waits.
-        assert_eq!(server.open_connections(), 1);
-        Timer::sleep(10.).await;
-        assert_eq!(server.open_connections(), 1);
-        assert_eq!(server.ordinary_requests(), requests_before);
-
-        // The wait ends 30 s after the second balance read; the registry check finds no ticker and the collector ends.
-        // The session closes with it (the collector held the last handle of the client).
-        wait_until("the session to close", 40., || server.open_connections() == 0).await;
-        let closed_after_idle = idle_since.elapsed().as_secs_f64();
-        eprintln!(
-            "Q10 observed: session closed {:.1} s after the disable, {closed_after_idle:.1} s after the wait began",
-            disabled_at.elapsed().as_secs_f64()
-        );
-        assert!((29.0..40.0).contains(&closed_after_idle), "{closed_after_idle}");
-        // The stub received nothing from the disabled token, before or after the check: no request at all.
-        Timer::sleep(1.).await;
+        // The session closes at the disable, not 30 s later.
+        wait_until("the session to close", 5., || server.open_connections() == 0).await;
+        // The stub receives nothing from the disabled token, now or after the old registry check would have come.
+        Timer::sleep(2.).await;
         assert_eq!(server.ordinary_requests(), requests_before);
         assert_eq!(server.requests(CALL), 2);
         assert_eq!(server.accepted(), 1);
     });
 }
 
+/// The disable ends the collector in the middle of a pass too: here while its history request waits for an answer that
+/// does not come (a reply delay of an hour). Nothing waits for the pass to finish.
 #[test]
-fn t38_6_4q_10_enable_again_inside_the_wait_leaves_two_collectors_and_two_sessions() {
+fn t38_6_4q_10_disable_ends_a_collector_that_waits_for_an_answer() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
-        let idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
+        server.set_result(GET_HISTORY, json!([]));
+        server.set_reply_delay(GET_HISTORY, Duration::from_secs(3_600));
+        drop(init_token_named(&env, TICKER, &[&server], true).await);
+        wait_until("the history request of the collector", 10., || {
+            server.requests(GET_HISTORY) == 1
+        })
+        .await;
+        assert_eq!(server.open_connections(), 1);
+
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        wait_until("the session to close", 5., || server.open_connections() == 0).await;
+        Timer::sleep(1.).await;
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (1, 1));
+    });
+}
+
+/// D38.6.4Q.5 status note, item 3 (R38.6.4Q.10 item 3): after a disable and an enable exactly one collector and one
+/// client serve the token. (Before the decision two collectors and two sessions did, both writing the stored history.)
+#[test]
+fn t38_6_4q_10_disable_then_enable_leaves_one_collector_and_one_session() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let _idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
 
         disable_coin(&env.ctx, TICKER).await.unwrap();
         // Enable again at once: a new client, and a new collector (`tx_history` true) with its two passes.
-        drop(init_token_named(&env, TICKER, &[&server], true).await);
+        let again = init_token_named(&env, TICKER, &[&server], true).await;
         wait_until("the new collector's passes", 10., || server.requests(CALL) == 4).await;
         assert_eq!(server.requests(GET_HISTORY), 2);
-        // Two clients now serve the token: the new one and the one the first collector still holds.
-        assert_eq!(server.open_connections(), 2);
+        // The old client closed: one session serves the token, and the stub accepted two in all.
+        wait_until("the old session to close", 5., || server.open_connections() == 1).await;
         assert_eq!(server.accepted(), 2);
 
-        // The first collector's wait ends 30 s after its second read: its check finds the ticker registered (by the new
-        // instance) and it goes on, beside the new collector, whose own wait ends a moment later.
-        let until_waits_end = 28.0 - idle_since.elapsed().as_secs_f64();
-        Timer::sleep(until_waits_end.max(0.)).await;
-        wait_until("both collectors' reads", 6., || server.requests(CALL) == 6).await;
-        Timer::sleep(2.).await;
-        // Both collectors read the balance once in this interval, over two sessions: two reads, not one (R38.6.4Q.10
-        // item 3 says exactly one collector and one client serve the token after an enable again).
-        assert_eq!(server.requests(CALL), 6);
-        assert_eq!(server.open_connections(), 2);
-        assert_eq!(server.accepted(), 2);
-        // No history request: the balance is unchanged for both.
-        assert_eq!(server.requests(GET_HISTORY), 2);
-
-        // The next idle interval repeats it: two more reads, one per collector.
+        // Over an idle interval of the new collector, past the moment the old collector's wait would have ended, the
+        // token reads its balance once: one collector.
         let calls_now = server.requests(CALL);
-        Timer::sleep(32.).await;
-        assert_eq!(server.requests(CALL), calls_now + 2);
+        Timer::sleep(33.).await;
+        assert_eq!(server.requests(CALL), calls_now + 1);
+        assert_eq!(server.requests(GET_HISTORY), 2);
+        assert_eq!(server.open_connections(), 1);
+        assert_eq!(server.accepted(), 2);
+        drop(again);
+    });
+}
+
+/// D38.6.4Q.5 status note, item 2: the collector's registry check compares the coin instance, not only the ticker. The
+/// old instance is taken out of the registry without `disable_coin` (so nothing aborts its collector) and the token
+/// is activated again; at its next check the old collector finds the ticker registered as another instance and ends,
+/// and its client closes. With the ticker alone it would find the ticker registered and go on beside the new one.
+#[test]
+fn t38_6_4q_10_a_collector_ends_at_its_registry_check_when_the_ticker_is_registered_as_another_instance() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let old = init_token_named(&env, TICKER, &[&server], false).await;
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = old.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+        wait_until("the second balance read of the collector", 10., || {
+            server.requests(CALL) == 2
+        })
+        .await;
+        drop(old);
+
+        // The old instance leaves the registry, not through `disable_coin`; a new instance takes the ticker.
+        let coins_ctx = CoinsContext::from_ctx(&env.ctx).unwrap();
+        assert!(coins_ctx.coins.lock().await.remove(TICKER).is_some());
+        drop(init_token_named(&env, TICKER, &[&server], false).await);
+        assert!(is_registered(&env).await);
         assert_eq!(server.open_connections(), 2);
+
+        // The old collector's wait ends about 30 s after its second read; its check finds another instance under the
+        // ticker, and it ends without another request.
+        wait_until("the old collector to end", 40., || ended.load(AtomicOrdering::SeqCst)).await;
+        wait_until("the old session to close", 5., || server.open_connections() == 1).await;
+        assert_eq!(
+            server.requests(CALL),
+            2,
+            "the old collector asked nothing after its check"
+        );
+        assert_eq!(server.accepted(), 2);
     });
 }
 
@@ -1571,15 +1998,17 @@ fn is_listing(message: &Json) -> bool {
 /// The call the balance stream of `mm2_main` makes for a token (`qrc20_subscription_target` and
 /// `blockchain_contract_event_subscribe`), made here on the token's client: the wallet's contract-format address, the
 /// token contract and the `Transfer` topic. The stream itself (the enabling of it) is not covered here.
+///
+/// D38.6.4Q.3 status note: an answered subscription is remembered and placed again, once, over the newly maintained
+/// session after a disconnect (before the decision nothing was placed again). An error answer to it, or no answer,
+/// leaves activation, balance and history working and is not repeated.
 #[test]
-fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_working_and_is_not_placed_again() {
+fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_working_and_is_placed_again_once() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
         let token = init_token_named(&env, TICKER, &[&server], false).await;
-        let UtxoRpcClientEnum::Electrum(client) = token.utxo.rpc_client.clone() else {
-            panic!("an Electrum activation builds an Electrum client")
-        };
+        let client = electrum_client_of(&token);
         let address = contract_addr_into_rpc_format(&token.my_addr_as_contract_addr().unwrap());
         let contract = contract_addr_into_rpc_format(&token.contract_address);
         let wanted = json!([
@@ -1593,7 +2022,8 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
                 .compat()
         };
 
-        // An error answer: the request fails, and balance and history keep working.
+        // An error answer: the request fails (an error answer to this method is final, as before), and balance and
+        // history keep working. A failed subscription is not remembered.
         server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
         let error = subscribe().await.unwrap_err().to_string();
         assert!(error.contains("stub subscribe error"), "{error}");
@@ -1604,6 +2034,17 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
             token.request_tx_history(env.ctx.metrics.clone()).await,
             RequestTxHistoryResult::Ok(..)
         ));
+        server.kill_connections();
+        wait_until("the client to reconnect", 60., || {
+            server.accepted() >= 2 && server.open_connections() == 1
+        })
+        .await;
+        Timer::sleep(2.).await;
+        assert_eq!(
+            server.requests(EVENT_SUBSCRIBE),
+            1,
+            "nothing was remembered, nothing is placed again"
+        );
 
         // No answer at all: the request stays pending, and balance and history keep working meanwhile.
         server.clear_error(EVENT_SUBSCRIBE);
@@ -1621,18 +2062,48 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
         assert!(matches!(outcome, futures::future::Either::Right(_)), "no answer came");
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
 
-        // An answer: the request succeeds. After a reconnect the client places nothing again.
+        // An answer: the request succeeds and the subscription is remembered.
         server.set_reply_delay(EVENT_SUBSCRIBE, Duration::ZERO);
         subscribe().await.unwrap();
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+
+        // After a disconnect the newly maintained session gets it again, exactly once, with the same parameters.
+        let accepted = server.accepted();
         server.kill_connections();
         wait_until("the client to reconnect", 60., || {
-            server.accepted() >= 2 && server.open_connections() == 1
+            server.accepted() > accepted && server.open_connections() == 1
+        })
+        .await;
+        wait_until("the subscription to arrive again", 10., || {
+            server.requests(EVENT_SUBSCRIBE) == 4
+        })
+        .await;
+        assert_eq!(server.request_params(EVENT_SUBSCRIBE).last().unwrap(), &wanted);
+        assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 4, "placed again once, not in a loop");
+
+        // The server now refuses it: after the next disconnect it is asked once more, the error changes nothing else
+        // (activation, balance and history work) and it is not asked again in a loop.
+        server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+        let accepted = server.accepted();
+        server.kill_connections();
+        wait_until("the client to reconnect again", 60., || {
+            server.accepted() > accepted && server.open_connections() == 1
+        })
+        .await;
+        wait_until("the refused subscription to be asked", 10., || {
+            server.requests(EVENT_SUBSCRIBE) == 5
         })
         .await;
         assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
-        Timer::sleep(2.).await;
-        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+        assert!(matches!(
+            token.request_tx_history(env.ctx.metrics.clone()).await,
+            RequestTxHistoryResult::Ok(..)
+        ));
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 5, "an error answer is not repeated");
+        assert!(is_registered(&env).await);
     });
 }
 

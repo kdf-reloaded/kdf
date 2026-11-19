@@ -24,7 +24,7 @@ use super::{z_coin_from_conf_and_params, z_send_htlc, ZCoin, ZcoinBackend, Zcoin
 use crate::lp_coins_traits::MarketCoinOps;
 use crate::utxo::utxo_common::payment_script;
 use crate::utxo::{UtxoActivationParams, UtxoAddressFormat};
-use crate::{FoundSwapTxSpend, TransactionEnum};
+use crate::{FoundSwapTxSpend, PrivKeyActivationPolicy, TransactionEnum};
 use chain::constants::SEQUENCE_FINAL;
 use common::executor::Timer;
 use common::{block_on, now_ms};
@@ -141,6 +141,7 @@ fn live_coin() -> Option<(MmArc, ZCoin, Vec<String>)> {
         &params,
         priv_key.as_slice(),
         0,
+        PrivKeyActivationPolicy::ContextPrivKey,
         None,
         protocol_info,
         ZcoinBackend::Light {

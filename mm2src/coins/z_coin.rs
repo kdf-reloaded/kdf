@@ -1,5 +1,6 @@
 use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, CapabilityWordStatus,
                                       CAPABILITY_TX_V6};
+use crate::lp_coins_context::PrivKeyActivationPolicy;
 use crate::node_url::lightwalletd_endpoint_label;
 use crate::rpc_command::get_my_address::PathToAddress;
 #[cfg(not(target_arch = "wasm32"))]
@@ -56,28 +57,25 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, Weak};
+use zcash_address::constants::mainnet as z_mainnet_address_constants;
 #[cfg(not(target_arch = "wasm32"))]
 use zcash_client_backend::data_api::{wallet::{input_selection::LockFilter, ConfirmationsPolicy},
                                      InputSource, SentTransaction, TargetValue, WalletCommitmentTrees, WalletRead,
                                      WalletWrite};
 use zcash_client_backend::decrypt_transaction;
+use zcash_keys::constants::mainnet as z_mainnet_constants;
 use zcash_keys::encoding::{decode_payment_address, encode_extended_spending_key, encode_payment_address};
 #[cfg(not(target_arch = "wasm32"))]
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::merkle_tree::read_commitment_tree;
 #[cfg(not(target_arch = "wasm32"))]
-use zcash_primitives::transaction::builder::{BuildConfig, Builder as ZTxBuilder, BundlePadding};
-#[cfg(not(target_arch = "wasm32"))]
 use zcash_primitives::transaction::fees::fixed::FeeRule as FixedFeeRule;
 use zcash_primitives::transaction::Transaction as ZTransaction;
 use zcash_protocol::consensus::{self, BlockHeight, BranchId, NetworkType, NetworkUpgrade, Parameters, H0};
-use zcash_protocol::constants::mainnet as z_mainnet_constants;
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis as Amount;
 #[cfg(not(target_arch = "wasm32"))]
 use zcash_protocol::ShieldedPool;
-#[cfg(not(target_arch = "wasm32"))]
-use zcash_transparent::builder::TransparentSigningSet;
 use zcash_transparent::bundle::TxOut;
 use zip32::ChildIndex;
 // Native-only imports
@@ -92,8 +90,19 @@ use zcash_client_sqlite::WalletDb;
 use zcash_proofs::prover::LocalTxProver;
 
 #[cfg(not(target_arch = "wasm32"))] mod z_htlc;
+#[cfg(not(target_arch = "wasm32"))] mod z_tx_assembler;
+
+/// The operating-system random number generator in the form the Zcash libraries take (an infallible `Rng` of
+/// the 0.10 line of `rand_core`). A failure of the operating system to supply entropy panics, as `OsRng` of
+/// `rand` 0.8 did.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn os_rng() -> rand_core::UnwrapErr<getrandom::SysRng> { rand_core::UnwrapErr(getrandom::SysRng) }
 mod z_htlc_key;
 pub use z_htlc_key::derive_swap_htlc_key_pair;
+mod z_key_switch;
+#[cfg(not(target_arch = "wasm32"))]
+use z_key_switch::check_activation_against_unfinished_swaps;
+pub use z_key_switch::{UnfinishedSwapLeg, UnfinishedSwapsView};
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_htlc_live_probe;
 #[cfg(not(target_arch = "wasm32"))]
@@ -540,14 +549,14 @@ pub struct ZcoinConsensusParams {
 
 impl ZcoinConsensusParams {
     fn network_type_hint(&self) -> NetworkType {
-        use zcash_protocol::constants::{regtest, testnet};
-
-        if self.hrp_sapling_payment_address == testnet::HRP_SAPLING_PAYMENT_ADDRESS
-            && self.hrp_sapling_extended_spending_key == testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY
+        if self.hrp_sapling_payment_address == zcash_address::constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS
+            && self.hrp_sapling_extended_spending_key
+                == zcash_keys::constants::testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY
         {
             NetworkType::Test
-        } else if self.hrp_sapling_payment_address == regtest::HRP_SAPLING_PAYMENT_ADDRESS
-            && self.hrp_sapling_extended_spending_key == regtest::HRP_SAPLING_EXTENDED_SPENDING_KEY
+        } else if self.hrp_sapling_payment_address == zcash_address::constants::regtest::HRP_SAPLING_PAYMENT_ADDRESS
+            && self.hrp_sapling_extended_spending_key
+                == zcash_keys::constants::regtest::HRP_SAPLING_EXTENDED_SPENDING_KEY
         {
             NetworkType::Regtest
         } else {
@@ -619,7 +628,11 @@ impl consensus::Parameters for ZcoinConsensusParams {
             NetworkUpgrade::Blossom => self.blossom_activation_height.map(BlockHeight::from_u32),
             NetworkUpgrade::Heartwood => self.heartwood_activation_height.map(BlockHeight::from_u32),
             NetworkUpgrade::Canopy => self.canopy_activation_height.map(BlockHeight::from_u32),
-            NetworkUpgrade::Nu5 | NetworkUpgrade::Nu6 | NetworkUpgrade::Nu6_1 | NetworkUpgrade::Nu6_2 => None,
+            NetworkUpgrade::Nu5
+            | NetworkUpgrade::Nu6
+            | NetworkUpgrade::Nu6_1
+            | NetworkUpgrade::Nu6_2
+            | NetworkUpgrade::Nu7 => None,
             // Ironwood (NU6.3) is the one post-Sapling upgrade a Pirate chain has. Until its height
             // is configured or discovered it reports `None`, which keeps the builder on the
             // Sapling-era versions; from the height on, the builder selects version 6 (R39.6.4e).
@@ -1105,14 +1118,14 @@ mod native_sapling_cache_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod zip212_decryption_tests {
     use super::*;
-    use rand::rngs::OsRng;
     use sapling::keys::PreparedIncomingViewingKey;
+    use sapling::note_encryption::COMPACT_NOTE_SIZE;
     use sapling::note_encryption::{sapling_note_encryption, try_sapling_compact_note_decryption,
                                    CompactOutputDescription, Zip212Enforcement};
     use sapling::util::generate_random_rseed;
     use sapling::value::NoteValue;
     use sapling::{Note, Rseed};
-    use zcash_note_encryption::{Domain, COMPACT_NOTE_SIZE};
+    use zcash_note_encryption::Domain;
     use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 
     /// ARRR's real mainnet parameters: Pirate has no Blossom, Heartwood or Canopy
@@ -1139,23 +1152,23 @@ mod zip212_decryption_tests {
     /// The rseed a sending wallet produces under `sender_enforcement`:
     /// pre-ZIP-212 when it is `Off`, post-ZIP-212 otherwise.
     fn rseed_from_sender(sender_enforcement: Zip212Enforcement) -> Rseed {
-        generate_random_rseed(sender_enforcement, &mut OsRng)
+        generate_random_rseed(sender_enforcement, &mut os_rng())
     }
 
     fn note_decrypts(rseed: Rseed, enforcement: Zip212Enforcement) -> bool {
-        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[7u8; 32]);
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[7u8; 32]).expect("a valid master key");
         #[allow(deprecated)]
         let extfvk = extsk.to_extended_full_viewing_key();
         let (_, address) = extfvk.default_address();
         let note = Note::from_parts(address, NoteValue::from_raw(100_000), rseed);
-        let encryptor = sapling_note_encryption(None, note.clone(), [0u8; 512], &mut OsRng);
+        let encryptor = sapling_note_encryption(None, note.clone(), [0u8; 512], &mut os_rng());
         let enc = encryptor.encrypt_note_plaintext();
         let compact = CompactOutputDescription {
             ephemeral_key: sapling::note_encryption::SaplingDomain::epk_bytes(encryptor.epk()),
             cmu: note.cmu(),
-            enc_ciphertext: enc[..COMPACT_NOTE_SIZE].try_into().unwrap(),
+            enc_ciphertext: enc.as_ref()[..COMPACT_NOTE_SIZE].try_into().unwrap(),
         };
-        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk().vk.ivk());
         try_sapling_compact_note_decryption(&ivk, &compact, enforcement).is_some()
     }
 
@@ -1548,16 +1561,14 @@ mod ironwood_consensus_param_tests {
     /// build-time default must not gate them off a value that does not apply.
     #[test]
     fn builtin_is_withheld_from_test_and_regtest_parameters() {
-        use zcash_protocol::constants::{regtest, testnet};
-
         for (hrp_addr, hrp_key) in [
             (
-                testnet::HRP_SAPLING_PAYMENT_ADDRESS,
-                testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+                zcash_address::constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
+                zcash_keys::constants::testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             ),
             (
-                regtest::HRP_SAPLING_PAYMENT_ADDRESS,
-                regtest::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+                zcash_address::constants::regtest::HRP_SAPLING_PAYMENT_ADDRESS,
+                zcash_keys::constants::regtest::HRP_SAPLING_EXTENDED_SPENDING_KEY,
             ),
         ] {
             let mut cfg = arrr_params_without_ironwood();
@@ -1575,8 +1586,9 @@ mod ironwood_consensus_param_tests {
         // An explicit configured value still applies on those networks — the
         // withholding is of the *default*, not of the feature.
         let mut cfg = arrr_params_without_ironwood();
-        cfg["hrp_sapling_payment_address"] = json!(testnet::HRP_SAPLING_PAYMENT_ADDRESS);
-        cfg["hrp_sapling_extended_spending_key"] = json!(testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY);
+        cfg["hrp_sapling_payment_address"] = json!(zcash_address::constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS);
+        cfg["hrp_sapling_extended_spending_key"] =
+            json!(zcash_keys::constants::testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY);
         cfg["ironwood_activation_time"] = json!(1_700_000_000u32);
         let params: ZcoinConsensusParams = serde_json::from_value(cfg).unwrap();
         assert_eq!(effective_ironwood_activation_time(&params, "ARRR"), Some(1_700_000_000));
@@ -2033,7 +2045,8 @@ mod light_backend_tests {
             &[1; 32],
             PathBuf::from("./for_tests"),
             None,
-            ExtendedSpendingKey::master(&[7; 32]),
+            ExtendedSpendingKey::master(&[7; 32]).expect("a valid master key"),
+            true,
             arrr_protocol_info(),
             backend,
         )
@@ -2182,12 +2195,17 @@ pub async fn z_coin_from_conf_and_params(
     params: &UtxoActivationParams,
     secp_priv_key: &[u8],
     account: u32,
+    priv_key_policy: PrivKeyActivationPolicy,
     #[cfg(not(target_arch = "wasm32"))] zcash_params_path: Option<PathBuf>,
     protocol_info: ZcoinProtocolInfo,
     backend: ZcoinBackend,
 ) -> Result<ZCoin, MmError<ZCoinBuildError>> {
-    let z_key = shielded_spending_key_for_policy(ctx, secp_priv_key, account, &protocol_info)?;
-    let transparent_secret = transparent_secret_for_policy(ctx, conf, secp_priv_key)?;
+    let z_key = shielded_spending_key_for_policy(ctx, secp_priv_key, account, priv_key_policy, &protocol_info)?;
+    let transparent_secret = transparent_secret_for_policy(ctx, conf, secp_priv_key, priv_key_policy)?;
+    let is_default_key = is_default_shielded_key(ctx, account, priv_key_policy)?;
+    // Before any wallet file is opened: a refusal leaves every file as it was (R39.8.0bd items 5 and 6).
+    #[cfg(not(target_arch = "wasm32"))]
+    check_activation_against_unfinished_swaps(ctx, ticker, &transparent_secret, &ctx.dbdir()).await?;
     z_coin_from_conf_and_params_with_z_key(
         ctx,
         ticker,
@@ -2199,10 +2217,41 @@ pub async fn z_coin_from_conf_and_params(
         #[cfg(not(target_arch = "wasm32"))]
         zcash_params_path,
         z_key,
+        is_default_key,
         protocol_info,
         backend,
     )
     .await
+}
+
+/// Whether the shielded key an activation selects is the login's default key (CRD ch.39 R39.8.0bd): the
+/// iguana key under a single-key login, and under a global-HD login the HD derivation of account 0.
+/// `IguanaPrivKey` under a global-HD login and any other HD account are not the default key. The default
+/// key's wallet database keeps the name it has always had; any other key's wallet database is named by
+/// the fingerprint of its viewing key.
+///
+/// # Errors
+/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, or for a
+/// hardware wallet policy, which a shielded coin does not support.
+pub(crate) fn is_default_shielded_key(
+    ctx: &MmArc,
+    account: u32,
+    priv_key_policy: PrivKeyActivationPolicy,
+) -> Result<bool, MmError<ZCoinBuildError>> {
+    if matches!(priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+        return MmError::err(hardware_policy_error());
+    }
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
+    Ok(match crypto_ctx.key_pair_policy() {
+        KeyPairPolicy::Iguana => true,
+        KeyPairPolicy::GlobalHDAccount(_) => {
+            matches!(priv_key_policy, PrivKeyActivationPolicy::ContextPrivKey) && account == 0
+        },
+    })
+}
+
+fn hardware_policy_error() -> ZCoinBuildError {
+    ZCoinBuildError::HdDerivationError("a shielded coin cannot be activated with a hardware wallet".to_owned())
 }
 
 /// Selects the coin's transparent secp256k1 secret according to the active key policy
@@ -2211,22 +2260,32 @@ pub async fn z_coin_from_conf_and_params(
 /// - **Iguana / legacy passphrase:** the coin's iguana secret, as before.
 /// - **HD (BIP39) wallet:** the key the UTXO builder activates for a UTXO coin's default
 ///   address, `m/<derivation_path>/0'/0/0` of the coins-file `derivation_path`; the
-///   activation request cannot change it (its `account` selects only the Sapling account).
+///   activation request's `account` selects only the Sapling account.
+/// - **HD wallet with `priv_key_policy` `IguanaPrivKey`:** the node's internal key
+///   (`mm2_internal_privkey_secret`), as under a single-key login (R39.6.4, status note of 2026-11-17).
 ///
 /// This secret is the coin's transparent key for every transparent use, and so the base key of
 /// the per-swap HTLC key (R39.5.9).
 ///
 /// # Errors
-/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, or
-/// when the HD policy is active and the coin entry has no usable `derivation_path`.
+/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, when the
+/// policy is a hardware wallet, or when the HD derivation is selected and the coin entry has no usable
+/// `derivation_path`.
 pub(crate) fn transparent_secret_for_policy(
     ctx: &MmArc,
     conf: &Json,
     secp_priv_key: &[u8],
+    priv_key_policy: PrivKeyActivationPolicy,
 ) -> Result<Vec<u8>, MmError<ZCoinBuildError>> {
+    if matches!(priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+        return MmError::err(hardware_policy_error());
+    }
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
     match crypto_ctx.key_pair_policy() {
         KeyPairPolicy::Iguana => Ok(secp_priv_key.to_vec()),
+        KeyPairPolicy::GlobalHDAccount(_) if matches!(priv_key_policy, PrivKeyActivationPolicy::IguanaPrivKey) => {
+            Ok(crypto_ctx.mm2_internal_privkey_secret().as_slice().to_vec())
+        },
         KeyPairPolicy::GlobalHDAccount(hd_ctx) => {
             if conf["derivation_path"].is_null() {
                 return MmError::err(ZCoinBuildError::HdDerivationError(
@@ -2251,30 +2310,42 @@ pub(crate) fn transparent_secret_for_policy(
 ///   seed along the coin's `z_derivation_path` with the activation `account`
 ///   appended as a hardened child (`m/<z_derivation_path>/account'`). In this
 ///   policy `z_derivation_path` is required; its absence is an error.
+/// - **HD wallet with `priv_key_policy` `IguanaPrivKey`:** the ZIP32 master of the node's internal key
+///   (`mm2_internal_privkey_secret`), as under a single-key login; `account` has no effect.
 ///
 /// # Errors
 /// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is
-/// unavailable or the HD policy is active but `z_derivation_path` is absent.
-fn shielded_spending_key_for_policy(
+/// unavailable, the policy is a hardware wallet, or the HD derivation is selected but
+/// `z_derivation_path` is absent.
+pub(crate) fn shielded_spending_key_for_policy(
     ctx: &MmArc,
     secp_priv_key: &[u8],
     account: u32,
+    priv_key_policy: PrivKeyActivationPolicy,
     protocol_info: &ZcoinProtocolInfo,
 ) -> Result<ExtendedSpendingKey, MmError<ZCoinBuildError>> {
+    if matches!(priv_key_policy, PrivKeyActivationPolicy::Trezor) {
+        return MmError::err(hardware_policy_error());
+    }
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
     match crypto_ctx.key_pair_policy() {
-        KeyPairPolicy::Iguana => Ok(ExtendedSpendingKey::master(secp_priv_key)),
+        KeyPairPolicy::Iguana => ExtendedSpendingKey::master(secp_priv_key).or_mm_err(|| {
+            ZCoinBuildError::HdDerivationError("the shielded master spending key is not valid for this seed".to_owned())
+        }),
+        KeyPairPolicy::GlobalHDAccount(_) if matches!(priv_key_policy, PrivKeyActivationPolicy::IguanaPrivKey) => {
+            ExtendedSpendingKey::master(crypto_ctx.mm2_internal_privkey_secret().as_slice()).or_mm_err(|| {
+                ZCoinBuildError::HdDerivationError(
+                    "the shielded master spending key is not valid for the node's internal key".to_owned(),
+                )
+            })
+        },
         KeyPairPolicy::GlobalHDAccount(hd_ctx) => {
             let z_derivation_path = protocol_info.z_derivation_path.as_ref().or_mm_err(|| {
                 ZCoinBuildError::HdDerivationError(
                     "z_derivation_path is required for HD-derived shielded key policy".to_owned(),
                 )
             })?;
-            Ok(derive_hd_shielded_spending_key(
-                hd_ctx.root_seed_bytes(),
-                z_derivation_path,
-                account,
-            ))
+            derive_hd_shielded_spending_key(hd_ctx.root_seed_bytes(), z_derivation_path, account)
         },
     }
 }
@@ -2289,13 +2360,16 @@ pub fn derive_hd_shielded_spending_key(
     root_seed: &[u8],
     z_derivation_path: &HDPathToCoin,
     account: u32,
-) -> ExtendedSpendingKey {
-    let master = ExtendedSpendingKey::master(root_seed);
+) -> Result<ExtendedSpendingKey, MmError<ZCoinBuildError>> {
+    let invalid =
+        || ZCoinBuildError::HdDerivationError("the shielded spending key is not valid for this seed".to_owned());
+    let master = ExtendedSpendingKey::master(root_seed).or_mm_err(invalid)?;
     ExtendedSpendingKey::from_path(&master, &[
         ChildIndex::hardened(z_derivation_path.purpose() as u32),
         ChildIndex::hardened(z_derivation_path.coin_type()),
         ChildIndex::hardened(account),
     ])
+    .or_mm_err(invalid)
 }
 
 #[cfg(test)]
@@ -2312,20 +2386,27 @@ mod hd_shielded_key_tests {
 
         // The account is appended to `z_derivation_path` as a hardened child, i.e.
         // `m/32'/133'/account'` (R39.6.4 §2).
-        let derived0 = encode_extended_spending_key(hrp, &derive_hd_shielded_spending_key(&seed, &path, 0));
+        let derived0 = encode_extended_spending_key(
+            hrp,
+            &derive_hd_shielded_spending_key(&seed, &path, 0).expect("a valid spending key"),
+        );
         let expected0 = encode_extended_spending_key(
             hrp,
-            &ExtendedSpendingKey::from_path(&ExtendedSpendingKey::master(&seed), &[
+            &ExtendedSpendingKey::from_path(&ExtendedSpendingKey::master(&seed).expect("a valid master key"), &[
                 ChildIndex::hardened(32),
                 ChildIndex::hardened(133),
                 ChildIndex::hardened(0),
-            ]),
+            ])
+            .expect("a valid spending key"),
         );
-        assert_eq!(derived0, expected0);
+        assert!(derived0 == expected0, "the derived spending key is the ZIP32 path key");
 
         // Distinct accounts derive distinct spending keys.
-        let derived1 = encode_extended_spending_key(hrp, &derive_hd_shielded_spending_key(&seed, &path, 1));
-        assert_ne!(derived0, derived1);
+        let derived1 = encode_extended_spending_key(
+            hrp,
+            &derive_hd_shielded_spending_key(&seed, &path, 1).expect("a valid spending key"),
+        );
+        assert!(derived0 != derived1, "distinct accounts derive distinct spending keys");
     }
 }
 
@@ -2850,6 +2931,9 @@ pub struct ZCoinBuilder<'a> {
     #[cfg(not(target_arch = "wasm32"))]
     zcash_params_path: Option<PathBuf>,
     z_spending_key: ExtendedSpendingKey,
+    /// Whether `z_spending_key` is the login's default key (R39.8.0bd); decides which wallet database
+    /// files the coin uses.
+    is_default_key: bool,
     protocol_info: ZcoinProtocolInfo,
     backend: ZcoinBackend,
 }
@@ -2961,6 +3045,7 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
                 consensus_params.clone(),
                 &extfvk,
                 self.protocol_info.check_point_block.as_ref(),
+                self.is_default_key,
                 &ShieldedDbUpgradePolicy::from_node_conf(&self.ctx.conf),
             )?;
             let scanned_through = shielded_history
@@ -3090,6 +3175,7 @@ impl<'a> ZCoinBuilder<'a> {
         #[cfg(not(target_arch = "wasm32"))] db_dir_path: PathBuf,
         #[cfg(not(target_arch = "wasm32"))] zcash_params_path: Option<PathBuf>,
         z_spending_key: ExtendedSpendingKey,
+        is_default_key: bool,
         protocol_info: ZcoinProtocolInfo,
         backend: ZcoinBackend,
     ) -> ZCoinBuilder<'a> {
@@ -3104,6 +3190,7 @@ impl<'a> ZCoinBuilder<'a> {
             #[cfg(not(target_arch = "wasm32"))]
             zcash_params_path,
             z_spending_key,
+            is_default_key,
             protocol_info,
             backend,
         }
@@ -3119,6 +3206,7 @@ async fn z_coin_from_conf_and_params_with_z_key(
     #[cfg(not(target_arch = "wasm32"))] db_dir_path: PathBuf,
     #[cfg(not(target_arch = "wasm32"))] zcash_params_path: Option<PathBuf>,
     z_spending_key: ExtendedSpendingKey,
+    is_default_key: bool,
     protocol_info: ZcoinProtocolInfo,
     backend: ZcoinBackend,
 ) -> Result<ZCoin, MmError<ZCoinBuildError>> {
@@ -3133,6 +3221,7 @@ async fn z_coin_from_conf_and_params_with_z_key(
         #[cfg(not(target_arch = "wasm32"))]
         zcash_params_path,
         z_spending_key,
+        is_default_key,
         protocol_info,
         backend,
     );
@@ -3906,12 +3995,12 @@ fn derive_z_key_from_mm_seed() {
 
     let seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
     let secp_keypair = key_pair_from_seed(seed).unwrap();
-    let z_spending_key = ExtendedSpendingKey::master(&*secp_keypair.private().secret);
+    let z_spending_key = ExtendedSpendingKey::master(&*secp_keypair.private().secret).expect("a valid master key");
     let encoded = encode_extended_spending_key(z_mainnet_constants::HRP_SAPLING_EXTENDED_SPENDING_KEY, &z_spending_key);
     assert_eq!(encoded, "secret-extended-key-main1qqqqqqqqqqqqqqytwz2zjt587n63kyz6jawmflttqu5rxavvqx3lzfs0tdr0w7g5tgntxzf5erd3jtvva5s52qx0ms598r89vrmv30r69zehxy2r3vesghtqd6dfwdtnauzuj8u8eeqfx7qpglzu6z54uzque6nzzgnejkgq569ax4lmk0v95rfhxzxlq3zrrj2z2kqylx2jp8g68lqu6alczdxd59lzp4hlfuj3jp54fp06xsaaay0uyass992g507tdd7psua5w6q76dyq3");
 
     let (_, address) = z_spending_key.default_address();
-    let encoded_addr = encode_payment_address(z_mainnet_constants::HRP_SAPLING_PAYMENT_ADDRESS, &address);
+    let encoded_addr = encode_payment_address(z_mainnet_address_constants::HRP_SAPLING_PAYMENT_ADDRESS, &address);
     assert_eq!(
         encoded_addr,
         "zs182ht30wnnnr8jjhj2j9v5dkx3qsknnr5r00jfwk2nczdtqy7w0v836kyy840kv2r8xle5gcl549"
@@ -3919,12 +4008,12 @@ fn derive_z_key_from_mm_seed() {
 
     let seed = "also shoot benefit prefer juice shell elder veteran woman mimic image kidney";
     let secp_keypair = key_pair_from_seed(seed).unwrap();
-    let z_spending_key = ExtendedSpendingKey::master(&*secp_keypair.private().secret);
+    let z_spending_key = ExtendedSpendingKey::master(&*secp_keypair.private().secret).expect("a valid master key");
     let encoded = encode_extended_spending_key(z_mainnet_constants::HRP_SAPLING_EXTENDED_SPENDING_KEY, &z_spending_key);
     assert_eq!(encoded, "secret-extended-key-main1qqqqqqqqqqqqqq8jnhc9stsqwts6pu5ayzgy4szplvy03u227e50n3u8e6dwn5l0q5s3s8xfc03r5wmyh5s5dq536ufwn2k89ngdhnxy64sd989elwas6kr7ygztsdkw6k6xqyvhtu6e0dhm4mav8rus0fy8g0hgy9vt97cfjmus0m2m87p4qz5a00um7gwjwk494gul0uvt3gqyjujcclsqry72z57kr265jsajactgfn9m3vclqvx8fsdnwp4jwj57ffw560vvwks9g9hpu");
 
     let (_, address) = z_spending_key.default_address();
-    let encoded_addr = encode_payment_address(z_mainnet_constants::HRP_SAPLING_PAYMENT_ADDRESS, &address);
+    let encoded_addr = encode_payment_address(z_mainnet_address_constants::HRP_SAPLING_PAYMENT_ADDRESS, &address);
     assert_eq!(
         encoded_addr,
         "zs1funuwrjr2stlr6fnhkdh7fyz3p7n0p8rxase9jnezdhc286v5mhs6q3myw0phzvad5mvqgfxpam"

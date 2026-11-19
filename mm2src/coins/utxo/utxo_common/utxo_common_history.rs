@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
+use crate::UnreadableTransaction;
 use std::collections::HashSet;
 
 lazy_static! {
@@ -499,6 +500,9 @@ where
 
         // This is the cache of the already requested transactions.
         let mut input_transactions = HistoryUtxoTxMap::default();
+        // The transactions this pass skipped because they cannot be read. Rebuilt on every pass and kept in memory
+        // only, so a transaction that reads on a later pass drops out of the report (CRD ch.39 D39.11.4V.1).
+        let mut unreadable: Vec<UnreadableTransaction> = Vec::new();
         for (txid, height) in tx_ids {
             let mut updated = false;
             match history_map.entry(txid) {
@@ -523,7 +527,7 @@ where
                             if transactions_left > 0 {
                                 transactions_left -= 1;
                                 *coin.as_ref().history_sync_state.lock().unwrap() =
-                                    HistorySyncState::InProgress(json!({ "transactions_left": transactions_left }));
+                                    HistorySyncState::utxo_in_progress(transactions_left, &unreadable);
                             }
                             updated = true;
                         },
@@ -540,7 +544,21 @@ where
                                 "tx_history",
                                 "coin" => coin.as_ref().conf.ticker;
                                 fmt = "Error {} on getting the details of {:?}, skipping the tx", e, txid
-                            )
+                            );
+                            // A transaction that cannot be read is reported in the sync status. Any other failure
+                            // (a transport, timeout or backend error) is skipped and tried again on the next pass,
+                            // and is not reported.
+                            if let TxDetailsByHashError::Unreadable(reason) = &e {
+                                let tx_hash = format!("{:02x}", txid);
+                                if !unreadable.iter().any(|skipped| skipped.tx_hash == tx_hash) {
+                                    unreadable.push(UnreadableTransaction {
+                                        tx_hash,
+                                        error: reason.clone(),
+                                    });
+                                    *coin.as_ref().history_sync_state.lock().unwrap() =
+                                        HistorySyncState::utxo_in_progress(transactions_left, &unreadable);
+                                }
+                            }
                         },
                     }
                 },
@@ -596,7 +614,7 @@ where
                 };
             }
         }
-        *coin.as_ref().history_sync_state.lock().unwrap() = HistorySyncState::Finished;
+        *coin.as_ref().history_sync_state.lock().unwrap() = HistorySyncState::utxo_finished(&unreadable);
 
         if success_iteration == 0 {
             log_tag!(
@@ -776,15 +794,76 @@ pub(crate) fn prev_output_at<'a>(
         })
 }
 
+/// Why [`tx_details_by_hash`] could not build the details of one transaction.
+#[derive(Debug)]
+pub enum TxDetailsByHashError {
+    /// The transaction, or the transaction of one of its inputs, cannot be read: it does not parse, or an input
+    /// spends an output that does not exist (CRD ch.38 R38.5A.9). The text is a short fixed reason with the parser's
+    /// error kind, never a payload. The history collector skips the transaction, reports it in the sync status
+    /// (CRD ch.39 D39.11.4V.1) and tries it again on a later pass.
+    Unreadable(String),
+    /// Any other failure: a transport, timeout or backend error, an address that cannot be derived, an amount that
+    /// does not convert. The history collector skips the transaction and tries it again on the next pass; the sync
+    /// status does not report it.
+    Other(String),
+}
+
+impl std::fmt::Display for TxDetailsByHashError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TxDetailsByHashError::Unreadable(text) | TxDetailsByHashError::Other(text) => f.write_str(text),
+        }
+    }
+}
+
+/// The reason text for bytes that do not parse as a transaction: fixed wording plus the parser's error kind. The
+/// text of a parser error of the `Custom` kind is taken over cut to 80 characters (it names a version number or a
+/// fixed sentence); the bytes themselves are never part of it.
+pub(crate) fn parse_failure_reason(what: &str, error: &serialization::Error) -> String {
+    let kind: String = match error {
+        serialization::Error::MalformedData => "malformed data".to_owned(),
+        serialization::Error::UnexpectedEnd => "unexpected end of data".to_owned(),
+        serialization::Error::UnreadData => "unread data after the transaction".to_owned(),
+        serialization::Error::Custom(text) => text.chars().take(80).collect(),
+    };
+    format!("{} cannot be parsed: {}", what, kind)
+}
+
+/// Why a previous transaction could not be had from the map or from the backend.
+enum PrevTxError {
+    /// The backend request failed.
+    Rpc(MmError<UtxoRpcError>),
+    /// The backend answered bytes that do not parse as a transaction.
+    Unparsed(serialization::Error),
+}
+
 pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     coin: &T,
     hash: &[u8],
     input_transactions: &mut HistoryUtxoTxMap,
-) -> Result<TransactionDetails, String> {
+) -> Result<TransactionDetails, TxDetailsByHashError> {
+    // Like `try_s!`, with the failure classed as not unreadable.
+    macro_rules! try_other {
+        ($e:expr) => {
+            match $e {
+                Ok(ok) => ok,
+                Err(err) => return Err(TxDetailsByHashError::Other(ERRL!("{}", err))),
+            }
+        };
+    }
+
     let ticker = &coin.as_ref().conf.ticker;
     let hash = H256Json::from(hash);
-    let verbose_tx = try_s!(coin.as_ref().rpc_client.get_verbose_transaction(&hash).compat().await);
-    let mut tx: UtxoTx = try_s!(deserialize(verbose_tx.hex.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+    let verbose_tx = try_other!(coin.as_ref().rpc_client.get_verbose_transaction(&hash).compat().await);
+    let mut tx: UtxoTx = match deserialize(verbose_tx.hex.as_slice()) {
+        Ok(tx) => tx,
+        Err(e) => {
+            return Err(TxDetailsByHashError::Unreadable(parse_failure_reason(
+                "the transaction",
+                &e,
+            )))
+        },
+    };
     tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     // `derivation_method.iguana_or_err()` only ever succeeds for a
     // single-address (Iguana) account -- it errors outright for an
@@ -798,7 +877,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     let my_address_obj: Address = match &coin_fields.derivation_method {
         DerivationMethod::Iguana(addr) => addr.clone(),
         DerivationMethod::HDWallet(hd_wallet) => {
-            let pk = try_s!(my_public_key(coin_fields));
+            let pk = try_other!(my_public_key(coin_fields));
             address_from_pubkey(
                 pk,
                 coin_fields.conf.pub_addr_prefix,
@@ -830,18 +909,31 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
         }
 
         let prev_tx_hash: H256Json = input.previous_output.hash.reversed().into();
-        let prev_tx = try_s!(
-            coin.get_mut_verbose_transaction_from_map_or_rpc(prev_tx_hash, input_transactions)
-                .await
-        );
+        let prev_tx = match verbose_transaction_or_unparsed(coin, prev_tx_hash, input_transactions).await {
+            Ok(prev_tx) => prev_tx,
+            Err(PrevTxError::Rpc(e)) => return Err(TxDetailsByHashError::Other(ERRL!("{}", e))),
+            Err(PrevTxError::Unparsed(e)) => {
+                return Err(TxDetailsByHashError::Unreadable(parse_failure_reason(
+                    "an input transaction",
+                    &e,
+                )))
+            },
+        };
         let prev_tx = &mut prev_tx.tx;
         prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
 
-        let prev_output = try_s!(prev_output_at(prev_tx, &prev_tx_hash, input.previous_output.index)
-            .map_err(|e| ERRL!("Transaction {:02x} spends a missing output: {}", hash, e)));
+        let prev_output = match prev_output_at(prev_tx, &prev_tx_hash, input.previous_output.index) {
+            Ok(prev_output) => prev_output,
+            Err(e) => {
+                return Err(TxDetailsByHashError::Unreadable(format!(
+                    "an input spends an output that does not exist: {}",
+                    e
+                )))
+            },
+        };
         let prev_tx_value = prev_output.value;
         input_amount += prev_tx_value;
-        let from: Vec<Address> = try_s!(coin.addresses_from_script(&prev_output.script_pubkey.clone().into()));
+        let from: Vec<Address> = try_other!(coin.addresses_from_script(&prev_output.script_pubkey.clone().into()));
         if from.contains(my_address) {
             spent_by_me += prev_tx_value;
         }
@@ -850,7 +942,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
 
     for output in tx.outputs.iter() {
         output_amount += output.value;
-        let to = try_s!(coin.addresses_from_script(&output.script_pubkey.clone().into()));
+        let to = try_other!(coin.addresses_from_script(&output.script_pubkey.clone().into()));
         if to.contains(my_address) {
             received_by_me += output.value;
         }
@@ -897,7 +989,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
             };
             cur + fee
         });
-        (try_s!(fee.try_into()), None)
+        (try_other!(fee.try_into()), None)
     } else {
         let fee = input_amount as i64 - output_amount as i64;
         (big_decimal_from_sat(fee, coin.as_ref().decimals), None)
@@ -906,10 +998,11 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     // remove address duplicates in case several inputs were spent from same address
     // or several outputs are sent to same address
     let mut from_addresses: Vec<String> =
-        try_s!(from_addresses.into_iter().map(|addr| addr.display_address()).collect());
+        try_other!(from_addresses.into_iter().map(|addr| addr.display_address()).collect());
     from_addresses.sort();
     from_addresses.dedup();
-    let mut to_addresses: Vec<String> = try_s!(to_addresses.into_iter().map(|addr| addr.display_address()).collect());
+    let mut to_addresses: Vec<String> =
+        try_other!(to_addresses.into_iter().map(|addr| addr.display_address()).collect());
     to_addresses.sort();
     to_addresses.dedup();
 
@@ -940,11 +1033,14 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     })
 }
 
-pub async fn get_mut_verbose_transaction_from_map_or_rpc<'a, 'b, T>(
-    coin: &'a T,
+/// The transaction `tx_hash` from `utxo_tx_map`, or from the backend when the map does not hold it. A failure of the
+/// backend request and bytes that do not parse are told apart, so that the history collector can report the latter
+/// (CRD ch.39 D39.11.4V.1).
+async fn verbose_transaction_or_unparsed<'b, T>(
+    coin: &T,
     tx_hash: H256Json,
     utxo_tx_map: &'b mut HistoryUtxoTxMap,
-) -> UtxoRpcResult<&'b mut HistoryUtxoTx>
+) -> Result<&'b mut HistoryUtxoTx, PrevTxError>
 where
     T: AsRef<UtxoCoinFields>,
 {
@@ -955,10 +1051,10 @@ where
                 .rpc_client
                 .get_verbose_transaction(&tx_hash)
                 .compat()
-                .await?;
+                .await
+                .map_err(PrevTxError::Rpc)?;
             let tx = HistoryUtxoTx {
-                tx: deserialize(verbose.hex.as_slice())
-                    .map_to_mm(|e| UtxoRpcError::InvalidResponse(format!("{:?}, tx: {:?}", e, tx_hash)))?,
+                tx: deserialize(verbose.hex.as_slice()).map_err(PrevTxError::Unparsed)?,
                 height: verbose.height,
             };
             e.insert(tx)
@@ -966,6 +1062,23 @@ where
         Entry::Occupied(e) => e.into_mut(),
     };
     Ok(tx)
+}
+
+pub async fn get_mut_verbose_transaction_from_map_or_rpc<'a, 'b, T>(
+    coin: &'a T,
+    tx_hash: H256Json,
+    utxo_tx_map: &'b mut HistoryUtxoTxMap,
+) -> UtxoRpcResult<&'b mut HistoryUtxoTx>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    match verbose_transaction_or_unparsed(coin, tx_hash, utxo_tx_map).await {
+        Ok(tx) => Ok(tx),
+        Err(PrevTxError::Rpc(e)) => Err(e),
+        Err(PrevTxError::Unparsed(e)) => {
+            MmError::err(UtxoRpcError::InvalidResponse(format!("{:?}, tx: {:?}", e, tx_hash)))
+        },
+    }
 }
 
 /// This function is used when the transaction details were calculated without considering the KMD rewards.
@@ -1824,5 +1937,366 @@ mod absence_loop_tests {
         let b = after.iter().find(|r| r.tx_hash == hash(B)).unwrap();
         assert_eq!(b.block_height, 0);
         assert_eq!(after.iter().find(|r| r.tx_hash == hash(A)).unwrap().block_height, 100);
+    }
+}
+
+/// CRD ch.39 D39.11.4V.1 and T39.11.4V.8: the legacy collector reports the transactions it skipped because they cannot
+/// be read, in the sync status, one real pass of `process_history_loop` over a native-backed test coin. A pass is
+/// driven from a stored file, so a later pass is a new run over the rows the earlier one wrote.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod unreadable_report_tests {
+    use super::*;
+    use crate::utxo::rpc_clients::{ListTransactionsItem, NativeClient, NativeClientImpl, UtxoRpcFut};
+    use crate::utxo::utxo_tests::software_coin_for_test;
+    use crate::{CoinsContext, MmCoinEnum};
+    use common::block_on;
+    use futures::future::Either;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use mocktopus::mocking::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    const P2PKH: &str = "76a91405aab5342166f8594baf17a7d9bef5d56744332788ac";
+    /// The height every mocked transaction is confirmed at, and at which the listing reports it.
+    const HEIGHT: u64 = 1000;
+
+    /// What the backend answers for one transaction id.
+    #[derive(Clone)]
+    enum Served {
+        Tx(String),
+        Transport,
+    }
+
+    type Backend = Arc<StdMutex<HashMap<[u8; 32], Served>>>;
+
+    fn backend(entries: Vec<([u8; 32], Served)>) -> Backend { Arc::new(StdMutex::new(entries.into_iter().collect())) }
+
+    /// An overwintered version-4 transaction with one input and one P2PKH output. With no `prevout` the input is a
+    /// null one, so the transaction needs no input transaction.
+    fn v4_tx(prevout: Option<([u8; 32], u32)>, value: u64) -> String {
+        let (prev_hash, prev_index) = prevout.unwrap_or(([0u8; 32], u32::MAX));
+        let prev_hash = hex::encode(prev_hash);
+        let prev_index = hex::encode(prev_index.to_le_bytes());
+        let value = hex::encode(value.to_le_bytes());
+        // Header with the overwintered bit, version group id, one input, one output, lock time, expiry height,
+        // value balance, no shielded spends, no shielded outputs, no joinsplits.
+        format!(
+            "04000080{}01{prev_hash}{prev_index}01c9ffffffff01{value}19{P2PKH}{}000000",
+            "85202f89",
+            "00".repeat(16)
+        )
+    }
+
+    /// An overwintered version-6 transaction, which the shared parser refuses.
+    fn v6_tx() -> String { format!("06000080{}{}", "85202f89", "00".repeat(16)) }
+
+    /// The id under which the listing and the rows know the transaction `tx_hex`.
+    fn id_of(tx_hex: &str) -> [u8; 32] {
+        let coin = software_coin_for_test("IDS");
+        let mut tx: UtxoTx = deserialize(hex::decode(tx_hex).unwrap().as_slice()).unwrap();
+        tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
+        let id: H256Json = tx.hash().reversed().into();
+        id.0
+    }
+
+    fn text(id: [u8; 32]) -> String { hex::encode(id) }
+
+    fn verbose_of(tx_hex: &str) -> RpcTransaction {
+        let lelantus_input = |n_fees: f64, serial: &str| {
+            json!({
+                "scriptSig": { "asm": "OP_LELANTUSJOINSPLIT", "hex": "c9" },
+                "nFees": n_fees,
+                "serials": [serial],
+                "sequence": 4294967295u32,
+            })
+        };
+        json::from_value(json!({
+            "hex": tx_hex,
+            "txid": "4242424242424242424242424242424242424242424242424242424242424242",
+            "version": 4,
+            "locktime": 0,
+            "vin": [lelantus_input(0.00003793, "0a0b0c0d")],
+            "vout": [{
+                "value": 0.001,
+                "n": 0,
+                "scriptPubKey": {
+                    "asm": "OP_DUP OP_HASH160 05aab5342166f8594baf17a7d9bef5d567443327 OP_EQUALVERIFY OP_CHECKSIG",
+                    "hex": P2PKH,
+                    "reqSigs": 1,
+                    "type": "pubkeyhash",
+                    "addresses": ["R9o9xTocqr6CeEDGDH6mEYpwLoMz6jNjMW"],
+                },
+            }],
+            "blockhash": "4343434343434343434343434343434343434343434343434343434343434343",
+            "confirmations": 10,
+            "time": 1_700_000_000u64,
+            "blocktime": 1_700_000_000u64,
+            "height": HEIGHT,
+        }))
+        .unwrap()
+    }
+
+    fn transport_error() -> common::jsonrpc_client::JsonRpcError {
+        common::jsonrpc_client::JsonRpcError {
+            client_info: "test".into(),
+            request: common::jsonrpc_client::JsonRpcRequestEnum::Single(common::jsonrpc_client::JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: "1".into(),
+                method: "getrawtransaction".into(),
+                params: vec![],
+            }),
+            error: common::jsonrpc_client::JsonRpcErrorType::Transport("stub failure".into()),
+        }
+    }
+
+    /// Runs one pass over the stored rows `seeded` with the backend listing `listing`, and returns the rows of the
+    /// file after it and the sync status as the RPC answer shows it.
+    fn drive_one_pass(
+        backend: &Backend,
+        listing: &[[u8; 32]],
+        seeded: Vec<TransactionDetails>,
+    ) -> (Vec<TransactionDetails>, Json) {
+        static DIRS: AtomicUsize = AtomicUsize::new(0);
+        let db_root = std::env::temp_dir().join(format!(
+            "kdf-legacy-unreadable-{}-{}",
+            std::process::id(),
+            DIRS.fetch_add(1, AtomicOrdering::SeqCst)
+        ));
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "dbdir": db_root.to_string_lossy() }))
+            .into_mm_arc();
+        std::fs::create_dir_all(ctx.dbdir().join("TRANSACTIONS")).unwrap();
+
+        let coin = software_coin_for_test("UNREADABLE");
+        let my_address = match &coin.as_ref().derivation_method {
+            DerivationMethod::Iguana(a) => a.display_address().unwrap(),
+            _ => unreachable!(),
+        };
+        let history_path = coin.tx_history_path(&ctx);
+        std::fs::write(&history_path, json::to_vec(&seeded).unwrap()).unwrap();
+
+        let listing_requests = Arc::new(AtomicUsize::new(0));
+        let served_by = backend.clone();
+        NativeClient::get_verbose_transaction.mock_safe(move |_client, txid| {
+            let served = served_by.lock().unwrap().get(&txid.0).cloned();
+            let answer: UtxoRpcFut<RpcTransaction> = match served {
+                Some(Served::Tx(tx_hex)) => Box::new(futures01::future::ok(verbose_of(&tx_hex))),
+                Some(Served::Transport) | None => Box::new(futures01::future::err(MmError::new(
+                    UtxoRpcError::Transport(transport_error()),
+                ))),
+            };
+            MockResult::Return(answer)
+        });
+        NativeClient::display_balance
+            .mock_safe(|_client, _addr, _dec| MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(1)))));
+        NativeClientImpl::get_block_count
+            .mock_safe(move |_client| MockResult::Return(Box::new(futures01::future::ok(2000u64))));
+        let listed: Vec<[u8; 32]> = listing.to_vec();
+        let listing_counter = listing_requests.clone();
+        NativeClientImpl::list_transactions.mock_safe(move |_client, _count, from| {
+            if from == 0 {
+                listing_counter.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            let items: Vec<ListTransactionsItem> = if from == 0 {
+                listed
+                    .iter()
+                    .map(|id| ListTransactionsItem {
+                        address: my_address.clone(),
+                        category: "receive".into(),
+                        txid: H256Json::from(*id),
+                        blockheight: Some(HEIGHT),
+                        ..Default::default()
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+            MockResult::Return(Box::new(futures01::future::ok(items)))
+        });
+
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(coins_ctx.add_coin(MmCoinEnum::UtxoCoin(coin.clone()))).unwrap();
+
+        // The pass is over when the listing was asked and the sync state says finished.
+        let finished_coin = coin.clone();
+        let asked = listing_requests.clone();
+        let poll = async move {
+            for _ in 0..400 {
+                if asked.load(AtomicOrdering::SeqCst) > 0
+                    && finished_coin.as_ref().history_sync_state.lock().unwrap().is_finished()
+                {
+                    return;
+                }
+                common::executor::Timer::sleep(0.05).await;
+            }
+            panic!("the pass did not end within 20 s");
+        };
+        let lp = process_history_loop(coin.clone(), ctx.clone());
+        futures::pin_mut!(poll);
+        futures::pin_mut!(lp);
+        match block_on(futures::future::select(poll, lp)) {
+            Either::Left(_) => (),
+            Either::Right(_) => panic!("the loop ended before the pass did"),
+        }
+
+        let after: Vec<TransactionDetails> = json::from_slice(&std::fs::read(&history_path).unwrap()).unwrap();
+        let status = json::to_value(coin.history_sync_status()).unwrap();
+        let _ = std::fs::remove_dir_all(&db_root);
+        (after, status)
+    }
+
+    fn present(rows: &[TransactionDetails], id: [u8; 32]) -> bool { rows.iter().any(|row| row.tx_hash == text(id)) }
+
+    /// The `unreadable_transactions` member of a finished status, as (tx_hash, error) pairs.
+    fn reported(status: &Json) -> Vec<(String, String)> {
+        assert_eq!(status["state"], "Finished");
+        status["additional_info"]["unreadable_transactions"]
+            .as_array()
+            .expect("a finished status with skips carries the list")
+            .iter()
+            .map(|item| {
+                (
+                    item["tx_hash"].as_str().unwrap().to_owned(),
+                    item["error"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn plain_finished(status: &Json) -> bool { json::to_string(status).unwrap() == r#"{"state":"Finished"}"# }
+
+    #[test]
+    fn an_unreadable_transaction_is_reported_and_drops_out_when_it_reads() {
+        let (a, b, c) = (v4_tx(None, 100_000), v4_tx(None, 200_000), v4_tx(None, 300_000));
+        let (a_id, b_id) = (id_of(&a), id_of(&b));
+        let unreadable_id = [0x22u8; 32];
+        let served = backend(vec![
+            (a_id, Served::Tx(a)),
+            (unreadable_id, Served::Tx(v6_tx())),
+            (b_id, Served::Tx(b)),
+        ]);
+
+        // The first pass: both version-4 rows are stored, the version-6 transaction is reported.
+        let listing = [a_id, unreadable_id, b_id];
+        let (rows, status) = drive_one_pass(&served, &listing, vec![]);
+        assert_eq!(rows.len(), 2);
+        assert!(present(&rows, a_id) && present(&rows, b_id));
+        let list = reported(&status);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, text(unreadable_id));
+        assert!(list[0].1.contains("unsupported transaction version 6"), "{}", list[0].1);
+
+        // The next pass reads it as a version-4 transaction: it is stored and the list is empty.
+        let c_id = id_of(&c);
+        served.lock().unwrap().insert(unreadable_id, Served::Tx(c));
+        let (rows, status) = drive_one_pass(&served, &listing, rows);
+        assert_eq!(rows.len(), 3);
+        assert!(present(&rows, a_id) && present(&rows, b_id) && present(&rows, c_id));
+        assert!(
+            plain_finished(&status),
+            "an empty list leaves the plain answer: {status}"
+        );
+    }
+
+    #[test]
+    fn a_transaction_listed_twice_is_reported_once() {
+        let (a, b) = (v4_tx(None, 100_000), v4_tx(None, 200_000));
+        let (a_id, b_id) = (id_of(&a), id_of(&b));
+        let unreadable_id = [0x22u8; 32];
+        let served = backend(vec![
+            (a_id, Served::Tx(a)),
+            (unreadable_id, Served::Tx(v6_tx())),
+            (b_id, Served::Tx(b)),
+        ]);
+        let (rows, status) = drive_one_pass(&served, &[a_id, unreadable_id, unreadable_id, b_id], vec![]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(reported(&status).len(), 1);
+    }
+
+    #[test]
+    fn a_transaction_with_an_unreadable_input_transaction_is_reported_with_the_input_reason() {
+        let (a, b) = (v4_tx(None, 100_000), v4_tx(None, 200_000));
+        let spending = v4_tx(Some(([0xc1u8; 32], 0)), 400_000);
+        let (a_id, b_id, spending_id) = (id_of(&a), id_of(&b), id_of(&spending));
+        let served = backend(vec![
+            (a_id, Served::Tx(a)),
+            (spending_id, Served::Tx(spending)),
+            ([0xc1u8; 32], Served::Tx(v6_tx())),
+            (b_id, Served::Tx(b)),
+        ]);
+        let (rows, status) = drive_one_pass(&served, &[a_id, spending_id, b_id], vec![]);
+        assert_eq!(rows.len(), 2);
+        assert!(present(&rows, a_id) && present(&rows, b_id));
+        let list = reported(&status);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, text(spending_id));
+        assert!(
+            list[0].1.contains("an input transaction cannot be parsed")
+                && list[0].1.contains("unsupported transaction version 6"),
+            "{}",
+            list[0].1
+        );
+    }
+
+    #[test]
+    fn a_transaction_that_spends_a_missing_output_is_reported() {
+        let (a, b) = (v4_tx(None, 100_000), v4_tx(None, 200_000));
+        let spending = v4_tx(Some(([0xc2u8; 32], 5)), 500_000);
+        let (a_id, b_id, spending_id) = (id_of(&a), id_of(&b), id_of(&spending));
+        let served = backend(vec![
+            (a_id, Served::Tx(a.clone())),
+            (spending_id, Served::Tx(spending)),
+            // The input transaction reads, but has one output only.
+            ([0xc2u8; 32], Served::Tx(a)),
+            (b_id, Served::Tx(b)),
+        ]);
+        let (rows, status) = drive_one_pass(&served, &[a_id, spending_id, b_id], vec![]);
+        assert_eq!(rows.len(), 2);
+        let list = reported(&status);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, text(spending_id));
+        assert!(
+            list[0].1.contains("an input spends an output that does not exist")
+                && list[0].1.contains("it has 1 outputs"),
+            "{}",
+            list[0].1
+        );
+    }
+
+    #[test]
+    fn a_transport_error_is_not_reported_and_the_transaction_is_tried_again() {
+        let (a, b, c) = (v4_tx(None, 100_000), v4_tx(None, 200_000), v4_tx(None, 300_000));
+        let (a_id, b_id, c_id) = (id_of(&a), id_of(&b), id_of(&c));
+        let failing_id = [0x55u8; 32];
+        let served = backend(vec![
+            (a_id, Served::Tx(a)),
+            (failing_id, Served::Transport),
+            (b_id, Served::Tx(b)),
+        ]);
+        let listing = [a_id, failing_id, b_id];
+        let (rows, status) = drive_one_pass(&served, &listing, vec![]);
+        // Skipped, as today: no row, and no report.
+        assert_eq!(rows.len(), 2);
+        assert!(
+            plain_finished(&status),
+            "a transport error is not an unreadable transaction: {status}"
+        );
+
+        // The backend answers on the next pass: the transaction is stored then.
+        served.lock().unwrap().insert(failing_id, Served::Tx(c));
+        let (rows, status) = drive_one_pass(&served, &listing, rows);
+        assert_eq!(rows.len(), 3);
+        assert!(present(&rows, c_id));
+        assert!(plain_finished(&status));
+    }
+
+    #[test]
+    fn a_pass_without_a_skip_answers_exactly_as_before() {
+        let (a, b) = (v4_tx(None, 100_000), v4_tx(None, 200_000));
+        let (a_id, b_id) = (id_of(&a), id_of(&b));
+        let served = backend(vec![(a_id, Served::Tx(a)), (b_id, Served::Tx(b))]);
+        let (rows, status) = drive_one_pass(&served, &[a_id, b_id], vec![]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(json::to_string(&status).unwrap(), r#"{"state":"Finished"}"#);
     }
 }
