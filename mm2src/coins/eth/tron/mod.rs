@@ -23,6 +23,8 @@ mod node_client_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod test_node;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod wallet_path_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod withdraw_fee_tests;
 
 pub use activation::{parse_trc20_contract, tron_coin_from_conf_and_request, tron_coin_from_params,
                      tron_coin_from_params_with_global_hd, tron_required_confirmations, TronCoinParams};

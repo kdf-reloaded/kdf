@@ -107,6 +107,7 @@ fn test_withdraw_impl_fee_details() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 10.into(),
         from: None,
         to: "qHmJ3KA6ZAjR9wGjpFASn4gtUSeFAqdZgs".into(),

@@ -1794,6 +1794,7 @@ fn t38_6_4q_11_a_withdraw_of_another_coin_waits_for_the_pending_broadcast_of_a_t
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
             };
             let outcome = doc.withdraw(request).compat().await;
             (outcome.is_ok(), started, std::time::Instant::now())
@@ -1931,6 +1932,7 @@ fn t38_6_4q_9_delegation_and_withdraw_from_one_address_list_one_after_the_other(
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
             };
             qtum.withdraw(request).compat().await.map_err(|e| e.to_string())
         };

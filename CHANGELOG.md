@@ -248,6 +248,31 @@ the previous version used. The safe way:
   address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
   `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: PR #412;
   CRD ch.21 R21.10B.8, D21.10B.2.
+- **A TRON withdrawal works out its real fee, takes it into account in the amount, and fails instead of guessing.**
+  The fee of a TRX or TRC20 withdrawal is now estimated from the real size of the transaction, the sender's free and
+  staked bandwidth and energy, and the chain's current prices. Bandwidth follows the TRON node's own rule: a
+  transaction is paid from the staked bandwidth as a whole, or from the free bandwidth as a whole, or all of it is
+  paid in TRX; the two are never added up, so the estimate is never below what the node charges. Sending TRX to an
+  address the chain has not seen adds the account-creation fee; a TRC20 transfer never does. `max: true` for TRX now
+  sends the balance less the fee (it used to send the whole balance, which the network refused), a zero balance
+  answers `ZeroBalanceToWithdrawMax`, a balance that does not exceed the fee answers `AmountTooLow`, and a TRX amount
+  plus fee above the balance answers `NotSufficientBalance` with the sum. A TRC20 withdrawal whose sender does not
+  hold enough TRX for the fee answers `NotSufficientPlatformBalanceForFee`. If the node cannot be asked for the
+  resources, the prices or the energy of a token transfer, the withdrawal fails with `Transport`; it no longer shows
+  made-up figures or leaves the fee out.
+  The fee limit of a TRC20 transfer is the cost of the energy the transfer needs plus 20%, rounded up, and at most
+  100 TRX; it was a fixed 100 TRX. The fee limit is the most the token transfer's contract call can cost. A transfer
+  whose energy alone would cost more than 100 TRX is refused before anything is signed, with both figures in the
+  error.
+  The members of the TRON fee details changed to the documented ones: `coin`, `bandwidth_used`, `energy_used`,
+  `bandwidth_fee`, `energy_fee`, `total_fee` and, when an account is created, `account_creation_fee`, with the fees
+  as decimal amounts in TRX, as GLEEC KDF reports them. The earlier members in SUN (`total_fee_sun`,
+  `bandwidth_fee_sun`, `energy_fee_sun`, `activation_fee_sun`) are gone. `total_fee` is the expected charge. `spent_by_me` includes the fee for TRX. A `memo` is refused with
+  `UnsupportedError`, and the new optional request member `expiration_seconds` sets how long the transaction stays
+  valid (60 seconds by default); other coins ignore it. An HD `from` is honored throughout: every balance and
+  resource is read for that address.
+  **TRON stays switched off in this build**, so none of this can be used yet. Detail: CRD ch.21 R21.10B.7,
+  D21.10B.1 and their status notes of 2026-11-19; RELOADED_VS_GLEEC.md.
 
 #### Tendermint (Cosmos) coins
 
@@ -758,6 +783,7 @@ the previous version used. The safe way:
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
   (PR #405). The TRON HD wallet is built on the same route, still switched off.
+  The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.
