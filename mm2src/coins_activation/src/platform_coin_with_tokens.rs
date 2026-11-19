@@ -478,8 +478,9 @@ where
 /// node setting would select it.
 fn registered_token_policy(_ctx: &MmArc) -> RegisteredTokenPolicy { RegisteredTokenPolicy::DEFAULT }
 
-/// Refuses a requested token that is registered and that the policy does not keep, before anything is built (CRD
-/// ch.43 R43.1F.4). Runs with the activation locks held, in a first activation and in a re-activation.
+/// Refuses a requested token that is registered for another platform, before anything is built (CRD ch.43
+/// R43.1F.4); a registered token of this platform is kept and joins it again. Runs with the activation locks held,
+/// in a first activation and in a re-activation.
 async fn check_requested_tokens<Platform>(
     ctx: &MmArc,
     ticker: &str,
@@ -605,16 +606,24 @@ where
         mm_tokens.extend(tokens);
     }
 
-    // A token that is already registered keeps its instance and its record (CRD ch.43 R43.1F.4); the others are
-    // recorded now, and forgotten again if the call fails.
+    // A token that is already a dependent keeps its instance and its record (CRD ch.43 R43.1F.4). A registered token
+    // of this platform that is not a dependent keeps its instance too and is recorded from that instance; the others
+    // are recorded from the built tokens. What is recorded now is forgotten again if the call fails.
+    let dependents = CoinsContext::from_ctx(&ctx)
+        .map_to_mm(EnablePlatformCoinWithTokensError::Internal)?
+        .dependents_of(ticker)
+        .await;
     let mut recorded: Vec<String> = Vec::new();
     for token in &mm_tokens {
         let token_ticker = token.ticker();
-        let registered = matches!(lp_coinfind_registered(&ctx, token_ticker).await, Ok(Some(_)));
-        if !registered && !recorded.iter().any(|t| t == token_ticker) {
-            platform_coin.record_token(token);
-            recorded.push(token_ticker.to_owned());
+        if dependents.contains(token_ticker) || recorded.iter().any(|t| t == token_ticker) {
+            continue;
         }
+        match lp_coinfind_registered(&ctx, token_ticker).await {
+            Ok(Some(registered)) => platform_coin.record_token(&registered),
+            _ => platform_coin.record_token(token),
+        }
+        recorded.push(token_ticker.to_owned());
     }
 
     // The answer lists every token on the record, so it is assembled after the record is written.

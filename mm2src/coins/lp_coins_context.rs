@@ -272,7 +272,8 @@ pub struct PlatformNotPassiveErr {
 /// R43.1F.4, D43.1F.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegisteredTokenPolicy {
-    /// A token that is a dependent of the very platform is kept; any other registered ticker is refused.
+    /// A registered token that is a dependent of the platform, or whose instance belongs to it, is kept; a registered
+    /// token of another platform is refused.
     Refuse,
     /// The registered instance is kept whatever it is. Nothing selects it yet.
     Keep,
@@ -385,8 +386,9 @@ impl CoinsContext {
     pub async fn make_passive(&self, ticker: &str) -> bool { self.coins.lock().await.make_passive(ticker) }
 
     /// Refuses the first requested ticker that is registered and that `policy` does not keep, before anything
-    /// is built (CRD ch.43 R43.1F.4). Under [`RegisteredTokenPolicy::Refuse`] a ticker that is already a dependent
-    /// of `platform_ticker` is kept; every other registered ticker is refused. Nothing is changed.
+    /// is built (CRD ch.43 R43.1F.4). Under [`RegisteredTokenPolicy::Refuse`] a ticker is kept when it is already a
+    /// dependent of `platform_ticker`, or when its registered instance belongs to `platform_ticker` (it joins the
+    /// set again); a registered ticker whose instance belongs to another platform is refused. Nothing is changed.
     pub async fn check_requested_tokens(
         &self,
         platform_ticker: &str,
@@ -397,7 +399,13 @@ impl CoinsContext {
         let dependents = coins.dependents_of(platform_ticker);
         for ticker in tickers {
             let kept = match policy {
-                RegisteredTokenPolicy::Refuse => dependents.contains(ticker),
+                RegisteredTokenPolicy::Refuse => {
+                    dependents.contains(ticker)
+                        || coins
+                            .registered()
+                            .get(ticker)
+                            .map_or(false, |coin| coin.platform_ticker() == platform_ticker)
+                },
                 RegisteredTokenPolicy::Keep => true,
             };
             if coins.registered().contains(ticker) && !kept {

@@ -2030,12 +2030,13 @@ mod reactivation {
 
     fn wire_of(error: &MmError<EnablePlatformCoinWithTokensError>) -> (Json, StatusCode) { wire(error) }
 
-    /// T43.1F.5 with D43.1F.1 (b), first activation: a registered token that is no dependent of this platform is
-    /// refused before anything is built, and nothing is registered.
+    /// T43.1F.5 (c'), first activation: a token registered for another platform is refused before anything is
+    /// built, and nothing is registered.
     #[test]
-    fn t43_1f_5_a_legacy_activated_token_is_refused_in_a_first_activation() {
+    fn t43_1f_5_a_token_registered_for_another_platform_is_refused_in_a_first_activation() {
         let ctx = iguana_ctx();
         let (node, count) = counting_node();
+        // The test coin is its own platform, so it is registered for a platform other than ETH.
         block_on(coins_ctx(&ctx).add_coin(TestCoin::new("USDT-ERC20").into())).unwrap();
 
         let wire = failure(
@@ -2053,6 +2054,45 @@ mod reactivation {
             .unwrap()
             .is_none());
         assert!(block_on(coins_ctx(&ctx).dependents_of(PLATFORM)).is_empty());
+    }
+
+    /// T43.1F.5 with the decision of 2026-11-19: after the versioned `disable_coin` of a platform its tokens stay
+    /// registered and its dependent set is dropped. A later activation naming a token that is registered for this
+    /// platform is accepted: the registered instance is kept, joins the set and the token list, and is reported.
+    #[test]
+    fn t43_1f_5_a_token_of_this_platform_left_registered_rejoins_in_a_later_activation() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": [{ "ticker": "USDT-ERC20", "required_confirmations": 7 }] }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the first activation failed: {}", e));
+        let token = token_instance(&ctx, "USDT-ERC20");
+        block_on(coins::disable_coin(&ctx, PLATFORM)).unwrap();
+        assert!(dependents(&ctx).is_empty(), "the dependent set is dropped");
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+
+        let result = activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": [{ "ticker": "USDT-ERC20", "required_confirmations": 9 }] }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the later activation failed: {}", e));
+
+        assert_eq!(token_balances(&result), vec!["USDT-ERC20".to_owned()]);
+        let after = token_instance(&ctx, "USDT-ERC20");
+        assert!(std::ptr::eq(&*token, &*after), "the registered token was replaced");
+        assert_eq!(after.required_confirmations(), 7, "the request's setting was applied");
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert_eq!(recorded_tickers(&ctx), vec!["USDT-ERC20".to_owned()]);
     }
 
     /// The same refusal in a re-activation: the platform stays passive and the record is unchanged.

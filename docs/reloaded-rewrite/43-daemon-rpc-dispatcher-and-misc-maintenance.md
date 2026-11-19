@@ -2039,12 +2039,18 @@ names.
 >    first activation and in a re-activation, under the locks and before
 >    anything is built: a ticker that is already a dependent of this very
 >    platform is kept (the built instance is discarded, the request's token
->    members are not applied, the ticker is reported once); any other
->    registered ticker is refused with `TokenIsAlreadyActivated` (string: the
->    ticker, HTTP 400); cases (c), (d) and (e) of the table are as stated
->    there. This is the `"refuse"` behavior; the check is one function with a
+>    members are not applied, the ticker is reported once); a registered
+>    ticker of another platform is refused with `TokenIsAlreadyActivated`
+>    (string: the ticker, HTTP 400); cases (c), (d) and (e) of the table are
+>    as stated there. This is the `"refuse"` behavior; the check is one function with a
 >    policy argument, so the `"keep"` value of the setting selects the other
->    branch at that one place later.
+>    branch at that one place later. By the decision of 2026-11-19 (D43.1F.1),
+>    "refuse" refuses only a registered ticker whose instance belongs to
+>    another platform (case c'): a registered token of this very platform that
+>    is not a dependent, for example one left by the versioned `disable_coin`
+>    of the platform or activated by the legacy `enable`, is kept, joins the
+>    dependent set and is recorded from the registered instance; the request's
+>    token members are not applied to it.
 > 9. *Token record (D43.1F.2 (b)).* In every family (EVM including TRC20, BCH
 >    with SLP, Tendermint, Solana) the token initializers write nothing to the
 >    platform's token record. The activation writes the tokens it built that
@@ -2061,7 +2067,12 @@ names.
 >     `nft_req` the chain is built anew. A chain that is already active
 >     answers `TokenIsAlreadyActivated` to `enable_nft` whatever the state of
 >     its platform (R43.1F.7). Reloaded has no method that disables an NFT
->     chain by itself, so item 5 of R43.1F.8 has no caller yet.
+>     chain by itself, so item 5 of R43.1F.8 has no caller yet. After the
+>     versioned `disable_coin` of the platform the chain stays active but is in
+>     no dependent set, and a later `enable_nft` answers
+>     `TokenIsAlreadyActivated` without putting it back, so the platform can
+>     then be removed by an unforced `disable_coin` while its NFT chain is
+>     active.
 > 11. *Not yet built.* The `reactivation_registered_token` setting of D43.1F.1
 >     and its `"keep"` value (the default behavior of item 8 is the only one in
 >     effect), and ending the background work of a removed coin (R43.1E.5
@@ -2096,6 +2107,15 @@ turns the silent adoption into an answer.
 > Under either value a token whose configuration names another platform is
 > still refused with `PlatformCoinMismatch` (case c). Option (c), replacing
 > the registered instance, is not offered.
+
+> *Reloaded status (clean side, 2026-11-19):* by the maintainer's decision of
+> 2026-11-19, under `"refuse"` a registered token whose instance belongs to
+> the platform being activated is kept and joins the platform's dependent set
+> and token record, as option (a) does, although it was not a dependent (the
+> cases (a) and (b) of R43.1F.4, for example a token left registered by the
+> versioned `disable_coin` of its platform, or one activated by the legacy
+> `enable`). Only a token registered for another platform (case c') is refused
+> with `TokenIsAlreadyActivated`.
 
 **D43.1F.2** *(Open, 2026-11-18.)* **Failed re-activations and the
 forced-removal race (the second code-quality finding).** Options: (a)

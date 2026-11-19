@@ -316,7 +316,7 @@ fn a_forced_removal_takes_the_platform_and_every_dependent_in_one_step() {
 fn names(tickers: &[&str]) -> Vec<String> { tickers.iter().map(|t| (*t).to_owned()).collect() }
 
 #[test]
-fn the_requested_token_check_keeps_a_dependent_and_refuses_every_other_registered_ticker() {
+fn the_requested_token_check_refuses_only_a_registered_token_of_another_platform() {
     let (_ctx, coins_ctx) = passive_platform();
     block_on(coins_ctx.add_coin(test_coin("LEGACY"))).unwrap();
     let check = |platform: &str, tickers: &[&str], policy| {
@@ -325,12 +325,19 @@ fn the_requested_token_check_keeps_a_dependent_and_refuses_every_other_registere
 
     // A dependent of the very platform and an unregistered ticker pass.
     check("PLAT", &["T1", "NEW"], RegisteredTokenPolicy::Refuse).unwrap();
-    // Any other registered ticker is refused, the first one named.
+    // A registered ticker of another platform is refused, the first one named.
     let refused = check("PLAT", &["T1", "LEGACY", "T2"], RegisteredTokenPolicy::Refuse).unwrap_err();
     assert_eq!(refused.get_inner().ticker, "LEGACY");
     // A dependent of another platform is no dependent of this one.
     let refused = check("OTHER", &["T1"], RegisteredTokenPolicy::Refuse).unwrap_err();
     assert_eq!(refused.get_inner().ticker, "T1");
+    // A registered token whose instance belongs to the platform rejoins it; one of another platform is refused.
+    let bch = bch_coin_without_network_for_test();
+    block_on(coins_ctx.add_coin(bch.clone().into())).unwrap();
+    block_on(coins_ctx.add_coin(slp_token(&bch, "FUSD").into())).unwrap();
+    check("BCH", &["FUSD"], RegisteredTokenPolicy::Refuse).unwrap();
+    let refused = check("PLAT", &["FUSD"], RegisteredTokenPolicy::Refuse).unwrap_err();
+    assert_eq!(refused.get_inner().ticker, "FUSD");
     // The keep policy refuses nothing.
     check("PLAT", &["T1", "LEGACY"], RegisteredTokenPolicy::Keep).unwrap();
     check("OTHER", &["T1"], RegisteredTokenPolicy::Keep).unwrap();

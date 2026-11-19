@@ -73,12 +73,13 @@ or undo, and every change that needs a step from you.
     platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
     Ending a removed coin's background work is still to come.
   - Detail: PR #424; CRD ch.43 §43.1E and §43.1F.
-- **A platform-with-tokens activation that names a token already registered as something else is now refused.**
+- **A platform-with-tokens activation that names a token registered for another platform is now refused.**
   Before, `enable_eth_with_tokens`, `enable_bch_with_tokens`, `enable_tendermint_with_assets`,
   `experimental::enable_solana_with_assets` and the task forms replaced a registered token of the same ticker by a new
-  one built from the request. Now a token that is already an active token of this very platform is kept as it is,
-  and any other registered ticker, for example a token activated by the legacy `enable`, is refused with
-  `TokenIsAlreadyActivated` (HTTP 400) before anything is built. GLEEC KDF keeps the registered token without saying so.
+  one built from the request. Now a token that is registered for this same platform is kept as it is and joins the
+  platform again, for example after the versioned `disable_coin` of the platform or after a token was activated by
+  the legacy `enable`; the request's settings for it are not applied. A token registered for another platform is
+  refused with `TokenIsAlreadyActivated` (HTTP 400) before anything is built.
   - *What to do:* disable the token first, or leave it out of the request.
   - Detail: PR #432; CRD ch.43 §43.1F R43.1F.4.
 
