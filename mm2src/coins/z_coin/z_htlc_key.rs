@@ -53,7 +53,9 @@ mod tests {
     use super::*;
     use crate::rpc_command::get_my_address::PathToAddress;
     use crate::utxo::utxo_builder::derive_activated_hd_secret;
-    use crate::z_coin::transparent_secret_for_policy;
+    use crate::z_coin::{is_default_shielded_key, shielded_spending_key_for_policy, transparent_secret_for_policy,
+                        ZcoinProtocolInfo};
+    use crate::PrivKeyActivationPolicy;
     use keys::{Private, Public};
     use mm2_core::mm_ctx::MmCtxBuilder;
     use serde_json::{json, Value as Json};
@@ -163,12 +165,16 @@ mod tests {
 
         let seed_ctx = ctx_with_policy(false);
         let seed_secret = internal_secret(&seed_ctx);
-        let seed_key = transparent_secret_for_policy(&seed_ctx, &conf, &seed_secret).unwrap();
+        let seed_key =
+            transparent_secret_for_policy(&seed_ctx, &conf, &seed_secret, PrivKeyActivationPolicy::ContextPrivKey)
+                .unwrap();
         // The seed policy changes nothing: the given secret is the coin's key.
         assert_eq!(seed_key, seed_secret);
 
         let hd_ctx = ctx_with_policy(true);
-        let hd_key = transparent_secret_for_policy(&hd_ctx, &conf, &seed_secret).unwrap();
+        let hd_key =
+            transparent_secret_for_policy(&hd_ctx, &conf, &seed_secret, PrivKeyActivationPolicy::ContextPrivKey)
+                .unwrap();
         assert_ne!(hd_key, seed_key);
 
         // Expected: the key at m/44'/141'/0'/0/0 of the same mnemonic, independently spelled out.
@@ -190,13 +196,164 @@ mod tests {
         );
     }
 
+    fn arrr_protocol_info() -> ZcoinProtocolInfo {
+        serde_json::from_value(json!({
+            "consensus_params": {
+                "overwinter_activation_height": 152855,
+                "sapling_activation_height": 152855,
+                "blossom_activation_height": null,
+                "heartwood_activation_height": null,
+                "canopy_activation_height": null,
+                "coin_type": 133,
+                "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+                "hrp_sapling_extended_full_viewing_key": "zxviews",
+                "hrp_sapling_payment_address": "zs",
+                "b58_pubkey_address_prefix": [0x1c, 0xb8],
+                "b58_script_address_prefix": [0x1c, 0xbd]
+            },
+            "z_derivation_path": "m/32'/133'"
+        }))
+        .unwrap()
+    }
+
+    fn spending_key_bytes(key: &sapling::zip32::ExtendedSpendingKey) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        key.write(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// R39.6.4 (status note of 2026-11-17): under a global-HD login `IguanaPrivKey` selects the node's internal
+    /// key for the transparent key and for the shielded key (the ZIP32 master of that secret, as under a
+    /// single-key login); an absent value (`ContextPrivKey`) keeps the HD derivation.
+    #[test]
+    fn iguana_priv_key_under_hd_selects_the_internal_key_for_both_keys() {
+        let conf = json!({"coin": "ARRR", "derivation_path": "m/44'/141'"});
+        let hd_ctx = ctx_with_policy(true);
+        let internal = internal_secret(&hd_ctx);
+        let info = arrr_protocol_info();
+
+        let transparent =
+            transparent_secret_for_policy(&hd_ctx, &conf, &[1; 32], PrivKeyActivationPolicy::IguanaPrivKey).unwrap();
+        assert!(transparent == internal, "the transparent key is the internal key");
+        let shielded =
+            shielded_spending_key_for_policy(&hd_ctx, &[1; 32], 0, PrivKeyActivationPolicy::IguanaPrivKey, &info)
+                .unwrap();
+        assert!(
+            spending_key_bytes(&shielded)
+                == spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&internal)),
+            "the shielded key is the master of the internal key"
+        );
+        // `account` has no effect on that key.
+        let shielded_account_3 =
+            shielded_spending_key_for_policy(&hd_ctx, &[1; 32], 3, PrivKeyActivationPolicy::IguanaPrivKey, &info)
+                .unwrap();
+        assert!(
+            spending_key_bytes(&shielded) == spending_key_bytes(&shielded_account_3),
+            "the account does not change the shielded key"
+        );
+
+        // The default policy under HD is the derivation, which is another key.
+        let hd_shielded =
+            shielded_spending_key_for_policy(&hd_ctx, &internal, 0, PrivKeyActivationPolicy::ContextPrivKey, &info)
+                .unwrap();
+        assert!(
+            spending_key_bytes(&hd_shielded) != spending_key_bytes(&shielded),
+            "the HD derivation is another shielded key"
+        );
+        let hd_transparent =
+            transparent_secret_for_policy(&hd_ctx, &conf, &internal, PrivKeyActivationPolicy::ContextPrivKey).unwrap();
+        assert!(
+            hd_transparent != transparent,
+            "the HD derivation is another transparent key"
+        );
+    }
+
+    /// R39.8.0bd item 5: the HD `account` selects the shielded key only. The transparent key, and with it the
+    /// HTLC key of a swap, is the same for every account, so a change of `account` alone never makes a swap's
+    /// key differ.
+    #[test]
+    fn the_hd_account_changes_the_shielded_key_and_not_the_transparent_or_htlc_key() {
+        let conf = json!({"coin": "ARRR", "derivation_path": "m/44'/141'"});
+        let hd_ctx = ctx_with_policy(true);
+        let internal = internal_secret(&hd_ctx);
+        let info = arrr_protocol_info();
+        let policy = PrivKeyActivationPolicy::ContextPrivKey;
+
+        let transparent = transparent_secret_for_policy(&hd_ctx, &conf, &internal, policy).unwrap();
+        let input = [5u8; 20];
+        let htlc_pub = derive_swap_htlc_key_pair(&key_pair_from_secret(&transparent).unwrap(), &input)
+            .unwrap()
+            .public_slice()
+            .to_vec();
+        let mut shielded_keys = Vec::new();
+        for account in [0u32, 1, 5] {
+            let shielded = shielded_spending_key_for_policy(&hd_ctx, &internal, account, policy, &info).unwrap();
+            shielded_keys.push(spending_key_bytes(&shielded));
+            // The transparent key is read again for every activation: the same secret and the same HTLC key.
+            let again = transparent_secret_for_policy(&hd_ctx, &conf, &internal, policy).unwrap();
+            assert!(again == transparent, "the same transparent secret for every account");
+            let derived = derive_swap_htlc_key_pair(&key_pair_from_secret(&again).unwrap(), &input).unwrap();
+            assert!(
+                derived.public_slice() == htlc_pub.as_slice(),
+                "the same HTLC key for every account"
+            );
+        }
+        shielded_keys.sort();
+        shielded_keys.dedup();
+        assert_eq!(shielded_keys.len(), 3, "each account has its own shielded key");
+    }
+
+    /// Under a single-key login both values select the iguana key; a hardware value is refused.
+    #[test]
+    fn single_key_login_ignores_the_policy_value_and_hardware_is_refused() {
+        let conf = json!({"coin": "ARRR"});
+        let seed_ctx = ctx_with_policy(false);
+        let secret = internal_secret(&seed_ctx);
+        let info = arrr_protocol_info();
+        for policy in [
+            PrivKeyActivationPolicy::ContextPrivKey,
+            PrivKeyActivationPolicy::IguanaPrivKey,
+        ] {
+            assert!(
+                transparent_secret_for_policy(&seed_ctx, &conf, &secret, policy).unwrap() == secret,
+                "a single-key login uses its own key as the transparent key"
+            );
+            assert!(
+                spending_key_bytes(&shielded_spending_key_for_policy(&seed_ctx, &secret, 0, policy, &info).unwrap())
+                    == spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&secret)),
+                "a single-key login uses the master of its own key as the shielded key"
+            );
+        }
+        let hd_ctx = ctx_with_policy(true);
+        for ctx in [&seed_ctx, &hd_ctx] {
+            assert!(transparent_secret_for_policy(ctx, &conf, &secret, PrivKeyActivationPolicy::Trezor).is_err());
+            assert!(shielded_spending_key_for_policy(ctx, &secret, 0, PrivKeyActivationPolicy::Trezor, &info).is_err());
+            assert!(is_default_shielded_key(ctx, 0, PrivKeyActivationPolicy::Trezor).is_err());
+        }
+    }
+
+    /// R39.8.0bd: the default key is the iguana key under a single-key login and the HD derivation of
+    /// account 0 under a global-HD login.
+    #[test]
+    fn the_default_key_of_a_login_is_named_as_specified() {
+        let seed_ctx = ctx_with_policy(false);
+        let hd_ctx = ctx_with_policy(true);
+        use PrivKeyActivationPolicy::{ContextPrivKey, IguanaPrivKey};
+        assert!(is_default_shielded_key(&seed_ctx, 0, ContextPrivKey).unwrap());
+        assert!(is_default_shielded_key(&seed_ctx, 5, IguanaPrivKey).unwrap());
+        assert!(is_default_shielded_key(&hd_ctx, 0, ContextPrivKey).unwrap());
+        assert!(!is_default_shielded_key(&hd_ctx, 1, ContextPrivKey).unwrap());
+        assert!(!is_default_shielded_key(&hd_ctx, 0, IguanaPrivKey).unwrap());
+    }
+
     /// R39.6.4: under the HD policy a coin entry without `derivation_path` fails the build; the seed policy
     /// does not need one.
     #[test]
     fn hd_policy_without_a_derivation_path_is_a_build_error() {
         let conf = json!({"coin": "ARRR"});
         let hd_ctx = ctx_with_policy(true);
-        let err = transparent_secret_for_policy(&hd_ctx, &conf, &[1; 32]).unwrap_err();
+        let err = transparent_secret_for_policy(&hd_ctx, &conf, &[1; 32], PrivKeyActivationPolicy::ContextPrivKey)
+            .unwrap_err();
         assert!(
             err.to_string().contains("derivation_path is required"),
             "{}",
@@ -204,7 +361,9 @@ mod tests {
         );
 
         let seed_ctx = ctx_with_policy(false);
-        assert!(transparent_secret_for_policy(&seed_ctx, &conf, &[1; 32]).is_ok());
+        assert!(
+            transparent_secret_for_policy(&seed_ctx, &conf, &[1; 32], PrivKeyActivationPolicy::ContextPrivKey).is_ok()
+        );
     }
 
     /// The base key of the swap key follows the policy: the same swap input derives a different HTLC key
@@ -215,7 +374,9 @@ mod tests {
         let seed_ctx = ctx_with_policy(false);
         let seed_secret = internal_secret(&seed_ctx);
         let hd_ctx = ctx_with_policy(true);
-        let hd_secret = transparent_secret_for_policy(&hd_ctx, &conf, &seed_secret).unwrap();
+        let hd_secret =
+            transparent_secret_for_policy(&hd_ctx, &conf, &seed_secret, PrivKeyActivationPolicy::ContextPrivKey)
+                .unwrap();
         let input = [9u8; 20];
         let from_seed = derive_swap_htlc_key_pair(&key_pair_from_secret(&seed_secret).unwrap(), &input).unwrap();
         let from_hd = derive_swap_htlc_key_pair(&key_pair_from_secret(&hd_secret).unwrap(), &input).unwrap();

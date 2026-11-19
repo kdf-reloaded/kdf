@@ -1,7 +1,7 @@
 // solana_types — Constants, structs, enums, error types, and core types.
 
 use super::*;
-use crate::solana::rpc_pool::SolanaRpcPool;
+use crate::solana::rpc_pool::{SolanaNodeOrder, SolanaRpcPool};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 /// The text of every swap operation of a Solana coin or token (CRD ch.40 R40.6B.14): swaps are not supported.
@@ -88,7 +88,11 @@ impl From<AccountError> for WithdrawError {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct SolanaActivationParams {
-    confirmation_commitment: CommitmentLevel,
+    /// The commitment level sent with node requests. Required in the request of the primary surface; `None` only
+    /// for the compatibility surface, which sends no commitment level so the node's default applies (CRD ch.40
+    /// R40.6B.4).
+    #[serde(deserialize_with = "required_commitment_level")]
+    confirmation_commitment: Option<CommitmentLevel>,
     /// Single-endpoint shorthand. Kept for backwards compatibility
     /// with existing GUI configs; if `client_urls` is also supplied
     /// the two lists are concatenated (this URL first).
@@ -97,9 +101,17 @@ pub struct SolanaActivationParams {
     /// Multi-endpoint pool. Activation succeeds if at least one URL
     /// is provided across both fields. Endpoints are tried in the
     /// order given; on a transport failure the offender is
-    /// quarantined for `QUARANTINE_TTL_SECS` and traffic moves on.
+    /// set aside after a failure, see the pool.
     #[serde(default)]
     client_urls: Vec<String>,
+}
+
+/// A member that must be present: a missing `confirmation_commitment` fails request parsing, as it did before the
+/// member could be `None`.
+fn required_commitment_level<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<CommitmentLevel>, D::Error> {
+    <CommitmentLevel as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 /// The debug form names each node by its host-only form (CRD ch.40 R40.5A.1, ch.35 R35.1.17).
@@ -122,6 +134,16 @@ impl std::fmt::Debug for SolanaActivationParams {
 }
 
 impl SolanaActivationParams {
+    /// The parameters of the compatibility surface (CRD ch.40 R40.2.1): the nodes in request order and no
+    /// commitment level.
+    pub fn without_commitment(urls: Vec<String>) -> Self {
+        SolanaActivationParams {
+            confirmation_commitment: None,
+            client_url: None,
+            client_urls: urls,
+        }
+    }
+
     /// Flattened endpoint list in dispatch order.
     pub(crate) fn collected_urls(&self) -> Vec<String> {
         let mut v: Vec<String> = Vec::with_capacity(self.client_urls.len() + 1);
@@ -130,6 +152,30 @@ impl SolanaActivationParams {
         }
         v.extend(self.client_urls.iter().cloned());
         v
+    }
+}
+
+/// One node URL of a compatibility request (CRD ch.40 R40.2.1): an absolute URL with a host. Anything else fails
+/// request parsing. The URL is a credential: the failure text is fixed and the debug form is the host-only one.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SolanaNodeUrl(String);
+
+impl SolanaNodeUrl {
+    /// The URL as given; use it to reach the node, never to name it.
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl Debug for SolanaNodeUrl {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult { f.write_str(&crate::node_url::host_only(&self.0)) }
+}
+
+impl<'de> serde::Deserialize<'de> for SolanaNodeUrl {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let url = <String as serde::Deserialize>::deserialize(deserializer)?;
+        match url::Url::parse(&url) {
+            Ok(parsed) if parsed.has_host() => Ok(SolanaNodeUrl(url)),
+            _ => Err(serde::de::Error::custom("Invalid node `url`: expected an absolute URL")),
+        }
     }
 }
 
@@ -246,20 +292,34 @@ pub fn solana_hd_secret(global_hd: &crypto::GlobalHDAccountArc, path: &str) -> R
     Ok(key.signing_key.to_bytes())
 }
 
+/// Builds the platform coin with its nodes in the listed order. Activation uses
+/// [`solana_coin_with_node_order`] with the order of the `solana_node_order` setting.
 pub async fn solana_coin_from_conf_and_params(
+    ticker: &str,
+    conf: &Json,
+    params: SolanaActivationParams,
+    priv_key: &[u8],
+) -> Result<SolanaCoin, String> {
+    solana_coin_with_node_order(ticker, conf, params, priv_key, SolanaNodeOrder::Listed).await
+}
+
+/// Builds the platform coin; its nodes are ranked once, in `order` (CRD ch.40 R40.1.5).
+pub async fn solana_coin_with_node_order(
     ticker: &str,
     _conf: &Json,
     params: SolanaActivationParams,
     priv_key: &[u8],
+    order: SolanaNodeOrder,
 ) -> Result<SolanaCoin, String> {
     let urls = params.collected_urls();
     if urls.is_empty() {
         return Err("Solana activation requires at least one RPC endpoint (client_url or client_urls)".to_owned());
     }
-    let client = SolanaRpcPool::with_commitment(urls, CommitmentConfig {
-        commitment: params.confirmation_commitment,
-    })
-    .ok_or_else(|| "Solana RPC pool initialisation returned no clients".to_owned())?;
+    let commitment = params
+        .confirmation_commitment
+        .map(|commitment| CommitmentConfig { commitment });
+    let client = SolanaRpcPool::with_order(urls, commitment, order)
+        .ok_or_else(|| "Solana RPC pool initialisation returned no clients".to_owned())?;
     // The platform has 9 decimals whatever the entry says (CRD ch.40 R40.6B.2); no top-level key is read.
     let decimals = SOLANA_DEFAULT_DECIMALS as u8;
     let key_pair = try_s!(generate_keypair_from_slice(priv_key));

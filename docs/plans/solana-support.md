@@ -95,7 +95,7 @@ specifications unless a reference question below changes them.
 | S6 | Withdraw fixes for classic SPL tokens: the account and balance derived with the token's `program_id` (a wallet without an account reads zero), the whole amount for SPL `max`, rent counted and shown, the four-member `fee_details`, owner addresses only as recipients, the mint-owner check of R40.2.2; a token whose `program_id` is the Token-2022 program is refused at activation with a structured error (maintainer decision of 2026-11-15, ch. 40 D40.6B.4 (a)) | done, PR #425 |
 | S6b | Full Token-2022 support: balance, source account and transfer under the token's own program, rent for the real account size, a stated rule for mints with a transfer fee (ch. 40 D40.6B.4 (b)) | after S9 |
 | S6c | A rent-exempt guard for SOL withdraws: a withdraw that would leave the sender's account between zero and Solana's rent-exempt minimum, or that sends less than that minimum to an address without an account, answers a structured error instead of a transaction the node refuses at broadcast (code-quality finding in ch. 40 R40.6B.10; kept out of S6 on 2026-11-18) | after S6 |
-| S7 | Compatibility methods `experimental::enable_solana_with_assets` and `experimental::enable_solana_token` over the same activation code, with the §40.2-§40.3 shapes, `getHealth` node selection and the §40.7 tests | after S2 and S6 |
+| S7 | Compatibility methods `experimental::enable_solana_with_assets` and `experimental::enable_solana_token` over the same activation code, with the §40.2-§40.3 shapes, `getHealth` node selection and the §40.7 tests | done, PR #426 (native; WASM with S8) |
 | S8 | WASM routing for both surfaces; a build probe early in the cycle decides how it is built (for example a node client on the target-neutral HTTP layer) | open; probe after S2 |
 | S9 | Switch Solana back on (CRD ch. 40 D40.4): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable `docs/DISABLED_TESTS.md` group 6, retire the refusal tests and the beta notes in ch. 40, ch. 55, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md` and the README; devnet lab rows before it is marked ready | after S1 to S8 (maintainer decision, 2026-11-15) |
 | S10 | Transaction history for SOL and SPL, Reloaded's own design on the public JSON-RPC | after S9 (planned for this cycle) |
@@ -142,7 +142,10 @@ specifications unless a reference question below changes them.
   mint refused at activation (S6; its withdraw rows follow with S6b), message
   signing and the key-policy refusal, `disable_coin` on a token, on a platform
   without tokens and on a platform with tokens, each followed by activating
-  the coin again (S3), and address parity with GLEEC KDF as a black box. An optional mainnet check at the
+  the coin again (S3), both `experimental::` methods (S7), the node pool (S7):
+  an unhealthy node skipped, the random spread (two nodes each see requests
+  from separate activations), `listed` keeping the order, and a set-aside node
+  recovering, and address parity with GLEEC KDF as a black box. An optional mainnet check at the
   switch-on needs a small SOL amount.
 
 ## Out of scope here

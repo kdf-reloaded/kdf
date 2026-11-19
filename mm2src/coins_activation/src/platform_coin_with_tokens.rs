@@ -33,12 +33,16 @@ pub trait TokenOf: Into<MmCoinEnum> {
 }
 
 pub struct TokenActivationParams<Req, Protocol> {
+    /// Read by the generic initializer's implementors; the Solana initializer resolves its tokens itself (it accepts
+    /// an inline custom-token `protocol`, CRD ch.40 R40.2.1), so no implementor remains in this crate.
+    #[allow(dead_code)]
     pub(crate) ticker: String,
     /// The per-token request fields. No generic initializer reads them at present: the BCH initializer,
     /// which did, resolves its tokens itself (it accepts an inline custom-token `protocol`, CRD ch.55
     /// R55.9.2), the same way the EVM initializer does.
     #[allow(dead_code)]
     pub(crate) activation_request: Req,
+    #[allow(dead_code)]
     pub(crate) protocol: Protocol,
 }
 
@@ -238,7 +242,7 @@ pub struct EnablePlatformCoinWithTokensReq<T: Clone> {
     /// It is accepted and ignored: streaming task events is deferred (D55.1).
     #[serde(default)]
     #[allow(dead_code)]
-    client_id: u64,
+    pub(crate) client_id: u64,
     #[serde(flatten)]
     pub(crate) request: T,
 }

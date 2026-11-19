@@ -138,6 +138,22 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
+- **Solana compatibility activation methods.** `experimental::enable_solana_with_assets`
+  and `experimental::enable_solana_token` take GLEEC KDF's requests and answer its results
+  and errors. Where Reloaded differs, no switch exists: a request with `tx_history: true`
+  gets its normal answer (GLEEC KDF ends it without one); a wallet without a token account
+  activates the token with balance `"0"` (GLEEC KDF fails the activation); the platform
+  method also takes `hd_path_layout`, `path_to_address` and `priv_key_policy`; an inline
+  token `protocol` may also use Reloaded's `SPLTOKEN` form. Native builds only for now;
+  Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
+
+- **Solana node selection.** GLEEC KDF asks the nodes `getHealth` in list order before every
+  request and uses the first healthy one. Reloaded draws a random node order once when the coin is
+  enabled (`solana_node_order: "listed"` keeps the listed order), asks a node `getHealth` at most
+  once per 30 seconds, sets a failing node aside for 20 seconds doubling up to 12 hours, and keeps
+  the reads of one withdraw on one node. A sent transaction is never rebuilt on another node. CRD
+  ch.40 R40.1.5; PR #426.
+
 - **Solana wallet methods answer.** On an active Solana coin or SPL token
   GLEEC KDF ends many requests without a JSON answer (`sign_message`,
   `verify_message`, `validateaddress`, `convertaddress`,
@@ -1000,6 +1016,8 @@ behavior, except for `swap_key_check`; the row of each switch in
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by measurement (`mixed`, the default since 2026-11-14; `random` gives the
   earlier default, a random draw).
+- `solana_node_order: "listed"` — a Solana coin's nodes are used in the order they are listed
+  instead of in a random order drawn once when the coin is enabled.
 - `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
   servers, does not fail an activation or refuse trades when they disagree about the chain: a server
   that is behind the chain or stopped following it keeps its place in reads, broadcasts and a swap's
@@ -1153,6 +1171,25 @@ sees the wallet as it was before the upgrade.
 `shielded_db_upgrade_backups` (a whole number, default `1`, lowest effective value `1`) changes the
 number; the backup just made is always kept. Other `.bak` files, such as `.upgrade-failed` and
 `.legacy-v2`, are never deleted by the node.
+
+#### Shielded wallet files per key, and `priv_key_policy`
+
+The shielded activation request accepts `priv_key_policy` in the shape the other coin families use. This is a
+KDF Reloaded addition: whether GLEEC KDF reads it for a shielded coin has not been established here, and the
+legacy/GLEEC database files are not involved either way. Under a global-HD login `IguanaPrivKey` selects the
+node's single internal key (shielded and transparent); leaving it out keeps the HD key.
+
+Each key keeps its own wallet. `<TICKER>_RELOADED_WALLET.db` (with `<TICKER>_RELOADED_COMPACT_BLOCKS.db` and
+`<TICKER>_RELOADED_TX_ADDRESSES.db`) stays with the key whose account it holds, so a wallet created by an
+earlier build is found unchanged. The default key (the single key, or the HD key of account 0) uses these
+names when no wallet exists yet; any other key uses the same three names with a 16-character fingerprint of
+its viewing key before `.db`, for example `ARRR_RELOADED_WALLET.0123456789abcdef.db`. The fingerprint is a hash;
+the viewing key is not in the name. Balance and history show the active key's wallet only. The backup before a
+schema upgrade (see above) covers every one of these files as it is opened.
+
+An activation is refused, with a message that names the swaps and says what to do, while swaps of the coin that
+are not finished were started with another key, and when a wallet file of the coin cannot be read while a swap
+still has to send its payment or fee. Changing the HD `account` alone is allowed.
 
 ## Forward-compatibility commitment
 

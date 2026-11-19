@@ -6,8 +6,9 @@ use crate::solana::solana_common::{amount_to_units, truncate_amount, units_to_am
 /// `withdraw` of SOL (CRD ch.40 R40.6B.9). `fee`, `memo`, `from` and `broadcast` change nothing.
 async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult {
     let to = solana_common::parse_recipient(&req.to)?;
-    let (hash, fee) = coin.estimate_withdraw_fees().await.mm_err(Into::into)?;
-    let balance = coin.rpc().get_balance(&coin.key_pair.pubkey()).await?;
+    // The blockhash, the fee quote and the balance are read from one node; a transport failure reruns the reads on the
+    // next one. Nothing is signed or sent before they are done (CRD ch.40 R40.1.5).
+    let (hash, fee, balance) = coin.withdraw_reads().await?;
     let decimals = coin.decimals;
     let fee_amount = units_to_amount(fee, decimals);
     let balance_amount = units_to_amount(balance, decimals);

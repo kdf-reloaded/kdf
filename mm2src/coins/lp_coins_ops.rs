@@ -948,6 +948,28 @@ pub async fn register_balance_update_handler(
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx.balance_update_handlers.lock().await.push(handler);
 }
+/// Registers the swap layer's reader of the saved swaps that are not finished, which the activation of a
+/// shielded coin checks its key against (CRD ch.39 R39.8.0bd). A second registration replaces the first.
+///
+/// # Errors
+///
+/// Returns the reason when the coins context cannot be created.
+pub fn register_unfinished_swaps_view(
+    ctx: &MmArc,
+    view: Arc<dyn crate::z_coin::UnfinishedSwapsView>,
+) -> Result<(), String> {
+    let coins_ctx = CoinsContext::from_ctx(ctx)?;
+    coins_ctx.set_unfinished_swaps_view(view);
+    Ok(())
+}
+/// Whether a reader of the unfinished swaps is registered in this context.
+///
+/// # Errors
+///
+/// Returns the reason when the coins context cannot be created.
+pub fn unfinished_swaps_view_registered(ctx: &MmArc) -> Result<bool, String> {
+    Ok(CoinsContext::from_ctx(ctx)?.has_unfinished_swaps_view())
+}
 pub fn update_coins_config(mut config: Json) -> Result<Json, String> {
     let coins = match config.as_array_mut() {
         Some(c) => c,

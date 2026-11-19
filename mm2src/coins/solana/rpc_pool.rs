@@ -1,72 +1,124 @@
 //! # Purpose
-//! Thin failover layer that distributes JSON-RPC traffic across a list
-//! of [`SolanaRpcClient`] endpoints with **lazy quarantine** on
-//! transport failures.
+//! The node pool of a Solana coin: it picks the node an operation runs on (CRD ch.40 R40.1.5, the maintainer's
+//! decision of 2026-11-19). It serves every Solana coin, whichever activation surface built it, and every operation of
+//! the coin. A token uses its platform's pool.
 //!
 //! # Design
-//! - The pool owns `Vec<SolanaRpcClient>` and a parallel
-//!   `Vec<EndpointHealth>`. `EndpointHealth` stores a single
-//!   `AtomicI64` — the unix-second timestamp until which the endpoint
-//!   is considered unhealthy. A value `<= now` means "healthy".
-//! - On every call the pool walks the endpoints in registration order
-//!   and dispatches to the first healthy one. On
-//!   [`RpcErrorKind::Transport`] (timeout, DNS, TCP, 5xx) the pool
-//!   marks the endpoint unhealthy for [`QUARANTINE_TTL_SECS`] and
-//!   retries the next endpoint. Server-side `Rpc` errors are returned
-//!   to the caller unchanged — they reflect a request-level fault, not
-//!   an endpoint fault.
-//! - Health state is lock-free (`AtomicI64`); the hot path takes no
-//!   mutexes, which keeps endpoint selection off any shared async lock.
+//! - **Order.** The coin's nodes are put into one order when the pool is built: the listed order under
+//!   [`SolanaNodeOrder::Listed`], a uniformly random permutation drawn once under [`SolanaNodeOrder::Random`] (the
+//!   default; the MM2.json string `solana_node_order`). The order lives in the running coin only.
+//! - **Health.** Before a node is used, `getHealth` is asked of it when it has not been checked in the last
+//!   [`HEALTH_VALID_MS`], or when its set-aside has just ended. A failed check (error answer or transport failure)
+//!   sets the node aside like a transport failure. A passed check is remembered for [`HEALTH_VALID_MS`].
+//! - **Set-aside.** A node is set aside after a transport failure or a failed health check, for
+//!   [`SET_ASIDE_FIRST_MS`], doubling on each consecutive failure up to [`SET_ASIDE_MAX_MS`]; a successful operation
+//!   resets it. Nodes are tried in the pool's order and set-aside nodes are skipped, so a recovered higher-ranked
+//!   node is used again as soon as its set-aside has ended and its health check has passed. When every node is set
+//!   aside, each is tried once in order before the operation fails.
+//! - **One operation, one node.** [`SolanaRpcPool::run`] runs an operation, which may send several requests, on one
+//!   node. A transport failure inside it sets the node aside and reruns the whole operation on the next node, so an
+//!   operation given to `run` must only read or only resend what is already built (CRD ch.40 R40.1.5): a signed
+//!   transaction is never rebuilt or re-signed after it has been sent.
+//! - A server-side `Rpc` or `Decode` error answers for the request, not for the node: it is returned as it is.
 //!
-//! # Non-goals
-//! - No background probing. Recovery is lazy: an endpoint becomes
-//!   eligible again the moment its quarantine expires; the next call
-//!   that lands on it does the actual probe via the underlying RPC.
-//! - No latency-weighted or sticky-by-pubkey strategy. The pool API is
-//!   small enough that a future strategy can replace the body of
-//!   [`SolanaRpcPool::pick_healthy`] without touching call sites.
+//! The clock and the random source are injectable, so the behavior is tested without sleeping.
 
 use crate::solana::rpc_client::{RpcError, RpcErrorKind, SolanaRpcClient, TokenAccountsFilter};
+use common::log::warn;
 use common::now_ms;
+use mm2_core::mm_ctx::MmArc;
+use rand::seq::SliceRandom;
+use serde_json::Value as Json;
 use solana_commitment_config::CommitmentConfig;
 use solana_hash::Hash;
 use solana_message::Message;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_transaction::Transaction;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-/// Default quarantine window for an endpoint that returned a transport
-/// error. Tuned to "long enough that we don't hammer a flaky endpoint,
-/// short enough that a transient network blip does not park it for the
-/// rest of the session". 30 s matches the GLEEC heartbeat cadence.
-pub const QUARANTINE_TTL_SECS: i64 = 30;
+/// How long a passed health check is remembered.
+pub const HEALTH_VALID_MS: u64 = 30_000;
+/// The first set-aside time of a node.
+pub const SET_ASIDE_FIRST_MS: u64 = 20_000;
+/// The longest set-aside time of a node (12 hours).
+pub const SET_ASIDE_MAX_MS: u64 = 12 * 60 * 60 * 1000;
 
-/// Per-endpoint health record. `unhealthy_until <= now` means healthy.
-#[derive(Debug, Default)]
-struct EndpointHealth {
-    unhealthy_until: AtomicI64,
+/// The order in which a coin's nodes are ranked (the MM2.json string `solana_node_order`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolanaNodeOrder {
+    /// The nodes in a uniformly random order drawn once when the coin is built. The default.
+    Random,
+    /// The listed order is kept.
+    Listed,
 }
 
-impl EndpointHealth {
-    fn is_healthy(&self) -> bool { self.unhealthy_until.load(Ordering::Relaxed) <= now_secs_i64() }
-
-    fn quarantine(&self, ttl_secs: i64) {
-        let until = now_secs_i64() + ttl_secs;
-        self.unhealthy_until.store(until, Ordering::Relaxed);
+/// The order `conf` asks for, and the warning to log when its `solana_node_order` is not recognized. An absent key
+/// means `random`. Any other value, `mixed` and `measured` included, means `random`.
+pub fn parse_node_order(conf: &Json) -> (SolanaNodeOrder, Option<String>) {
+    match &conf["solana_node_order"] {
+        Json::Null => (SolanaNodeOrder::Random, None),
+        Json::String(value) if value == "random" => (SolanaNodeOrder::Random, None),
+        Json::String(value) if value == "listed" => (SolanaNodeOrder::Listed, None),
+        other => {
+            let shown = match other {
+                Json::String(value) => value.clone(),
+                other => other.to_string(),
+            };
+            (
+                SolanaNodeOrder::Random,
+                Some(format!(
+                    "solana_node_order \"{shown}\" is not recognized; using \"random\""
+                )),
+            )
+        },
     }
-
-    fn clear(&self) { self.unhealthy_until.store(0, Ordering::Relaxed); }
 }
 
-/// Wall-clock seconds since the Unix epoch as `i64`. We use `i64` so
-/// `quarantine(-1)` (test fixture) yields a value that is unambiguously
-/// in the past on every platform.
-fn now_secs_i64() -> i64 { (now_ms() / 1000) as i64 }
+/// The `MM2.json` string `solana_node_order`: `random` (the default) or `listed`. Any other value is taken as
+/// `random` and one warning is logged.
+///
+/// **Compatibility:** for the node order of the reference, set `solana_node_order` to `listed`.
+pub fn solana_node_order(ctx: &MmArc) -> SolanaNodeOrder {
+    let (order, warning) = parse_node_order(&ctx.conf);
+    if let Some(warning) = warning {
+        warn!("{warning}");
+    }
+    order
+}
 
-/// Failover-aware Solana RPC pool. Cloneable; cloning shares the
-/// underlying clients and health state.
+/// The time source of the pool; tests inject their own.
+pub trait PoolClock: Send + Sync + std::fmt::Debug {
+    fn now_ms(&self) -> u64;
+}
+
+#[derive(Debug)]
+struct SystemClock;
+
+impl PoolClock for SystemClock {
+    fn now_ms(&self) -> u64 { now_ms() }
+}
+
+/// What the pool remembers about one node.
+#[derive(Debug, Default)]
+struct NodeState {
+    /// A passed health check is valid until this time; `0`: the node must be checked before it is used.
+    health_valid_until_ms: u64,
+    /// The node is set aside until this time.
+    set_aside_until_ms: u64,
+    /// Consecutive failures; the next set-aside time follows from it.
+    failures: u32,
+}
+
+/// The set-aside time after `failures` earlier consecutive failures: [`SET_ASIDE_FIRST_MS`], doubling, at most
+/// [`SET_ASIDE_MAX_MS`].
+fn set_aside_ms(failures: u32) -> u64 {
+    SET_ASIDE_FIRST_MS
+        .checked_shl(failures.min(40))
+        .map_or(SET_ASIDE_MAX_MS, |ms| ms.min(SET_ASIDE_MAX_MS))
+}
+
+/// Failover-aware Solana RPC pool. Cloneable; cloning shares the clients and the node memory.
 #[derive(Clone, Debug)]
 pub struct SolanaRpcPool {
     inner: Arc<PoolInner>,
@@ -74,15 +126,15 @@ pub struct SolanaRpcPool {
 
 #[derive(Debug)]
 struct PoolInner {
+    /// In the pool's order.
     clients: Vec<SolanaRpcClient>,
-    health: Vec<EndpointHealth>,
-    quarantine_ttl_secs: i64,
+    states: Vec<Mutex<NodeState>>,
+    clock: Arc<dyn PoolClock>,
 }
 
 impl SolanaRpcPool {
-    /// Build a pool from raw endpoint URLs with the default commitment
-    /// level. Returns `None` if `urls` is empty (the activation layer
-    /// is expected to surface a coin-init error in that case).
+    /// Build a pool from raw endpoint URLs with the default commitment level, in the listed order. Returns `None` if
+    /// `urls` is empty (the activation layer is expected to surface a coin-init error in that case).
     pub fn from_urls<I, S>(urls: I) -> Option<Self>
     where
         I: IntoIterator<Item = S>,
@@ -91,139 +143,215 @@ impl SolanaRpcPool {
         Self::with_commitment(urls, CommitmentConfig::default())
     }
 
-    /// Build a pool from raw endpoint URLs with a caller-supplied
-    /// commitment.
+    /// Build a pool from raw endpoint URLs with a caller-supplied commitment, in the listed order.
     pub fn with_commitment<I, S>(urls: I, commitment: CommitmentConfig) -> Option<Self>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let clients: Vec<SolanaRpcClient> = urls
-            .into_iter()
-            .map(|u| SolanaRpcClient::with_commitment(u, commitment))
-            .collect();
-        if clients.is_empty() {
-            return None;
-        }
-        let health = clients.iter().map(|_| EndpointHealth::default()).collect();
-        Some(Self {
-            inner: Arc::new(PoolInner {
-                clients,
-                health,
-                quarantine_ttl_secs: QUARANTINE_TTL_SECS,
-            }),
-        })
+        Self::with_parts(
+            urls.into_iter().map(Into::into).collect(),
+            Some(commitment),
+            SolanaNodeOrder::Listed,
+            Arc::new(SystemClock),
+            &mut common::small_rng(),
+        )
     }
 
-    /// Build a pool from already-constructed clients. Used by tests
-    /// and by code paths that need per-endpoint commitment overrides.
+    /// Build a pool from raw endpoint URLs whose clients send no commitment level, so the node's default applies
+    /// (the compatibility activation surface, CRD ch.40 R40.6B.4), in the listed order. Returns `None` if `urls` is
+    /// empty.
+    pub fn without_commitment<I, S>(urls: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::with_parts(
+            urls.into_iter().map(Into::into).collect(),
+            None,
+            SolanaNodeOrder::Listed,
+            Arc::new(SystemClock),
+            &mut common::small_rng(),
+        )
+    }
+
+    /// The pool of an activated coin: `commitment` (`None`: no commitment level is sent) and the node `order`.
+    pub fn with_order(urls: Vec<String>, commitment: Option<CommitmentConfig>, order: SolanaNodeOrder) -> Option<Self> {
+        Self::with_parts(urls, commitment, order, Arc::new(SystemClock), &mut common::small_rng())
+    }
+
+    /// Build a pool from every part, the clock and the random source included. Returns `None` if `urls` is empty.
+    pub fn with_parts<R: rand::Rng>(
+        urls: Vec<String>,
+        commitment: Option<CommitmentConfig>,
+        order: SolanaNodeOrder,
+        clock: Arc<dyn PoolClock>,
+        rng: &mut R,
+    ) -> Option<Self> {
+        let clients: Vec<SolanaRpcClient> = urls
+            .into_iter()
+            .map(|url| match commitment {
+                Some(commitment) => SolanaRpcClient::with_commitment(url, commitment),
+                None => SolanaRpcClient::without_commitment(url),
+            })
+            .collect();
+        Self::from_clients_ordered(clients, order, clock, rng)
+    }
+
+    /// Build a pool from already-constructed clients, in the listed order.
     pub fn from_clients(clients: Vec<SolanaRpcClient>) -> Option<Self> {
+        Self::from_clients_ordered(
+            clients,
+            SolanaNodeOrder::Listed,
+            Arc::new(SystemClock),
+            &mut common::small_rng(),
+        )
+    }
+
+    fn from_clients_ordered<R: rand::Rng>(
+        mut clients: Vec<SolanaRpcClient>,
+        order: SolanaNodeOrder,
+        clock: Arc<dyn PoolClock>,
+        rng: &mut R,
+    ) -> Option<Self> {
         if clients.is_empty() {
             return None;
         }
-        let health = clients.iter().map(|_| EndpointHealth::default()).collect();
+        if order == SolanaNodeOrder::Random {
+            clients.shuffle(rng);
+        }
+        let states = clients.iter().map(|_| Mutex::new(NodeState::default())).collect();
         Some(Self {
-            inner: Arc::new(PoolInner {
-                clients,
-                health,
-                quarantine_ttl_secs: QUARANTINE_TTL_SECS,
-            }),
+            inner: Arc::new(PoolInner { clients, states, clock }),
         })
     }
 
     /// Number of endpoints in the pool.
     pub fn len(&self) -> usize { self.inner.clients.len() }
 
-    /// Snapshot of endpoint URLs in registration order.
+    /// Snapshot of endpoint URLs in the pool's order.
     pub fn urls(&self) -> Vec<&str> { self.inner.clients.iter().map(|c| c.url()).collect() }
 
-    /// Returns `true` if **every** endpoint is currently quarantined.
-    /// Useful for diagnostics; the call paths themselves do not branch
-    /// on this — they just attempt the call and surface the last error
-    /// if every endpoint failed.
-    pub fn all_quarantined(&self) -> bool { self.inner.health.iter().all(|h| !h.is_healthy()) }
-
-    /// Manually clear the quarantine on every endpoint (operator
-    /// escape hatch; not used by the hot path).
-    pub fn clear_quarantines(&self) { self.inner.health.iter().for_each(EndpointHealth::clear); }
-
-    fn pick_healthy(&self) -> Vec<usize> {
-        // Healthy endpoints first, then quarantined ones as a last
-        // resort so a fully-quarantined pool still tries to make
-        // progress (and updates health state when it does).
-        let mut healthy = Vec::with_capacity(self.inner.clients.len());
-        let mut stale = Vec::new();
-        for (i, h) in self.inner.health.iter().enumerate() {
-            if h.is_healthy() {
-                healthy.push(i);
-            } else {
-                stale.push(i);
-            }
-        }
-        healthy.extend(stale);
-        healthy
+    fn state(&self, idx: usize) -> std::sync::MutexGuard<'_, NodeState> {
+        self.inner.states[idx].lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Run an async RPC operation against the pool. The closure is
-    /// invoked once per candidate endpoint; the first non-transport
-    /// outcome (success **or** server `Rpc` error) is returned.
-    /// Transport failures quarantine the endpoint and trigger a retry
-    /// against the next candidate.
-    async fn dispatch<T, F, Fut>(&self, op: F) -> Result<T, RpcError>
+    fn is_set_aside(&self, idx: usize) -> bool { self.state(idx).set_aside_until_ms > self.inner.clock.now_ms() }
+
+    fn needs_health_check(&self, idx: usize) -> bool {
+        self.state(idx).health_valid_until_ms <= self.inner.clock.now_ms()
+    }
+
+    fn health_passed(&self, idx: usize) {
+        let until = self.inner.clock.now_ms().saturating_add(HEALTH_VALID_MS);
+        self.state(idx).health_valid_until_ms = until;
+    }
+
+    /// Sets the node aside after a failure; the next health check is due when the set-aside ends. A failure seen while
+    /// the node is already set aside (several operations running at once met the same fault, or the node was tried
+    /// once because every node was set aside) keeps the current set-aside and does not count: only a failure after
+    /// the set-aside has ended, or on a node that was not set aside, counts and doubles the time.
+    fn set_aside(&self, idx: usize) {
+        let now = self.inner.clock.now_ms();
+        let mut state = self.state(idx);
+        if state.set_aside_until_ms > now {
+            state.health_valid_until_ms = 0;
+            return;
+        }
+        state.set_aside_until_ms = now.saturating_add(set_aside_ms(state.failures));
+        state.failures = state.failures.saturating_add(1);
+        state.health_valid_until_ms = 0;
+    }
+
+    /// Tests: reports a failure of the node at `idx` as an operation would.
+    #[cfg(test)]
+    pub(crate) fn report_failure_for_test(&self, idx: usize) { self.set_aside(idx); }
+
+    /// Tests: how long the node at `idx` stays set aside from now, in milliseconds.
+    #[cfg(test)]
+    pub(crate) fn set_aside_remaining_ms_for_test(&self, idx: usize) -> u64 {
+        let now = self.inner.clock.now_ms();
+        self.state(idx).set_aside_until_ms.saturating_sub(now)
+    }
+
+    /// The node answered: the back-off starts over.
+    fn answered(&self, idx: usize) {
+        let mut state = self.state(idx);
+        state.failures = 0;
+        state.set_aside_until_ms = 0;
+    }
+
+    /// Runs `op` on one node. The nodes are tried in the pool's order, set-aside nodes skipped; when every node is
+    /// set aside each is tried once. A node is health-checked first when its check is stale. A transport failure of
+    /// the health check or of `op` sets the node aside and `op` runs again, from its start, on the next node; any
+    /// other outcome is returned as it is. `op` may send several requests, all to the one node it is given.
+    ///
+    /// `op` is rerun after a transport failure, so it must only read, or resend an already built and signed
+    /// transaction unchanged. When no node serves it, the error is the last failure.
+    pub async fn run<T, F, Fut>(&self, op: F) -> Result<T, RpcError>
     where
         F: Fn(SolanaRpcClient) -> Fut,
         Fut: std::future::Future<Output = Result<T, RpcError>>,
     {
-        let order = self.pick_healthy();
+        let mut candidates: Vec<usize> = (0..self.inner.clients.len())
+            .filter(|idx| !self.is_set_aside(*idx))
+            .collect();
+        if candidates.is_empty() {
+            candidates = (0..self.inner.clients.len()).collect();
+        }
         let mut last_err: Option<RpcError> = None;
-        for idx in order {
+        for idx in candidates {
             let client = self.inner.clients[idx].clone();
-            match op(client).await {
-                Ok(v) => {
-                    self.inner.health[idx].clear();
-                    return Ok(v);
-                },
-                Err(e) => match e.kind {
-                    RpcErrorKind::Transport(_) => {
-                        self.inner.health[idx].quarantine(self.inner.quarantine_ttl_secs);
+            if self.needs_health_check(idx) {
+                match client.get_health().await {
+                    Ok(()) => self.health_passed(idx),
+                    Err(e) => {
+                        self.set_aside(idx);
                         last_err = Some(e);
                         continue;
                     },
-                    RpcErrorKind::Decode(_) | RpcErrorKind::Rpc(_) => return Err(e),
+                }
+            }
+            match op(client).await {
+                Ok(value) => {
+                    self.answered(idx);
+                    return Ok(value);
+                },
+                Err(e) => match e.kind {
+                    RpcErrorKind::Transport(_) => {
+                        self.set_aside(idx);
+                        last_err = Some(e);
+                    },
+                    RpcErrorKind::Decode(_) | RpcErrorKind::Rpc(_) => {
+                        self.answered(idx);
+                        return Err(e);
+                    },
                 },
             }
         }
         Err(last_err.unwrap_or_else(|| RpcError::transport("pool", "no endpoints configured")))
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Same surface as SolanaRpcClient. Each method is a one-line
-    // delegate; we intentionally do not macro-generate them so the
-    // signatures are greppable and rust-analyzer "go to definition"
-    // works without cross-macro indirection.
-    // ──────────────────────────────────────────────────────────────
+    // One-request operations. An operation of several requests uses `run` itself.
 
-    pub async fn get_health(&self) -> Result<(), RpcError> {
-        self.dispatch(|c| async move { c.get_health().await }).await
-    }
+    pub async fn get_health(&self) -> Result<(), RpcError> { self.run(|c| async move { c.get_health().await }).await }
 
     pub async fn get_balance(&self, address: &Pubkey) -> Result<u64, RpcError> {
         let address = *address;
-        self.dispatch(move |c| async move { c.get_balance(&address).await })
-            .await
+        self.run(move |c| async move { c.get_balance(&address).await }).await
     }
 
     pub async fn get_block_height(&self) -> Result<u64, RpcError> {
-        self.dispatch(|c| async move { c.get_block_height().await }).await
+        self.run(|c| async move { c.get_block_height().await }).await
     }
 
     pub async fn get_latest_blockhash(&self) -> Result<Hash, RpcError> {
-        self.dispatch(|c| async move { c.get_latest_blockhash().await }).await
+        self.run(|c| async move { c.get_latest_blockhash().await }).await
     }
 
     pub async fn get_fee_for_message(&self, message: &Message) -> Result<u64, RpcError> {
         let msg = message.clone();
-        self.dispatch(move |c| {
+        self.run(move |c| {
             let msg = msg.clone();
             async move { c.get_fee_for_message(&msg).await }
         })
@@ -231,13 +359,15 @@ impl SolanaRpcPool {
     }
 
     pub async fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64, RpcError> {
-        self.dispatch(move |c| async move { c.get_minimum_balance_for_rent_exemption(data_len).await })
+        self.run(move |c| async move { c.get_minimum_balance_for_rent_exemption(data_len).await })
             .await
     }
 
+    /// Sends the signed transaction `tx`. A failure is retried on the next node with the same signed bytes; the
+    /// transaction is never rebuilt or re-signed here.
     pub async fn send_transaction(&self, tx: &Transaction) -> Result<Signature, RpcError> {
         let tx = tx.clone();
-        self.dispatch(move |c| {
+        self.run(move |c| {
             let tx = tx.clone();
             async move { c.send_transaction(&tx).await }
         })
@@ -250,7 +380,7 @@ impl SolanaRpcPool {
         filter: TokenAccountsFilter,
     ) -> Result<Vec<crate::solana::rpc_client::KeyedTokenAccount>, RpcError> {
         let owner = *owner;
-        self.dispatch(move |c| {
+        self.run(move |c| {
             let filter = filter.clone();
             async move { c.get_token_accounts_by_owner(&owner, filter).await }
         })
@@ -262,88 +392,19 @@ impl SolanaRpcPool {
         account: &Pubkey,
     ) -> Result<crate::solana::rpc_client::TokenAmount, RpcError> {
         let account = *account;
-        self.dispatch(move |c| async move { c.get_token_account_balance(&account).await })
+        self.run(move |c| async move { c.get_token_account_balance(&account).await })
             .await
     }
 
     pub async fn get_account_exists(&self, address: &Pubkey) -> Result<bool, RpcError> {
         let address = *address;
-        self.dispatch(move |c| async move { c.get_account_exists(&address).await })
+        self.run(move |c| async move { c.get_account_exists(&address).await })
             .await
     }
 
     pub async fn get_account_owner(&self, address: &Pubkey) -> Result<Option<Pubkey>, RpcError> {
         let address = *address;
-        self.dispatch(move |c| async move { c.get_account_owner(&address).await })
+        self.run(move |c| async move { c.get_account_owner(&address).await })
             .await
-    }
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Tests
-// ────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_reject_empty_endpoint_list() {
-        let none: Option<SolanaRpcPool> = SolanaRpcPool::from_urls(Vec::<String>::new());
-        assert!(none.is_none());
-    }
-
-    #[test]
-    fn should_preserve_endpoint_order() {
-        let pool = SolanaRpcPool::from_urls(vec!["http://a", "http://b", "http://c"]).unwrap();
-        assert_eq!(pool.urls(), vec!["http://a", "http://b", "http://c"]);
-        assert_eq!(pool.len(), 3);
-    }
-
-    #[test]
-    fn should_mark_endpoint_healthy_initially() {
-        let pool = SolanaRpcPool::from_urls(vec!["http://a"]).unwrap();
-        assert!(!pool.all_quarantined());
-    }
-
-    #[test]
-    fn should_quarantine_endpoint_for_ttl_then_recover() {
-        let h = EndpointHealth::default();
-        assert!(h.is_healthy());
-        h.quarantine(QUARANTINE_TTL_SECS);
-        assert!(!h.is_healthy());
-        h.clear();
-        assert!(h.is_healthy());
-    }
-
-    #[test]
-    fn should_treat_negative_ttl_as_immediate_recovery() {
-        let h = EndpointHealth::default();
-        h.quarantine(-1);
-        assert!(h.is_healthy());
-    }
-
-    #[test]
-    fn should_pick_healthy_endpoints_before_quarantined_ones() {
-        let pool = SolanaRpcPool::from_urls(vec!["http://a", "http://b", "http://c"]).unwrap();
-        // Quarantine the first endpoint and expect it to be tried last.
-        pool.inner.health[0].quarantine(QUARANTINE_TTL_SECS);
-        let order = pool.pick_healthy();
-        assert_eq!(order, vec![1, 2, 0]);
-    }
-
-    #[test]
-    fn should_report_all_quarantined_when_every_endpoint_is_parked() {
-        let pool = SolanaRpcPool::from_urls(vec!["http://a", "http://b"]).unwrap();
-        pool.inner.health.iter().for_each(|h| h.quarantine(QUARANTINE_TTL_SECS));
-        assert!(pool.all_quarantined());
-    }
-
-    #[test]
-    fn should_clear_quarantines_on_demand() {
-        let pool = SolanaRpcPool::from_urls(vec!["http://a", "http://b"]).unwrap();
-        pool.inner.health.iter().for_each(|h| h.quarantine(QUARANTINE_TTL_SECS));
-        pool.clear_quarantines();
-        assert!(!pool.all_quarantined());
     }
 }
