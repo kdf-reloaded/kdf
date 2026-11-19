@@ -551,9 +551,9 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   or a failed activation closes no session another instance uses. What
   differs on a shared client:
   - *Sessions.* Each server holds one session for all sharing instances.
-  - *Naming.* Transport error texts, log lines and `CoinTransportMetrics`
-    name the platform ticker, also for a token's requests, and
-    `electrum_servers` for a token reports the shared client.
+  - *Naming.* Activation errors, transport error texts, log lines and
+    `CoinTransportMetrics` name the platform ticker, also for a token's
+    requests, and `electrum_servers` for a token reports the shared client.
   - *Disagreeing servers.* A token that would reuse a client whose servers
     disagree is refused with `ElectrumServersDisagree`, as a fresh build is.
   - *Subscriptions.* A disabled instance's remembered subscriptions are

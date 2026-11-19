@@ -201,11 +201,11 @@ which serves one wallet, so no client crosses wallet identities.
 5. Add bounded INFO diagnostics for ownership creation/reuse/release and TRACE
    attribution for individual calls. Avoid periodic success logs.
 
-*P5 (2026-11-19).* PR #427 implements the shared client of D38.6.4Q.1 as its
-status note in CRD ch.38 records it: items 1 and 4, and item 3 for QTUM and a
-token activating at the same time. Still open: a test of a repeated activation
-of one instance (item 3), and the INFO lines for creating, reusing and releasing
-a shared client (item 5).
+*P5 (2026-11-19).* PR #427 implements the shared client of D38.6.4Q.1, all six
+items of its status note in CRD ch.38. Of the Phase C items above, it covers
+items 1 and 4, and item 3 for QTUM and a token activating at the same time.
+Still open in Phase C: a test of a repeated activation of one instance (item 3),
+and the INFO lines for creating, reusing and releasing a shared client (item 5).
 
 ## Phase D -- QRC20 history reliability
 

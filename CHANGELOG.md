@@ -549,10 +549,10 @@ the previous version used. The safe way:
   failed activation, closes no connection the others use. A subscription of a disabled instance is
   no longer placed again after a reconnect unless another instance still uses it. A token that
   would join a set whose servers disagree about the chain is refused with the same error as a new
-  activation. On a shared set, transport error texts, log lines and transport metrics name the
-  platform (for example `QTUM`) also for a token's requests, and `electrum_servers` for a token
-  reports the shared set. A shared record of spent coins is still planned. Detail: PR #427; CRD
-  ch.38 D38.6.4Q.1 and its status note.
+  activation. On a shared set, activation errors, transport error texts, log lines and transport
+  metrics name the platform (for example `QTUM`) also for a token, and `electrum_servers` for a token
+  reports the shared set. A shared record of spent coins is still planned. Detail: PR #427; CRD ch.38
+  D38.6.4Q.1 and its status note.
 
 ### Tests
 
