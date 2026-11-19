@@ -823,6 +823,16 @@ is fed back to the legacy broadcast method, and the Sia-specific
 not by this chapter. `tx_json` is absent for every other coin family, and its
 absence is not an error.
 
+> **Sign-only gasless result (pointer, 2026-11-19).** The sign-only result of
+> the Tron gasless rail is a second result, after the unsigned results of
+> [Chapter 36](36-tendermint-v2-activation-rpcs.md) R36.14.17, that carries
+> neither `tx_hex` nor `tx_hash`: nothing in it can be broadcast, and its
+> additional top-level members hold an off-chain authorization instead. Those
+> members are stated by [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8A
+> (R25-R28). R49.25's "mandatory for a completed withdrawal transaction" does
+> not reach that result. §63.8A is not cleared until the KDF Dirty Gate passes
+> it.
+
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
 `withdraw` result with the `details` payload of a successful task withdrawal.
