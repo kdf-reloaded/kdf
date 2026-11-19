@@ -209,6 +209,8 @@ impl<'a> UtxoCoinBuilderCommonOps for QtumCoinBuilder<'a> {
 
     fn ticker(&self) -> &str { self.ticker }
 
+    fn shared_electrum_platform(&self) -> Option<&str> { Some(self.ticker) }
+
     fn check_utxo_maturity(&self) -> bool { self.activation_params().check_utxo_maturity.unwrap_or(true) }
 }
 

@@ -1,6 +1,7 @@
 use super::*;
 use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
 use crate::utxo::rpc_clients::electrum_pool::every_server_answered_an_error;
+use crate::utxo::rpc_clients::UtxoJsonRpcClientInfo;
 use crate::utxo::{RequestTxHistoryResult, UtxoFeeDetails};
 use crate::{CoinsContext, MmCoinEnum, TxFeeDetails, TxHistoryResult};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -516,9 +517,10 @@ impl Qrc20Coin {
                         },
                         // The pool reports a call that failed on every server it tried as a transport failure.
                         JsonRpcErrorType::Transport(err) => {
+                            // The failure names the client, which is the platform's on a shared client.
                             let kind = match self.utxo.rpc_client {
-                                UtxoRpcClientEnum::Electrum(_)
-                                    if every_server_answered_an_error(&self.utxo.conf.ticker, &err) =>
+                                UtxoRpcClientEnum::Electrum(ref client)
+                                    if every_server_answered_an_error(client.coin_name(), &err) =>
                                 {
                                     HistoryPassKind::EveryServerAnsweredAnError
                                 },
@@ -1074,7 +1076,7 @@ fn is_transfer_event_log(log: &LogEntry) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use common::block_on;
