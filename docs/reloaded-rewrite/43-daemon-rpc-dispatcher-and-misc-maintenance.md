@@ -2042,8 +2042,9 @@ names.
 >    members are not applied, the ticker is reported once); a registered
 >    ticker of another platform is refused with `TokenIsAlreadyActivated`
 >    (string: the ticker, HTTP 400); cases (c), (d) and (e) of the table are
->    as stated there. This is the `"refuse"` behavior; the check is one function with a
->    policy argument, so the `"keep"` value of the setting selects the other
+>    as stated there. This is the `"refuse"` behavior; the check is one
+>    function with a policy argument, so the `"keep"` value of the setting
+>    selects the other
 >    branch at that one place later. By the decision of 2026-11-19 (D43.1F.1),
 >    "refuse" refuses only a registered ticker whose instance belongs to
 >    another platform (case c'): a registered token of this very platform that

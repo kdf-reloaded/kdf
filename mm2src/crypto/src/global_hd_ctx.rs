@@ -50,7 +50,7 @@ pub struct GlobalHDAccountCtx {
     /// The root BIP39 seed (64 bytes), derived from the mnemonic.
     bip39_seed: Bip39Seed,
     /// BIP32 secp256k1 master extended private key, derived from `bip39_seed`.
-    bip39_secp_priv_key: ExtendedPrivateKey<secp256k1::SecretKey>,
+    bip39_secp_priv_key: ExtendedPrivateKey<secp256k1_33::SecretKey>,
     /// SLIP-0010 ed25519 master extended signing key, derived from `bip39_seed`.
     ed25519_master_priv_key: ExtendedSigningKey,
 }
@@ -66,8 +66,8 @@ impl GlobalHDAccountCtx {
     /// max account index) and is used for P2P identity and internal signing.
     pub fn new(mnemonic_str: &str) -> Result<(Mm2InternalKeyPair, GlobalHDAccountCtx), MmError<PrivKeyError>> {
         let bip39_seed = bip39_seed_from_mnemonic(mnemonic_str)?;
-        let bip39_secp_priv_key: ExtendedPrivateKey<secp256k1::SecretKey> =
-            ExtendedPrivateKey::new(bip39_seed.0).map_to_mm(PrivKeyError::Secp256k1MasterKey)?;
+        let bip39_secp_priv_key: ExtendedPrivateKey<secp256k1_33::SecretKey> =
+            ExtendedPrivateKey::new(&bip39_seed.0).map_to_mm(PrivKeyError::Secp256k1MasterKey)?;
 
         let ed25519_master_priv_key =
             ExtendedSigningKey::from_seed(&bip39_seed.0).map_to_mm(PrivKeyError::Ed25519MasterKey)?;
@@ -83,7 +83,7 @@ impl GlobalHDAccountCtx {
         }
         drop_mutability!(internal_priv_key);
 
-        let mm2_internal_key_pair = key_pair_from_secret(internal_priv_key.private_key().as_ref())?;
+        let mm2_internal_key_pair = key_pair_from_secret(&internal_priv_key.private_key().to_secret_bytes())?;
 
         let global_hd_ctx = GlobalHDAccountCtx {
             bip39_seed,
@@ -104,7 +104,7 @@ impl GlobalHDAccountCtx {
     pub fn root_seed_bytes(&self) -> &[u8] { &self.bip39_seed.0 }
 
     /// Returns the root BIP32 secp256k1 extended private key.
-    pub fn root_priv_key(&self) -> &ExtendedPrivateKey<secp256k1::SecretKey> { &self.bip39_secp_priv_key }
+    pub fn root_priv_key(&self) -> &ExtendedPrivateKey<secp256k1_33::SecretKey> { &self.bip39_secp_priv_key }
 
     /// Derives a secp256k1 secret key at the given BIP32 derivation path.
     ///
@@ -145,7 +145,7 @@ impl GlobalHDAccountCtx {
 
 /// Derives a secp256k1 secret key by walking a BIP32 derivation path from a given extended private key.
 pub fn derive_secp256k1_secret(
-    bip39_secp_priv_key: ExtendedPrivateKey<secp256k1::SecretKey>,
+    bip39_secp_priv_key: ExtendedPrivateKey<secp256k1_33::SecretKey>,
     derivation_path: &DerivationPath,
 ) -> MmResult<Secp256k1Secret, hw_common::primitives::Bip32Error> {
     let mut priv_key = bip39_secp_priv_key;
@@ -154,7 +154,7 @@ pub fn derive_secp256k1_secret(
     }
     drop_mutability!(priv_key);
 
-    let secret = *priv_key.private_key().as_ref();
+    let secret: [u8; 32] = priv_key.private_key().to_secret_bytes();
     Ok(Secp256k1Secret::from(secret))
 }
 
@@ -166,7 +166,7 @@ pub fn derive_secp256k1_secret(
 /// path (`purpose'/coin_type'/account'`), then serialise the result to the canonical `xpub`
 /// form via `.to_string(bip32::Prefix::XPUB)`.
 pub fn derive_secp256k1_extended_pubkey(
-    bip39_secp_priv_key: ExtendedPrivateKey<secp256k1::SecretKey>,
+    bip39_secp_priv_key: ExtendedPrivateKey<secp256k1_33::SecretKey>,
     derivation_path: &DerivationPath,
 ) -> MmResult<Secp256k1ExtendedPublicKey, Bip32Error> {
     let mut priv_key = bip39_secp_priv_key;

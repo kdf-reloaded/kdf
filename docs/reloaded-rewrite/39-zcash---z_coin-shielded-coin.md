@@ -1576,6 +1576,20 @@ values the bytes do not carry.
 > the bundle's spent notes; a wallet built that way holds no Ironwood notes, so no such
 > spend can be its own. The patch skips that step and changes nothing else.
 
+> **Status note (2026-11-18, Reloaded-original; wallet-library upgrade).** The patched copy of the
+> wallet-database crate named above is removed. The wallet-database crate is now the published
+> `zcash_client_sqlite 0.23.0`, built with its `orchard` feature, with which recording a sent
+> transaction that carries an Ironwood bundle does not stop the process (checked on the real Pirate1
+> withdrawal of the probe). The vendored copies of `zcash_primitives` and `zcash_transparent` are
+> removed as well (chapter 34, entry of 2026-11-18); the transaction hooks they provided are replaced
+> by this project's own assembler over the published interface. The stack since this upgrade is
+> `zcash_primitives 0.31.1`, `zcash_transparent 0.11.1`, `zcash_client_backend 0.25.0`,
+> `zcash_client_sqlite 0.23.0`, `zcash_proofs 0.31.0`, `zcash_protocol 0.11.0`,
+> `sapling-crypto 0.9.0` and `orchard 0.16.0`, all unmodified. The transaction expiry delta of a
+> shielded coin is set explicitly to 40 blocks, the value the builder used before, and no longer
+> follows the library's per-branch default; the NU7 network upgrade reports no activation height for
+> a shielded coin, as every other upgrade after Sapling except Ironwood does (R39.6.4d).
+
 R39.6.5h **The Ironwood proving key.** The proving key for Ironwood actions shall be
 derived in the process from the circuit, on the first build that needs it, and kept for
 the life of the process. Nothing is downloaded, shipped or checked by hash: the proving
@@ -1635,6 +1649,11 @@ of T39.6.5a that pays from Sapling into Ironwood has the same flags and the same
 > T39.6.5d (the flags and anchor of a built bundle, `z_pirate1_tests.rs`) and T39.6.5c (the built
 > withdrawal, `z_note_lock_tests/pirate1_withdraw.rs`), which pass before and after.
 
+> **Status note (2026-11-18, Reloaded-original).** The dedicated builder constructor named in the
+> note above no longer exists: the patched builder is removed, and the output-only Ironwood bundle is
+> built by this project's own assembler (§39.6.5B, R39.6.5j--R39.6.5n) with the same flags, anchor and
+> padding.
+
 T39.6.5e *The broadcast record.* A submitted Pirate1 withdrawal is recorded: its fee is
 derived from the bytes, its notes are excluded from the next selection until its block
 is scanned or it expires, its unmined history row carries the final amounts, and its
@@ -1681,6 +1700,82 @@ change counts as non-spendable balance.
 > offered, as the maintainer decided on 2026-11-04: GLEEC KDF cannot build any transaction
 > for the post-Ironwood chain (R39.6.4a, its compatibility note), so refusing the address
 > would restore nothing that works. The row is in `docs/GLEEC_COMPATIBILITY.md`.
+
+### 39.6.5B The transaction assembler (wallet-library upgrade)
+
+The published transaction builder of the Zcash libraries cannot express four things a shielded
+coin needs: a transparent input that spends a swap contract output with this project's script
+signature and a chosen sequence number, an explicit legacy lock time, transparent outputs kept
+exactly as given, and an output-only Ironwood bundle. Earlier builds obtained them from patched,
+vendored copies of the builder (R39.6.5d, the status note of 2026-11-15). Since the library upgrade
+of 2026-11-18 the transaction is assembled by this project's own code over the libraries' public
+lower-level interfaces, and no library is vendored or patched.
+
+R39.6.5j **One assembler for every shielded transaction.** A transaction of a shielded coin that
+carries a swap contract spend, a raw transparent output, an Ironwood output or a Sapling spend or
+output shall be assembled by one module (the assembler). It shall use the published Sapling builder
+for the Sapling bundle, the published Orchard builder for the Ironwood bundle, and the published
+transaction data and signature-hash types for the rest; it shall not depend on any patched
+library. The Sapling proofs are made before the signatures, as the format requires.
+
+R39.6.5k **The contract spend.** A transparent input of the assembler spends a swap contract output.
+Its script signature is the signature over the transparent signature hash with the redeem script as
+script code and `SIGHASH_ALL`, then the selector or the secret (push-only data supplied by the
+caller), then the redeem script as one push. The input carries the sequence number the caller
+chooses. The signature is accepted only when the public key of the signing key occurs in the redeem
+script, so a key that is not the contract's cannot produce a spend. A redeem script of more than 520
+bytes, the consensus limit of one script push, is refused with a typed error before anything is
+built. Transparent outputs given as they are keep their count, order, value and script. The legacy
+lock time is the one the caller sets (zero by default).
+
+R39.6.5l **The output-only Ironwood bundle.** An Ironwood output is added to a bundle built with
+spends disabled, outputs enabled, cross-address transfers as the Ironwood version defines, the
+empty-tree anchor and the default padding to two actions, exactly as R39.6.5d and R39.6.5e require.
+No Ironwood spend can be added. A transaction version without an Ironwood bundle refuses an
+Ironwood output with a typed error.
+
+R39.6.5m **Version, expiry and fee.** The transaction version and consensus branch are those the
+published builder selects for the target height, so a coin without an Ironwood height keeps building
+version 4. The expiry height is the target height plus the single explicit delta of 40 blocks
+(R39.11.8(e)), never a library default. The assembler asks the caller's fee rule for the fee of
+exactly the parts added and requires the transaction to balance to it: a shortfall and a surplus
+are different typed errors that name the amount. For the ZIP 317 rule a contract input is priced as
+a known size: the outpoint, the CompactSize and bytes of a signature of the largest size, the
+selector or secret and the pushed redeem script, and the sequence number. The shielded coins
+configure a fixed fee, as before, so the fees they pay are unchanged.
+
+R39.6.5n **Typed failure.** Every failure of the assembler is a typed error (the transparent,
+Sapling, Ironwood, signing, fee, balance and finishing classes). The assembler does not panic on
+caller data.
+
+T39.6.5f *Contract spends.* A refund (selector `OP_1`, non-final sequence, lock time) and a claim
+(the secret pushed, final sequence, lock time zero), each as a version-4 and a version-6
+transaction, read back from their bytes with the script signature `<signature> <selector or secret>
+<redeem script>`, the sequence and lock time asked for, and the outputs in the order given; the
+signature verifies against a signature hash recomputed from the bytes independently of the
+assembler. A key that is not in the redeem script is refused. A deficit and a surplus are refused
+with their amounts. The fee of the ZIP 317 rule for the contract-spending shape is the expected
+figure. The four contract spends (refund and claim, as version 4 and as version 6) are
+byte-identical to the transactions the previous vendored builder produced for the same inputs, keys
+and heights, recorded once from the base commit of the upgrade; they have no shielded part and their
+signatures are deterministic, so the comparison is exact.
+
+T39.6.5g *The recorded shapes.* With the Sapling parameters present: a contract spend with two raw
+outputs and a Sapling output, and a Sapling spend paying into an output-only Ironwood bundle with
+Sapling change, have the fields recorded when the vendored builder was compared with the assembler
+(version, branch, lock time, expiry, sequences, script-signature layout, outputs, Sapling and
+Ironwood action counts, flags, anchors, value balances, fee), and every proof and signature verifies
+with the public verifying keys. The transactions that the vendored builder produced before the
+upgrade are the reference for the fixed fields.
+
+> **Status note (2026-11-18, Reloaded-original; wallet-library upgrade).** Added with the removal of
+> the vendored builder crates. The wording of R39.6.5d and R39.6.5e is unchanged; where earlier
+> status notes name the builder constructor that only this repository's code called, the assembler
+> now provides the same bundle. Evidence for the equality of the two: the field comparison of the
+> probe of November 2026 (the same keys, inputs and seeded randomness through both) found every
+> deterministic field equal and every proof and signature valid on both sides, with one difference
+> that is not in the assembler's output: the published builder's default expiry delta, which the
+> assembler replaces with the explicit value of R39.6.5m.
 
 ### 39.6.6 Reference behavior: Sapling parameter provisioning and shielded coins in the browser build
 
@@ -2983,6 +3078,15 @@ never-migrated rule of R39.8.0x.
 > the same bytes, and the working copy of item 2 is made from the verified backup. The other items
 > are unchanged. The `.pre-upgrade` backup named in T39.8.0f is likewise the consistent copy; the
 > test of R39.8.0bc (T39.8.0j) checks its content instead of its bytes.
+
+> **Status note (2026-11-18, Reloaded-original; wallet-library upgrade).** The recognized previous
+> generations of this rule are now two: the schema of `zcash_client_sqlite 0.21.1` (467 records) and
+> the schema of `0.22.0` built without `orchard` (`user_version` 8, 727 canonical records, 71
+> migrations), which was the selected current generation until this upgrade. The current generation
+> is the schema of `zcash_client_sqlite 0.23.0` built with its `orchard` feature (75 migrations). A
+> wallet database of the `0.22.0` generation is therefore backed up, verified and migrated on its
+> first open by the steps above, and the migration is not reversible by the library: the
+> `.pre-upgrade.<ms>.bak` backup is the way back to an older build.
 
 R39.8.0bc **Consistent, verified backup before a schema upgrade.** The upgrade of
 R39.8.0ba runs these steps before its working copy is made, all inside the

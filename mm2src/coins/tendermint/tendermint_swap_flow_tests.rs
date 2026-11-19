@@ -2297,13 +2297,13 @@ fn tm_act_a_custom_token_is_wallet_only_and_a_configured_token_is_not() {
 fn independent_secret(path: &str) -> [u8; 32] {
     let mnemonic = bip39::Mnemonic::from_phrase(HD_MNEMONIC, bip39::Language::English).expect("a valid mnemonic");
     let seed = bip39::Seed::new(&mnemonic, "");
-    let mut key: bip32::ExtendedPrivateKey<secp256k1::SecretKey> =
+    let mut key: crypto::Secp256k1ExtendedPrivateKey =
         bip32::ExtendedPrivateKey::new(seed.as_bytes()).expect("a master key");
     let path: bip32::DerivationPath = path.parse().expect("a derivation path");
     for child in path {
         key = key.derive_child(child).expect("a child key");
     }
-    *key.private_key().as_ref()
+    key.private_key().to_secret_bytes()
 }
 
 /// The bech32 account address of the key with the given secret.

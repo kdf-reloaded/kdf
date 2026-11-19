@@ -784,11 +784,25 @@ pub async fn get_enabled_coins(ctx: MmArc) -> Result<Response<Vec<u8>>, String> 
     let res = try_s!(json::to_vec(&json!({ "result": enabled_coins })));
     Ok(try_s!(Response::builder().body(res)))
 }
-/// A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's Electrum client
-/// closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5). Every removal path calls it.
-fn end_qrc20_history_collector(removed: &MmCoinEnum) {
-    if let MmCoinEnum::Qrc20Coin(token) = removed {
-        token.end_history_collector();
+/// The work that ends with a removed instance, at once and wherever the instance is. Every removal path calls it, once
+/// per removed instance: `disable_coin` and each removal of `disable_platform_with_dependents`.
+///
+/// A QRC20 token's history collector ends with its instance; the token's Electrum client closes with the last handle of
+/// the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
+///
+/// A removed QTUM or QRC20 instance leaves the subscriptions of its Electrum client; one that no other instance
+/// remembers is no longer placed again after a reconnect (CRD ch.38 D38.6.4Q.1 status note, item 6). This takes no
+/// registry lock and sends nothing.
+fn end_removed_instance_work(removed: &MmCoinEnum) {
+    match removed {
+        MmCoinEnum::QtumCoin(qtum) => {
+            AsRef::<crate::utxo::UtxoCoinFields>::as_ref(qtum).forget_electrum_subscriptions()
+        },
+        MmCoinEnum::Qrc20Coin(token) => {
+            token.end_history_collector();
+            token.utxo.forget_electrum_subscriptions();
+        },
+        _ => (),
     }
 }
 /// Removes one registered coin, active or passive, and its records on its platform. Ending the rest of the coin's background
@@ -799,7 +813,7 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     match coins.remove(ticker) {
         Some(removed) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
-            end_qrc20_history_collector(&removed);
+            end_removed_instance_work(&removed);
             forget_token_records(&coins, &removed, ticker);
             Ok(())
         },
@@ -827,7 +841,7 @@ pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Re
         match coins.remove(&ticker) {
             Some(removed) => {
                 coins_ctx.fee_estimate_cache.forget_coin(&ticker);
-                end_qrc20_history_collector(&removed);
+                end_removed_instance_work(&removed);
                 forget_token_records(&coins, &removed, &ticker);
                 removed_tickers.push(ticker);
             },

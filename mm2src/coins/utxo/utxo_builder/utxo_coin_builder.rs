@@ -2,12 +2,13 @@ use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageKeyPolicy};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+use crate::utxo::rpc_clients::electrum_client_registry::ClientKey;
 use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_listed_order_for_spends,
                                               electrum_server_order, electrum_spread_near_factor,
                                               electrum_spread_near_offset_ms, electrum_spread_reads,
                                               electrum_tip_checks};
-use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
-                               ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
+use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumOwner, ElectrumPoolOptions,
+                               ElectrumPoolTimings, ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, InitBlockHeaderStorageOps};
 use crate::utxo::utxo_builder::utxo_conf_builder::{header_layout_fallback_families, unrecognised_enum_policy,
@@ -15,8 +16,8 @@ use crate::utxo::utxo_builder::utxo_conf_builder::{header_layout_fallback_famili
 use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, ElectrumProtoVerifier, RecentlySpentOutPoints,
                   SPVConf, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoRpcMode,
                   DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
-use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, PrivKeyBuildPolicy,
-            PrivKeyPolicy, RpcClientType, UtxoActivationParams};
+use crate::{BlockchainNetwork, CoinTransportMetrics, CoinsContext, DerivationMethod, HistorySyncState,
+            PrivKeyBuildPolicy, PrivKeyPolicy, RpcClientType, UtxoActivationParams};
 use async_trait::async_trait;
 use chain::TxHashAlgo;
 use common::executor::{spawn, Timer};
@@ -231,6 +232,7 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
             decimals,
             dust_amount,
             rpc_client,
+            electrum_owner: ElectrumOwner::new_unique(),
             priv_key_policy,
             hw_ctx: None,
             derivation_method,
@@ -368,6 +370,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
             decimals,
             dust_amount,
             rpc_client,
+            electrum_owner: ElectrumOwner::new_unique(),
             priv_key_policy,
             hw_ctx: None,
             derivation_method,
@@ -441,6 +444,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             decimals,
             dust_amount,
             rpc_client,
+            electrum_owner: ElectrumOwner::new_unique(),
             priv_key_policy: PrivKeyPolicy::Trezor,
             hw_ctx: Some(hw_ctx),
             derivation_method: DerivationMethod::HDWallet(hd_wallet),
@@ -459,7 +463,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         &self,
         hd_wallet_storage: &HDWalletCoinStorage,
         derivation_path: &HDPathToCoin,
-        software_master: Option<&bip32::ExtendedPrivateKey<secp256k1::SecretKey>>,
+        software_master: Option<&crypto::Secp256k1ExtendedPrivateKey>,
     ) -> UtxoCoinBuildResult<HDAccountsMap<UtxoHDAccount>> {
         utxo_common::load_hd_accounts_from_storage(hd_wallet_storage, derivation_path, software_master)
             .await
@@ -566,6 +570,41 @@ pub(crate) async fn build_electrum_client(
     client.start_pool(args.spawn_ping);
 
     Ok(ElectrumClient(client))
+}
+
+/// Builds the Electrum client of an instance of the QTUM family, or reuses the one an instance with exactly the same
+/// client inputs holds (CRD ch.38 D38.6.4Q.1 status note, items 1 to 5). `platform` is the platform's ticker: the
+/// shared client goes by it in its log lines, error texts and transport metrics, whichever instance builds it first.
+///
+/// The callers hold the activation lock of their own ticker (R55.1.12). The build lock of the key follows, then the
+/// registry's maps inside it; the coin registry is not touched here, so the callers take it only after this returns.
+pub(crate) async fn build_or_reuse_electrum_client(
+    ctx: &MmArc,
+    platform: &str,
+    coin_conf: &Json,
+    args: ElectrumBuilderArgs,
+    servers: Vec<ElectrumRpcRequest>,
+    min_connected: Option<usize>,
+    max_connected: Option<usize>,
+) -> UtxoCoinBuildResult<ElectrumClient> {
+    let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(UtxoCoinBuildError::Internal)?;
+    let key = ClientKey::new(
+        platform,
+        &servers,
+        min_connected,
+        max_connected,
+        electrum_listed_order_for_spends(coin_conf),
+        electrum_block_interval(coin_conf),
+        &args,
+    );
+    coins_ctx
+        .electrum_clients
+        .get_or_build(
+            key,
+            |text| MmError::new(UtxoCoinBuildError::ElectrumServersDisagree(text)),
+            || build_electrum_client(ctx, platform, coin_conf, args, servers, min_connected, max_connected),
+        )
+        .await
 }
 
 #[async_trait]
@@ -733,6 +772,12 @@ pub trait UtxoCoinBuilderCommonOps {
         }
     }
 
+    /// The platform ticker of an instance of the QTUM family (a coin whose `protocol.type` is `QTUM` or `QRC20`):
+    /// QTUM's own ticker, a token's `protocol.protocol_data.platform`. Such an instance takes its Electrum client from
+    /// the registry of shared clients (CRD ch.38 D38.6.4Q.1 status note); every other coin has `None` and builds its
+    /// own.
+    fn shared_electrum_platform(&self) -> Option<&str> { None }
+
     async fn electrum_client(
         &self,
         args: ElectrumBuilderArgs,
@@ -740,6 +785,18 @@ pub trait UtxoCoinBuilderCommonOps {
         min_connected: Option<usize>,
         max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
+        if let Some(platform) = self.shared_electrum_platform() {
+            return build_or_reuse_electrum_client(
+                self.ctx(),
+                platform,
+                self.conf(),
+                args,
+                servers,
+                min_connected,
+                max_connected,
+            )
+            .await;
+        }
         build_electrum_client(
             self.ctx(),
             self.ticker(),
