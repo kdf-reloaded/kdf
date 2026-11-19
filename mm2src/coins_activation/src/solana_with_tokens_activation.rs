@@ -290,7 +290,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         let crypto_ctx =
             CryptoCtx::from_ctx(&ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
         reject_unsupported_policy(&ticker, &activation_request.priv_key_policy)?;
-        // D40.6B.4 (LAE): a Token-2022 inline token is refused before any node is contacted and nothing is
+        // D40.6B.4: a Token-2022 inline token is refused before any node is contacted and nothing is
         // registered. A token whose configuration does not resolve is left to the later token initialisation.
         for token in &activation_request.spl_tokens_requests {
             if let Ok((_, protocol)) = coin_conf_with_protocol::<SplProtocolConf>(&ctx, &token.ticker) {

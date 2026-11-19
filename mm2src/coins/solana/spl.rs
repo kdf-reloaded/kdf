@@ -41,7 +41,7 @@ pub const TOKEN_2022_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 ]);
 
 /// The text of the activation refusal of a Token-2022 token, after the token ticker and a colon (CRD ch.40 D40.6B.4,
-/// maintainer decision LAE). Both activation surfaces use it.
+/// the maintainer's decision of 2026-11-18). Both activation surfaces use it.
 pub const TOKEN_2022_NOT_SUPPORTED: &str = "Token-2022 tokens are not supported yet";
 
 /// The size in bytes of a classic token account: what the rent of a created recipient account is quoted for (CRD

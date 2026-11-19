@@ -239,7 +239,7 @@ fn token_method_with_no_mint_account_and_no_token_account_activates_with_zero() 
 }
 
 // ---------------------------------------------------------------------------
-// Token-2022 refusal (CRD ch.40 D40.6B.4, maintainer decision LAE)
+// Token-2022 refusal (CRD ch.40 D40.6B.4, the maintainer's decision of 2026-11-18)
 // ---------------------------------------------------------------------------
 
 const REFUSAL: &str = "TOK-SOL: Token-2022 tokens are not supported yet";

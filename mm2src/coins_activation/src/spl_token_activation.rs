@@ -121,7 +121,7 @@ impl TokenActivationOps for SplToken {
         _activation_params: Self::ActivationParams,
         protocol_conf: Self::ProtocolInfo,
     ) -> Result<(Self, Self::ActivationResult), MmError<Self::ActivationError>> {
-        // D40.6B.4 (LAE): a Token-2022 token is refused before any node is contacted and nothing is registered.
+        // D40.6B.4: a Token-2022 token is refused before any node is contacted and nothing is registered.
         if protocol_conf.program_id == TOKEN_2022_PROGRAM_ID {
             return MmError::err(SplInitError::Token2022(format!(
                 "{}: {}",
