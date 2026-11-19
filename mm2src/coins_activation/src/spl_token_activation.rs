@@ -136,4 +136,10 @@ impl TokenActivationOps for SplToken {
         };
         Ok((token, init_result))
     }
+
+    // The platform records the token once it is registered, so that its token set and the disable hook agree
+    // (CRD ch.40 T40.6B.20; the with-tokens path records its tokens the same way).
+    fn on_token_registered(platform_coin: &Self::PlatformCoin, token: &Self) {
+        platform_coin.add_spl_token_info(token.ticker().into(), token.get_info());
+    }
 }

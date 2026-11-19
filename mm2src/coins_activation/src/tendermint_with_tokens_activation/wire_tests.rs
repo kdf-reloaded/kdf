@@ -1375,3 +1375,57 @@ fn the_task_variant_under_an_hd_login_honors_iguana_priv_key() {
         json!(hd_address_at(&ctx, "m/44'/118'/0'/0/0"))
     );
 }
+
+// ---------------------------------------------------------------------------
+// The dependent set and the unregister hook of `disable_coin` (CRD ch.43 R43.1E.5 items 1-2)
+// ---------------------------------------------------------------------------
+
+fn dependents(ctx: &MmArc) -> Vec<String> {
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    block_on(coins_ctx.dependents_of(PLATFORM)).into_iter().collect()
+}
+
+#[test]
+fn a_tendermint_token_joins_the_dependent_set_and_disable_coin_takes_it_out_with_its_platform_record() {
+    let ctx = ctx();
+    let node = balance_node("unyan", 5_000_000);
+    let platform = register_platform_on(&ctx, &node.url);
+    assert!(dependents(&ctx).is_empty());
+
+    match block_on(enable_tendermint_token(ctx.clone(), token_request("IRIS-NYAN"))) {
+        Ok(_) => {},
+        Err(e) => panic!("the configured token must activate: {:?}", token_wire(&e).0),
+    }
+    assert_eq!(dependents(&ctx), vec!["IRIS-NYAN".to_owned()]);
+    assert!(platform.activated_token_tickers().contains("IRIS-NYAN"));
+
+    block_on(coins::disable_coin(&ctx, "IRIS-NYAN")).expect("the token is disabled");
+    assert!(dependents(&ctx).is_empty(), "the token left the dependent set");
+    assert!(
+        platform.activated_token_tickers().is_empty(),
+        "the platform no longer records the token"
+    );
+    assert!(
+        block_on(coins::disable_coin(&ctx, "IRIS-NYAN")).is_err(),
+        "disabled already"
+    );
+    assert!(platform.activated_token_tickers().is_empty());
+}
+
+#[test]
+fn disabling_a_tendermint_platform_drops_its_dependent_set_and_its_token_stays_registered() {
+    let ctx = ctx();
+    let node = balance_node("unyan", 5_000_000);
+    register_platform_on(&ctx, &node.url);
+    block_on(enable_tendermint_token(ctx.clone(), token_request("IRIS-NYAN")))
+        .unwrap_or_else(|e| panic!("the configured token must activate: {:?}", token_wire(&e).0));
+
+    block_on(coins::disable_coin(&ctx, PLATFORM)).expect("the platform is disabled");
+
+    assert!(dependents(&ctx).is_empty(), "the platform's entry is gone");
+    assert!(block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_none());
+    assert!(
+        block_on(lp_coinfind(&ctx, "IRIS-NYAN")).unwrap().is_some(),
+        "the token stays registered, as before"
+    );
+}
