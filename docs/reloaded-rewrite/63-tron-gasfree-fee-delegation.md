@@ -1027,11 +1027,11 @@ R25. **Custody derivation checked against the controller
     that address younger than 10 minutes exists (so after every restart
     of the node, and at least every 10 minutes while the rail is used),
     the implementation compares the address it derives (§63.5) with the
-    controller's read-only `getGasFreeAddress(user)`. On inequality the gasless rail is refused
-    for that network with `Unavailable` (HTTP 503) and one warning line,
-    nothing is signed, and the native rail stays available. This refusal
-    is not a deterministic unavailability for §63.8 step 6. *(Takes no
-    reference input.)*
+    controller's read-only `getGasFreeAddress(user)`. On inequality the
+    gasless rail is refused for that network with `Unavailable` (HTTP 503)
+    and one warning line, nothing is signed, and the native rail stays
+    available. This refusal is not a deterministic unavailability for
+    §63.8 step 6. *(Takes no reference input.)*
 
 > **Code-quality finding (informative; trigger: a comment at the
 > reference row states the problem itself).** At the reference row the custody address is not produced
@@ -1140,9 +1140,9 @@ T14. **Nile end-to-end (lab row; deferred with D63.6).** A
     smoke test of the header-bearing transport. No end-to-end test
     exists at the reference row.
 
-    *Status note (2026-11-19).* T15 (Reloaded-original). Controller check
-    (R25): a match is confirmed and reused for 10 minutes; after that, or
-    after a restart, the controller is read again; a mismatch refuses with
+T15. **Controller check (R25) (Reloaded-original, 2026-11-19).** A
+    match is confirmed and reused for 10 minutes; after that, or after a
+    restart, the controller is read again; a mismatch refuses with
     `Unavailable` (503), signs nothing and keeps nothing cached; a failed
     read is reported through the node error.
 
@@ -1370,6 +1370,6 @@ V2. The baseline withdraw request has no fee-rail selector and no
   only in that branch's commit message of 2026-06-26, against a
   reference state that was not tabled at the time. Neither that
   verdict nor the two failed passes carry to this revision.
-- *Additions of 2026-11-19:* R25 and the status notes dated 2026-11-19
-  (§63.4.5, §63.5, R23, T1, T2, T15) are Reloaded-original and take no reference
-  input.
+- *Additions of 2026-11-19:* R25, T15 and the status notes dated
+  2026-11-19 (§63.4.5, §63.5, R23, T1, T2) are Reloaded-original and take no
+  reference input.
