@@ -580,7 +580,7 @@ pub fn send_raw_tx_bytes(
 /// Qtum): once the backend has accepted the broadcast, the spend is promoted into the recently-spent record if the
 /// bytes are those of a pending withdraw (see [`send_raw_tx_bytes_promoting_withdraw`]).
 pub fn send_raw_tx_promoting_withdraw(
-    coin: &UtxoArc,
+    coin: &UtxoCoinFields,
     tx: &str,
 ) -> Box<dyn Future<Item = String, Error = String> + Send> {
     let bytes = try_fus!(hex::decode(tx));
@@ -592,19 +592,18 @@ pub fn send_raw_tx_promoting_withdraw(
 /// that has not expired move that entry into the record. A refused broadcast promotes nothing, and bytes that match
 /// no pending entry change nothing.
 pub fn send_raw_tx_bytes_promoting_withdraw(
-    coin: &UtxoArc,
+    coin: &UtxoCoinFields,
     tx_bytes: &[u8],
 ) -> Box<dyn Future<Item = String, Error = String> + Send> {
-    let coin = coin.clone();
+    // The record is shared by QTUM and its tokens, so a pending entry that either of them noted is promoted by
+    // the `send_raw_tx` of either (CRD ch.38 D38.6.4Q.4 status note, item 3).
+    let record = coin.recently_spent_outpoints.clone();
     let bytes = tx_bytes.to_vec();
     let broadcast = coin.rpc_client.send_raw_transaction(tx_bytes.into()).compat();
     Box::new(
         async move {
             let hash = broadcast.await.map_err(|e| ERRL!("{}", e))?;
-            coin.recently_spent_outpoints
-                .lock()
-                .await
-                .promote_pending_withdraw(&bytes);
+            record.lock().await.promote_pending_withdraw(&bytes);
             Ok(format!("{:?}", hash))
         }
         .boxed()

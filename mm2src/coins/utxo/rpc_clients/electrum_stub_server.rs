@@ -54,6 +54,10 @@ enum Control {
     Close,
 }
 
+/// A computed answer: gets the `params` of the request and the `params` of every `blockchain.transaction.broadcast`
+/// received so far, and returns the result, or `None` to leave the request to the canned results.
+type Responder = std::sync::Arc<dyn Fn(&Json, &[Json]) -> Option<Json> + Send + Sync>;
+
 struct StubState {
     behavior: Mutex<StubBehavior>,
     /// The protocol version `server.version` answers.
@@ -71,6 +75,9 @@ struct StubState {
     /// Canned answers keyed by the parameters of the request (see [`StubServer::set_params_result`]); they win over
     /// `scripthash_results` and `results`.
     param_rules: Mutex<Vec<ParamRule>>,
+    /// Answers computed from the request and from the broadcasts received so far (see [`StubServer::set_responder`]);
+    /// they apply where no rule of `param_rules` fits, and win over `scripthash_results` and `results`.
+    responders: Mutex<HashMap<String, Responder>>,
     /// Every ordinary request (not `server.version` or `server.ping`) as `(method, params)`, in the order it was
     /// answered, the elements of a batch one by one.
     request_log: Mutex<Vec<(String, Json)>>,
@@ -133,6 +140,7 @@ impl StubServer {
             scripthash_results: Mutex::new(HashMap::new()),
             error_objects: Mutex::new(HashMap::new()),
             param_rules: Mutex::new(Vec::new()),
+            responders: Mutex::new(HashMap::new()),
             request_log: Mutex::new(Vec::new()),
             messages: Mutex::new(Vec::new()),
             requests: Mutex::new(HashMap::new()),
@@ -285,6 +293,22 @@ impl StubServer {
     /// exactly. It wins over [`Self::set_params_result`] of the same parameters.
     pub fn set_params_error(&self, method: &str, params: Json, error: Json) {
         self.set_param_rule(method, params, false, Err(error));
+    }
+
+    /// Makes `method` answer what `responder` returns for the request, unless a rule of [`Self::set_params_result`]
+    /// and its relatives fits. `responder` gets the `params` of the request and the `params` of every
+    /// `blockchain.transaction.broadcast` the stub has received (a server that has accepted a broadcast knows the
+    /// transaction).
+    pub fn set_responder(
+        &self,
+        method: &str,
+        responder: impl Fn(&Json, &[Json]) -> Option<Json> + Send + Sync + 'static,
+    ) {
+        self.state
+            .responders
+            .lock()
+            .unwrap()
+            .insert(method.to_owned(), std::sync::Arc::new(responder));
     }
 
     /// Forgets every rule of [`Self::set_params_result`], [`Self::set_params_prefix_result`] and
@@ -533,7 +557,18 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed:
     let result = |result: Json| Some(json!({"jsonrpc": "2.0", "id": id, "result": result}));
     let error = |message: &str| Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -1, "message": message}}));
     let error_object = |error: Json| Some(json!({"jsonrpc": "2.0", "id": id, "error": error}));
-    let rule = find_param_rule(state, &method, &request["params"]);
+    let rule = find_param_rule(state, &method, &request["params"]).or_else(|| {
+        let responder = state.responders.lock().unwrap().get(&method).cloned()?;
+        let broadcasts: Vec<Json> = state
+            .request_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(logged, _)| logged == "blockchain.transaction.broadcast")
+            .map(|(_, params)| params.clone())
+            .collect();
+        responder(&request["params"], &broadcasts).map(Ok)
+    });
     match (behavior, method.as_str()) {
         (StubBehavior::Silent, _) | (StubBehavior::Down, _) => None,
         (StubBehavior::BadVersion, "server.version") => error("unsupported protocol version"),

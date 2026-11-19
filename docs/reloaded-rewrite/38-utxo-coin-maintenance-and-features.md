@@ -4447,6 +4447,47 @@ its inputs, and its change is offered, whichever of QTUM, a token or
 delegation built either one and whichever session answers the listing.
 *Recommendation:* (b). No peer observes it.
 
+*Status note (2026-11-15 and 2026-11-19, clean side; maintainer decisions).
+D38.6.4Q.4 is decided:* option (b), on 2026-11-15. Its key was decided on
+2026-11-19.
+
+1. *Key.* One recently-spent record per platform and address script: the
+   platform (a token's `protocol.protocol_data.platform`, QTUM's own ticker)
+   and the script of the address whose outputs are spent. QTUM and its
+   tokens use one record wherever they spend from the same address. Under an
+   HD login, QTUM's enabled address and the tokens' address are different
+   scripts, so each has its own record. Every other coin keeps its record
+   per instance, as before.
+2. *Lifetime.* The node keeps the shared records in a registry of its
+   context, by weak reference. An instance takes the record of its activated
+   address when it is built. A record lives as long as any instance holds
+   it; when the last one is disabled, the record ends, as an instance's own
+   record does today. A spend from another address of an HD wallet keeps the
+   behavior of an instance's own record: it is entered into the record of
+   the instance's activated address, and no lasting record is kept for that
+   other address.
+3. *What is entered.* Every transaction of the QTUM family that this node
+   built and the backend accepted, when it spends outputs of the address:
+   QTUM's swap sends and merges, every token broadcast (payments, fees,
+   spends and refunds, which pay their gas from the address), and the
+   withdraws and delegations promoted as in R38.5B.9. A refused broadcast
+   enters nothing.
+4. *Ordering.* The record's own lock is the lock of the address. Every build
+   of the QTUM family that spends outputs of the address takes it when the
+   unspent listing has been answered, filters the listing through the record
+   under it, and holds it through the broadcast and the entry, or, for a
+   build that is not broadcast at once (a withdraw or a delegation), through
+   signing and the pending entry of R38.5B.9. The listing request itself is
+   sent before the lock is taken, so two builds can ask at the same time;
+   their selections are made one after the other. It replaces the process-wide lock for this
+   family; the other UTXO coins keep the process-wide lock. A pending entry
+   does not hide inputs: two builds made before either is broadcast can
+   select the same input, and the backend refuses the second broadcast.
+5. *Lock order.* The record's lock is a lock of the send path. It is never
+   taken while the activation locks of R55.1.12 (chapter 55), the client
+   build lock or a registry of the status note after D38.6.4Q.1 are held,
+   and `disable_coin` does not take it.
+
 D38.6.4Q.5 *(Open, 2026-11-15.)* **Ending a token's background work when it
 is disabled.** The reference ends it at once (R38.6.4Q.10 item 1); this tree
 does not, and a quick disable and enable leaves two collectors (the note
@@ -6434,3 +6475,10 @@ R38.8.6 **Tests (two-direction, observable).**
   read the forbidden corpus, from the maintainer's decisions and this
   repository's code. It takes no forbidden-class input, so chapter 01 R38 is
   not engaged and no gate pass is required.
+- *Maintainer decisions (2026-11-15 and 2026-11-19), clean side -- status
+  note after D38.6.4Q.4 (one recently-spent record per platform and address
+  for the QTUM family: key, lifetime, what is entered, ordering, and lock
+  order).* Written by a session that never read the forbidden corpus, from
+  the maintainer's decisions and this repository's code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
