@@ -863,6 +863,17 @@ governs Reloaded.
   in base58check, while withdraw (chapter 47 R47.5.6a) and message signing
   refuse it. D21.10B.3.
 
+*Status note (2026-11-19), the HD methods for a TRC20 ticker (Spec Reader
+round 0.5.0-15; pending the KDF Dirty Gate).* The "HD methods" item of
+R21.10B.4 describes a TRX ticker. For a TRC20 ticker the reference answers
+from the platform's HD wallet, which the token shares, and each balance map
+holds that token's ticker only. The scan then counts an address as used
+when the chain has created its account, and no token balance is
+consulted. The shared wallet and the token-only ticker set match what
+chapter 49 §49.2.1 (R49.32) records for an ERC-20 ticker on an EVM
+platform; the used-address criterion does not. The sentences of
+R21.10B.4 above are unchanged.
+
 **R21.10B.5** *Activation result (completes the §21.4 note and R-WP5).* The
 result has the EVM family's shape with no TRON-specific member. Single
 key: `current_block` is the TRON head block number from
@@ -1809,3 +1820,12 @@ V3. The address encoding, protobuf transaction/contract formats,
   and `v2.6.0-beta` compared on the points attributed to them. Method:
   reading, combined with a mechanical word n-gram comparison (6-gram and
   4-gram) and a per-token inventory; the additions embed no code blocks.
+- *Status note added 2026-11-19 (Spec Reader round 0.5.0-15) -- after
+  R21.10B.4.* **KDF Dirty Gate: pending.** *Inputs:* the forbidden corpus at
+  the row `v3.0.0-beta` of chapter 02 §2.15A, consulted **only** to establish
+  which tickers the HD address methods carry, and what makes an address
+  used for the scan, when the request names a TRC20 ticker. The reading was
+  done together with chapter 49 §49.2.1, whose scoped record covers the
+  shared EVM-family surface. Behavior only; no private identifier, body,
+  error, log or comment text was reproduced. The sentences of R21.10B.4 are
+  unchanged.
