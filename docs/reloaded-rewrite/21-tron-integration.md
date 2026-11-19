@@ -1098,15 +1098,18 @@ unchanged: it still uses the node's internal key
 (`mm2_internal_privkey_secret`) and is a single-address coin, on both routes.
 The Trezor, WalletConnect and MetaMask refusals are unchanged under a
 global-HD login. The HD methods (`get_new_address`, `account_balance` and the
-task forms of `get_new_address`, `scan_for_new_addresses` and
-`account_balance`) answer for a TRX or TRC20 ticker with base58check addresses
+task forms of `scan_for_new_addresses` and `account_balance`) answer for a TRX
+or TRC20 ticker with base58check addresses
 and a balance map: over TRX and the enabled TRC20 tokens for the TRX ticker,
 over that token only for a TRC20 ticker, which is served by the HD wallet of
 its platform. For either ticker an address counts as used when the chain has
 created its account or when any enabled TRC20 token has a non-zero balance at
 it (the Reloaded note of 2026-11-19 after R21.10B.4, which records how this
-differs for a TRC20 ticker). `task::create_new_account::init` ends with `Internal` in the task status
-for every TRON coin, before any account is created. `withdraw` and
+differs for a TRC20 ticker). This repository has no
+`task::get_new_address::init` for any coin, so that task form of R21.10B.4 is
+not served for TRON either. `task::create_new_account::init` ends with
+`Internal` in the task status for every TRON coin, before any account is
+created. `withdraw` and
 `task::withdraw::init` of a TRX or TRC20 coin take the HD `from` forms of the
 EVM withdraw (an address id or a derivation path, resolved in the HD wallet of
 the platform) and sign with the key of that path. For a TRC20 coin this is a
