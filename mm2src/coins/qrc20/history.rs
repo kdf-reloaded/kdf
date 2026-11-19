@@ -1076,7 +1076,7 @@ fn is_transfer_event_log(log: &LogEntry) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use common::block_on;
