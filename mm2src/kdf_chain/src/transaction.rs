@@ -480,6 +480,26 @@ pub struct Transaction {
     pub sapling_v5: SaplingBundleV5,
     /// The Orchard part of a version 5 transaction. Empty for every other version.
     pub orchard: OrchardBundle,
+    /// Set when an external reader (the Zcash library, for a version the layouts above do not cover)
+    /// produced this transaction: the original bytes and the identifier that reader computed. See
+    /// [`OpaqueTx`]. `None` for everything the parser of this module reads or a signer builds.
+    pub opaque: Option<OpaqueTx>,
+}
+
+/// The raw form of a transaction that a reader outside this crate has parsed (CRD ch.39 D39.11.4V.3: a
+/// ZIP 229 version 6 transaction is read by the Zcash library). The ordinary fields of the
+/// [`Transaction`] hold what call sites read (inputs, outputs, lock time, expiry height); this keeps
+/// the bytes exactly as received and the identifier the reader derived, because the layout is not
+/// built here: `serialize` writes `raw` and `hash` answers `txid`.
+///
+/// Never set on a transaction that is going to be modified or signed: the ordinary fields would then
+/// disagree with `raw`. The signer refuses such a transaction through its version check.
+#[derive(Debug, PartialEq, Clone)]
+pub struct OpaqueTx {
+    /// The transaction exactly as it was read.
+    pub raw: Bytes,
+    /// The transaction identifier in digest (internal) byte order, like [`Transaction::hash`].
+    pub txid: H256,
 }
 
 impl From<&'static str> for Transaction {
@@ -498,6 +518,9 @@ impl Transaction {
     /// is personalized with `consensus_branch_id`. The 32 bytes are in digest order, like the
     /// double-SHA256 of the other versions; the usual txid string is their reverse.
     pub fn hash(&self) -> H256 {
+        if let Some(opaque) = &self.opaque {
+            return opaque.txid;
+        }
         if self.is_v5() {
             return zip244::txid(self);
         }
@@ -562,6 +585,10 @@ impl Transaction {
 
 impl Serializable for Transaction {
     fn serialize(&self, stream: &mut Stream) {
+        if let Some(opaque) = &self.opaque {
+            stream.append_slice(&opaque.raw);
+            return;
+        }
         if self.is_v5() {
             // ZIP 225 layout: header, group id, branch id, lock time, expiry height, then the
             // transparent, Sapling and Orchard bundles.
@@ -663,7 +690,8 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
     let overwintered = (header >> 31) != 0;
     let version = if overwintered { header & 0x7FFF_FFFF } else { header };
 
-    // Only the overwintered layouts up to version 5 are built; a later one would be read in the wrong layout.
+    // Only the overwintered layouts up to version 5 are built; a later one would be read in the wrong layout. The
+    // UTXO coins' reader in `coins` (`read_utxo_tx`) gives those to the Zcash library; this crate does not depend on it.
     if overwintered && version > ZIP225_VERSION {
         return Err(Error::Custom(format!("unsupported transaction version {version}")));
     }
@@ -777,6 +805,7 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
         consensus_branch_id: 0,
         sapling_v5: SaplingBundleV5::default(),
         orchard: OrchardBundle::default(),
+        opaque: None,
     })
 }
 
@@ -813,6 +842,7 @@ fn deserialize_tx_v5<T: io::Read>(reader: &mut Reader<T>, version_group_id: u32)
         consensus_branch_id,
         sapling_v5,
         orchard,
+        opaque: None,
     })
 }
 
@@ -909,6 +939,7 @@ mod tests {
             consensus_branch_id: 0,
             sapling_v5: SaplingBundleV5::default(),
             orchard: OrchardBundle::default(),
+            opaque: None,
         };
 
         let bytes = serialize(&tx);
@@ -919,5 +950,24 @@ mod tests {
             Some(0x6655_4433),
             "n_time must survive the serialize/deserialize round-trip"
         );
+    }
+
+    /// A transaction carrying the raw form of an external reader is written as those bytes and answers that
+    /// reader's transaction id, whatever its other fields say.
+    #[test]
+    fn an_opaque_transaction_serializes_as_its_raw_bytes_and_hashes_to_its_txid() {
+        let raw = vec![0x06, 0x00, 0x00, 0x80, 1, 2, 3];
+        let txid = H256::from([9u8; 32]);
+        let tx = Transaction {
+            version: 6,
+            overwintered: true,
+            opaque: Some(OpaqueTx {
+                raw: Bytes::from(raw.clone()),
+                txid,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(serialize(&tx).to_vec(), raw);
+        assert_eq!(tx.hash(), txid);
     }
 }

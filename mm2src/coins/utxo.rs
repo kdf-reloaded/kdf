@@ -867,6 +867,7 @@ impl UtxoCoinFields {
             str_d_zeel,
             hash_algo: self.tx_hash_algo.into(),
             sighash_suffix: self.conf.sighash_suffix,
+            read_by_library: false,
         }
     }
 }

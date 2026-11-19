@@ -269,7 +269,7 @@ pub fn wait_for_confirmations(
     wait_until: u64,
     check_every: u64,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-    let mut tx: UtxoTx = try_fus!(deserialize(tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_fus!(read_utxo_tx(tx).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
     coin.rpc_client.wait_for_confirmations(
         tx.hash().reversed().into(),
@@ -288,7 +288,7 @@ pub fn wait_for_output_spend(
     from_block: u64,
     wait_until: u64,
 ) -> TransactionFut {
-    let mut tx: UtxoTx = try_tx_fus!(deserialize(tx_bytes).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_tx_fus!(read_utxo_tx(tx_bytes).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
     let tx_hash = tx.hash();
     let script_pubkey = tx.outputs[output_index].script_pubkey.clone();
