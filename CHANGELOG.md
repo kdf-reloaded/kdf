@@ -80,7 +80,7 @@ or undo, and every change that needs a step from you.
   and any other registered ticker, for example a token activated by the legacy `enable`, is refused with
   `TokenIsAlreadyActivated` (HTTP 400) before anything is built. GLEEC KDF keeps the registered token without saying so.
   - *What to do:* disable the token first, or leave it out of the request.
-  - Detail: PR #424; CRD ch.43 §43.1F R43.1F.4.
+  - Detail: PR #432; CRD ch.43 §43.1F R43.1F.4.
 
 - **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
   handler produced them. A client that decoded those entities itself to get the original text must stop doing so,
@@ -140,11 +140,11 @@ the previous version used. The safe way:
   tokens are activated, and the answer lists every token the platform was activated with and not disabled since, plus
   the request's tokens. An active platform, and a passive platform of another family, still answer
   `PlatformIsAlreadyActivated`. A refused request leaves the platform passive and its token list as it was. Detail: PR
-  #424; CRD ch.43 §43.1F R43.1F.2 to R43.1F.5.
+  #432; CRD ch.43 §43.1F R43.1F.2 to R43.1F.5.
 - **An EVM platform's NFT chain counts as its dependent.** An NFT chain activated by `enable_nft`, or inline by
   `nft_req`, now keeps its platform from being removed by an unforced `disable_coin`: a platform whose only dependent
   is its NFT chain becomes passive, and a forced `disable_coin` deactivates the NFT chain with the platform's tokens. A
-  re-activation without `nft_req` keeps the NFT chain. Detail: PR #424; CRD ch.43 R43.1F.8.
+  re-activation without `nft_req` keeps the NFT chain. Detail: PR #432; CRD ch.43 R43.1F.8.
 - **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
   members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
@@ -331,7 +331,7 @@ the previous version used. The safe way:
 - **A refused platform-with-tokens activation leaves none of its tokens on the platform's token list.** The list a
   platform reports in its activation answer and its balance stream is now written only once the tokens are registered,
   so a request that failed after its tokens were built no longer leaves them on the list of the platform. Detail: PR
-  #424; CRD ch.43 D43.1F.2.
+  #432; CRD ch.43 D43.1F.2.
 - **A standalone activation task for the ticker of a passive platform is refused at `init`.** `task::enable_utxo::init`
   and the other standalone activation tasks answer `CoinIsAlreadyActivated` with HTTP 400, as for an active coin,
   and build nothing. Detail: PR #424; CRD ch.43 R43.1F.9 and D43.1F.4.
