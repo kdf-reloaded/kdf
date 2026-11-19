@@ -179,8 +179,14 @@ mod tests {
         let unsent = maker_swap(maker_started("ARRR", "KMD", uuid), vec![]);
         let leg = maker_leg(&unsent, "ARRR").unwrap().unwrap();
         assert_eq!(leg.uuid, uuid.to_string());
-        assert_eq!(leg.recorded_htlc_pubkey.unwrap().as_slice(), &[2u8; 33][..]);
-        assert_eq!(leg.swap_unique_input, vec![7u8; 20]);
+        assert!(
+            leg.recorded_htlc_pubkey.unwrap().as_slice() == &[2u8; 33][..],
+            "the maker-coin key is reported"
+        );
+        assert!(
+            leg.swap_unique_input == vec![7u8; 20],
+            "the key input is the secret hash"
+        );
         assert!(leg.saved_privkey_pubkey.is_none());
         assert!(!leg.own_payments_sent);
 
@@ -196,7 +202,10 @@ mod tests {
         let swap = maker_swap(maker_started("KMD", "ARRR", Uuid::from_bytes([2; 16])), vec![]);
         let leg = maker_leg(&swap, "ARRR").unwrap().unwrap();
         assert!(leg.own_payments_sent);
-        assert_eq!(leg.recorded_htlc_pubkey.unwrap().as_slice(), &[3u8; 33][..]);
+        assert!(
+            leg.recorded_htlc_pubkey.unwrap().as_slice() == &[3u8; 33][..],
+            "the taker-coin key is reported"
+        );
         assert!(maker_leg(&swap, "ZEC").unwrap().is_none());
     }
 
@@ -234,8 +243,14 @@ mod tests {
         };
 
         let nothing = taker_leg(&with(vec![]), "ARRR").unwrap().unwrap();
-        assert_eq!(nothing.swap_unique_input, uuid.as_bytes().to_vec());
-        assert_eq!(nothing.recorded_htlc_pubkey.unwrap().as_slice(), &[4u8; 33][..]);
+        assert!(
+            nothing.swap_unique_input == uuid.as_bytes().to_vec(),
+            "the key input is the uuid"
+        );
+        assert!(
+            nothing.recorded_htlc_pubkey.unwrap().as_slice() == &[4u8; 33][..],
+            "the taker's key is reported"
+        );
         assert!(!nothing.own_payments_sent);
         let fee_only = taker_leg(&with(vec![TakerSwapEvent::TakerFeeSent(txid())]), "ARRR")
             .unwrap()
@@ -293,7 +308,10 @@ mod tests {
         let mut data = maker_started("ARRR", "KMD", Uuid::from_bytes([6; 16]));
         data.maker_coin_htlc_privkey = Some(pair.into());
         let leg = maker_leg(&maker_swap(data, vec![]), "ARRR").unwrap().unwrap();
-        assert_eq!(leg.saved_privkey_pubkey.unwrap().as_slice(), pair.public_slice());
+        assert!(
+            leg.saved_privkey_pubkey.unwrap().as_slice() == pair.public_slice(),
+            "the public half of the saved key is reported"
+        );
     }
 
     /// A swap whose first event is not `Started` cannot be read, which refuses the activation.

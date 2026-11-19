@@ -234,28 +234,38 @@ mod tests {
 
         let transparent =
             transparent_secret_for_policy(&hd_ctx, &conf, &[1; 32], PrivKeyActivationPolicy::IguanaPrivKey).unwrap();
-        assert_eq!(transparent, internal);
+        assert!(transparent == internal, "the transparent key is the internal key");
         let shielded =
             shielded_spending_key_for_policy(&hd_ctx, &[1; 32], 0, PrivKeyActivationPolicy::IguanaPrivKey, &info)
                 .unwrap();
-        assert_eq!(
-            spending_key_bytes(&shielded),
-            spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&internal))
+        assert!(
+            spending_key_bytes(&shielded)
+                == spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&internal)),
+            "the shielded key is the master of the internal key"
         );
         // `account` has no effect on that key.
         let shielded_account_3 =
             shielded_spending_key_for_policy(&hd_ctx, &[1; 32], 3, PrivKeyActivationPolicy::IguanaPrivKey, &info)
                 .unwrap();
-        assert_eq!(spending_key_bytes(&shielded), spending_key_bytes(&shielded_account_3));
+        assert!(
+            spending_key_bytes(&shielded) == spending_key_bytes(&shielded_account_3),
+            "the account does not change the shielded key"
+        );
 
         // The default policy under HD is the derivation, which is another key.
         let hd_shielded =
             shielded_spending_key_for_policy(&hd_ctx, &internal, 0, PrivKeyActivationPolicy::ContextPrivKey, &info)
                 .unwrap();
-        assert_ne!(spending_key_bytes(&hd_shielded), spending_key_bytes(&shielded));
+        assert!(
+            spending_key_bytes(&hd_shielded) != spending_key_bytes(&shielded),
+            "the HD derivation is another shielded key"
+        );
         let hd_transparent =
             transparent_secret_for_policy(&hd_ctx, &conf, &internal, PrivKeyActivationPolicy::ContextPrivKey).unwrap();
-        assert_ne!(hd_transparent, transparent);
+        assert!(
+            hd_transparent != transparent,
+            "the HD derivation is another transparent key"
+        );
     }
 
     /// R39.8.0bd item 5: the HD `account` selects the shielded key only. The transparent key, and with it the
@@ -281,9 +291,12 @@ mod tests {
             shielded_keys.push(spending_key_bytes(&shielded));
             // The transparent key is read again for every activation: the same secret and the same HTLC key.
             let again = transparent_secret_for_policy(&hd_ctx, &conf, &internal, policy).unwrap();
-            assert_eq!(again, transparent, "account {account}");
+            assert!(again == transparent, "the same transparent secret for every account");
             let derived = derive_swap_htlc_key_pair(&key_pair_from_secret(&again).unwrap(), &input).unwrap();
-            assert_eq!(derived.public_slice(), htlc_pub.as_slice(), "account {account}");
+            assert!(
+                derived.public_slice() == htlc_pub.as_slice(),
+                "the same HTLC key for every account"
+            );
         }
         shielded_keys.sort();
         shielded_keys.dedup();
@@ -301,13 +314,14 @@ mod tests {
             PrivKeyActivationPolicy::ContextPrivKey,
             PrivKeyActivationPolicy::IguanaPrivKey,
         ] {
-            assert_eq!(
-                transparent_secret_for_policy(&seed_ctx, &conf, &secret, policy).unwrap(),
-                secret
+            assert!(
+                transparent_secret_for_policy(&seed_ctx, &conf, &secret, policy).unwrap() == secret,
+                "a single-key login uses its own key as the transparent key"
             );
-            assert_eq!(
-                spending_key_bytes(&shielded_spending_key_for_policy(&seed_ctx, &secret, 0, policy, &info).unwrap()),
-                spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&secret))
+            assert!(
+                spending_key_bytes(&shielded_spending_key_for_policy(&seed_ctx, &secret, 0, policy, &info).unwrap())
+                    == spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&secret)),
+                "a single-key login uses the master of its own key as the shielded key"
             );
         }
         let hd_ctx = ctx_with_policy(true);

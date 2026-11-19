@@ -8003,8 +8003,8 @@ pub(crate) mod tests {
         let first = fingerprint_of(1);
         assert_eq!(first.len(), 16);
         assert!(first.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-        assert_eq!(first, fingerprint_of(1));
-        assert_ne!(first, fingerprint_of(2));
+        assert!(first == fingerprint_of(1), "the fingerprint of a key is stable");
+        assert!(first != fingerprint_of(2), "another key has another fingerprint");
     }
 
     /// R39.8.0bd, test: the default key uses the default files.
@@ -8030,17 +8030,17 @@ pub(crate) mod tests {
         let db_dir = test_db_dir("key-non-default");
         let history = open_for_key(&db_dir, 2, false);
         let fingerprint = fingerprint_of(2);
-        assert_eq!(
-            name_of(history.wallet_db_path()),
-            format!("ARRR_RELOADED_WALLET.{fingerprint}.db")
+        assert!(
+            name_of(history.wallet_db_path()) == format!("ARRR_RELOADED_WALLET.{fingerprint}.db"),
+            "the wallet file is named by the key fingerprint"
         );
-        assert_eq!(
-            name_of(history.compact_blocks_path()),
-            format!("ARRR_RELOADED_COMPACT_BLOCKS.{fingerprint}.db")
+        assert!(
+            name_of(history.compact_blocks_path()) == format!("ARRR_RELOADED_COMPACT_BLOCKS.{fingerprint}.db"),
+            "the compact-block file is named by the key fingerprint"
         );
-        assert_eq!(
-            name_of(history.tx_addresses_path()),
-            format!("ARRR_RELOADED_TX_ADDRESSES.{fingerprint}.db")
+        assert!(
+            name_of(history.tx_addresses_path()) == format!("ARRR_RELOADED_TX_ADDRESSES.{fingerprint}.db"),
+            "the address file is named by the key fingerprint"
         );
         assert!(!db_dir.join("ARRR_RELOADED_WALLET.db").exists());
     }
@@ -8055,12 +8055,18 @@ pub(crate) mod tests {
         let second = open_for_key(&db_dir, 2, false);
         let second_path = second.wallet_db_path().to_path_buf();
         drop(second);
-        assert_ne!(first_path, second_path);
+        assert!(first_path != second_path, "each key has its own wallet file");
         let files_after_both = file_names(&db_dir);
 
         for _ in 0..2 {
-            assert_eq!(open_for_key(&db_dir, 1, true).wallet_db_path(), first_path);
-            assert_eq!(open_for_key(&db_dir, 2, false).wallet_db_path(), second_path);
+            assert!(
+                open_for_key(&db_dir, 1, true).wallet_db_path() == first_path,
+                "the first key reopens its wallet"
+            );
+            assert!(
+                open_for_key(&db_dir, 2, false).wallet_db_path() == second_path,
+                "the second key reopens its wallet"
+            );
         }
 
         assert_eq!(
@@ -8071,14 +8077,14 @@ pub(crate) mod tests {
         // Each file holds only its own key's account.
         for (path, seed) in [(&first_path, 1u8), (&second_path, 2u8)] {
             let ufvk = sapling_ufvk(&test_extfvk(seed)).unwrap();
-            assert_eq!(
-                wallet_db_key_holding(path, &test_params(), &ufvk).unwrap(),
-                WalletDbKeyHolding::ThisKey
+            assert!(
+                wallet_db_key_holding(path, &test_params(), &ufvk).unwrap() == WalletDbKeyHolding::ThisKey,
+                "each file holds its own key"
             );
             let other = sapling_ufvk(&test_extfvk(seed % 2 + 1)).unwrap();
-            assert_eq!(
-                wallet_db_key_holding(path, &test_params(), &other).unwrap(),
-                WalletDbKeyHolding::OtherKey
+            assert!(
+                wallet_db_key_holding(path, &test_params(), &other).unwrap() == WalletDbKeyHolding::OtherKey,
+                "each file does not hold the other key"
             );
         }
     }
@@ -8094,7 +8100,10 @@ pub(crate) mod tests {
 
         // The same key, now judged a non-default key: still the default file, no per-key file.
         let again = open_for_key(&db_dir, 5, false);
-        assert_eq!(again.wallet_db_path(), default_path);
+        assert!(
+            again.wallet_db_path() == default_path,
+            "the key keeps the default file it holds"
+        );
         drop(again);
         assert!(file_names(&db_dir)
             .iter()
@@ -8102,15 +8111,15 @@ pub(crate) mod tests {
 
         // Another key that is the default key goes to its own files.
         let other = open_for_key(&db_dir, 6, true);
-        assert_eq!(
-            name_of(other.wallet_db_path()),
-            format!("ARRR_RELOADED_WALLET.{}.db", fingerprint_of(6))
+        assert!(
+            name_of(other.wallet_db_path()) == format!("ARRR_RELOADED_WALLET.{}.db", fingerprint_of(6)),
+            "the default key gets its own file when the default file holds another key"
         );
         assert!(default_path.exists());
         let ufvk = sapling_ufvk(&test_extfvk(5)).unwrap();
-        assert_eq!(
-            wallet_db_key_holding(&default_path, &test_params(), &ufvk).unwrap(),
-            WalletDbKeyHolding::ThisKey
+        assert!(
+            wallet_db_key_holding(&default_path, &test_params(), &ufvk).unwrap() == WalletDbKeyHolding::ThisKey,
+            "the default file still holds its key"
         );
     }
 
@@ -8124,9 +8133,9 @@ pub(crate) mod tests {
         // `test_extfvk(8)` owns the fixture's account; seed 9 is another key.
         let history = open_for_key(&db_dir, 9, false);
 
-        assert_eq!(
-            name_of(history.wallet_db_path()),
-            format!("ARRR_RELOADED_WALLET.{}.db", fingerprint_of(9))
+        assert!(
+            name_of(history.wallet_db_path()) == format!("ARRR_RELOADED_WALLET.{}.db", fingerprint_of(9)),
+            "the other key gets its own file"
         );
         assert_eq!(
             classify_wallet_db(&paths.wallet_db_path, test_params()),
@@ -8137,9 +8146,10 @@ pub(crate) mod tests {
             1
         );
         let owner = sapling_ufvk(&test_extfvk(8)).unwrap();
-        assert_eq!(
-            wallet_db_key_holding(&paths.wallet_db_path, &test_params(), &owner).unwrap(),
-            WalletDbKeyHolding::ThisKey
+        assert!(
+            wallet_db_key_holding(&paths.wallet_db_path, &test_params(), &owner).unwrap()
+                == WalletDbKeyHolding::ThisKey,
+            "the upgraded default file keeps its key"
         );
     }
 
