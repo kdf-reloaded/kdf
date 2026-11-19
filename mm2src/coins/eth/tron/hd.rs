@@ -3,6 +3,10 @@
 //! An address of the wallet counts as used when the chain has created its account (a non-empty
 //! `POST /wallet/getaccount` answer) or when any enabled TRC20 token has a non-zero balance at it. The scan for new
 //! addresses and the activation scan stop after `gap_limit` addresses that are not used.
+//!
+//! The rule is the same when a scan is asked for a TRC20 ticker (the Reloaded note of 2026-11-19 in CRD ch.21):
+//! receiving a TRC20 token does not create the account, so an address that holds only a token would otherwise be
+//! missed.
 
 use super::api::TronApiClient;
 use super::balance::{trc20_balance_units, TronBalanceError};

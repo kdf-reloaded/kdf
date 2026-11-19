@@ -230,9 +230,12 @@ the previous version used. The safe way:
   `gap_limit`, `scan_policy` and `min_addresses_number`, the way every EVM platform does, for the default policy and for
   `ContextPrivKey`; a config without `derivation_path` is refused with `InvalidPayload`. `IguanaPrivKey` keeps the node's
   single internal key. The result lists the accounts with base58check addresses, their derivation paths and the balances
-  of TRX and the enabled TRC20 tokens. `get_new_address`, `account_balance`, `task::get_new_address::init`,
-  `task::scan_for_new_addresses::init` and `task::account_balance::init` work for TRX and TRC20 tickers; an address counts
-  as used when the chain has created its account or an enabled TRC20 token has a balance there.
+  of TRX and the enabled TRC20 tokens. `get_new_address`, `account_balance`, `task::scan_for_new_addresses::init` and
+  `task::account_balance::init` work for TRX and TRC20 tickers. Asked for TRX,
+  each balance map covers TRX and the enabled TRC20 tokens; asked for a TRC20 ticker, that token only, as for an ERC-20
+  ticker. For either ticker an address counts as used when the chain has created its account or an enabled TRC20 token
+  has a balance there. For a TRC20 ticker GLEEC KDF looks at the account only; receiving a TRC20 token does not create
+  the account, so Reloaded also looks at the token balances and finds an address that holds only a token.
   `task::create_new_account::init` fails with `Internal` for every TRON coin. `withdraw` and `task::withdraw` take an HD
   `from` for TRX and TRC20 and sign with the key of that path, and `show_priv_key` answers the key of the activated
   address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, which Reloaded's EVM

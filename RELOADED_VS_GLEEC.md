@@ -727,9 +727,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Under a global-HD login `enable_eth_with_tokens` and `task::enable_eth::init` derive the TRX address under the
   `derivation_path` of the coin config (coin type 195), as GLEEC KDF does; the HD methods (`get_new_address`,
   `account_balance` and the task forms of `get_new_address`, `scan_for_new_addresses` and `account_balance`) answer
-  base58check addresses and a balance map over TRX and the enabled TRC20 tokens, and `task::create_new_account::init`
-  fails with `Internal`. A TRX address counts as used when the chain has created its account or an enabled TRC20 token
-  has a balance there. The legacy `enable` method keeps the node's internal key under a global-HD login, as Reloaded's
+  base58check addresses and a balance map (over TRX and the enabled TRC20 tokens for the TRX ticker, that token only for
+  a TRC20 ticker, as GLEEC KDF does), and `task::create_new_account::init` fails with `Internal`. An address counts as
+  used when the chain has created its account or an enabled TRC20 token has a balance there. For a scan asked for a
+  TRC20 ticker this differs from GLEEC KDF, which looks at the account only: receiving a TRC20 token does not create the
+  account, so GLEEC KDF's scan misses an address that holds only a token, and Reloaded's finds it (a superset, never
+  fewer addresses; not visible to peers). The legacy `enable` method keeps the node's internal key under a global-HD login, as Reloaded's
   EVM and UTXO legacy routes do, so its TRON address differs from the HD route's address for the same seed; GLEEC KDF
   refuses TRON on the legacy method, so a GLEEC client never reaches it. `withdraw` of a TRON coin takes an HD `from`
   and signs with that key, and refuses `from` on a single-key coin (it was ignored before). A TRC20 withdraw under a global-HD login takes an HD `from` resolved in the platform's HD wallet (any activated address of the platform); this is a Reloaded extension, and an EVM ERC-20 coin in Reloaded refuses `from`. No switch; row in

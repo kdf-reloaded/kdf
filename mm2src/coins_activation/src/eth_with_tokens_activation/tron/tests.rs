@@ -1001,6 +1001,18 @@ fn spendable_of(balance: &Json) -> BigDecimal {
     BigDecimal::from_str(balance["spendable"].as_str().expect("a decimal string")).expect("a decimal")
 }
 
+/// The tickers of a balance map, sorted.
+fn tickers_of(balance: &Json) -> Vec<&str> {
+    let mut tickers: Vec<&str> = balance
+        .as_object()
+        .expect("a balance map")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    tickers.sort_unstable();
+    tickers
+}
+
 fn poll_status(mut status: impl FnMut() -> Json) -> Json {
     for _ in 0..400 {
         let polled = status();
@@ -1146,8 +1158,9 @@ fn a_config_without_a_derivation_path_is_invalid_payload_under_a_global_hd_login
 }
 
 /// The HD methods for a TRX and a TRC20 ticker (CRD ch.21 R21.10B.4): `get_new_address` derives the next address,
-/// `account_balance` and `task::account_balance::init` list the known addresses, all in base58check, with the
-/// balance map over the platform and its enabled token.
+/// `account_balance` and `task::account_balance::init` list the known addresses, all in base58check. Asked for the
+/// TRX ticker, each balance map covers the platform and its enabled token; asked for a TRC20 ticker, that token only
+/// (the status note of 2026-11-19, as CRD ch.49 R49.32 records for an ERC-20 ticker).
 #[test]
 fn the_hd_methods_answer_base58_addresses_and_a_balance_map_over_the_platform_and_its_tokens() {
     use coins::hd_wallet::get_new_address;
@@ -1179,9 +1192,16 @@ fn the_hd_methods_answer_base58_addresses_and_a_balance_map_over_the_platform_an
         BigDecimal::from_str("2.5").expect("a decimal")
     );
     assert_eq!(spendable_of(&first["balance"]["USDT-TRC20"]), BigDecimal::from(0));
+    assert_eq!(tickers_of(&first["balance"]), ["TRX", "USDT-TRC20"]);
     let second = new_address("USDT-TRC20");
     assert_eq!(second["address"], address(2).as_str());
     assert_eq!(second["derivation_path"], "m/44'/195'/0'/0/2");
+    assert_eq!(
+        tickers_of(&second["balance"]),
+        ["USDT-TRC20"],
+        "the token's ticker only"
+    );
+    assert_eq!(spendable_of(&second["balance"]["USDT-TRC20"]), BigDecimal::from(0));
 
     // `account_balance`: the page balance is the ticker's own.
     let balances = |ticker: &str| -> Json {
@@ -1216,6 +1236,9 @@ fn the_hd_methods_answer_base58_addresses_and_a_balance_map_over_the_platform_an
         spendable_of(&trx["page_balance"]),
         BigDecimal::from_str("2.5").expect("a decimal")
     );
+    for entry in trx["addresses"].as_array().expect("addresses") {
+        assert_eq!(tickers_of(&entry["balance"]), ["TRX", "USDT-TRC20"], "{entry}");
+    }
     let token = balances("USDT-TRC20");
     assert_eq!(
         spendable_of(&token["page_balance"]),
@@ -1223,6 +1246,19 @@ fn the_hd_methods_answer_base58_addresses_and_a_balance_map_over_the_platform_an
         "the token's own balance"
     );
     assert_eq!(token["addresses"][0]["address"], address(0).as_str());
+    let token_addresses = token["addresses"].as_array().expect("addresses");
+    assert_eq!(token_addresses.len(), 3, "the platform's wallet: the same addresses");
+    for entry in token_addresses {
+        assert_eq!(tickers_of(&entry["balance"]), ["USDT-TRC20"], "{entry}");
+    }
+    assert_eq!(
+        spendable_of(&token_addresses[0]["balance"]["USDT-TRC20"]),
+        dec("1.234567")
+    );
+    assert_eq!(
+        spendable_of(&token_addresses[1]["balance"]["USDT-TRC20"]),
+        BigDecimal::from(0)
+    );
 
     // `task::account_balance::init` for both tickers.
     for ticker in ["TRX", "USDT-TRC20"] {
@@ -1231,11 +1267,22 @@ fn the_hd_methods_answer_base58_addresses_and_a_balance_map_over_the_platform_an
             .unwrap_or_else(|e| panic!("init_account_balance failed: {}", e.get_inner()));
         let result = serde_json::to_value(&result).expect("a serializable answer");
         assert_eq!(result["addresses"][1]["address"], address(1).as_str(), "{ticker}");
-        assert_eq!(
-            spendable_of(&result["total_balance"]["TRX"]),
-            BigDecimal::from_str("2.5").expect("a decimal"),
-            "{ticker}"
-        );
+        // The TRX ticker reports the platform and its token, a TRC20 ticker that token only.
+        let expected: &[&str] = if ticker == "TRX" {
+            &["TRX", "USDT-TRC20"]
+        } else {
+            &["USDT-TRC20"]
+        };
+        assert_eq!(tickers_of(&result["total_balance"]), expected, "{ticker}");
+        for entry in result["addresses"].as_array().expect("addresses") {
+            assert_eq!(tickers_of(&entry["balance"]), expected, "{ticker}: {entry}");
+        }
+        if ticker == "TRX" {
+            assert_eq!(
+                spendable_of(&result["total_balance"]["TRX"]),
+                BigDecimal::from_str("2.5").expect("a decimal")
+            );
+        }
         assert_eq!(
             spendable_of(&result["total_balance"]["USDT-TRC20"]),
             dec("1.234567"),
@@ -1272,9 +1319,13 @@ fn task_scan_for_new_addresses_follows_the_used_address_rule() {
         spendable_of(&found[2]["balance"]["TRX"]),
         BigDecimal::from_str("2.5").expect("a decimal")
     );
+    for entry in found {
+        assert_eq!(tickers_of(&entry["balance"]), ["TRX", "USDT-TRC20"], "{entry}");
+    }
 
-    // (b) Only a token balance at index 2: with the token enabled the address is used, and the task answers for a
-    // TRC20 ticker as well.
+    // (b) Only a token balance at index 2, where the chain has created no account: with the token enabled the
+    // address is used, also when the task is asked for a TRC20 ticker (the status note of 2026-11-19 and the
+    // Reloaded note after it). The answer for a TRC20 ticker holds that token's ticker only.
     let ctx = tron_hd_ctx();
     let address = |id: u32| independent_address(&ctx, &format!("m/44'/195'/0'/0/{id}"));
     let node = hd_node(&[address(0)], &[address(2)]);
@@ -1287,6 +1338,9 @@ fn task_scan_for_new_addresses_follows_the_used_address_rule() {
     let found = status["details"]["new_addresses"].as_array().expect("new addresses");
     assert_eq!(found.len(), 2, "{status}");
     assert_eq!(found[1]["address"], address(2).as_str());
+    for entry in found {
+        assert_eq!(tickers_of(&entry["balance"]), ["USDT-TRC20"], "{entry}");
+    }
     assert_eq!(
         spendable_of(&found[1]["balance"]["USDT-TRC20"]),
         BigDecimal::from_str("1.234567").expect("a decimal")

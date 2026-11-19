@@ -344,7 +344,9 @@ impl HDWalletRpcOps for EthCoin {
         // A TRC20 token asks the HD wallet of its platform (CRD ch.21 R21.10B.4).
         let serving = self.hd_serving_coin().await.map_to_mm(HDWalletRpcError::Internal)?;
         if serving.tron_api.is_some() {
-            return tron_get_new_address_rpc(&serving, params).await;
+            let mut response = tron_get_new_address_rpc(&serving, params).await?;
+            self.keep_own_ticker_if_trc20(&mut response.new_address.balance);
+            return Ok(response);
         }
         hd_wallet::common_impl::get_new_address_rpc(self, params).await
     }
@@ -638,7 +640,7 @@ impl AccountBalanceRpcOps for EthCoin {
         params: AccountBalanceParams,
     ) -> MmResult<HDAccountBalanceResponse, HDAccountBalanceRpcError> {
         // A TRC20 token asks the HD wallet of its platform (CRD ch.21 R21.10B.4); the page balance of the answer
-        // is then the token's own.
+        // is then the token's own, and each balance map holds the token's ticker only.
         let serving = self
             .hd_serving_coin()
             .await
@@ -651,6 +653,9 @@ impl AccountBalanceRpcOps for EthCoin {
                 .fold(CoinBalance::default(), |total, address| {
                     total + address.balance.get(self.ticker()).cloned().unwrap_or_default()
                 });
+        }
+        for address in response.addresses.iter_mut() {
+            self.keep_own_ticker_if_trc20(&mut address.balance);
         }
         Ok(response)
     }
@@ -671,13 +676,18 @@ impl InitAccountBalanceRpcOps for EthCoin {
         &self,
         params: InitAccountBalanceParams,
     ) -> MmResult<HDAccountBalance, HDAccountBalanceRpcError> {
-        // A TRC20 token asks the HD wallet of its platform (CRD ch.21 R21.10B.4): the balance maps cover the
-        // platform and its enabled tokens.
+        // A TRC20 token asks the HD wallet of its platform (CRD ch.21 R21.10B.4). For the platform's ticker the
+        // balance maps cover the platform and its enabled tokens; for a token's ticker, that token only.
         let serving = self
             .hd_serving_coin()
             .await
             .map_to_mm(HDAccountBalanceRpcError::Internal)?;
-        init_account_balance_mod::common_impl::init_account_balance_rpc(&serving, params).await
+        let mut response = init_account_balance_mod::common_impl::init_account_balance_rpc(&serving, params).await?;
+        self.keep_own_ticker_if_trc20(&mut response.total_balance);
+        for address in response.addresses.iter_mut() {
+            self.keep_own_ticker_if_trc20(&mut address.balance);
+        }
+        Ok(response)
     }
 }
 
@@ -750,7 +760,12 @@ impl InitScanAddressesRpcOps for EthCoin {
             .hd_serving_coin()
             .await
             .map_to_mm(HDAccountBalanceRpcError::Internal)?;
-        init_scan_for_new_addresses::common_impl::scan_for_new_addresses_rpc(&serving, params).await
+        let mut response =
+            init_scan_for_new_addresses::common_impl::scan_for_new_addresses_rpc(&serving, params).await?;
+        for address in response.new_addresses.iter_mut() {
+            self.keep_own_ticker_if_trc20(&mut address.balance);
+        }
+        Ok(response)
     }
 }
 
@@ -817,6 +832,17 @@ impl EthCoin {
             }
         }
         map
+    }
+
+    /// Narrows a balance map of an HD method's answer to this coin's own ticker when the method was asked for a
+    /// TRC20 ticker, as for an ERC-20 ticker (CRD ch.21 status note of 2026-11-19, ch.49 R49.32). The platform's
+    /// wallet serves the method ([`Self::hd_serving_coin`]) and reports the platform and every enabled token; a
+    /// TRC20 ticker answers that token only. A map asked for the TRX ticker is left whole.
+    fn keep_own_ticker_if_trc20(&self, map: &mut CoinBalanceMap) {
+        if matches!(self.coin_type, EthCoinType::Trc20 { .. }) {
+            let ticker = self.ticker();
+            map.retain(|reported, _| reported == ticker);
+        }
     }
 
     /// The coin whose HD wallet serves the HD RPC methods asked of this coin: the platform for a TRC20 token (a

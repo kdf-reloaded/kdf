@@ -871,6 +871,24 @@ governs Reloaded.
   in base58check, while withdraw (chapter 47 R47.5.6a) and message signing
   refuse it. D21.10B.3.
 
+*Reloaded note (2026-11-19), the HD methods for a TRC20 ticker in this
+repository (its own code, not the reference; PR #428).* Asked for a TRC20
+ticker, `get_new_address`, `account_balance`,
+`task::account_balance::init` and `task::scan_for_new_addresses::init`
+answer from the HD wallet of the platform, and each balance map holds that
+token's ticker only, as chapter 49 §49.2.1 (R49.32) records for an ERC-20
+ticker on an EVM platform. Asked for the TRX ticker, each balance map
+covers TRX and the enabled TRC20 tokens. The activation result is the same
+as before. The used-address criterion is deliberately not the reference's:
+for a TRC20 ticker, as for the TRX ticker, an address counts as used when
+the chain has created its account or when any enabled TRC20 token has a
+non-zero balance at it. Receiving a TRC20 token does not create the
+account, so a scan that consulted no token balance would miss an address
+that holds only a token. The addresses found this way are a superset of
+those the account-only criterion finds, so no funds are found by the
+reference's criterion and missed by this one; the difference is not
+visible to peers and has no switch.
+
 **R21.10B.5** *Activation result (completes the §21.4 note and R-WP5).* The
 result has the EVM family's shape with no TRON-specific member. Single
 key: `current_block` is the TRON head block number from
@@ -1071,9 +1089,12 @@ The Trezor, WalletConnect and MetaMask refusals are unchanged under a
 global-HD login. The HD methods (`get_new_address`, `account_balance` and the
 task forms of `get_new_address`, `scan_for_new_addresses` and
 `account_balance`) answer for a TRX or TRC20 ticker with base58check addresses
-and a balance map over TRX and the enabled TRC20 tokens; a TRC20 ticker is
-served by the HD wallet of its platform. An address counts as used as R21.10B.4
-says. `task::create_new_account::init` ends with `Internal` in the task status
+and a balance map: over TRX and the enabled TRC20 tokens for the TRX ticker,
+over that token only for a TRC20 ticker, which is served by the HD wallet of
+its platform. For either ticker an address counts as used when the chain has
+created its account or when any enabled TRC20 token has a non-zero balance at
+it (the Reloaded note of 2026-11-19 after R21.10B.4, which records how this
+differs for a TRC20 ticker). `task::create_new_account::init` ends with `Internal` in the task status
 for every TRON coin, before any account is created. `withdraw` and
 `task::withdraw::init` of a TRX or TRC20 coin take the HD `from` forms of the
 EVM withdraw (an address id or a derivation path, resolved in the HD wallet of
