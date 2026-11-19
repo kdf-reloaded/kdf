@@ -1,5 +1,5 @@
 use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens, EnablePlatformCoinWithTokensError,
-                                       EnablePlatformCoinWithTokensReq, GetPlatformBalance,
+                                       EnablePlatformCoinWithTokensReq, GetPlatformBalance, InitTokensAsMmCoinsError,
                                        PlatformWithTokensActivationOps, RegisterTokenInfo, TokenActivationParams,
                                        TokenActivationRequest, TokenAsMmCoinInitializer, TokenInitializer, TokenOf};
 use crate::prelude::*;
@@ -10,7 +10,7 @@ use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::node_url::scrub_urls_in_text;
 use coins::rpc_command::get_my_address::PathToAddress;
-use coins::solana::spl::SplProtocolConf;
+use coins::solana::spl::{SplProtocolConf, TOKEN_2022_NOT_SUPPORTED, TOKEN_2022_PROGRAM_ID};
 use coins::solana::{solana_hd_derivation_path, solana_hd_secret, SolanaHdLayout};
 use coins::{coin_conf, solana_coin_from_conf_and_params, CoinBalance, CoinProtocol, MarketCoinOps,
             PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE,
@@ -48,6 +48,21 @@ pub struct SplTokenInitializer {
     platform_coin: SolanaCoin,
 }
 
+/// A failure while the inline tokens are initialised (CRD ch.40 R40.2.4, R40.3A.3): the node failed while a mint
+/// account was read, or a mint is owned by another program than the token's.
+#[derive(Debug)]
+pub enum SplTokensInitError {
+    Transport(String),
+}
+
+impl From<SplTokensInitError> for InitTokensAsMmCoinsError {
+    fn from(e: SplTokensInitError) -> Self {
+        match e {
+            SplTokensInitError::Transport(e) => InitTokensAsMmCoinsError::Transport(e),
+        }
+    }
+}
+
 impl TokenOf for SplToken {
     type PlatformCoin = SolanaCoin;
 }
@@ -58,8 +73,8 @@ impl TokenInitializer for SplTokenInitializer {
     type Token = SplToken;
     type TokenActivationRequest = SplActivationRequest;
     type TokenProtocol = SplProtocolConf;
-    /// Initialising a token reads no node and cannot fail: its key is parsed with its protocol.
-    type InitTokensError = std::convert::Infallible;
+    /// Initialising a token reads its mint account from a node (CRD ch.40 R40.2.2).
+    type InitTokensError = SplTokensInitError;
 
     fn tokens_requests_from_platform_request(
         platform_params: &SolanaWithTokensActivationRequest,
@@ -71,18 +86,22 @@ impl TokenInitializer for SplTokenInitializer {
         &self,
         activation_params: Vec<TokenActivationParams<SplActivationRequest, SplProtocolConf>>,
     ) -> Result<Vec<SplToken>, MmError<Self::InitTokensError>> {
-        let tokens = activation_params
-            .into_iter()
-            .map(|param| {
-                SplToken::new(
-                    param.protocol.decimals,
-                    param.ticker,
-                    param.protocol.token_contract_address,
-                    param.protocol.program_id,
-                    self.platform_coin.clone(),
-                )
-            })
-            .collect();
+        // R40.2.2: each token's mint account, if it exists, must be owned by the token's program; a mint account
+        // that does not exist is accepted. Nothing is registered here, so a failure leaves nothing behind.
+        let mut tokens = Vec::with_capacity(activation_params.len());
+        for param in activation_params {
+            self.platform_coin
+                .check_mint_owner(&param.protocol.token_contract_address, &param.protocol.program_id)
+                .await
+                .mm_err(|e| SplTokensInitError::Transport(e.to_string()))?;
+            tokens.push(SplToken::new(
+                param.protocol.decimals,
+                param.ticker,
+                param.protocol.token_contract_address,
+                param.protocol.program_id,
+                self.platform_coin.clone(),
+            ));
+        }
         Ok(tokens)
     }
 
@@ -271,6 +290,18 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         let crypto_ctx =
             CryptoCtx::from_ctx(&ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
         reject_unsupported_policy(&ticker, &activation_request.priv_key_policy)?;
+        // D40.6B.4: a Token-2022 inline token is refused before any node is contacted and nothing is
+        // registered. A token whose configuration does not resolve is left to the later token initialisation.
+        for token in &activation_request.spl_tokens_requests {
+            if let Ok((_, protocol)) = coin_conf_with_protocol::<SplProtocolConf>(&ctx, &token.ticker) {
+                if protocol.program_id == TOKEN_2022_PROGRAM_ID {
+                    return Err(creation_error(
+                        &ticker,
+                        format!("{}: {}", token.ticker, TOKEN_2022_NOT_SUPPORTED),
+                    ));
+                }
+            }
+        }
         // R40.1A.1: a single-key login uses the key passed in; a global-HD login derives its own key, or uses the
         // context's internal key when the request asks for `IguanaPrivKey` (`hd_path_layout` and `path_to_address`
         // are then ignored).

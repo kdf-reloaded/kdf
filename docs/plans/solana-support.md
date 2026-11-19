@@ -92,8 +92,9 @@ specifications unless a reference question below changes them.
 | S3 | Every operation an ordinary RPC reaches on a Solana coin answers a typed "not supported for this coin" error instead of ending the request; operations only a swap reaches stay behind the trading refusal. The minimum transaction amount becomes one lamport for SOL and one smallest unit of its own decimals for each SPL token (section "Trading floors"); `show_priv_key` answers the 64-byte keypair in base58 (maintainer decision of 2026-11-15) | done: part a PR #401, part b (`disable_coin`) PR #413 |
 | S4 | Keys under each login: under a global-HD login an ed25519 key derived from the wallet seed at the coin's `derivation_path` and `path_to_address`; a typed refusal for hardware-wallet and WalletConnect requests; the single-key rule of R40.1.4 unchanged; the legacy passphrase key never used for Solana; ch. 05 R46 and ch. 40 R40.1.4 reconciled by status notes; layouts `bip44_change` (default, `m/44'/501'/N'/0'`) and `bip44` (`m/44'/501'/N'`) chosen per request, nothing stored | done, PR #392 (ch. 40 §40.1A) |
 | S5 | Move the Solana crates to the 3.x line, which no longer pins `ed25519-dalek` 1 (see `solana-sdk-upgrade.md`), with address and signature regression vectors; before S6 and S8 | open (in this cycle by maintainer decision, 2026-11-15) |
-| S6 | Withdraw fixes for classic SPL tokens: the account and balance derived with the token's `program_id` (a wallet without an account reads zero), the whole amount for SPL `max`, rent counted and shown, the four-member `fee_details`, owner addresses only as recipients, the mint-owner check of R40.2.2; a token whose `program_id` is the Token-2022 program is refused at activation with a structured error (maintainer decision of 2026-11-15, ch. 40 D40.6B.4 (a)) | after S2 |
+| S6 | Withdraw fixes for classic SPL tokens: the account and balance derived with the token's `program_id` (a wallet without an account reads zero), the whole amount for SPL `max`, rent counted and shown, the four-member `fee_details`, owner addresses only as recipients, the mint-owner check of R40.2.2; a token whose `program_id` is the Token-2022 program is refused at activation with a structured error (maintainer decision of 2026-11-15, ch. 40 D40.6B.4 (a)) | done, PR #425 |
 | S6b | Full Token-2022 support: balance, source account and transfer under the token's own program, rent for the real account size, a stated rule for mints with a transfer fee (ch. 40 D40.6B.4 (b)) | after S9 |
+| S6c | A rent-exempt guard for SOL withdraws: a withdraw that would leave the sender's account between zero and Solana's rent-exempt minimum, or that sends less than that minimum to an address without an account, answers a structured error instead of a transaction the node refuses at broadcast (code-quality finding in ch. 40 R40.6B.10; kept out of S6 on 2026-11-18) | after S6 |
 | S7 | Compatibility methods `experimental::enable_solana_with_assets` and `experimental::enable_solana_token` over the same activation code, with the §40.2-§40.3 shapes, `getHealth` node selection and the §40.7 tests | after S2 and S6 |
 | S8 | WASM routing for both surfaces; a build probe early in the cycle decides how it is built (for example a node client on the target-neutral HTTP layer) | open; probe after S2 |
 | S9 | Switch Solana back on (CRD ch. 40 D40.4): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable `docs/DISABLED_TESTS.md` group 6, retire the refusal tests and the beta notes in ch. 40, ch. 55, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md` and the README; devnet lab rows before it is marked ready | after S1 to S8 (maintainer decision, 2026-11-15) |
@@ -137,9 +138,11 @@ specifications unless a reference question below changes them.
   done on chain; history; the `withdraw` answer; the answer of the other RPCs on
   Solana coins; the reading of coins-file variants.
 - **Lab:** rows on the public devnet (faucet funds only): activation on both
-  surfaces and both configuration forms, SOL and SPL withdraws including a
-  Token-2022 mint, message signing and the key-policy refusal, and address
-  parity with GLEEC KDF as a black box. An optional mainnet check at the
+  surfaces and both configuration forms, SOL and SPL withdraws, a Token-2022
+  mint refused at activation (S6; its withdraw rows follow with S6b), message
+  signing and the key-policy refusal, `disable_coin` on a token, on a platform
+  without tokens and on a platform with tokens, each followed by activating
+  the coin again (S3), and address parity with GLEEC KDF as a black box. An optional mainnet check at the
   switch-on needs a small SOL amount.
 
 ## Out of scope here
