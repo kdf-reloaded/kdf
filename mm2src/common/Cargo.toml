@@ -76,6 +76,9 @@ getrandom = { version = "0.2", features = ["js"] } # see https://docs.rs/getrand
 # wasm backend enabled. This feature plus the `--cfg getrandom_backend="wasm_js"`
 # rustflag in .cargo/config.toml are BOTH required on wasm32-unknown-unknown.
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# getrandom 0.4 is pulled transitively (rand 0.10 via orchard 0.16 of the Zcash libraries); its wasm backend is
+# selected by this feature alone (no rustflag).
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 gstuff = { version = "0.7" }
 js-sys = "0.3.27"
 serde-wasm-bindgen = "0.4.3"

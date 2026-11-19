@@ -10,6 +10,7 @@ use crate::utxo::rpc_clients::{UtxoRpcClientEnum, UtxoRpcError};
 use crate::utxo::utxo_common::payment_script;
 use crate::utxo::{sat_from_big_decimal, UtxoAddressFormat};
 use crate::z_coin::z_tx_addresses::AddressSide;
+use crate::z_coin::z_tx_assembler::{AssemblerError, KdfP2shInput, TransparentSignature, TransparentSigner, TxAssembler};
 use crate::z_coin::{z_tx_read, BuilderHeightError, SendOutputsErr, ZOutput, DEX_FEE_OVK};
 use crate::{NumConversError, PrivKeyNotAllowed, TransactionEnum};
 use bigdecimal::BigDecimal;
@@ -21,9 +22,7 @@ use keys::{Address, Public};
 use mm2_err_handle::prelude::*;
 use script::{Builder as ScriptBuilder, Opcode, Script};
 use secp256k1::SecretKey;
-use std::convert::Infallible;
 use zcash_keys::encoding::encode_payment_address;
-use zcash_primitives::transaction::builder::{BuildConfig, Builder as ZTxBuilder, BundlePadding};
 use zcash_primitives::transaction::fees::fixed::FeeRule as FixedFeeRule;
 use zcash_primitives::transaction::Transaction as ZTransaction;
 use zcash_protocol::consensus;
@@ -31,10 +30,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis as Amount;
 use zcash_script::script::Code as ZCashScriptCode;
 use zcash_transparent::address::Script as ZCashScript;
-use zcash_transparent::builder::TransparentSigningSet;
 use zcash_transparent::bundle::{OutPoint as ZCashOutpoint, TxOut};
-
-type ZTxBuilderError = zcash_primitives::transaction::builder::Error<Infallible>;
 
 /// The pay-to-script-hash address of `redeem_script`, with the coin's configured prefixes (CRD ch.39
 /// R39.8.9d3 (a), (c)). The payment to a swap's script lists it in `to`, and a spend or refund of that
@@ -130,7 +126,7 @@ pub async fn z_send_dex_fee(
 #[derive(Debug, Display)]
 #[allow(clippy::large_enum_variant, clippy::upper_case_acronyms)]
 pub enum ZP2SHSpendError {
-    ZTxBuilderError(ZTxBuilderError),
+    Assembler(AssemblerError),
     PrivKeyNotAllowed(PrivKeyNotAllowed),
     Rpc(UtxoRpcError),
     #[display(fmt = "{}", _0)]
@@ -141,8 +137,8 @@ pub enum ZP2SHSpendError {
     TxRecoverable(TransactionEnum, String),
 }
 
-impl From<ZTxBuilderError> for ZP2SHSpendError {
-    fn from(tx_builder: ZTxBuilderError) -> ZP2SHSpendError { ZP2SHSpendError::ZTxBuilderError(tx_builder) }
+impl From<AssemblerError> for ZP2SHSpendError {
+    fn from(err: AssemblerError) -> ZP2SHSpendError { ZP2SHSpendError::Assembler(err) }
 }
 
 impl From<PrivKeyNotAllowed> for ZP2SHSpendError {
@@ -194,26 +190,28 @@ pub async fn z_p2sh_spend(
         payment_txid,
         target_height
     );
-    let mut tx_builder = ZTxBuilder::new(
+    let mut assembler = TxAssembler::new(
         coin.z_fields.consensus_params.clone(),
         target_height.into(),
-        BuildConfig::Standard {
-            sapling_anchor: Some(sapling::Anchor::empty_tree()),
-            orchard_anchor: None,
-            ironwood_anchor: None,
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
-        },
+        sapling::Anchor::empty_tree(),
     );
-    tx_builder.set_lock_time(tx_locktime);
+    assembler.set_lock_time(tx_locktime);
 
     // The address of the script this input spends (R39.8.9d3 (c)), from the redeem script the input carries.
     let spent_script_address = p2sh_address(coin, &redeem_script).to_string();
 
     let secp_secret = SecretKey::from_slice(htlc_privkey)
         .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
-    let mut signing_set = TransparentSigningSet::new();
-    let pubkey = signing_set.add_key(secp_secret);
+    let signer: TransparentSigner = Box::new(move |sighash: &[u8; 32]| {
+        let secp = secp256k1::Secp256k1::signing_only();
+        let message = secp256k1::Message::from_digest(*sighash);
+        Ok(TransparentSignature {
+            der: secp.sign_ecdsa(&message, &secp_secret).serialize_der().to_vec(),
+            public_key: secp256k1::PublicKey::from_secret_key(&secp, &secp_secret)
+                .serialize()
+                .to_vec(),
+        })
+    });
 
     let outpoint = ZCashOutpoint::new(*p2sh_tx.txid().as_ref(), 0);
     let tx_out = p2sh_tx
@@ -221,13 +219,14 @@ pub async fn z_p2sh_spend(
         .and_then(|bundle| bundle.vout.first())
         .cloned()
         .or_mm_err(|| ZP2SHSpendError::InvalidPaymentTx("transparent output 0 is missing".to_owned()))?;
-    let redeem_script = zcash_script::script::FromChain::parse(&ZCashScriptCode(redeem_script.to_vec()))
-        .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
-    let script_data = zcash_script::script::Sig::parse(&ZCashScriptCode(script_data.to_vec()))
-        .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
-    tx_builder
-        .add_kdf_p2sh_input(pubkey, outpoint, tx_out, redeem_script, script_data, input_sequence)
-        .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
+    assembler.add_kdf_p2sh_input(KdfP2shInput {
+        outpoint,
+        coin: tx_out,
+        redeem_script: redeem_script.to_vec(),
+        script_data: script_data.to_vec(),
+        sequence: input_sequence,
+        signer,
+    });
     let fee = Amount::const_from_u64(1_000);
     let payment_value = p2sh_tx
         .transparent_bundle()
@@ -236,27 +235,22 @@ pub async fn z_p2sh_spend(
         // CRD ch.60 R60.6.4: a spend whose fee is not smaller than the HTLC value is refused.
         .and_then(|value| if value > fee { value - fee } else { None })
         .or_mm_err(|| ZP2SHSpendError::InvalidPaymentTx("output 0 cannot cover the swap spend fee".to_owned()))?;
-    tx_builder
-        .add_sapling_output(None, coin.z_fields.my_z_addr.clone(), payment_value, MemoBytes::empty())
-        .map_to_mm(ZP2SHSpendError::from)?;
+    assembler.add_sapling_output(None, coin.z_fields.my_z_addr.clone(), payment_value, MemoBytes::empty());
 
     log::info!(
         "{}: HTLC spend of payment {}: building the transaction",
         ticker,
         payment_txid
     );
-    let zcash_tx = tx_builder
+    let zcash_tx = assembler
         .build(
-            &signing_set,
+            crate::z_coin::os_rng(),
             &[],
-            &[],
-            rand::rngs::OsRng,
             &coin.z_fields.z_tx_prover,
             &coin.z_fields.z_tx_prover,
             &FixedFeeRule::non_standard(fee),
         )
-        .map_to_mm(ZP2SHSpendError::from)?
-        .into_transaction();
+        .map_to_mm(ZP2SHSpendError::from)?;
 
     // Recorded when the transaction is built, as a withdrawal's recipient is: a spend spends no wallet
     // note and shows up only once mined, and a refused broadcast leaves a harmless entry that the scan

@@ -2,6 +2,7 @@ use super::*;
 use crate::activation_locks::{ActivationGuard, ActivationLocks};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 use crate::rpc_command::get_my_address::PathToAddress;
+use crate::utxo::rpc_clients::electrum_client_registry::ElectrumClientRegistry;
 use std::collections::{BTreeSet, HashSet};
 
 #[derive(Clone, Debug)]
@@ -225,6 +226,8 @@ pub struct CoinsContext {
     pub(crate) coins: AsyncMutex<CoinRegistry>,
     /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
     activation_locks: ActivationLocks,
+    /// The Electrum clients that QTUM and its QRC20 tokens share, by weak reference (CRD ch.38 D38.6.4Q.1 status note).
+    pub(crate) electrum_clients: ElectrumClientRegistry,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
     /// The swap layer's reader of the saved swaps that are not finished, registered at start; a shielded
     /// coin's activation checks the key against it (CRD ch.39 R39.8.0bd).
@@ -271,6 +274,7 @@ impl CoinsContext {
             Ok(CoinsContext {
                 coins: AsyncMutex::new(CoinRegistry::default()),
                 activation_locks: ActivationLocks::default(),
+                electrum_clients: ElectrumClientRegistry::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
                 unfinished_swaps_view: parking_lot::Mutex::new(None),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
@@ -453,7 +457,7 @@ pub enum PrivKeyPolicy<T> {
         /// The key pair derived at the user's chosen address path.
         activated_key: T,
         /// The BIP32 root extended private key for deriving additional coin keys.
-        bip39_secp_priv_key: bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
+        bip39_secp_priv_key: crypto::Secp256k1ExtendedPrivateKey,
         /// The `path_to_address` the key was derived at (CRD ch.05 R36 compares it with the address the coin pays from).
         path_to_address: PathToAddress,
     },
@@ -903,7 +907,10 @@ mod coin_protocol_tests {
                 use zcash_protocol::consensus::NetworkConstants;
                 assert!(info.check_point_block.is_some());
                 assert!(info.z_derivation_path.is_some());
-                assert_eq!(info.consensus_params.hrp_sapling_payment_address(), "zs");
+                // The test is of this crate's own implementation of the (deprecated) trait method.
+                #[allow(deprecated)]
+                let hrp = info.consensus_params.hrp_sapling_payment_address();
+                assert_eq!(hrp, "zs");
                 assert_eq!(info.consensus_params.coin_type(), 133);
             },
             other => panic!("expected ZHTLC, got {:?}", other),

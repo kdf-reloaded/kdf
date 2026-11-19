@@ -240,7 +240,9 @@ mod tests {
                 .unwrap();
         assert!(
             spending_key_bytes(&shielded)
-                == spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&internal)),
+                == spending_key_bytes(
+                    &sapling::zip32::ExtendedSpendingKey::master(&internal).expect("a valid master key")
+                ),
             "the shielded key is the master of the internal key"
         );
         // `account` has no effect on that key.
@@ -320,7 +322,9 @@ mod tests {
             );
             assert!(
                 spending_key_bytes(&shielded_spending_key_for_policy(&seed_ctx, &secret, 0, policy, &info).unwrap())
-                    == spending_key_bytes(&sapling::zip32::ExtendedSpendingKey::master(&secret)),
+                    == spending_key_bytes(
+                        &sapling::zip32::ExtendedSpendingKey::master(&secret).expect("a valid master key")
+                    ),
                 "a single-key login uses the master of its own key as the shielded key"
             );
         }
@@ -385,16 +389,16 @@ mod tests {
 
     /// T39.5.b: the key re-derived after a restart signs a refund of the HTLC. The refund spends the P2SH
     /// output of the redeem script rebuilt from the derived key (as `send_maker_refunds_payment` rebuilds it
-    /// from the key it is given); the builder signs only with a key whose public half is the one in the
-    /// redeem script's refund branch, and refuses a signing set that holds another key.
+    /// from the key it is given); the assembler accepts a signature only from a key whose public half is
+    /// the one in the redeem script, and refuses any other key.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_rederived_key_signs_a_refund_of_the_htlc() {
         use crate::utxo::utxo_common::payment_script;
-        use crate::z_coin::z_v6_construction_tests::{params, standard_config, NoProver};
-        use crate::z_coin::{FixedFeeRule, TransparentSigningSet, TxOut, ZTxBuilder};
+        use crate::z_coin::z_tx_assembler::{KdfP2shInput, TransparentSignature, TransparentSigner, TxAssembler};
+        use crate::z_coin::z_v6_construction_tests::{params, NoProver};
+        use crate::z_coin::{FixedFeeRule, TxOut};
         use zcash_protocol::value::Zatoshis as Amount;
-        use zcash_script::script::{Code, FromChain, Sig};
         use zcash_transparent::address::TransparentAddress;
         use zcash_transparent::bundle::OutPoint;
 
@@ -412,38 +416,40 @@ mod tests {
 
         let refund_with = |signing_key: &KeyPair| {
             let secret = secp256k1::SecretKey::from_slice(signing_key.private().secret.as_slice()).unwrap();
-            let mut builder = ZTxBuilder::new(params(None), 100u32.into(), standard_config(None));
-            builder.set_lock_time(time_lock);
-            builder
-                .add_kdf_p2sh_input(
-                    secp256k1::PublicKey::from_slice(derived.public()).unwrap(),
-                    OutPoint::new([5; 32], 0),
-                    payment_out.clone(),
-                    FromChain::parse(&Code(redeem.to_vec())).unwrap(),
-                    Sig::parse(&Code(vec![0x51])).unwrap(),
-                    0xffff_fffe,
-                )
-                .unwrap();
-            builder.add_transparent_output_raw(TxOut::new(
+            let signer: TransparentSigner = Box::new(move |sighash: &[u8; 32]| {
+                let secp = secp256k1::Secp256k1::signing_only();
+                let message = secp256k1::Message::from_digest(*sighash);
+                Ok(TransparentSignature {
+                    der: secp.sign_ecdsa(&message, &secret).serialize_der().to_vec(),
+                    public_key: secp256k1::PublicKey::from_secret_key(&secp, &secret)
+                        .serialize()
+                        .to_vec(),
+                })
+            });
+            let mut assembler = TxAssembler::new(params(None), 100u32.into(), sapling::Anchor::empty_tree());
+            assembler.set_lock_time(time_lock);
+            assembler.add_kdf_p2sh_input(KdfP2shInput {
+                outpoint: OutPoint::new([5; 32], 0),
+                coin: payment_out.clone(),
+                redeem_script: redeem.to_vec(),
+                script_data: vec![0x51],
+                sequence: 0xffff_fffe,
+                signer,
+            });
+            assembler.add_transparent_output_raw(TxOut::new(
                 Amount::const_from_u64(99_000),
                 TransparentAddress::PublicKeyHash([4; 20]).script().into(),
             ));
-            let mut signing = TransparentSigningSet::new();
-            signing.add_key(secret);
-            builder.build(
-                &signing,
+            assembler.build(
+                crate::z_coin::os_rng(),
                 &[],
-                &[],
-                rand::rngs::OsRng,
                 &NoProver,
                 &NoProver,
                 &FixedFeeRule::non_standard(Amount::const_from_u64(1_000)),
             )
         };
 
-        let refund = refund_with(&derived)
-            .expect("the derived key signs the refund")
-            .into_transaction();
+        let refund = refund_with(&derived).expect("the derived key signs the refund");
         assert_eq!(refund.lock_time(), time_lock);
         assert_eq!(refund.transparent_bundle().unwrap().vin[0].sequence(), 0xffff_fffe);
         assert!(!refund.transparent_bundle().unwrap().vin[0].script_sig().0 .0.is_empty());

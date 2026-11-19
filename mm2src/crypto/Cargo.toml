@@ -57,6 +57,7 @@ primitives = { package = "kdf_primitives", path = "../kdf_primitives" }
 rpc_task = { path = "../rpc_task" }
 rustc-hex = "2"
 secp256k1 = "0.29"
+secp256k1_33 = { package = "secp256k1", version = "0.33" }
 ser_error = { path = "../derives/ser_error" }
 ser_error_derive = { path = "../derives/ser_error_derive" }
 serde = "1.0"
