@@ -864,7 +864,7 @@ governs Reloaded.
   refuse it. D21.10B.3.
 
 *Status note (2026-11-19), the HD methods for a TRC20 ticker (Spec Reader
-round 0.5.0-15; pending the KDF Dirty Gate).* The "HD methods" item of
+round 0.5.0-15; passed the KDF Dirty Gate).* The "HD methods" item of
 R21.10B.4 describes a TRX ticker. For a TRC20 ticker the reference answers
 from the platform's HD wallet, which the token shares, and each balance map
 holds that token's ticker only. The scan then counts an address as used
@@ -1821,7 +1821,9 @@ V3. The address encoding, protobuf transaction/contract formats,
   reading, combined with a mechanical word n-gram comparison (6-gram and
   4-gram) and a per-token inventory; the additions embed no code blocks.
 - *Status note added 2026-11-19 (Spec Reader round 0.5.0-15) -- after
-  R21.10B.4.* **KDF Dirty Gate: pending.** *Inputs:* the forbidden corpus at
+  R21.10B.4.* **KDF Dirty Gate: PASS on 2026-11-19, measure 0.02, no
+  findings** (with chapter 49 §49.2.1; the attestation is in chapter 49
+  §49.7). *Inputs:* the forbidden corpus at
   the row `v3.0.0-beta` of chapter 02 §2.15A, consulted **only** to establish
   which tickers the HD address methods carry, and what makes an address
   used for the scan, when the request names a TRC20 ticker. The reading was

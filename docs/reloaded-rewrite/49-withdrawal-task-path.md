@@ -174,7 +174,7 @@ balance checks, nonce selection, signing, and the completed transaction's
 sender. When `from` is present, both paths shall resolve it as an HD address
 selector and use the selected activated HD address and derived key instead.
 
-*Status note (2026-11-19), the token half of R49.5 (pending the KDF Dirty
+*Status note (2026-11-19), the token half of R49.5 (passed the KDF Dirty
 Gate).* §49.2.1 records the reference contract for an ERC-20 token under HD.
 The token's `from` is resolved against its platform's HD wallet (R49.34),
 and the platform's HD address methods list every activated token
@@ -304,8 +304,9 @@ passphrase user action.
 
 ### 49.2.1 EVM HD: token balances in the HD address methods and the token `from` selector (reference behavior)
 
-> **Provenance status: pending the KDF Dirty Gate** (chapter 01 R40; scoped
-> record in the Provenance Footer). This subsection was written by the
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-19, measure 0.02**
+> (chapter 01 R40; attestation in the Provenance Footer). This subsection was
+> written by the
 > dirty-side specification author on 2026-11-19 (Spec Reader round 0.5.0-15)
 > under the two-team procedure of chapter 01 §1.4A, from the rows
 > `v2.6.0-beta`, `v3.0.0-beta` and `main (as of 2026-10-07)` of chapter 02
@@ -1177,7 +1178,9 @@ addresses.
 - *Scoped addition (2026-11-19, Spec Reader round 0.5.0-15) -- §49.2.1
   (R49.32 -- R49.34, the Reloaded status note, the code-quality finding,
   T49.31, T49.32) and the status note after R49.5.* **KDF Dirty Gate:
-  pending.** *Inputs:* the forbidden corpus at the rows `v2.6.0-beta`,
+  PASS on 2026-11-19, measure 0.02, no findings** (chapter 01 R40; the
+  attestation closes this item). *Inputs:* the forbidden corpus at the rows
+  `v2.6.0-beta`,
   `v3.0.0-beta` and `main (as of 2026-10-07)` of chapter 02 §2.15A, identical
   on this surface at all three, consulted **only** to establish, for an EVM
   platform under an HD wallet (software global HD and the `Trezor` policy),
@@ -1194,5 +1197,17 @@ addresses.
   code-quality finding, T49.31 and T49.32 rest on this repository's own tree
   and are Reloaded-original. No row was added to chapter 02 §2.15A: all three
   states read already have rows. *Dirty Gate clearance (chapter 01 T1,
-  R40):* not yet recorded; the extent, method and measure of the gate's scope
-  attestation are to be carried here when the gate passes.
+  R40):* PASS, 2026-11-19, measure 0.02, no findings, in a main pass and a
+  delta pass after one sentence of the chapter 21 note was narrowed; the
+  pointer in chapter 35 and the note in chapter 21 passed with this item.
+  *Extent:* the EVM-family HD wallet surface: the per-address balance maps
+  of the HD address methods for platform and token tickers, the scan's
+  used-address criterion (EVM and TRON), the address form in HD answers,
+  the resolution and refusals of the withdraw `from` selector on the direct
+  and task routes, and the platform HD wallet shared with a token at
+  activation; the row `v3.0.0-beta` in full, `v2.6.0-beta` on the same
+  points for EVM, and `main (as of 2026-10-07)` confirmed equal to
+  `v3.0.0-beta`. *Method:* reading, a per-token forced-versus-free
+  inventory and a targeted phrase search; the repository's clean-room gate
+  tool was not applicable because the additions embed no code blocks.
+  *Measure:* 0.02, on the discretionary-expression basis.

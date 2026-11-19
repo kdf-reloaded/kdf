@@ -2871,5 +2871,6 @@ is decided together with this item.
 - *Pointer added 2026-11-19 (Spec Reader round 0.5.0-15) -- the note after
   R35.1.3.* It names chapter 49 R49.32 -- R49.34 and restates their ticker
   set in one sentence; it states no behavior of its own and travels with
-  chapter 49 §49.2.1 for the KDF Dirty Gate (**pending**), as recorded in
-  chapter 49's provenance footer.
+  chapter 49 §49.2.1 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
+  2026-11-19, measure 0.02, no findings**, as recorded for §49.2.1 in chapter
+  49's provenance footer.
