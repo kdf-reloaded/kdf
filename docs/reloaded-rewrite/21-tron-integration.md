@@ -1065,6 +1065,202 @@ unchanged; TRX amounts in SUN stay 64-bit values. Tests:
 `tron/tx_builder.rs` and `tron/withdraw_fee_tests.rs`, against hand-computed
 call data.
 
+*Status note (2026-11-20), origin-energy share.* What the reference does
+about the energy a TRC20 contract pays itself is stated in R21.10B.10 --
+R21.10B.12 below, and what it does when the dry run reverts in R21.10B.13
+(Spec Reader round 0.5.0-17). The sentences of R21.10B.7 are unchanged.
+
+> **Clearance (chapter 01 R40) -- passed the KDF Dirty Gate on
+> 2026-11-20, measure 0.02, for R21.10B.10 -- R21.10B.13, T21.10B.16 --
+> T21.10B.18 and the notes between them (Spec Reader round 0.5.0-17;
+> attestation in §21.13).**
+
+**Origin-energy share of a TRC20 transfer (added 2026-11-20).** *Public
+rule (TRON Developer Hub, Resource Model and smart-contract energy
+pages; not corpus-derived).* A contract's public settings
+`consume_user_resource_percent` and `origin_energy_limit`, returned by
+`POST /wallet/getcontract`, let the contract's deployer pay part or all of
+a call's energy: the caller is charged that percentage of the energy used,
+and the rest is drawn from the deployer's staked energy, bounded per call
+by `origin_energy_limit` and by what the deployer has available; what the
+deployer cannot cover falls back on the caller. A receipt shows the split
+as `origin_energy_usage` within `energy_usage_total`. The rules below
+state the rows `v3.0.0-beta`, `v2.6.0-beta`, `feat/tron-swap-support (as of
+2026-04-23)` and `feat/tron-gasfree (as of 2026-05-04)` of chapter 02
+§2.15A.
+
+**R21.10B.10** *The reference does not model the origin share (completes
+the "Energy (TRC20)" bullet of R21.10B.7).* At `v3.0.0-beta` the only
+energy input of a TRC20 fee is the `energy_used` member of the dry run
+through `POST /wallet/triggerconstantcontract`; that figure is the whole
+energy of the call, whoever pays it. The contract's percentage, its origin
+limit and the deployer's available energy are not inputs of any fee figure.
+Per method:
+
+- *`withdraw` and `task::withdraw::init` (TRC20).* `energy_used` of the
+  fee details is the whole dry-run energy; `energy_fee` is the part of it
+  the sender's own unused staked energy does not cover, times
+  `getEnergyFee`; `total_fee` adds the bandwidth fee. All of the energy
+  is treated as the caller's. For a contract whose deployer pays the
+  energy, the reported `energy_fee` and `total_fee` are therefore above
+  what the chain charges, by up to the whole energy fee.
+- *The TRX-for-fee check of a TRC20 withdraw.* The sender's TRX balance
+  is compared with that same `total_fee`. A sender whose TRX covers the
+  bandwidth and the caller's real share, but not the whole-energy figure,
+  is refused with `NotSufficientPlatformBalanceForFee` (HTTP 400) and
+  no transaction is returned.
+- *Trade-fee and swap-fee methods.* There is no TRON fee estimate in any
+  of them, so the question does not arise. `trade_preimage` refuses a
+  wallet-only ticker with `CoinIsWalletOnly` before any fee work, and
+  `setprice`, `buy` and `sell` behave as R21.10B.9 states. The legacy
+  `get_trade_fee`, `max_taker_vol` and `max_maker_vol`, and the swap-fee
+  estimates behind order placement for a trading-capable TRON coin, have
+  no TRON case: their fee figures come from the EVM gas path, which a
+  TRON coin has no node for (R21.10B.9). No TRON swap exists (F21.B1), so
+  there is no payment, spend, refund or DEX-fee estimate for a TRC20
+  contract call.
+- *Balance and activation results.* No balance, activation or address
+  method reports or reserves a TRON fee.
+
+Per state: `feat/tron-swap-support (as of 2026-04-23)` and the native
+(non-delegated) TRC20 withdraw of `feat/tron-gasfree (as of 2026-05-04)`
+have the same energy rule, the same `fee_limit` rule and the same TRX
+check as `v3.0.0-beta`; they differ from it only as R21.10B.1 and chapter
+63 state. On the fee-delegated route of chapter 63 the sender pays the
+provider's fee in the token and no energy figure is computed. `v2.6.0-beta`
+has no TRON fee estimate, dry run or `fee_limit` at all (R21.10B.1).
+
+**R21.10B.11** *`fee_limit` and the balance check use different figures
+(completes D21.10B.1).* At the three rows that build a TRC20 transfer,
+`fee_limit` is the whole dry-run energy times `getEnergyFee`: it is not
+reduced by the sender's staked energy, by the contract's percentage or by
+the origin limit, and it carries no margin. The TRX check uses `total_fee`
+of R21.10B.10, in which the energy part **is** reduced by the sender's
+unused staked energy and to which the bandwidth fee is added. The check
+is therefore against the full estimate of what the sender would burn if
+it paid all the energy, never against a figure reduced for the origin
+share, and the sender's TRX balance is not compared with `fee_limit`
+itself. Under the public rule above, the caller's share never exceeds the
+whole energy of the call, so a `fee_limit` set this way is not made too
+low by the origin share; it has no room for a call that uses more energy
+at inclusion than in the dry run (D21.10B.1).
+
+**R21.10B.12** *No contract metadata is read.* No path of the reference at
+any of the four rows requests `POST /wallet/getcontract`,
+`POST /wallet/getcontractinfo` or an equivalent, and no response member
+carrying the percentage, the origin limit or a per-contract energy factor
+is decoded. The deployer's account resources are not requested either:
+`POST /wallet/getaccountresource` is sent for the sender only. The node
+endpoints the reference uses are those of §21.9 and R21.10B.7 and nothing
+more. The row `feat/tron-swap-support (as of 2026-04-23)` adds documents
+only (F21.B4); a research document there lists the contract-information
+endpoint among public node endpoints, and no source file at that row uses
+it.
+
+*Code-quality finding (informative).* The reference's TRC20 fee is an
+upper bound, not an estimate, for a contract with an origin share: the fee
+details overstate the cost, and a withdraw the chain would accept can be
+refused for lack of TRX (R21.10B.10). A possible remedy, in this chapter's
+own terms: read the contract's two settings and the deployer's available
+energy once per withdraw; report the caller's expected share as the fee;
+keep `fee_limit` at a figure that still covers the whole energy, because
+the deployer's energy can be used up between the estimate and inclusion,
+in which case the caller pays the remainder; and decide explicitly which
+of the two figures the TRX check uses. Whether Reloaded adopts this is the
+lane's decision; the reference gives no precedent for either choice.
+
+*Not established (this block).* Nothing was run against a reference
+binary or a live node; the receipt members and the charging rule are
+taken from the public documentation, not from a measurement of this
+round. Whether a node's dry run reports a different `energy_used` when
+the deployer's energy is exhausted was not checked. The trade-fee
+outcomes of R21.10B.10 were read, not executed.
+
+T21.10B.16 *No contract read (parity).* Against a stub whose token
+contract would report a caller percentage of 0 and an ample origin limit,
+a TRC20 withdraw at parity sends no contract-metadata request; its
+`energy_fee` equals the stub's dry-run `energy_used`, less the sender's
+unused staked energy, times the stub's `getEnergyFee`, and the built
+transaction's `fee_limit` equals the dry-run `energy_used` times
+`getEnergyFee`. Reloaded: the row is restated when the lane decides
+whether the origin share is modeled.
+
+T21.10B.17 *TRX check on the full figure (parity).* With the same stub and
+a sender whose TRX balance covers the bandwidth fee but is below
+`total_fee` of T21.10B.16, the withdraw answers
+`NotSufficientPlatformBalanceForFee` with the platform ticker, the TRX
+balance and that `total_fee`. Reloaded: as T21.10B.16.
+
+**R21.10B.13** *A reverting dry run is not detected (completes the "Energy
+(TRC20)" bullet of R21.10B.7).* At `v3.0.0-beta` the withdraw's dry run of
+`transfer(address,uint256)` is judged by two things only: the node-answer
+classification of R21.10B.3, and whether `energy_used` is present and
+above zero. The revert message, the returned data in `constant_result`
+and the execution result of the simulated transaction are not examined
+for this call.
+
+- *Revert with the inner success flag true and a positive `energy_used`.*
+  Not detected. The withdraw goes on exactly as for a successful dry run:
+  the fee details and `fee_limit` are computed from that `energy_used`
+  (R21.10B.7, R21.10B.11), the TRX check runs, and the result carries a
+  signed transaction and its `tx_hash`. No error is answered. The
+  withdraw itself sends nothing to the chain at any row; if the client
+  then broadcasts the transaction and the call reverts at inclusion, the
+  sender pays for the energy used.
+- *Inner success flag false, or absent together with an error code.* The
+  answer is an error object and follows R21.10B.3: a transient code moves
+  the request to the next node, any other code ends it. The withdraw
+  answers `Transport` (HTTP 502) and nothing is signed.
+- *`energy_used` missing or zero.* Treated as an unusable answer: the
+  request moves to the next node, and when every node answers so the
+  withdraw answers `Transport` (HTTP 502) and nothing is signed.
+- *Order of checks.* The token balance is read, and an amount above it is
+  refused with `NotSufficientBalance`, before the dry run is sent, so the
+  commonest cause of a revert does not reach the dry run. Other causes
+  (a contract that refuses the sender or the recipient, a paused
+  contract) do.
+- *Routes and states.* `withdraw` and `task::withdraw::init` take the same
+  path; the task reports the same result or error token in its status.
+  `feat/tron-swap-support (as of 2026-04-23)` and the native TRC20
+  withdraw of `feat/tron-gasfree (as of 2026-05-04)` behave the same.
+  `v2.6.0-beta` has no dry run (R21.10B.1).
+- *Balance reads.* The reference's `balanceOf` read does not look at the
+  revert indication either; it differs only in what it requires of the
+  returned data. It takes the first `constant_result` entry of up to 32
+  bytes as the number; an empty list or a non-hex entry moves the read to
+  the next node, and an entry longer than 32 bytes ends the read as
+  failed without trying another node. Revert data of the usual
+  error-string form is longer than 32 bytes and so fails the read; a
+  shorter returned value would be read as a balance. Reloaded's stricter
+  rule for balance reads is R-WP3 and is not changed by this rule.
+
+*Code-quality finding (informative).* The reference can hand the client a
+signed TRC20 transfer that its own dry run has already shown to revert,
+with a fee estimate presented as if the transfer would succeed
+(R21.10B.13). A possible remedy, in this chapter's own terms: treat a dry
+run that carries a revert indication -- a revert message beside a true
+success flag, or a simulated execution result other than success -- as a
+refusal of the withdraw before anything is signed, with a typed error
+that names the contract's refusal, and do not move such an answer to
+another node, since the outcome belongs to the contract and not to the
+node. Which error token Reloaded uses is the lane's decision; the
+reference gives no precedent.
+
+*Not established (R21.10B.13).* Which members a TRON node fills for a
+reverting constant call (the success flag, the message, the simulated
+result, `energy_used`) was taken from the question put to this round and
+from public TRON documentation, not measured here.
+
+T21.10B.18 *Reverting dry run (parity).* Against a stub whose
+`triggerconstantcontract` answer for `transfer(address,uint256)` has the
+inner success flag true, a revert message, error-string data in
+`constant_result` and a positive `energy_used`, a TRC20 withdraw at
+parity answers a result with `tx_hex`, with `energy_used` equal to the
+stub's figure, and the stub receives no broadcast request. With the same
+stub answering `energy_used` zero on every node, the withdraw answers
+`Transport`, HTTP 502. Reloaded: the first half is restated when the lane
+decides the refusal of the finding above.
+
 **R21.10B.8** *Address methods (completes R-WP5 and R-AD1).*
 
 - `validateaddress` accepts the base58check form (34 characters starting
@@ -2197,3 +2393,45 @@ V3. The address encoding, protobuf transaction/contract formats,
   corpus:* not consulted for this section; R21.10B.6 already records that
   the reference has no TRON history. No sentence of §21.0 -- §21.10B was
   edited.
+- *Scoped addition (2026-11-20, Spec Reader round 0.5.0-17) -- the status
+  note after R21.10B.7 and the block that follows it (the public-rule
+  paragraph, R21.10B.10 -- R21.10B.13, the two code-quality findings, the
+  two not-established paragraphs, T21.10B.16 -- T21.10B.18); no other text
+  of this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-20,
+  measure 0.02, no findings** (chapter 01 R40; the attestation closes
+  this item).
+  *Inputs:* (1) the forbidden corpus at the rows `v3.0.0-beta` (read from
+  a checkout at the row `dev (as of 2026-03-27)`, whose source tree was
+  confirmed identical by mechanical difference), `v2.6.0-beta`,
+  `feat/tron-swap-support (as of 2026-04-23)` and `feat/tron-gasfree (as
+  of 2026-05-04)` of chapter 02 §2.15A, read read-only and consulted
+  **only** to establish: which energy figure the TRC20 withdraw fee, its
+  `fee_limit` and its TRX check use; whether any trade-fee or swap-fee
+  method has a TRON fee estimate; whether any path requests contract
+  metadata or the deployer's resources; which members of the dry-run
+  answer decide whether a TRC20 withdraw or a token balance read goes on,
+  and with which error token and status it ends otherwise; and the
+  agreement of the rows on these points. Behavior, public wire names, error tokens, statuses and
+  public TRON endpoint paths and member names only; no private
+  identifier, body, helper decomposition, error, log, comment or test
+  text was reproduced. (2) Public TRON documentation (TRON Developer Hub,
+  *Resource Model* and the smart-contract energy pages; the HTTP API
+  reference for `wallet/getcontract` and for the transaction receipt) for
+  the origin-energy rule. (3) This repository's tree at the base of this
+  round (the dev branch as of 2026-11-20) for the cross-references. No
+  row was added to chapter 02 §2.15A: every state read already had one.
+  The remedies sketched in the two code-quality findings and the three
+  acceptance rows are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-20, measure
+  0.02, no findings. *Extent:* the TRON wallet surface the block reaches:
+  the TRC20 withdraw fee estimate and its energy input, the `fee_limit`,
+  the check that the sender holds the TRX for the fee, the node client's
+  handling of a dry-run answer and of a token balance read, and the
+  endpoints requested; at the rows `dev (as of 2026-03-27)` and
+  `v3.0.0-beta` (identical trees), `v2.6.0-beta`, `feat/tron-swap-support
+  (as of 2026-04-23)` and `feat/tron-gasfree (as of 2026-05-04)`.
+  *Method:* reading plus mechanical comparison (word n-gram overlap at
+  lengths 6, 5, 4 and 3, and a per-token forced-versus-free inventory);
+  the repository's clean-room gate tool was not applicable because the
+  additions embed no code blocks. *Measure:* 0.02, on the
+  discretionary-expression basis.
