@@ -372,6 +372,7 @@ fn t5_max_native_withdrawal_deducts_eth_send_coins() {
     let (ctx, eth) = eth_coin_with_ctx(json!({"gas_limit": {"eth_send_coins": 50_000}}));
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 0.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_owned(),

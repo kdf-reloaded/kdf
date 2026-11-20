@@ -768,6 +768,21 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   format values with the legacy error body; an EVM coin is unchanged. No switch; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R21.10B.8, D21.10B.2.
 
+- **The fee of a TRON withdrawal (TRON is still switched off) follows the node's bandwidth rule, and a TRC20 fee limit
+  has a margin and a maximum.** The withdraw estimate, its amounts, its errors and its fee details follow GLEEC KDF
+  `v3.0.0-beta` as the CRD records it, with three differences. (1) *Bandwidth.* GLEEC KDF charges only what the
+  sender's free and staked bandwidth, added together, do not cover. The TRON node takes a transaction's bandwidth from
+  the staked bandwidth as a whole, or from the free bandwidth as a whole, and otherwise charges TRX for all of it.
+  Reloaded estimates by the node's rule, so its estimate is never below what the node charges; for an account whose
+  two quotas only together reach the size it is higher than GLEEC KDF's, and `max` then sends less. (2) *Fee limit
+  margin.* GLEEC KDF sets a TRC20 transfer's `fee_limit` to the cost of the dry-run energy exactly. Reloaded adds 20%,
+  rounded up to whole SUN, so that a small change of the contract's state between the dry run and the block does not
+  fail the transfer; `total_fee` in the fee details stays the expected charge. (3) *Maximum.* Reloaded never sets a
+  `fee_limit` above 100 TRX and refuses, before signing, a transfer whose energy alone would cost more, with
+  `UnsupportedError` naming both figures. None of the three is visible to a peer and none changes the shape of an
+  answer, so no switch exists; rows in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.21 R21.10B.7, D21.10B.1.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.

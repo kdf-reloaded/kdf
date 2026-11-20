@@ -1985,6 +1985,7 @@ fn test_withdraw_impl_manual_fee() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2027,6 +2028,7 @@ fn test_withdraw_impl_fee_details() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2074,6 +2076,7 @@ fn test_withdraw_impl_refuses_the_cosmos_fee_forms() {
     ] {
         let withdraw_req = WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
             amount: 1.into(),
             from: None,
             to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2091,6 +2094,7 @@ fn task_withdraw_evm_native_accepts_omitted_from_sender() {
     let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2117,6 +2121,7 @@ fn task_withdraw_evm_token_accepts_omitted_from_sender() {
     );
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2139,6 +2144,7 @@ fn task_withdraw_evm_token_explicit_hd_from_resolves_selected_sender() {
     });
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -2165,6 +2171,7 @@ fn direct_withdraw_evm_explicit_hd_from_signs_with_selected_sender() {
     let (ctx, coin, selected_addr) = eth_hd_coin_for_test(EthCoinType::Eth);
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -2205,6 +2212,7 @@ fn direct_withdraw_evm_single_key_explicit_from_is_structured_sender_error() {
     let (ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -3132,6 +3140,7 @@ fn direct_withdraw_rejected_for_trezor_signer() {
     let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Eth);
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),

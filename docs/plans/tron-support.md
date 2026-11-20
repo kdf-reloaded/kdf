@@ -1,6 +1,6 @@
 # Plan: make TRON work again
 
-**Status:** in progress — **Last reviewed:** 2026-11-17
+**Status:** in progress — **Last reviewed:** 2026-11-19
 
 > **Context:** created 2026-10-28 as the umbrella plan for bringing TRON (TRX,
 > TRC20) back. By maintainer decision TRON activation is switched off on `dev`
@@ -103,6 +103,15 @@ on (work package 2) is the last step, after these.
 the TRX address is derived under the coin config's `derivation_path`, the HD methods and `task::create_new_account::init`
 answer as the chapter states, and `withdraw` takes an HD `from`. `IguanaPrivKey` keeps the node's internal key. The legacy
 `enable` route keeps the internal key under a global-HD login, as the EVM and UTXO legacy routes do (decided 2026-11-19).
+TRON stays switched off.
+
+*2026-11-19:* The accuracy of the withdraw fee estimate is done (CRD ch.21 R21.10B.7 and its status note). The
+estimate reads the sender's resources and the chain's prices and fails the withdraw when a read fails; bandwidth
+follows the node's rule (staked as a whole, else free as a whole, else all of it paid in TRX); the account-creation
+fee applies to a TRX recipient only; `max` for TRX deducts the fee; the amount errors and the fee details are the
+chapter's. Decided the same day (D21.10B.1 (b)): the TRC20 `fee_limit` is the cost of the dry-run energy plus 20%,
+rounded up to whole SUN, at most 100 TRX, and a transfer whose energy alone costs more is refused before it is
+signed. Still open before the switch-on: transaction history, and the testnet and mainnet rows of work package 4.
 TRON stays switched off.
 
 *2026-11-17:* GasFree gets its modules before the switch-on, and its reachable
