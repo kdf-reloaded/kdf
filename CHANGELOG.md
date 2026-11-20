@@ -290,6 +290,17 @@ the previous version used. The safe way:
   disagrees. The API key and secret are never logged or shown. Gasless withdrawals themselves are not available yet.
   **TRON stays switched off in this build**, so none of this can be used yet. Detail: PR #441; CRD ch.63 §63.3.1 to
   §63.3.3, R18, R29.
+- **A TRC20 token can be withdrawn without TRX through a GasFree provider; the result is a signed authorization that
+  is not submitted yet.** The withdraw request takes `fee_method` (`native`, `gasless` or `auto`) and a `gasless`
+  object (`max_fee`, `deadline_seconds`, `fallback_to_native`). With `gasless`, the fee is paid in the token from the
+  GasFree deposit address, and the answer holds the signed authorization and the fee in the token instead of a
+  transaction: it has no `tx_hex` and no `tx_hash`, and KDF does not yet hand it to the provider. With `auto`, the
+  ordinary TRX-paid transfer is tried first and the gasless one only when it cannot be funded. Other coins refuse
+  `gasless` and `auto`. To move tokens back from the GasFree deposit address, make a gasless withdraw to your own
+  address. The new `MM2.json` setting `tron_gasfree_guard_allows_fallback` (default `false`) decides whether a
+  withdraw with `fallback_to_native` may use the TRX-paid transfer when the GasFree contract check refuses.
+  **TRON stays switched off in this build**, so none of this can be used yet. Detail: CRD ch.63 §63.3.4 to §63.3.6,
+  §63.8, §63.8A, R29; RELOADED_VS_GLEEC.md.
 
 #### Tendermint (Cosmos) coins
 
@@ -824,9 +835,9 @@ the previous version used. The safe way:
   The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
-  controller; the support modules are built and not yet reachable; the activation binding and the `gasfree_address`
-  fields in the reports are built, behind the TRON switch; the withdraw dispatcher, then submission and settlement,
-  remain.
+  controller; the support modules, the activation binding and the `gasfree_address` fields in the reports are built,
+  behind the TRON switch; the gasless withdraw is built as sign-only on 2026-11-20, behind the same switch;
+  submission and settlement remain.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.

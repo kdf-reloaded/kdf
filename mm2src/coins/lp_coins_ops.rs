@@ -406,6 +406,8 @@ pub async fn validate_address_core(
 }
 pub async fn withdraw(ctx: MmArc, req: WithdrawRequest) -> WithdrawResult {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    // CRD ch.63 R21: the fee-rail check comes before any other processing of the request, for every coin family.
+    check_withdraw_fee_rail(&coin, &req)?;
     // A withdrawal is not built while the coin's Electrum servers disagree about the chain (CRD ch.38 R38.6.4o item 12).
     if let Some(error) = coin.chain_disagreement() {
         return MmError::err(WithdrawError::ChainDisagreement(error));

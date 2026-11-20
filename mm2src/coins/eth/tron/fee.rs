@@ -386,6 +386,47 @@ impl TronTxFeeDetails {
     }
 }
 
+/// The fixed `fee_method` of [`TronGaslessFeeDetails`].
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub enum GaslessFeeMethod {
+    #[serde(rename = "gasless")]
+    Gasless,
+}
+
+/// The fixed `provider_name` of [`TronGaslessFeeDetails`].
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub enum GaslessProviderName {
+    #[serde(rename = "gasfree")]
+    GasFree,
+}
+
+/// The fee of a TRC20 withdraw through the gasless rail as a withdraw result reports it (CRD ch.63 §63.3.5), the
+/// `{"type": "TronGasless"}` member of the fee details. The fee is paid in the token, not in TRX: every amount is
+/// a decimal amount in token units.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TronGaslessFeeDetails {
+    /// The coin the fee is paid in: the ticker of the token that is withdrawn.
+    pub coin: String,
+    pub fee_method: GaslessFeeMethod,
+    pub provider_name: GaslessProviderName,
+    /// The GasFree custody address of the sender, in base58check: the account the transfer and its fee are taken
+    /// from.
+    pub gasfree_address: String,
+    /// The provider's fee for the transfer.
+    pub transfer_fee: BigDecimal,
+    /// The provider's fee for activating the custody account; zero for an account that is already activated.
+    pub activation_fee: BigDecimal,
+    /// `transfer_fee` plus `activation_fee`: the fee the provider quoted.
+    pub total_token_fee: BigDecimal,
+    /// The highest fee the signed authorization accepts (its `maxFee`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_max_fee: Option<BigDecimal>,
+    /// The provider's id of the submitted transfer. Always present; `null` while the authorization is signed
+    /// only and not submitted (CRD ch.63 D63.6).
+    #[serde(default)]
+    pub trace_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::api::ChainParameter;

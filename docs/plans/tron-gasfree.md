@@ -82,6 +82,19 @@ new PRs, and the branch stays until the second PR below has landed.
 > `TRON_ACTIVATION_AVAILABLE`. Not built: the `fee_method` and `gasless`
 > members of the withdraw request, the withdraw dispatcher, and submission.
 
+> **Sign-only gasless withdraw built (2026-11-20).** The shared withdraw
+> request has `fee_method` and `gasless`; the direct method and
+> `task::withdraw::init` refuse them for a coin that is not a TRON coin (ch.63
+> R21). For a TRC20 token with the rail enabled, `gasless` and `auto` run the
+> controller check (R29), the preflight (§63.7) and the fee cap, and sign the
+> `PermitTransfer`; the result is the sign-only result of §63.8A in its D63.8
+> (a) form, with the `TronGasless` fee details. The rail makes no TRX fee
+> estimate. The `MM2.json` switch `tron_gasfree_guard_allows_fallback` is
+> built. All of it is behind `TRON_ACTIVATION_AVAILABLE`. Not built:
+> submission to the provider and settlement tracking (ch.63 D63.6); the
+> sentence above about the withdraw request and the dispatcher describes the
+> state before this date.
+
 ## Blocker: the derived custody address is knowingly wrong
 
 > **Resolved by [Chapter 63](../reloaded-rewrite/63-tron-gasfree-fee-delegation.md)

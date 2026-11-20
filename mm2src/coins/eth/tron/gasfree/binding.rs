@@ -23,12 +23,15 @@ use super::networks::gasfree_network;
 use super::provider::{GasFreeProvider, ProviderCredentials, DEFAULT_STATUS_POLL_INTERVAL_MS};
 use crate::eth::{u256_to_big_decimal, wei_from_big_decimal, EthCoin};
 use crate::node_url::{host_only, SECRET_SET};
+use crate::AsyncMutex;
 use derive_more::Display;
 use ethereum_types::{Address, U256};
 use mm2_number::BigDecimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value as Json;
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// The `tron_gasless_provider` object of a platform activation request (CRD ch.63 §63.3.1), as sent.
 /// [`GasFreeBinding::from_request`] validates it.
@@ -218,6 +221,9 @@ pub struct GasFreeBinding {
     status_poll_interval_ms: u64,
     /// The confirmations of this platform's custody addresses by the controller contract (R29).
     checks: ControllerChecks,
+    /// One lock per sending address, held while the gasless rail quotes and signs for that address (§63.8 step 3).
+    /// The map is never held across an `.await`; the lock it hands out is.
+    sender_locks: Mutex<BTreeMap<[u8; 20], Arc<AsyncMutex<()>>>>,
 }
 
 /// The provider client's own debug form shows no credential (R9).
@@ -259,7 +265,32 @@ impl GasFreeBinding {
                 .status_poll_interval_ms
                 .unwrap_or(DEFAULT_STATUS_POLL_INTERVAL_MS),
             checks: ControllerChecks::new(),
+            sender_locks: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// The platform's network.
+    pub(crate) fn network(&self) -> &Network { &self.network }
+
+    /// The provider client.
+    pub(crate) fn provider(&self) -> &GasFreeProvider { &self.provider }
+
+    /// The fee-paying provider, the `serviceProvider` of every authorization (§63.6).
+    pub(crate) fn service_provider(&self) -> &TronAddress { &self.service_provider }
+
+    /// The controller confirmations of this platform (R29): the ones the reports use.
+    pub(crate) fn controller_checks(&self) -> &ControllerChecks { &self.checks }
+
+    /// The lock of the sending address `sender` (§63.8 step 3). While its guard is held, no other gasless withdraw
+    /// of this platform quotes or signs for the same address, so two authorizations are never signed over one
+    /// reading of the provider's nonce by this node at the same time.
+    pub(crate) fn sender_lock(&self, sender: &TronAddress) -> Arc<AsyncMutex<()>> {
+        self.sender_locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(sender.to_evm_address().0)
+            .or_default()
+            .clone()
     }
 
     /// The custody address a report shows for `user` (CRD ch.63 §63.3.3, R18), under the report rule of R29:

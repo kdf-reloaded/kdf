@@ -1125,6 +1125,8 @@ fn test_withdraw_impl_set_fixed_fee() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1173,6 +1175,8 @@ fn test_withdraw_impl_sat_per_kb_fee() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1245,6 +1249,8 @@ fn explicit_fee_withdraw(
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1388,6 +1394,8 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1436,6 +1444,8 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max_dust_included_to_fee() 
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1484,6 +1494,8 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_over_max() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.97939455".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1519,6 +1531,8 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 0u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1582,6 +1596,8 @@ fn test_withdraw_kmd_rewards_impl(
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1694,6 +1710,8 @@ fn test_withdraw_kmd_rewards_post_fork_reduction() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1942,6 +1960,8 @@ fn test_withdraw_doc_rewards_none() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -4511,6 +4531,8 @@ fn test_withdraw_to_p2pkh() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2pkh_address.to_string(),
@@ -4560,6 +4582,8 @@ fn test_withdraw_to_p2sh() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2sh_address.to_string(),
@@ -4609,6 +4633,8 @@ fn test_withdraw_to_p2wpkh() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2wpkh_address.to_string(),
@@ -9520,6 +9546,8 @@ mod withdraw_recent_spent {
         WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -10994,6 +11022,8 @@ mod hd_coin_swap_key_tests {
             WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 amount: 1u64.into(),
                 from,
                 to: RECEIVER.to_string(),
@@ -11523,6 +11553,8 @@ mod sighash_suffix_sites {
         WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -11830,6 +11862,8 @@ mod zec_v5_wiring {
         WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: amount.parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),

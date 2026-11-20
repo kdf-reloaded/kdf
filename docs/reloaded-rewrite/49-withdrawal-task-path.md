@@ -39,6 +39,20 @@ shape.
 > They are inert for every non-Tron coin. Chapter 63 passed the KDF Dirty Gate
 > on 2026-11-08.
 
+> *Status note (2026-11-20), the fee-rail members as built (clean side).* The
+> shared request has the optional members `fee_method` and `gasless`, and the
+> structured withdrawal error has the arm `Gasless`, whose `error_data` is an
+> object with its own `error_type` (chapter 63 §63.9.1). The direct `withdraw`
+> method and `task::withdraw::init` check the two members right after the coin
+> is found: on a coin that is not a TRON coin `fee_method` `gasless` or `auto`
+> answers `Gasless`/`Unavailable` (HTTP 503), and on every coin `gasless`
+> options without one of those two values answer `InvalidFeePolicy` (HTTP
+> 400). On the task route the `init` call itself answers both. A request
+> without the two members is served as before. The task status vocabulary
+> gained `FetchingGaslessQuote` and `SigningGaslessAuthorization` (chapter 63
+> §63.3.6). TRON stays switched off, so only the two refusals can be met
+> today.
+
 > **The `fee` descriptor's EVM forms (cross-reference).** The descriptor is a
 > single enumeration shared by every coin family, tagged by a `type` member.
 > Its EVM forms, the rule for an absent descriptor, the gas-limit estimation
@@ -1226,3 +1240,7 @@ addresses.
   chapter 63 §63.8A for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
   2026-11-19, measure 0.01, no findings**, as recorded for §63.8A in chapter
   63's provenance footer.
+- *Status note added 2026-11-20 (after the fee-rail pointer of §49.2).*
+  Reloaded-original, clean side: it records the two request members, the
+  `Gasless` error arm and the two task progress values as built; no
+  forbidden-class input.
