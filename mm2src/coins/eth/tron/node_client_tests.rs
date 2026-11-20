@@ -2,7 +2,7 @@
 //! bad answers (T-N1 to T-N3), the per-attempt cutoff (T-N4), concurrent requests (T-N5), the node order (T-N6),
 //! the all-failed error (T-N7), the broadcast rules (T-N8) and the request headers (R-N9).
 
-use super::api::{TronApiClient, TronApiError};
+use super::api::{AccountListing, TronApiClient, TronApiError};
 use super::nodes::{parse_nodes, TronApiKey, TronNode};
 use super::test_node::{Reply, StubNode};
 use super::{tron_coin_from_conf_and_request, Network, TronAddress};
@@ -538,4 +538,197 @@ fn a_read_without_a_constant_result_moves_on_to_the_next_node() {
         assert_eq!(answer.constant_result.map(|r| r.len()), Some(1));
         assert_eq!(bad_node.requests().len(), 1, "{bad}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The account listings: GET requests of the keyed TronGrid nodes only (CRD ch.21 §21.10C)
+// ---------------------------------------------------------------------------------------------------------------
+
+const LISTING: &str = r#"{"data":[],"success":true,"meta":{"at":1,"page_size":0}}"#;
+
+/// A client over `nodes` in which `history[i]` says whether node `i` counts as a keyed TronGrid node. A loopback
+/// stub can never be one by the production rule, which `nodes.rs` tests on its own.
+fn history_client_over(nodes: &[&StubNode], history: &[bool], cutoff_s: f64) -> TronApiClient {
+    TronApiClient::new_with_history_nodes(
+        "TRX",
+        nodes.iter().map(|n| TronNode::plain(n.url())).collect(),
+        history,
+        cutoff_s,
+    )
+}
+
+fn listing(client: &TronApiClient) -> Result<usize, TronApiError> {
+    block_on(client.get_account_listing(&address(), AccountListing::Transactions, None)).map(|page| page.data.len())
+}
+
+/// The GET walk fails over like the POST walk (R-N4): a status outside 2xx, a body that is not JSON, a body of the
+/// wrong shape, a listing not marked a success and a transient code each move on, and the answering node becomes
+/// the first node of the order (R-N5).
+#[test]
+fn a_listing_fails_over_on_every_bad_answer_and_the_answering_node_becomes_first() {
+    for (status, body) in [
+        (429, r#"{"success":false,"error":"rate limit","statusCode":429}"#),
+        (403, r#"{"success":false,"error":"forbidden","statusCode":403}"#),
+        (503, r#"{"success":false}"#),
+        (301, ""),
+        (200, "<html>not json</html>"),
+        (200, r#"{"success":true}"#),
+        (200, r#"{"success":false,"data":[],"meta":{}}"#),
+        (200, r#"{"Error":"class java.lang.NullPointerException"}"#),
+        (200, r#"{"result":false,"code":"SERVER_BUSY","message":"busy"}"#),
+    ] {
+        let (bad, good) = (fixed(status, body), fixed(200, LISTING));
+        let client = history_client_over(&[&bad, &good], &[true, true], 5.);
+        assert_eq!(listing(&client).expect("the second node answers"), 0, "{status} {body}");
+        assert_eq!(bad.requests().len(), 1, "{status} {body}");
+        assert_eq!(client.order_labels(), labels(&[&good, &bad]), "{status} {body}");
+        // The next request starts at the node that answered.
+        listing(&client).expect("answers");
+        assert_eq!(bad.requests().len(), 1, "{status} {body}");
+    }
+}
+
+/// The cutoff of R-N3 bounds a GET attempt too: a silent node costs the cutoff and the next node answers; when
+/// every node is silent the error is the timeout class.
+#[test]
+fn a_listing_attempt_is_bounded_by_the_cutoff() {
+    let (slow, good) = (silent(), fixed(200, LISTING));
+    let client = history_client_over(&[&slow, &good], &[true, true], TEST_CUTOFF_S);
+    let started = Instant::now();
+    listing(&client).expect("the second node answers");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs_f64(TEST_CUTOFF_S),
+        "the cutoff was not waited"
+    );
+    assert!(elapsed < Duration::from_secs(3), "the silent node was not abandoned");
+
+    let (first, second) = (silent(), silent());
+    let client = history_client_over(&[&first, &second], &[true, true], TEST_CUTOFF_S);
+    assert!(matches!(listing(&client), Err(TronApiError::Timeout(_))));
+}
+
+/// Only the keyed TronGrid nodes are asked for a listing: a node that is not one gets no request, even when it is
+/// first in the order and even when the keyed node fails.
+#[test]
+fn a_listing_is_asked_of_keyed_trongrid_nodes_only() {
+    let (plain, keyed) = (fixed(200, LISTING), fixed(200, LISTING));
+    let client = history_client_over(&[&plain, &keyed], &[false, true], 5.);
+    assert!(client.has_history_nodes());
+    listing(&client).expect("the keyed node answers");
+    assert!(
+        plain.requests().is_empty(),
+        "a node without a key was asked for a listing"
+    );
+    assert_eq!(keyed.requests().len(), 1);
+    // The other requests still go to every node, in the order: a POST reaches the node without a key.
+    let (first, second) = (fixed(200, CHAIN_PARAMETERS), fixed(200, CHAIN_PARAMETERS));
+    let client = history_client_over(&[&first, &second], &[false, true], 5.);
+    chain_parameters(&client).expect("answers");
+    assert_eq!(first.requests().len(), 1);
+    assert!(second.requests().is_empty());
+
+    let (plain, failing) = (fixed(200, LISTING), fixed(500, "{}"));
+    let client = history_client_over(&[&plain, &failing], &[false, true], 5.);
+    assert!(listing(&client).is_err());
+    assert!(
+        plain.requests().is_empty(),
+        "a node without a key was asked after the keyed node failed"
+    );
+}
+
+/// Without a keyed TronGrid node no request is made at all.
+#[test]
+fn a_listing_without_a_keyed_node_makes_no_request() {
+    let node = fixed(200, LISTING);
+    let client = client_over(&[&node], 5.);
+    assert!(!client.has_history_nodes());
+    assert!(matches!(listing(&client), Err(TronApiError::AllNodesFailed(_))));
+    assert!(node.requests().is_empty());
+}
+
+/// The request of each listing: the documented path and parameters, confirmed rows only, the token filter and the
+/// cursor; the node's own headers travel with it and the query of the node URL stays at the end.
+#[test]
+fn a_listing_request_has_the_documented_path_and_parameters() {
+    let node = fixed(200, LISTING);
+    let urls = json!([{ "url": format!("{}/x?key=1", node.url()), "headers": { "TRON-PRO-API-KEY": "KEY-VALUE" } }]);
+    let client = TronApiClient::new_with_history_nodes("TRX", parse_nodes(&urls, None).expect("nodes"), &[true], 5.);
+    let owner = address();
+    let base58 = owner.to_base58();
+
+    block_on(client.get_account_listing(&owner, AccountListing::Transactions, None)).expect("answers");
+    block_on(client.get_account_listing(&owner, AccountListing::Trc20 { contract: None }, None)).expect("answers");
+    block_on(client.get_account_listing(
+        &owner,
+        AccountListing::Trc20 { contract: Some(&owner) },
+        Some("Cursor_1-x"),
+    ))
+    .expect("answers");
+
+    let asked: Vec<String> = node.requests().into_iter().map(|(path, _)| path).collect();
+    assert_eq!(asked, [
+        format!("/x/v1/accounts/{base58}/transactions?only_confirmed=true&limit=200&key=1"),
+        format!("/x/v1/accounts/{base58}/transactions/trc20?only_confirmed=true&limit=200&key=1"),
+        format!(
+            "/x/v1/accounts/{base58}/transactions/trc20?only_confirmed=true&limit=200&contract_address={base58}&\
+             fingerprint=Cursor_1-x&key=1"
+        ),
+    ]);
+    assert_eq!(seen(&node, "tron-pro-api-key"), vec![Some("KEY-VALUE".to_owned()); 3]);
+
+    // A cursor that could change the request URL is refused before any request.
+    let before = node.requests().len();
+    for cursor in ["a&b=c", "a b", "a/b", "a?b", ""] {
+        let refused = block_on(client.get_account_listing(&owner, AccountListing::Transactions, Some(cursor)));
+        assert!(matches!(refused, Err(TronApiError::InvalidResponse(_))), "{cursor}");
+    }
+    assert_eq!(node.requests().len(), before);
+}
+
+/// No error of a listing renders a part of a node URL beyond its host or a header value (R-N1, R-N8, R-N9): for a
+/// node that answers badly and for a node that cannot be reached.
+#[test]
+fn a_failed_listing_names_no_key() {
+    let failing = fixed(500, r#"{"success":false,"error":"down"}"#);
+    let urls = json!([
+        { "url": format!("{}/APIKEY?token=QUERYKEY", failing.url()), "headers": { "TRON-PRO-API-KEY": "HEADERKEY" } },
+        { "url": "http://user:secret@127.0.0.1:1/OTHERKEY", "headers": { "TRON-PRO-API-KEY": "SECONDKEY" } },
+    ]);
+    let client =
+        TronApiClient::new_with_history_nodes("TRX", parse_nodes(&urls, None).expect("nodes"), &[true, true], 5.);
+    let error = listing(&client).expect_err("every node fails");
+    let texts = [error.to_string(), format!("{error:?}"), format!("{client:?}")];
+    for text in &texts {
+        for secret in [
+            "APIKEY",
+            "QUERYKEY",
+            "HEADERKEY",
+            "user",
+            "secret",
+            "OTHERKEY",
+            "SECONDKEY",
+        ] {
+            assert!(!text.contains(secret), "a credential part is rendered");
+        }
+    }
+    // The key reached the node it belongs to.
+    assert_eq!(seen(&failing, "tron-pro-api-key"), vec![Some("HEADERKEY".to_owned())]);
+}
+
+/// The receipt read of the history: a node that does not know the transaction (the empty object) is a bad answer,
+/// so the next node is asked.
+#[test]
+fn a_receipt_the_node_does_not_know_moves_on_to_the_next_node() {
+    let (unknowing, knowing) = (
+        fixed(200, "{}"),
+        fixed(200, r#"{"id":"ab","blockNumber":7,"receipt":{"net_usage":267}}"#),
+    );
+    let client = client_over(&[&unknowing, &knowing], 5.);
+    let receipt = block_on(client.get_confirmed_transaction_info(TXID)).expect("the second node answers");
+    assert_eq!(receipt.block_number, Some(7));
+    assert_eq!(receipt.receipt.and_then(|inner| inner.net_usage), Some(267));
+
+    let client = client_over(&[&unknowing], 5.);
+    assert!(block_on(client.get_confirmed_transaction_info(TXID)).is_err());
 }

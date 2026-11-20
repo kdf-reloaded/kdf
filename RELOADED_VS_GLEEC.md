@@ -767,6 +767,14 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `{"format": "hex"}`, accepts `from` as base58check, `41...` or `0x41...`, and refuses an EVM `0x` address and the EVM
   format values with the legacy error body; an EVM coin is unchanged. No switch; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R21.10B.8, D21.10B.2.
+- **TRON (still switched off) has a transaction history when a TronGrid API key is set.** GLEEC KDF has no TRON
+  history: its versioned `my_tx_history` answers `NotSupportedFor`, its legacy one an empty list, and it ignores
+  `tx_history` for TRON. Reloaded answers the same without a key. With `tx_history: true` and a keyed TronGrid node
+  (the node's own `TRON-PRO-API-KEY` header or `tron_api_key`), both methods list the transactions of TRX and TRC20
+  coins from TronGrid's account listings, over every known address of an HD wallet, with base58check addresses and the
+  fee details of a withdraw result. Only confirmed transactions; history requests go to keyed TronGrid hosts only. An
+  addition a GLEEC client does not meet unless it sets the key; no switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 §21.10C.
 
 - **The fee of a TRON withdrawal (TRON is still switched off) follows the node's bandwidth rule, and a TRC20 fee limit
   has a margin and a maximum.** The withdraw estimate, its amounts, its errors and its fee details follow GLEEC KDF

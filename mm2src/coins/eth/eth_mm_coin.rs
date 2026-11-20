@@ -137,6 +137,16 @@ impl MmCoin for EthCoin {
     }
 
     fn process_history_loop(&self, ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> {
+        // The TRON history reads a provider's account listings over HTTP and runs on every target (CRD ch.21
+        // §21.10C). It does nothing for a coin whose history is not enabled.
+        if self.is_tron_family() {
+            let coin = self.clone();
+            let fut = async move {
+                crate::eth::tron::history::tron_history_loop(coin, ctx).await;
+                Ok(())
+            };
+            return Box::new(fut.boxed().compat());
+        }
         cfg_wasm32! {
             ctx.log.log(
                 "🤔",
@@ -151,11 +161,8 @@ impl MmCoin for EthCoin {
                 match coin.coin_type {
                     EthCoinType::Eth => coin.process_eth_history(&ctx).await,
                     EthCoinType::Erc20 { ref token_addr, .. } => coin.process_erc20_history(*token_addr, &ctx).await,
-                    // TRON tx history is fetched from a different API entirely
-                    // (TronGrid /v1/accounts/{address}/transactions). Wired in P10.2.5.
-                    EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                        log!("TRON tx history not yet wired (pending P10.2.5)");
-                    },
+                    // A TRON coin is served above.
+                    EthCoinType::Tron | EthCoinType::Trc20 { .. } => {},
                 }
                 Ok(())
             };
