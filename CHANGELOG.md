@@ -819,6 +819,16 @@ the previous version used. The safe way:
   - delegation, and the lock that orders withdraws.
   Some of them wait in real time for the history collector's 30-second cycle. Detail: PR #406; CRD ch.38 §38.6.4Q.
 
+- **The node tests of `mm2_main` that need no public server now run in CI.** These tests start real nodes
+  on loopback addresses and talk to them over RPC; no CI job ran them as a group before. A new job runs 15 of
+  them: start-up, the RPC password, mmrpc 2.0 errors, batch requests, the passphrase forms, the public key,
+  swap status, the order book ticker rule, the bot start and stop, and the start on an old database folder.
+  Six of them needed a public server, a passphrase variable or a network id before and were changed to need
+  none; the nodes of the tests no longer ask a public time server at start. Nine tests were removed: three
+  exact copies, four that need a native ZOMBIE daemon nobody can run, and two whose checks already run offline
+  in CI. The other node tests still need public servers and stay off by default; the two that were ignored
+  without a reason now state it. Only test code changed.
+
 ### Plans touched
 
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
