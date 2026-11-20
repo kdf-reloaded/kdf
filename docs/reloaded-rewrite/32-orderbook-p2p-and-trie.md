@@ -432,6 +432,13 @@ stores and forwards the word unchanged, like the rest of the bytes, and
 since protocol information is not part of the trie leaf (R-W3), the word
 changes no root. *(Reloaded-original, 2026-11-04.)*
 
+*Pointer (2026-11-20; pending the KDF Dirty Gate with chapter 59 §59.4B).*
+What a relay at the reference rows keeps and returns for these bytes in
+the full-orderbook, synchronization and best-orders answers, the wire
+form of the two strings, and the treatment of a member appended to a
+best-orders peer request (§32.7.1), are recorded in
+[Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4B.
+
 **R-W4.** The subsystem MUST support, behaviourally:
 
 - projecting an in-memory record down to the wire record;
