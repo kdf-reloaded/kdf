@@ -209,8 +209,8 @@ pub(super) async fn enable_tron_platform_coin(
     let params = TronCoinParams {
         nodes,
         required_confirmations: tron_required_confirmations(request.required_confirmations, platform_conf),
-        // `tx_history` is ignored: no history source exists yet (R21.10B.2).
-        tx_history: false,
+        // The history is enabled only when the node list also has a keyed TronGrid node (CRD ch.21 §21.10C).
+        tx_history: request.tx_history(),
     };
     let protocol = CoinProtocol::TRX {
         network: network.clone(),
