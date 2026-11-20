@@ -790,6 +790,15 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `UnsupportedError` naming both figures. None of the three is visible to a peer and none changes the shape of an
   answer, so no switch exists; rows in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
   CRD ch.21 R21.10B.7, D21.10B.1.
+- **A TRC20 withdrawal whose dry run reverts is refused (TRON is still switched off).** GLEEC KDF `v3.0.0-beta`, as
+  the CRD records it, judges the energy dry run of a TRC20 transfer only by its `energy_used`: when the token contract
+  would refuse the transfer, it still returns a signed transaction and a fee estimate, and broadcasting it burns the
+  fee. Reloaded reads the dry run's revert indication and refuses the withdrawal before anything is signed, with
+  `UnsupportedError` and the text "the token contract refused this transfer (its dry run reverted)" followed by the
+  node's reason; no other node is asked. The energy a contract's deployer may pay is not modeled in either, so the
+  estimate of a TRC20 fee can be above the chain's charge in both. No peer sees the check and a successful dry run
+  answers the same, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.21 R21.10B.10 to R21.10B.13.
 
 ### Removed / disabled in KDF Reloaded
 

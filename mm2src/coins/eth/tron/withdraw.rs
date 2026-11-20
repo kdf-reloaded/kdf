@@ -23,6 +23,7 @@
 //!   `from` member selected.
 //! - A TRX transaction is built only when its amount plus its estimated fee fits the balance, and a TRC20
 //!   transaction only when the sender's TRX balance covers its estimated fee.
+//! - A TRC20 transfer whose dry run reverts is never signed.
 
 use super::api::{TronApiClient, TronApiError};
 use super::balance::{trc20_balance_units, trx_balance_sun};
@@ -63,7 +64,8 @@ const MAX_AMOUNT_ROUNDS: usize = 3;
 /// From the estimate: [`WithdrawError::Transport`] for every failed node read, a dry run without a positive
 /// energy figure included; [`WithdrawError::InternalError`] when a TRX transfer creates the recipient's account
 /// and the node reports no fee for that; [`WithdrawError::UnsupportedError`] when the energy of a TRC20 transfer
-/// costs more than the highest `fee_limit` (CRD ch.21 D21.10B.1).
+/// costs more than the highest `fee_limit` (CRD ch.21 D21.10B.1), and when the dry run of a TRC20 transfer
+/// reverts: the token contract refuses the transfer, and nothing is signed (CRD ch.21 R21.10B.13 and its finding).
 pub(crate) async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest, sender: EvmWithdrawSender) -> WithdrawResult {
     if let Some(fee) = &req.fee {
         return MmError::err(WithdrawError::InvalidFeePolicy(format!(
@@ -487,6 +489,10 @@ async fn fetch_trc20_balance(
 ///
 /// # Errors
 ///
+/// [`WithdrawError::UnsupportedError`] when the dry run reverts (CRD ch.21 R21.10B.13 and its finding): the token
+/// contract refuses this transfer, whichever node is asked, so no other node is asked and the caller signs
+/// nothing. The text carries the node's revert message, or the name of the simulated result.
+///
 /// [`WithdrawError::Transport`] when the read fails or the answer has no positive `energy_used`
 /// (CRD ch.21 R21.10B.3). No figure stands in for a missing one.
 async fn dry_run_trc20_energy(
@@ -500,14 +506,36 @@ async fn dry_run_trc20_energy(
     // Strip the 4-byte selector: triggerconstantcontract wants parameters only.
     let param_hex = hex::encode(&data[4..]);
     let resp = api
-        .trigger_constant_contract(sender, contract, "transfer(address,uint256)", &param_hex)
+        .trigger_constant_dry_run(sender, contract, "transfer(address,uint256)", &param_hex)
         .await
-        .map_to_mm(node_error)?;
+        .map_to_mm(dry_run_error)?;
     match resp.energy_used {
         Some(energy) if energy > 0 => Ok(energy),
         _ => MmError::err(WithdrawError::Transport(
             "the dry run of the TRC20 transfer reports no positive energy_used".to_owned(),
         )),
+    }
+}
+
+/// The most characters of a node's revert reason a withdraw error shows.
+const REVERT_REASON_MAX_CHARS: usize = 200;
+
+/// The withdraw error of a failed energy dry run. A revert is the token contract's refusal of the transfer: a
+/// request the caller has to change (CRD ch.21 R21.10B.13 and its finding, ch.49 R49.27a). The reason is node
+/// text: the node client has removed the node's URL from it, and it is cut to [`REVERT_REASON_MAX_CHARS`] here.
+/// Every other failure is a failed node read.
+fn dry_run_error(e: TronApiError) -> WithdrawError {
+    match e {
+        TronApiError::ContractRevert(reason) => {
+            let mut shown: String = reason.chars().take(REVERT_REASON_MAX_CHARS).collect();
+            if shown.len() < reason.len() {
+                shown.push_str("...");
+            }
+            WithdrawError::UnsupportedError(format!(
+                "the token contract refused this transfer (its dry run reverted): {shown}"
+            ))
+        },
+        other => node_error(other),
     }
 }
 
@@ -648,6 +676,35 @@ mod tests {
         assert_eq!(at(Some(86_400)), Ok(1_700_086_400_000));
         assert!(at(Some(u64::MAX)).is_err());
         assert!(at(Some(i64::MAX as u64 / 1000)).is_err());
+    }
+
+    #[test]
+    fn a_reverting_dry_run_maps_to_the_contracts_refusal_with_a_bounded_reason() {
+        match dry_run_error(TronApiError::ContractRevert("REVERT opcode executed".to_owned())) {
+            WithdrawError::UnsupportedError(text) => assert_eq!(
+                text,
+                "the token contract refused this transfer (its dry run reverted): REVERT opcode executed"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // A long reason is cut at 200 characters, on a character boundary.
+        match dry_run_error(TronApiError::ContractRevert("\u{e9}".repeat(500))) {
+            WithdrawError::UnsupportedError(text) => {
+                let reason = text.rsplit(": ").next().unwrap_or_default();
+                assert_eq!(reason, format!("{}...", "\u{e9}".repeat(200)));
+            },
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // Exactly 200 characters are shown whole.
+        match dry_run_error(TronApiError::ContractRevert("x".repeat(200))) {
+            WithdrawError::UnsupportedError(text) => assert!(text.ends_with(&"x".repeat(200)), "{text}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // Any other failure of the dry run is a failed node read.
+        assert!(matches!(
+            dry_run_error(TronApiError::Timeout("cutoff".to_owned())),
+            WithdrawError::Transport(_)
+        ));
     }
 
     #[test]

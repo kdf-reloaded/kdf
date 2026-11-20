@@ -1261,6 +1261,65 @@ stub answering `energy_used` zero on every node, the withdraw answers
 `Transport`, HTTP 502. Reloaded: the first half is restated when the lane
 decides the refusal of the finding above.
 
+*Status note (2026-11-20), what Reloaded does for R21.10B.10 -- R21.10B.13.*
+The sentences of the block above are unchanged; this note restates its three
+acceptance rows for Reloaded.
+
+- *A reverting dry run is refused (T21.10B.18 restated; the remedy of the
+  finding after R21.10B.13).* Reloaded reads the dry-run answer of a TRC20
+  withdraw for a revert indication, and either of two markers is one: the
+  status object has the success flag true **and** a non-empty `message`; or an
+  entry of `transaction.ret` names an execution result (`ret`, or
+  `contractRet`) other than `SUCCESS`. An empty `constant_result` is no marker
+  on its own. A withdraw whose dry run carries the indication answers
+  `UnsupportedError`, HTTP 400 on the direct method and in `details` of an
+  `Error` status on the task route (chapter 49 R49.27a: the request is the
+  client's to change). Its text is "the token contract refused this transfer
+  (its dry run reverted): " followed by the node's `message`, or by "simulated
+  result " and the result's name when there is no message. The node's text has
+  the node's URL removed, as every node text has (R-N1), and is cut to 200
+  characters, marked with "...". Nothing is signed, no `tx_hex` is returned,
+  and the answer is not moved to another node: the outcome belongs to the
+  contract and not to the node, so the node order does not change either. The
+  revert is judged before `energy_used`. Against the stub of T21.10B.18
+  (success flag true, a revert message, error-string data in
+  `constant_result`, a positive `energy_used`) Reloaded therefore answers that
+  `UnsupportedError`, the stub receives no broadcast request, and with two
+  such nodes one node is asked for the dry run. The second half of the row
+  holds as written: `energy_used` zero or missing answers `Transport`, HTTP
+  502, and so does an answer whose success flag is not true and that carries
+  no usable energy figure. A `message` beside a success flag that is not true
+  is no revert marker; such an answer is judged by R21.10B.3 and by its
+  `transaction.ret` entries. Token balance reads are not changed (R-WP3).
+- *Answer forms (public chain data, chapter 01 R6).* On 2026-11-20 a public
+  mainnet node answered the dry run of a USDT `transfer(address,uint256)`
+  that succeeds with the status object `{"result": true}` and no `message`,
+  one 32-byte word in `constant_result`, `transaction.ret` equal to `[{}]`,
+  a `logs` list and integer `energy_used` and `energy_penalty`. For a
+  transfer the token refuses (a sender without a token balance; an amount
+  above the balance) it answered with the status object `{"result": true,
+  "message": "REVERT opcode executed"}`, the message as plain text,
+  `constant_result` equal to `[""]`, `transaction.ret` equal to
+  `[{"ret": "FAILED"}]`, no `logs`, and positive figures: `energy_used`
+  8,624 and `energy_penalty` 6,640. This settles, for that node, the
+  members the paragraph "Not established (R21.10B.13)" leaves open.
+- *The origin share is not modeled (T21.10B.16 and T21.10B.17 restated as
+  parity; the maintainer's decision of 2026-11-20).* Reloaded keeps R21.10B.10
+  -- R21.10B.12: no contract metadata and no resources of the deployer are
+  read, the whole dry-run energy counts as the sender's, and the TRX check is
+  against the full `total_fee`. The estimate and the amount the check asks for
+  can therefore be above what the chain charges when the contract's deployer
+  pays part of the energy. For mainnet USDT the effect was zero on 2026-11-20:
+  a public node reported the deployer's energy as fully used (9,335 of 9,335),
+  and ordinary transfers that day showed no origin share in their receipts.
+  T21.10B.16 holds for Reloaded with one difference that predates this note:
+  the `fee_limit` is the dry-run energy times `getEnergyFee` plus the margin
+  of D21.10B.1. T21.10B.17 holds as written.
+- *Tests.* `tron/withdraw_fee_tests.rs` (the refusal with each marker, one
+  node asked, an unchanged fee for a successful dry run in the node's full
+  form, zero energy, and the two parity rows), `tron/node_client_tests.rs`
+  and the unit tests of `tron/api.rs` and `tron/withdraw.rs`.
+
 **R21.10B.8** *Address methods (completes R-WP5 and R-AD1).*
 
 - `validateaddress` accepts the base58check form (34 characters starting
@@ -1453,6 +1512,14 @@ R21.10B.8 and R21.10B.9 is deliberately not recorded. (3) Whether the TRON
 node's energy dry run includes the dynamic-energy penalty in
 `energy_used` was not checked. (4) The swap-fee failure of R21.10B.9 for a
 trading-capable coin was read, not executed.
+
+*Lab note (2026-11-20), on item (3).* On 2026-11-20 a public mainnet node's
+dry run of a USDT `transfer(address,uint256)` to an address that holds the
+token reported `energy_used` 64,285 with `energy_penalty` 49,635, equal to
+the receipts of real transfers of that kind: the dry run includes the
+dynamic-energy penalty. To an address without a token balance it reported
+130,285; no real receipt of that kind was compared. Public chain data
+(chapter 01 R6); the sentence of item (3) is unchanged.
 
 *Acceptance rows.* Each row runs against a stub TRON node that answers the
 public endpoints of §21.9 with the forms the row names. *Parity* is the
@@ -2435,3 +2502,11 @@ V3. The address encoding, protobuf transaction/contract formats,
   the repository's clean-room gate tool was not applicable because the
   additions embed no code blocks. *Measure:* 0.02, on the
   discretionary-expression basis.
+- *Status and lab notes added 2026-11-20 (clean-side, Reloaded-original)
+  -- the status note after T21.10B.18 and the lab note after the "Not
+  established" paragraph of the compatibility block.* *Inputs:* the cleared
+  text of R21.10B.10 -- R21.10B.13 and T21.10B.16 -- T21.10B.18 above; the
+  public TRON full-node HTTP API (§21.9); answers of a public mainnet node
+  and public mainnet receipts captured on 2026-11-20 (chapter 01 R6); and
+  this repository's own code. *Forbidden corpus:* not consulted for these
+  notes. No cleared sentence was edited.
