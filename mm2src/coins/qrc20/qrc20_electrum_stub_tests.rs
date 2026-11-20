@@ -1267,16 +1267,6 @@ async fn family_stub() -> StubServer {
     server.set_tip(777);
     server.set_params_prefix_result(CALL, json!([TOKEN_B_CONTRACT]), balance_answer(2_000));
     server.set_result(BROADCAST, json!(ACCEPTED_TXID));
-    // A transaction the stub accepted is known to it: a confirmed, ordinary one. The token's maturity check reads the
-    // transaction of an output before it spends it, also the change of a transaction the node broadcast itself.
-    server.set_responder(GET_TX, |params, broadcasts| {
-        let wanted = params[0].as_str()?;
-        broadcasts.iter().find_map(|broadcast| {
-            let bytes = hex::decode(broadcast[0].as_str()?).ok()?;
-            let tx: UtxoTx = deserialize(bytes.as_slice()).ok()?;
-            (txid_of(&tx) == wanted).then(|| verbose_answer(&tx, 500, 1_600_000_000))
-        })
-    });
     server
 }
 
@@ -2226,6 +2216,45 @@ fn t38_6_4q_4_the_guard_of_the_shared_record_serializes_qtum_and_a_token() {
         // One after the other: the second spent the first's change, not the funding output.
         assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
         assert!(inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])));
+    });
+}
+
+/// Follow-up of the decision (2026-11-20): the maturity check, which a token always runs, does not fetch the parent of
+/// an output the record supplied, the change of a transaction this node built and the backend accepted. The stub knows
+/// no transaction it was sent: it answers `blockchain.transaction.get` only for the funding transaction, as a server
+/// that has not indexed the broadcast. An output the server listed keeps the fetch.
+#[test]
+fn t38_6_4q_4_the_maturity_check_does_not_fetch_the_parent_of_an_output_the_record_supplied() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 86, &[1_000_000_000]);
+        let call = |token: &Qrc20Coin| {
+            token
+                .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+                .unwrap()
+        };
+        token_a.send_contract_calls(vec![call(&token_a)]).await.unwrap();
+        token_b.send_contract_calls(vec![call(&token_b)]).await.unwrap();
+        token_a.send_contract_calls(vec![call(&token_a)]).await.unwrap();
+
+        let txs = broadcast_txs(&server);
+        assert_eq!(txs.len(), 3);
+        // The second and third spent the change of the one before.
+        assert!(inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])));
+        assert!(inputs_of(&txs[2]).iter().all(|(hash, _)| *hash == txid_of(&txs[1])));
+        let fetched: Vec<String> = server
+            .request_params(GET_TX)
+            .iter()
+            .map(|params| params[0].as_str().unwrap().to_owned())
+            .collect();
+        // The listed funding output was fetched; nothing the node built was.
+        assert!(fetched.contains(&txid_of(&funding)), "{fetched:?}");
+        assert!(fetched.iter().all(|txid| *txid == txid_of(&funding)), "{fetched:?}");
     });
 }
 

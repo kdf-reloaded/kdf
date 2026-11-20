@@ -546,6 +546,12 @@ impl RecentlySpentOutPoints {
         }
     }
 
+    /// Whether `unspent` is an output of a transaction this node built and signed, which the record entered after
+    /// the backend accepted it: the outputs [`Self::replace_spent_outputs_with_cache`] supplies as replacements.
+    pub(crate) fn supplies(&self, unspent: &UnspentInfo) -> bool {
+        self.output_to_input_map.contains_key(&unspent.clone().into())
+    }
+
     pub fn replace_spent_outputs_with_cache(&self, mut outputs: HashSet<UnspentInfo>) -> HashSet<UnspentInfo> {
         let mut replacement_unspents = HashSet::new();
         outputs = outputs

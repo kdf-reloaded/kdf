@@ -9631,6 +9631,75 @@ mod withdraw_recent_spent {
         assert_eq!(listing(&coin), before);
     }
 
+    const GET_TX: &str = "blockchain.transaction.get";
+
+    /// [`coin_on_backend`] with the maturity check on. The server answers the verbose transaction of the one listed
+    /// output (and no other: a transaction it has not seen is answered with a result that is not a transaction, as a
+    /// spread read of a server that has not indexed it fails), and the tip.
+    fn coin_with_maturity_on_backend() -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let (client, server) = electrum_client_over_stub(|server| {
+            server.set_scripthash_result(
+                "blockchain.scripthash.listunspent",
+                &p2pkh_hash,
+                json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": LISTED_VALUE}]),
+            );
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+            server.set_result(BROADCAST, json!("ab".repeat(32)));
+            server.set_result("blockchain.headers.subscribe", json!({"height": 777, "hex": "00"}));
+            server.set_params_result(
+                GET_TX,
+                json!(["01".repeat(32), true]),
+                json!({
+                    "hex": hex::encode(serialize(&UtxoTx::default())),
+                    "txid": "01".repeat(32),
+                    "version": 1,
+                    "locktime": 0,
+                    "vin": [],
+                    "vout": [],
+                    "height": 10,
+                    "time": 1_600_000_000u32,
+                    "blocktime": 1_600_000_000u32,
+                    "confirmations": 100,
+                }),
+            );
+        });
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+        fields.check_utxo_maturity = true;
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    /// The transaction ids the server was asked for with `blockchain.transaction.get`.
+    fn fetched_parents(server: &StubServer) -> Vec<String> {
+        server
+            .request_params(GET_TX)
+            .iter()
+            .map(|params| params[0].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// A output the server listed keeps the parent fetch of the maturity check; an output the record supplied (the
+    /// change of a transaction this node built, whose broadcast the backend accepted) is not fetched: it is never a
+    /// coinbase, and a server that has not seen it yet would fail the spend (CRD ch.38 D38.6.4Q.4 follow-up).
+    #[test]
+    fn maturity_check_fetches_the_parent_of_a_listed_output_and_not_of_a_record_supplied_one() {
+        let (coin, server) = coin_with_maturity_on_backend();
+        let first_details = legacy_withdraw(&coin);
+        let first = tx_of(&first_details);
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+        // The listed output was fetched.
+        assert!(fetched_parents(&server).contains(&"01".repeat(32)));
+
+        broadcast_hex(&coin, &first_details).unwrap();
+        let fetches_before = fetched_parents(&server).len();
+        let second = tx_of(&legacy_withdraw(&coin));
+        // The second withdraw spent the first one's change, and no parent was fetched for it.
+        assert!(inputs_of(&second).iter().all(|input| input.hash == first.hash()));
+        let fetched = fetched_parents(&server);
+        assert_eq!(fetched.len(), fetches_before, "{fetched:?}");
+        assert!(fetched.iter().all(|txid| *txid == "01".repeat(32)));
+    }
+
     /// T38.5B.3 (R38.5B.9 items 2 and 6): an accepted broadcast of a withdraw's bytes records the spend.
     #[test]
     fn accepted_broadcast_of_a_withdraw_records_the_spend() {

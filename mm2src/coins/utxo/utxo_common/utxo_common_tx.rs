@@ -836,7 +836,8 @@ where
     T: UtxoCommonOps + GetUtxoListOps,
 {
     let (unspents, recently_spent) = coin.get_all_unspent_ordered_list(address).await?;
-    let mature_unspents = identify_mature_unspents(coin, unspents).await?;
+    let mature_unspents =
+        identify_mature_unspents_skipping(coin, unspents, |unspent| recently_spent.supplies(unspent)).await?;
     Ok((mature_unspents, recently_spent))
 }
 
@@ -852,11 +853,14 @@ where
 {
     let (unspents_map, recently_spent) = coin.get_all_unspent_ordered_map(addresses).await?;
     // Get an iterator of futures: `Future<Output=UtxoRpcResult<(Address, MatureUnspentList)>>`
+    let record = &recently_spent;
     let fut_it = unspents_map.into_iter().map(|(address, unspents)| {
-        identify_mature_unspents(coin, unspents).map(|res| -> UtxoRpcResult<(Address, MatureUnspentList)> {
-            let mature_unspents = res?;
-            Ok((address, mature_unspents))
-        })
+        identify_mature_unspents_skipping(coin, unspents, |unspent| record.supplies(unspent)).map(
+            |res| -> UtxoRpcResult<(Address, MatureUnspentList)> {
+                let mature_unspents = res?;
+                Ok((address, mature_unspents))
+            },
+        )
     });
     // Poll the `fut_it` futures concurrently.
     let result_map = futures::future::try_join_all(fut_it).await?.into_iter().collect();
@@ -865,6 +869,23 @@ where
 
 /// Splits the given `unspents` outputs into mature and immature.
 pub async fn identify_mature_unspents<T>(coin: &T, unspents: Vec<UnspentInfo>) -> UtxoRpcResult<MatureUnspentList>
+where
+    T: UtxoCommonOps,
+{
+    identify_mature_unspents_skipping(coin, unspents, |_| false).await
+}
+
+/// [`identify_mature_unspents`] that does not look at the outputs `is_own` names: they are mature without a fetch.
+///
+/// The shared listing path passes the outputs the recently-spent record supplied, which are outputs of a transaction
+/// this node built and signed. Such a transaction is never a coinbase or a coinstake, so maturity cannot apply to it.
+/// The parent fetch is a spread read whose error answer is final, so a server that has not yet seen the fresh
+/// transaction failed the next spend from the same address. Outputs the server listed keep the fetch.
+async fn identify_mature_unspents_skipping<T>(
+    coin: &T,
+    unspents: Vec<UnspentInfo>,
+    is_own: impl Fn(&UnspentInfo) -> bool,
+) -> UtxoRpcResult<MatureUnspentList>
 where
     T: UtxoCommonOps,
 {
@@ -900,6 +921,7 @@ where
 
     let to_verbose: HashSet<H256Json> = unspents
         .iter()
+        .filter(|unspent| !is_own(unspent))
         .map(|unspent| unspent.outpoint.hash.reversed().into())
         .collect();
     let verbose_txs = coin
@@ -911,6 +933,10 @@ where
 
     let mut result = MatureUnspentList::with_capacity(unspents.len());
     for unspent in unspents {
+        if is_own(&unspent) {
+            result.mature.push(unspent);
+            continue;
+        }
         let tx_hash: H256Json = unspent.outpoint.hash.reversed().into();
         let tx_info = verbose_txs
             .get(&tx_hash)
