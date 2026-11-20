@@ -15,9 +15,7 @@ pub enum MmCoinEnum {
     ZCoin(ZCoin),
     Bch(BchCoin),
     SlpToken(SlpToken),
-    #[cfg(not(target_arch = "wasm32"))]
     SolanaCoin(SolanaCoin),
-    #[cfg(not(target_arch = "wasm32"))]
     SplToken(SplToken),
     #[cfg(not(target_arch = "wasm32"))]
     LightningCoin(LightningCoin),
@@ -35,11 +33,9 @@ impl From<EthCoin> for MmCoinEnum {
 impl From<TestCoin> for MmCoinEnum {
     fn from(c: TestCoin) -> MmCoinEnum { MmCoinEnum::Test(c) }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<SolanaCoin> for MmCoinEnum {
     fn from(c: SolanaCoin) -> MmCoinEnum { MmCoinEnum::SolanaCoin(c) }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<SplToken> for MmCoinEnum {
     fn from(c: SplToken) -> MmCoinEnum { MmCoinEnum::SplToken(c) }
 }
@@ -85,9 +81,7 @@ impl Deref for MmCoinEnum {
             MmCoinEnum::LightningCoin(ref c) => c,
             MmCoinEnum::ZCoin(ref c) => c,
             MmCoinEnum::Test(ref c) => c,
-            #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::SolanaCoin(ref c) => c,
-            #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::SplToken(ref c) => c,
             MmCoinEnum::SiaCoin(ref c) => c,
             MmCoinEnum::TendermintCoin(ref c) => c,
@@ -544,9 +538,7 @@ pub enum CoinProtocol {
         network: BlockchainNetwork,
         confirmations: PlatformCoinConfirmations,
     },
-    #[cfg(not(target_arch = "wasm32"))]
     SOLANA,
-    #[cfg(not(target_arch = "wasm32"))]
     SPLTOKEN {
         platform: String,
         /// A base58 32-byte public key, checked when the protocol is parsed (like `SOLANATOKEN`'s `mint_address`).
@@ -558,7 +550,6 @@ pub enum CoinProtocol {
     /// `mint_address` and `program_id` are base58 32-byte public keys, checked when the protocol is parsed, so an
     /// invalid key makes the protocol unparsable. `program_id` is the token program that owns the mint (SPL Token
     /// or Token-2022).
-    #[cfg(not(target_arch = "wasm32"))]
     SOLANATOKEN {
         platform: String,
         decimals: u8,
@@ -642,7 +633,6 @@ pub enum CoinProtocol {
 }
 
 /// A Solana public key as a base58 string in JSON (the crate's own serde form is a byte array).
-#[cfg(not(target_arch = "wasm32"))]
 mod base58_pubkey {
     use solana_pubkey::Pubkey;
 
@@ -1097,12 +1087,9 @@ mod coin_protocol_tests {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    #[cfg(not(target_arch = "wasm32"))]
     const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn solanatoken_json() -> serde_json::Value {
         json!({
             "type": "SOLANATOKEN",
@@ -1116,7 +1103,6 @@ mod coin_protocol_tests {
     }
 
     /// T40.2: the platform descriptor in the bare form, with an empty `protocol_data` and with a null one.
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solana_protocol_accepts_three_forms() {
         for protocol in [
@@ -1139,7 +1125,6 @@ mod coin_protocol_tests {
         assert!(CoinProtocol::from_conf_json(json!({"type": "SOLANA", "protocol_data": 5})).is_err());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn solana_protocol_serializes_without_protocol_data() {
         assert_eq!(
@@ -1161,7 +1146,6 @@ mod coin_protocol_tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solanatoken_protocol_parses_and_round_trips() {
         let parsed = CoinProtocol::from_conf_json(solanatoken_json()).unwrap();
@@ -1190,7 +1174,6 @@ mod coin_protocol_tests {
         ));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solanatoken_protocol_requires_every_key() {
         for key in ["platform", "decimals", "mint_address", "program_id"] {
@@ -1202,7 +1185,6 @@ mod coin_protocol_tests {
         assert!(CoinProtocol::from_conf_json(json!({"type": "SOLANATOKEN"})).is_err());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solanatoken_protocol_rejects_invalid_keys() {
         // Not base58, and base58 of a wrong length (31 and 33 bytes).
@@ -1224,7 +1206,6 @@ mod coin_protocol_tests {
         assert!(CoinProtocol::from_conf_json(protocol).is_err());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn spltoken_protocol_still_parses() {
         match CoinProtocol::from_conf_json(json!({

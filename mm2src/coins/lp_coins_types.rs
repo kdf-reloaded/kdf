@@ -677,7 +677,6 @@ pub enum TxFeeDetails {
     Eth(EthTxFeeDetails),
     Qrc20(Qrc20FeeDetails),
     Slp(SlpFeeDetails),
-    #[cfg(not(target_arch = "wasm32"))]
     Solana(SolanaFeeDetails),
     Sia(siacoin::SiaFeeDetails),
     Tendermint(tendermint::TendermintFeeDetails),
@@ -732,7 +731,6 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
             Utxo(UtxoFeeDetails),
             Eth(EthTxFeeDetails),
             Qrc20(Qrc20FeeDetails),
-            #[cfg(not(target_arch = "wasm32"))]
             Solana(SolanaFeeDetails),
             Sia(siacoin::SiaFeeDetails),
             Tron(crate::eth::tron::fee::TronTxFeeDetails),
@@ -743,7 +741,6 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
             TxFeeDetailsUnTagged::Utxo(f) => Ok(TxFeeDetails::Utxo(f)),
             TxFeeDetailsUnTagged::Eth(f) => Ok(TxFeeDetails::Eth(f)),
             TxFeeDetailsUnTagged::Qrc20(f) => Ok(TxFeeDetails::Qrc20(f)),
-            #[cfg(not(target_arch = "wasm32"))]
             TxFeeDetailsUnTagged::Solana(f) => Ok(TxFeeDetails::Solana(f)),
             TxFeeDetailsUnTagged::Sia(f) => Ok(TxFeeDetails::Sia(f)),
             TxFeeDetailsUnTagged::Tron(f) => Ok(TxFeeDetails::Tron(f)),
@@ -768,7 +765,6 @@ impl From<UtxoFeeDetails> for TxFeeDetails {
 impl From<Qrc20FeeDetails> for TxFeeDetails {
     fn from(qrc20_details: Qrc20FeeDetails) -> Self { TxFeeDetails::Qrc20(qrc20_details) }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<SolanaFeeDetails> for TxFeeDetails {
     fn from(solana_details: SolanaFeeDetails) -> Self { TxFeeDetails::Solana(solana_details) }
 }
@@ -1368,7 +1364,6 @@ mod tx_fee_details_tests {
         }));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn solana_details() -> SolanaFeeDetails {
         SolanaFeeDetails::new("0.000005".parse().unwrap(), "0.00203928".parse().unwrap())
     }
@@ -1376,7 +1371,6 @@ mod tx_fee_details_tests {
     /// T40.6B.13: the Solana object is exactly the tag and the three members, the last three decimal strings, and
     /// the total is the sum.
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
     fn test_solana_fee_details_wire_shape() {
         let details = TxFeeDetails::Solana(solana_details());
         let wire: Json = json::to_value(&details).unwrap();
@@ -1402,7 +1396,6 @@ mod tx_fee_details_tests {
 
     /// T40.6B.13: the untagged reader reads the new shape back as Solana, with and without rent.
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
     fn test_solana_fee_details_roundtrip() {
         roundtrip(TxFeeDetails::Solana(solana_details()));
         roundtrip(TxFeeDetails::Solana(SolanaFeeDetails::new(
