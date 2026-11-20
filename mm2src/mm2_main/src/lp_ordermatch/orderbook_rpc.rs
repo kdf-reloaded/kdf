@@ -1,3 +1,4 @@
+use super::capability_presentation::{log_left_out, CapabilityFilter};
 use super::{is_my_order, mm2_internal_pubkey_hex, orderbook_address, subscribe_to_orderbook_topic, OrdermatchContext,
             RpcOrderbookEntry};
 use crate::mm2::lp_ordermatch::{addr_format_from_protocol_info, RpcOrderbookEntryV2};
@@ -135,6 +136,9 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
     }
 
     try_s!(subscribe_to_orderbook_topic(&ctx, &base_ticker, &rel_ticker, request_orderbook).await);
+    // CRD ch.59 R59.4C.3: only presentable orders are listed, and the totals below cover the listed ones.
+    let capability_filter = CapabilityFilter::for_pair(&ctx, &req.base, &req.rel).await;
+    let mut left_out = 0;
     let orderbook = ordermatch_ctx.orderbook.lock();
     let my_pubsecp = try_s!(mm2_internal_pubkey_hex(&ctx));
 
@@ -146,6 +150,11 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
                     "Orderbook::unordered contains {:?} uuid that is not in Orderbook::order_set",
                     uuid
                 ))?;
+                let is_mine = is_my_order(&ask.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
+                if !capability_filter.is_presentable(ask, is_mine) {
+                    left_out += 1;
+                    continue;
+                }
                 let address_format = addr_format_from_protocol_info(&ask.base_protocol_info);
                 let address = match orderbook_address(&ctx, &req.base, &base_coin_conf, &ask.pubkey, address_format) {
                     Ok(a) => a.into_legacy_string(),
@@ -154,7 +163,6 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
                         continue;
                     },
                 };
-                let is_mine = is_my_order(&ask.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
                 orderbook_entries.push(ask.as_rpc_entry_ask(address, is_mine));
             }
             orderbook_entries
@@ -173,6 +181,11 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
                     "Orderbook::unordered contains {:?} uuid that is not in Orderbook::order_set",
                     uuid
                 ))?;
+                let is_mine = is_my_order(&bid.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
+                if !capability_filter.is_presentable(bid, is_mine) {
+                    left_out += 1;
+                    continue;
+                }
                 let address_format = addr_format_from_protocol_info(&bid.base_protocol_info);
                 let address = match orderbook_address(&ctx, &req.rel, &rel_coin_conf, &bid.pubkey, address_format) {
                     Ok(a) => a.into_legacy_string(),
@@ -181,7 +194,6 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
                         continue;
                     },
                 };
-                let is_mine = is_my_order(&bid.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
                 orderbook_entries.push(bid.as_rpc_entry_bid(address, is_mine));
             }
             orderbook_entries
@@ -190,6 +202,7 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
     };
     bids.sort_unstable_by(|bid1, bid2| bid2.price_rat.cmp(&bid1.price_rat));
     let (bids, total_bids_base_vol, total_bids_rel_vol) = build_aggregated_entries(bids);
+    log_left_out("orderbook", &req.base, &req.rel, left_out);
 
     let response = OrderbookResponse {
         num_asks: asks.len(),
@@ -300,6 +313,9 @@ pub async fn orderbook_rpc_v2(
         .await
         .map_to_mm(OrderbookRpcError::P2PSubscribeError)?;
 
+    // CRD ch.59 R59.4C.3: only presentable orders are listed, and the totals below cover the listed ones.
+    let capability_filter = CapabilityFilter::for_pair(&ctx, &req.base, &req.rel).await;
+    let mut left_out = 0;
     let orderbook = ordermatch_ctx.orderbook.lock();
     let my_pubsecp = mm2_internal_pubkey_hex(&ctx).map_to_mm(OrderbookRpcError::Internal)?;
 
@@ -314,6 +330,11 @@ pub async fn orderbook_rpc_v2(
                         continue;
                     },
                 };
+                let is_mine = is_my_order(&ask.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
+                if !capability_filter.is_presentable(ask, is_mine) {
+                    left_out += 1;
+                    continue;
+                }
                 let address_format = addr_format_from_protocol_info(&ask.base_protocol_info);
                 let address = match orderbook_address(&ctx, &req.base, &base_coin_conf, &ask.pubkey, address_format) {
                     Ok(a) => a,
@@ -322,7 +343,6 @@ pub async fn orderbook_rpc_v2(
                         continue;
                     },
                 };
-                let is_mine = is_my_order(&ask.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
                 orderbook_entries.push(ask.as_rpc_v2_entry_ask(address, is_mine));
             }
             orderbook_entries
@@ -344,6 +364,11 @@ pub async fn orderbook_rpc_v2(
                         continue;
                     },
                 };
+                let is_mine = is_my_order(&bid.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
+                if !capability_filter.is_presentable(bid, is_mine) {
+                    left_out += 1;
+                    continue;
+                }
                 let address_format = addr_format_from_protocol_info(&bid.base_protocol_info);
                 let address = match orderbook_address(&ctx, &req.rel, &rel_coin_conf, &bid.pubkey, address_format) {
                     Ok(a) => a,
@@ -352,7 +377,6 @@ pub async fn orderbook_rpc_v2(
                         continue;
                     },
                 };
-                let is_mine = is_my_order(&bid.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
                 orderbook_entries.push(bid.as_rpc_v2_entry_bid(address, is_mine));
             }
             orderbook_entries
@@ -361,6 +385,7 @@ pub async fn orderbook_rpc_v2(
     };
     bids.sort_unstable_by(|bid1, bid2| bid2.price.rational.cmp(&bid1.price.rational));
     let (bids, total_bids_base_vol, total_bids_rel_vol) = build_aggregated_entries_v2(bids);
+    log_left_out("orderbook", &req.base, &req.rel, left_out);
 
     Ok(OrderbookV2Response {
         num_asks: asks.len(),

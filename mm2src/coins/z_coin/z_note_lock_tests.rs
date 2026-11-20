@@ -604,6 +604,44 @@ fn t39_6_4f_the_coin_methods_send_decline_and_accept() {
     assert!(coin.is_coin_protocol_supported(&Some(sent)));
 }
 
+/// CRD ch.59 T16 (a), (c) on a real coin: without an Ironwood upgrade the coin requires nothing; once a
+/// height is discovered it requires `tx_v6`, and its acceptance check declines exactly the values that
+/// lack a required key. Skipped without the Sapling parameter files, like the test above.
+#[test]
+fn ch59_t16_the_coin_methods_give_the_required_set_the_acceptance_check_applies() {
+    use crate::coin_protocol_capability::missing_capabilities;
+
+    let Some(fixture) = LightCoinFixture::with_notes(0, 2) else {
+        return;
+    };
+    let coin = &fixture.coin;
+    let first = coin.coin_protocol_info();
+    let word = append_capability_word(Vec::new(), &[CAPABILITY_TX_V6]);
+    // Values whose first value the coin accepts, so only the capability rule can decline them.
+    let values = [
+        Some(first.clone()),
+        Some([first.as_slice(), word.as_slice()].concat()),
+        Some([first.as_slice(), &word[..word.len() - 1]].concat()),
+        Some([first.as_slice(), &[0x80]].concat()),
+    ];
+    let assert_parity = |required: &[&'static str]| {
+        for value in &values {
+            assert_eq!(
+                coin.is_coin_protocol_supported(value),
+                missing_capabilities(required, value.as_deref()).is_empty(),
+                "{value:?}"
+            );
+        }
+    };
+
+    assert!(coin.required_counterparty_capabilities().is_empty());
+    assert_parity(&[]);
+
+    coin.z_fields.consensus_params.record_discovered_ironwood_height(100);
+    assert_eq!(coin.required_counterparty_capabilities(), vec![CAPABILITY_TX_V6]);
+    assert_parity(&[CAPABILITY_TX_V6]);
+}
+
 /// T39.8.0h, send path baseline (R39.8.0ap, R39.8.0at): a successful send reaches the backend
 /// exactly once, the wallet database record is written only after the backend accepted it, and the
 /// record then holds the note it spent.

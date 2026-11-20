@@ -1075,6 +1075,28 @@ impl Node {
             .insert(topic, OrderbookRequestingState::Requested);
     }
 
+    /// Puts an order of a peer that sells `base` for `rel` into the node's own orderbook. Its protocol information is
+    /// empty for both coins, so it declares no capability.
+    fn hold_peer_order(&self, base: &str, rel: &str) -> Uuid {
+        let uuid = Uuid::new_v4();
+        let maker = key_pair_from_seed("a peer that makes orders").unwrap();
+        insert_or_update_order(&self.ctx, OrderbookItem {
+            pubkey: hex::encode(&**maker.public()),
+            base: base.to_owned(),
+            rel: rel.to_owned(),
+            price: BigRational::from_integer(1.into()),
+            max_volume: BigRational::from_integer(10.into()),
+            min_volume: BigRational::from_integer(0.into()),
+            uuid,
+            created_at: now_ms() / 1000,
+            base_protocol_info: Vec::new(),
+            rel_protocol_info: Vec::new(),
+            conf_settings: Some(OrderConfirmationsSettings::default()),
+        });
+        self.ordermatch_ctx().wait_trie_ops_flushed();
+        uuid
+    }
+
     /// The own taker order with this UUID, as it is now.
     pub(crate) fn taker_order(&self, uuid: Uuid) -> TakerOrder {
         let ordermatch_ctx = self.ordermatch_ctx();
@@ -1726,6 +1748,17 @@ fn taker_order_error_wire_forms() {
             "The volume 1 of the KMD coin less than minimum transaction amount 2".into(),
         ),
         (
+            TakerOrderError::OrderNotMatchableMissingCapability {
+                coin: "KMD".into(),
+                capability: "tx_v6".into(),
+                orders: two_order_uuids(),
+            },
+            "OrderNotMatchableMissingCapability",
+            Some("object"),
+            400,
+            "None of the orders named in match_by can be matched: KMD requires a counterparty that declares tx_v6".into(),
+        ),
+        (
             TakerOrderError::SpendUnsafeVolume {
                 coin: "KMD".into(),
                 volume: bd("1"),
@@ -1828,6 +1861,37 @@ fn taker_order_error_wire_forms() {
     for (error, token, data, status, text) in cases {
         assert_wire(&error, token, data, status, &text);
     }
+}
+
+/// The two order identifiers of the wire-form cases of `OrderNotMatchableMissingCapability`, in ascending order.
+fn two_order_uuids() -> Vec<Uuid> {
+    [
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+    ]
+    .iter()
+    .map(|uuid| uuid.parse().unwrap())
+    .collect()
+}
+
+/// CRD ch.59 R59.4C.6: the early refusal of `buy` and `sell` serializes as `OrderNotMatchableMissingCapability` with
+/// exactly the members `coin`, `capability` and `orders`, the orders as the strings of their identifiers.
+#[test]
+fn order_not_matchable_missing_capability_wire_form() {
+    let error = TakerOrderError::OrderNotMatchableMissingCapability {
+        coin: "KMD".into(),
+        capability: "tx_v6".into(),
+        orders: two_order_uuids(),
+    };
+    let expected = json!({
+        "error_type": "OrderNotMatchableMissingCapability",
+        "error_data": {
+            "coin": "KMD",
+            "capability": "tx_v6",
+            "orders": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"]
+        }
+    });
+    assert!(json::to_value(&error).unwrap() == expected, "the wire form");
 }
 
 #[test]
@@ -2261,6 +2325,61 @@ fn buy_and_sell_are_refused_while_the_clock_check_refuses() {
         assert_legacy_error(&legacy, &refusal);
     }
     assert_eq!(node.taker_orders_count(), 0);
+}
+
+/// CRD ch.59 R59.4C.6: when the node's own orderbook holds every order named in `match_by` and none of them declares
+/// a capability a coin requires, `buy` and `sell` fail with `OrderNotMatchableMissingCapability` (HTTP 400; the coin,
+/// the capability and the named orders in ascending order as the payload), the legacy arms answer the refusal text,
+/// and no taker order is placed. Without the requirement the same request is placed.
+#[test]
+fn buy_and_sell_refuse_named_orders_that_lack_a_required_capability() {
+    use coins::coin_protocol_capability::CAPABILITY_TX_V6;
+
+    let node = taker_node();
+    // DYN requires `tx_v6` of a counterparty.
+    TestCoin::required_counterparty_capabilities.mock_safe(|coin| {
+        MockResult::Return(if coin.ticker() == "DYN" {
+            vec![CAPABILITY_TX_V6]
+        } else {
+            Vec::new()
+        })
+    });
+    let refusal =
+        "None of the orders named in match_by can be matched: DYN requires a counterparty that declares tx_v6";
+
+    let mut requests = Vec::new();
+    // `buy` is matched by orders that sell DYN for KMD, `sell` by orders that sell KMD for DYN.
+    for (method, base, rel) in [("buy", "DYN", "KMD"), ("sell", "KMD", "DYN")] {
+        let mut named = vec![node.hold_peer_order(base, rel), node.hold_peer_order(base, rel)];
+        named.sort();
+        // The request lists the orders in descending order.
+        let match_by = json!({ "match_by": { "type": "Orders", "data": [named[1], named[0]] } });
+
+        let error = taker_error(taker_core(&node.ctx, method, taker_req(match_by.clone())));
+        assert_class!(
+            error,
+            TakerOrderError::OrderNotMatchableMissingCapability { coin, capability, orders }
+                if coin == "DYN" && capability == "tx_v6" && *orders == named
+        );
+        assert_eq!(token_of(&error), "OrderNotMatchableMissingCapability");
+        assert_eq!(error.status_code().as_u16(), 400);
+        assert!(error.to_string() == refusal, "{method}: Display text");
+
+        let legacy = legacy_taker(&node.ctx, method, taker_body(match_by.clone())).unwrap_err();
+        assert_legacy_error(&legacy, refusal);
+        requests.push((method, match_by));
+    }
+    // A refused order is not placed.
+    assert_eq!(node.taker_orders_count(), 0);
+
+    // The same requests once no coin requires anything.
+    TestCoin::required_counterparty_capabilities.mock_safe(|_| MockResult::Return(Vec::new()));
+    for (method, match_by) in requests {
+        taker_core(&node.ctx, method, taker_req(match_by.clone())).unwrap_or_else(|_| panic!("the order is placed"));
+        let answer = legacy_taker(&node.ctx, method, taker_body(match_by)).unwrap();
+        assert_eq!(answer.status(), 200);
+    }
+    assert_eq!(node.taker_orders_count(), 4);
 }
 
 #[test]
