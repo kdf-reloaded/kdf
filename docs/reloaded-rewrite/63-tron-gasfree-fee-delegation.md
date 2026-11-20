@@ -1046,6 +1046,14 @@ R28. **Shared members on this path, and two repeated names
     survives: the later value, at the earlier position. Which routes
     do so was not examined one by one in this pass.
 
+    *Status note (2026-11-20, Reloaded-original).* Decided 2026-11-20:
+    Reloaded's sign-only result has no `memo` member where this rule
+    records `memo` `null`. Every withdraw result of this repository outside
+    the Tendermint family omits an absent memo, and a TRON withdraw refuses
+    a request that carries a memo, so the member would always be `null`. The
+    other shared members are as this rule states them. The deviation is
+    recorded in `RELOADED_VS_GLEEC.md`.
+
 > **Reading the payload back (informative; not bound).** The
 > reference row defines a typed reading of the nine members that
 > refuses any member outside the nine and accepts a missing `from`;
@@ -1849,8 +1857,8 @@ V2. The baseline withdraw request has no fee-rail selector and no
   record what is built and the report rule for R29, and take no reference
   input.
 - *Further additions of 2026-11-20:* the status notes dated 2026-11-20 after
-  §63.3.6, before §63.8A, the second one after R29, and those after D63.7,
-  T8, T13, T16 and T17 are Reloaded-original, clean side: they record the
-  sign-only withdraw rail as built, the switch
-  `tron_gasfree_guard_allows_fallback` and the recovery procedure, and take
-  no reference input.
+  §63.3.6, before §63.8A, after R28, the second one after R29, and those
+  after D63.7, T8, T13, T16 and T17 are Reloaded-original, clean side: they
+  record the sign-only withdraw rail as built, the omitted `memo` of the
+  sign-only result, the switch `tron_gasfree_guard_allows_fallback` and the
+  recovery procedure, and take no reference input.
