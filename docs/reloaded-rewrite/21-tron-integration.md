@@ -1002,6 +1002,60 @@ otherwise burns TRX for the whole size; the reference charges only the
 shortfall of the two pools summed. Remedy: Reloaded's estimate follows the
 node's rule, so that it is never below what the node charges.
 
+*Status note (2026-11-19), what Reloaded does for R21.10B.7.* Reloaded's TRON
+withdraw follows R21.10B.7 with the remedy above.
+
+- *No fallback figures.* The estimate is part of the withdraw and no longer
+  best-effort. A failed read of the current block, of the sender's
+  `getaccountresource`, of `getchainparameters`, of the recipient's account
+  (TRX) or of the energy dry run (TRC20, a missing or non-positive
+  `energy_used` included) fails the withdraw with `Transport`; so does a
+  resource answer that does not decode and a parameter answer without a
+  positive `getTransactionFee` or `getEnergyFee`. Every balance and resource
+  read is for the sender: the activated address, or the HD address a `from`
+  member selects.
+- *Bandwidth.* The size is the serialized size of the transaction with its one
+  65-byte signature, plus 64 for its contract. It costs nothing when the
+  sender's remaining staked bandwidth covers the whole size, nothing when the
+  remaining free bandwidth covers the whole size, and otherwise the whole size
+  is burned at `getTransactionFee`. The two quotas are never summed, so an
+  account whose quotas only together reach the size is estimated the full
+  burn, as the node charges it.
+- *New account (TRX only).* As the rule states. The account-creating case also
+  needs `getCreateAccountFee` when the staked bandwidth does not cover the
+  transfer; a node that does not report it makes that withdraw fail with
+  `InternalError`, like a node without a positive
+  `getCreateNewAccountFeeInSystemContract`. A reported
+  `getCreateNewAccountBandwidthRate` that is not positive is an unusable
+  parameter answer (`Transport`). A TRC20 transfer counts no account-creation
+  cost and does not read the recipient's account.
+- *Energy.* As the rule states; the `fee_limit` is the one of the note at
+  D21.10B.1.
+- *Amounts.* As the rule states. For TRX `max` the amount is recomputed from
+  the fee of the transaction that carries it until that fee no longer changes.
+  Where the amount lies next to a length boundary of its encoding, so that the
+  two neighboring fees would alternate, the amount is the largest one found
+  that fits the balance together with its own fee; at most the price of the
+  alternating bytes stays unsent, and the amount plus the fee is never above
+  the balance. An amount of zero without `max` is still not refused before
+  building.
+- *Other request members.* `fee` (`InvalidFeePolicy`, R-WP6) and `memo`
+  (`UnsupportedError`) are refused before any node request.
+  `expiration_seconds` is an optional member of the shared withdraw request
+  (chapter 49), read for a TRON coin only and ignored by every other family;
+  absent is 60. A value whose expiry does not fit the protocol's 64-bit
+  millisecond field answers `UnsupportedError`. The transaction's own
+  `timestamp` stays the local time of building.
+- *Fee details.* The members of the rule. Before this date the object carried
+  integer members in SUN under other names; nothing stored them. `total_fee`
+  is the expected charge; no `fee_limit` member is added. `spent_by_me` is the
+  amount plus `total_fee` for TRX and the amount for a token.
+
+Tests: `coins/eth/tron/withdraw_fee_tests.rs` (T21.10B.11 -- T21.10B.13 and
+each point above, against a stub node, with hand-computed figures),
+`tron/fee.rs`, `tron/withdraw.rs` and, for the HD sender,
+`tron/hd_tests.rs`.
+
 **R21.10B.8** *Address methods (completes R-WP5 and R-AD1).*
 
 - `validateaddress` accepts the base58check form (34 characters starting
@@ -1056,6 +1110,24 @@ Options: (a) the reference's figure; (b) the estimate plus a stated margin,
 bounded by a stated maximum; (c) a fixed cap. The choice also fixes what
 the fee details report as the most the transfer can cost (D21.B5 of
 §21.11B.4 states the charging semantics).
+
+*Status note (2026-11-19), D21.10B.1 decided: (b):* the estimate plus 20%,
+rounded up to whole SUN, at most 100 TRX; an estimate above the maximum is
+refused before broadcast. The estimate is the dry-run energy times
+`getEnergyFee`, counting the whole energy whether the sender's staked energy
+covers it or not, because the limit bounds both (D21.B5). The `fee_limit` of
+a TRC20 transfer is that estimate plus a fifth of it, rounded up to whole
+SUN, and never above 100 000 000 SUN (100 TRX). When the estimate itself is
+above that maximum the withdraw is refused with `UnsupportedError` (HTTP
+400), whose text names the estimate and the maximum; nothing is signed, so
+nothing can be broadcast. A limit below the need is never set: by the
+charging semantics of D21.B5 such a call would fail on chain and still be
+charged. The `fee_limit` is the most the contract call of a TRC20 transfer
+can cost the sender; bandwidth, when it is burned, is charged beside it. The
+fee details keep `total_fee` as the expected charge (the energy shortfall and
+the bandwidth of R21.10B.7) and carry no `fee_limit` member. The margin and
+the maximum are Reloaded's figures: the reference sets no margin, and
+neither figure is visible to a peer.
 
 **D21.10B.2** *`convertaddress` for a TRON coin.* The reference answers an
 EVM `0x` form for a TRON coin. Options: (a) parity; (b) refuse the method
@@ -1155,6 +1227,15 @@ The legacy `enable` and `electrum` routes keep the node's internal key under a
 global-HD login, as the EVM and UTXO legacy routes do in Reloaded (decided
 2026-11-19), so their TRON address differs from the address of the mmrpc 2.0
 route for the same seed; the reference does not serve TRON on those routes.
+
+*Status note (2026-11-19), withdraw fees of the compatibility block.* The
+withdraw defects the block lists are fixed. The estimate uses the real size
+of the transaction, counts an account-creation cost for a TRX recipient
+only, and is no longer best-effort: a failed node read fails the withdraw.
+`max: true` for TRX deducts the fee, and a TRX amount plus fee above the
+balance is refused before building. The TRC20 `fee_limit` follows D21.10B.1
+and is no longer a fixed cap. The status notes after R21.10B.7 and at
+D21.10B.1 state the rules.
 
 *Status note (2026-11-20), compatibility block.* The sentence "Reloaded has no
 TRON history source either" of the block no longer holds for a coin with a
@@ -1978,6 +2059,14 @@ V3. The address encoding, protobuf transaction/contract formats,
   configured node order (R-N5); it was not asked and nothing was taken from
   the reference. Their tests are in the Tron node-client test module
   (T-N1 to T-N8 and the header tests of R-N9).
+- *Clean-context addition (2026-11-19, forbidden corpus not consulted):* the
+  status notes of this date after R21.10B.7, at D21.10B.1 and after the
+  compatibility block of §21.10B are Reloaded-original. They rest on the
+  cleared text of R21.10B.7 and D21.10B.1, on D21.B5, on this repository's
+  own code and on the public TRON protobuf transaction format (§21.6) for the
+  sizes. The whole-draw bandwidth rule, the margin and maximum of the
+  `fee_limit`, the refusal above the maximum and the settling of a TRX `max`
+  amount are Reloaded's own. No cleared sentence was edited.
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
   with its status remark, is Reloaded-original. It rests on the maintainer
