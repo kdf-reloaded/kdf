@@ -262,8 +262,9 @@ gains an optional gasless block:
 >   withdraw rail reads both settings.
 > - *Secrets (R9).* The debug form of the request and of the binding shows
 >   neither credential and names the URL by its host; no refusal repeats a
->   value of the object; a credential of another JSON type than a string fails
->   request decoding without being repeated.
+>   value of the object; a `tron_gasless_provider` or `gasless` value that is
+>   not an object, and a member of the wrong JSON type, fail request decoding
+>   with a fixed text that repeats no part of the value.
 
 ### 63.3.3 Where the custody address is reported (dictated by our public API)
 
@@ -333,8 +334,11 @@ report builder. See the code-quality finding in §63.10.)
 >
 >   None of the three outcomes fails the balance read or the activation. The
 >   confirmations are kept per platform coin and shared with its tokens; they
->   are gone after a restart and after the platform is activated again. The
->   refusal of the gasless rail in R29 is unchanged.
+>   are gone after a restart and after the platform is activated again. With
+>   a provider configured, every report reads the controller once per address
+>   at most every 10 minutes, so an HD scan with gap N makes up to N reads,
+>   empty entries included. The refusal of the gasless rail in R29 is
+>   unchanged.
 
 ### 63.3.4 Withdraw request (dictated by our public API)
 

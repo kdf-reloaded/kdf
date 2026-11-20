@@ -311,6 +311,73 @@ fn the_provider_object_needs_its_members_and_never_echoes_a_credential() {
     }
 }
 
+/// R9: a provider object or a token block of the wrong JSON type, and a member of the wrong type, fail decoding
+/// with a text that repeats no part of the value. The marker stands for a misplaced credential.
+#[test]
+fn a_wrongly_typed_object_or_member_is_refused_without_being_repeated() {
+    const MARKER: &str = "misplaced-marker-51c7";
+    const MARKER_NUMBER: u64 = 7_039_112_233;
+    let quiet = |text: String| {
+        assert!(
+            !text.contains(MARKER) && !text.contains("7039112233"),
+            "the value is repeated"
+        );
+        assert_no_credential(&text);
+    };
+
+    for value in [
+        json!(MARKER),
+        json!([MARKER, API_SECRET]),
+        json!(MARKER_NUMBER),
+        json!(true),
+    ] {
+        let Err(error) = serde_json::from_value::<TronGaslessProviderRequest>(value.clone()) else {
+            panic!("a provider object must be an object")
+        };
+        assert!(error.to_string().contains("must be an object"), "the fixed text");
+        quiet(error.to_string());
+        let Err(error) = serde_json::from_value::<TronTokenGaslessRequest>(value) else {
+            panic!("a gasless block must be an object")
+        };
+        assert!(error.to_string().contains("must be an object"), "the fixed text");
+        quiet(error.to_string());
+    }
+    for member in ["service_provider", "request_timeout_ms", "status_poll_interval_ms"] {
+        for value in [json!([MARKER]), json!({ "v": MARKER }), json!(-1), json!(1.5)] {
+            let object = provider_json("https://open.gasfree.io", json!({ (member): value }));
+            let Err(error) = serde_json::from_value::<TronGaslessProviderRequest>(object) else {
+                panic!("a wrongly typed member must be refused")
+            };
+            assert!(error.to_string().contains(member), "the refusal names the member");
+            quiet(error.to_string());
+        }
+    }
+    let object = provider_json("https://open.gasfree.io", json!({ "request_timeout_ms": MARKER }));
+    let Err(error) = serde_json::from_value::<TronGaslessProviderRequest>(object) else {
+        panic!("a wrongly typed member must be refused")
+    };
+    quiet(error.to_string());
+    for block in [
+        json!({ "enabled": MARKER }),
+        json!({ "enabled": MARKER_NUMBER }),
+        json!({ "enabled": true, "transfer_max_fee": MARKER }),
+        json!({ "enabled": true, "transfer_max_fee": [MARKER] }),
+        json!({ "enabled": true, "transfer_max_fee": { "v": MARKER_NUMBER } }),
+    ] {
+        let Err(error) = serde_json::from_value::<TronTokenGaslessRequest>(block) else {
+            panic!("a wrongly typed member must be refused")
+        };
+        quiet(error.to_string());
+    }
+    // An explicit `null` is an absent optional member.
+    let object = provider_json(
+        "https://open.gasfree.io",
+        json!({ "request_timeout_ms": null, "status_poll_interval_ms": null }),
+    );
+    assert!(serde_json::from_value::<TronGaslessProviderRequest>(object).is_ok());
+    assert!(!gasless_request(json!({ "transfer_max_fee": null })).is_enabled());
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // R9: the credentials
 // ---------------------------------------------------------------------------------------------------------------

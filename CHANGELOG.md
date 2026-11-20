@@ -263,8 +263,8 @@ the previous version used. The safe way:
   the HD address methods show `gasfree_address` next to each address: the address to send a token to before it can be
   moved without TRX. The address is checked against the GasFree contract first and is left out if the contract
   disagrees. The API key and secret are never logged or shown. Gasless withdrawals themselves are not available yet.
-  **TRON stays switched off in this build**, so none of this can be used yet. Detail: CRD ch.63 §63.3.1 to §63.3.3,
-  R18, R29.
+  **TRON stays switched off in this build**, so none of this can be used yet. Detail: PR #441; CRD ch.63 §63.3.1 to
+  §63.3.3, R18, R29.
 
 #### Tendermint (Cosmos) coins
 

@@ -26,46 +26,93 @@ use crate::node_url::{host_only, SECRET_SET};
 use derive_more::Display;
 use ethereum_types::{Address, U256};
 use mm2_number::BigDecimal;
-use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value as Json;
 use std::fmt;
 
-/// A member of the provider object that must be a JSON string and may hold a secret: a value of another type is
-/// refused without being repeated in the error.
-fn text_member<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    match Json::deserialize(deserializer)? {
-        Json::String(text) => Ok(text),
-        _ => Err(D::Error::custom(
-            "base_url, api_key and api_secret of tron_gasless_provider must be strings",
-        )),
-    }
-}
-
 /// The `tron_gasless_provider` object of a platform activation request (CRD ch.63 §63.3.1), as sent.
 /// [`GasFreeBinding::from_request`] validates it.
-#[derive(Clone, Deserialize)]
+///
+/// The type decodes itself member by member, so that no decoding error repeats a part of the value (R9): a value
+/// that is not an object, a missing member and a member of the wrong JSON type are each refused with a fixed text
+/// that names the member only.
+#[derive(Clone)]
 pub struct TronGaslessProviderRequest {
     /// The provider's URL: scheme and host only (R13).
-    #[serde(deserialize_with = "text_member")]
     base_url: String,
     /// A secret (R9).
-    #[serde(deserialize_with = "text_member")]
     api_key: String,
     /// A secret (R9).
-    #[serde(deserialize_with = "text_member")]
     api_secret: String,
     /// The base58check TRON address of the fee-paying provider.
     service_provider: String,
     /// The per-call HTTP timeout; 15 000 ms when absent (R20).
-    #[serde(default)]
     request_timeout_ms: Option<u64>,
     /// The settlement poll interval; 3 000 ms when absent (R20).
-    #[serde(default)]
     status_poll_interval_ms: Option<u64>,
+}
+
+/// Why a value does not decode as one of the two GasFree request objects. The text names a member and never
+/// repeats a part of the value.
+fn decoding_refusal<E: serde::de::Error>(text: &'static str) -> E { E::custom(text) }
+
+impl<'de> Deserialize<'de> for TronGaslessProviderRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Json::Object(mut object) = Json::deserialize(deserializer)? else {
+            return Err(decoding_refusal("tron_gasless_provider must be an object"));
+        };
+        let mut text = |missing: &'static str, wrong: &'static str, member: &str| match object.remove(member) {
+            Some(Json::String(text)) => Ok(text),
+            Some(Json::Null) | None => Err(decoding_refusal::<D::Error>(missing)),
+            Some(_) => Err(decoding_refusal(wrong)),
+        };
+        let base_url = text(
+            "tron_gasless_provider: missing member base_url",
+            "tron_gasless_provider: base_url must be a string",
+            "base_url",
+        )?;
+        let api_key = text(
+            "tron_gasless_provider: missing member api_key",
+            "tron_gasless_provider: api_key must be a string",
+            "api_key",
+        )?;
+        let api_secret = text(
+            "tron_gasless_provider: missing member api_secret",
+            "tron_gasless_provider: api_secret must be a string",
+            "api_secret",
+        )?;
+        let service_provider = text(
+            "tron_gasless_provider: missing member service_provider",
+            "tron_gasless_provider: service_provider must be a string",
+            "service_provider",
+        )?;
+        let mut interval = |wrong: &'static str, member: &str| match object.remove(member) {
+            Some(Json::Null) | None => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| decoding_refusal::<D::Error>(wrong)),
+        };
+        let request_timeout_ms = interval(
+            "tron_gasless_provider: request_timeout_ms must be a non-negative integer",
+            "request_timeout_ms",
+        )?;
+        let status_poll_interval_ms = interval(
+            "tron_gasless_provider: status_poll_interval_ms must be a non-negative integer",
+            "status_poll_interval_ms",
+        )?;
+        Ok(TronGaslessProviderRequest {
+            base_url,
+            api_key,
+            api_secret,
+            service_provider,
+            request_timeout_ms,
+            status_poll_interval_ms,
+        })
+    }
 }
 
 /// The debug form shows neither credential and names the URL by its host-only form (R9; CRD ch.35 R35.1.17).
@@ -83,14 +130,42 @@ impl fmt::Debug for TronGaslessProviderRequest {
 }
 
 /// The `gasless` object of a TRC20 token activation request (CRD ch.63 §63.3.2), as sent.
-#[derive(Clone, Debug, Deserialize)]
+///
+/// Like [`TronGaslessProviderRequest`] it decodes itself, so that no decoding error repeats a part of the value.
+#[derive(Clone, Debug)]
 pub struct TronTokenGaslessRequest {
     /// Opts the token into the gasless rail. A block with `false` behaves exactly as an absent block.
-    #[serde(default)]
     enabled: bool,
     /// The cap on the provider fee the user accepts, in token units.
-    #[serde(default)]
     transfer_max_fee: Option<BigDecimal>,
+}
+
+impl<'de> Deserialize<'de> for TronTokenGaslessRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Json::Object(mut object) = Json::deserialize(deserializer)? else {
+            return Err(decoding_refusal("gasless must be an object"));
+        };
+        let enabled = match object.remove("enabled") {
+            None => false,
+            Some(Json::Bool(enabled)) => enabled,
+            Some(_) => return Err(decoding_refusal("gasless: enabled must be a boolean")),
+        };
+        let transfer_max_fee = match object.remove("transfer_max_fee") {
+            Some(Json::Null) | None => None,
+            Some(value @ (Json::String(_) | Json::Number(_))) => Some(
+                serde_json::from_value::<BigDecimal>(value)
+                    .map_err(|_| decoding_refusal::<D::Error>("gasless: transfer_max_fee must be a decimal number"))?,
+            ),
+            Some(_) => return Err(decoding_refusal("gasless: transfer_max_fee must be a decimal number")),
+        };
+        Ok(TronTokenGaslessRequest {
+            enabled,
+            transfer_max_fee,
+        })
+    }
 }
 
 impl TronTokenGaslessRequest {

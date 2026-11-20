@@ -759,3 +759,54 @@ fn an_undecodable_provider_object_repeats_no_credential() {
     };
     assert_no_credential(&error.to_string());
 }
+
+/// R9: a `tron_gasless_provider` or a `gasless` member that is not an object fails the decoding of the request, on
+/// the platform routes (one request type serves the one-shot and the task form) and on both token routes, with a
+/// fixed text that repeats no part of the value. The marker stands for a misplaced credential.
+#[test]
+fn a_gasfree_member_of_the_wrong_json_type_repeats_nothing_of_its_value() {
+    const MARKER: &str = "misplaced-marker-51c7";
+    let node_urls = ["http://127.0.0.1:1".to_owned()];
+    let quiet = |text: String, fixed: &str| {
+        assert!(text.contains(fixed), "the fixed text");
+        assert!(
+            !text.contains(MARKER) && !text.contains("7039112233"),
+            "the value is repeated"
+        );
+        assert_no_credential(&text);
+    };
+    for value in [
+        json!(MARKER),
+        json!([MARKER, API_KEY, API_SECRET]),
+        json!(7_039_112_233u64),
+    ] {
+        // The platform request: the provider object, and the block of a token entry.
+        let body = request_json("TRX", &node_urls, json!({ "tron_gasless_provider": value }));
+        let Err(error) = serde_json::from_value::<Req>(body) else {
+            panic!("the request must not decode")
+        };
+        quiet(error.to_string(), "tron_gasless_provider must be an object");
+        let body = request_json(
+            "TRX",
+            &node_urls,
+            json!({ "erc20_tokens_requests": gasless_tokens("USDT-TRC20", value.clone()) }),
+        );
+        let Err(error) = serde_json::from_value::<Req>(body) else {
+            panic!("the request must not decode")
+        };
+        quiet(error.to_string(), "gasless must be an object");
+
+        // `enable_erc20` and `task::enable_erc20::init`.
+        let body = json!({ "ticker": "USDT-TRC20", "activation_params": { "gasless": value } });
+        let Err(error) = serde_json::from_value::<EnableEvmTokenRequest>(body.clone()) else {
+            panic!("the request must not decode")
+        };
+        quiet(error.to_string(), "gasless must be an object");
+        let Err(error) = serde_json::from_value::<
+            crate::init_token::InitTokenReq<crate::erc20_token_activation::EvmTokenActivationParams>,
+        >(body) else {
+            panic!("the request must not decode")
+        };
+        quiet(error.to_string(), "gasless must be an object");
+    }
+}
