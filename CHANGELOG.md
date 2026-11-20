@@ -289,7 +289,7 @@ the previous version used. The safe way:
   nothing changes: the legacy method answers an empty list with `NotEnabled` and the versioned one `NotSupportedFor`,
   as GLEEC KDF does. GLEEC KDF has no TRON history and ignores `tx_history` for TRON. The key is never logged or
   shown. In a browser build only the legacy method answers, and the keyed history has not been checked in a browser.
-  **TRON stays switched off in this build.** Detail: CRD ch.21 §21.10C.
+  **TRON stays switched off in this build.** Detail: PR #440; CRD ch.21 §21.10C.
 - **Support code for gasless TRC20 transfers through GasFree was added; nothing uses it yet.** The code derives a
   user's GasFree custody address and checks it against the GasFree contract, prepares and signs a transfer
   authorization, and reads account and fee data from a GasFree provider. No RPC reaches it, so nothing changes for
@@ -826,7 +826,7 @@ the previous version used. The safe way:
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
   (PR #405). The TRON HD wallet is built on the same route, still switched off.
   The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
-  The transaction history (work package 4) is built with a TronGrid API key, still switched off.
+  The transaction history (work package 4) is built with a TronGrid API key, still switched off (PR #440).
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
   controller; the support modules are built and not yet reachable; the remaining PRs are listed again (activation

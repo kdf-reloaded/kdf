@@ -1386,7 +1386,11 @@ single-key coin, and for an HD wallet the known (activated) external addresses
 of every account, read again on each pass, so an address added by
 `get_new_address` or a scan is covered from the next pass. The rows of all
 addresses form one history. A transaction that two own addresses list is one
-row. A TRC20 ticker enabled on a TRX platform is served by the platform's
+row. When the wallet comes to know a further address (and at the first pass
+after a start), `spent_by_me`, `received_by_me` and `my_balance_change` of the
+stored transfer rows are recomputed from the rows' own members by the rules of
+R21.10C.5 and R21.10C.7, so a send to an address that became known later reads
+as a transfer between own addresses; fee-only rows are left as they are. A TRC20 ticker enabled on a TRX platform is served by the platform's
 wallet and its addresses.
 
 **R21.10C.5 (TRX rows).** For each row of the transaction listing whose first
@@ -1421,9 +1425,11 @@ neither a block number nor a fee: both come from `gettransactioninfobyid`,
 read once for a new transaction and stored with the row. A row whose receipt no
 node has yet is not stored and is asked again on a later pass. `tx_hex` is
 empty, because neither source carries the raw transaction. `internal_id` is a
-hash over the transaction id, the two addresses, the value and the position
-among equal events of the transaction, since one transaction can carry several
-transfer events. `transaction_type` is `StandardTransfer`.
+hash over the transaction id, the token contract, the two addresses, the value
+and the position among equal events of that token in the transaction, since one
+transaction can carry several transfer events, of one token or of several. The
+id of an event is therefore the same whether the listing was filtered by the
+token contract or not. `transaction_type` is `StandardTransfer`.
 
 **R21.10C.8 (fee details).** `fee_details` has the shape of the withdraw result
 (R21.10B.7), with `coin` the platform ticker, from the chain's own figures (the
@@ -1482,7 +1488,9 @@ record mapping of R21.10C.5 to R21.10C.8 for a TRX transfer out and in, a
 transfer to a new account, a TRC20 transfer out and in, a fee-only row and the
 rows that are left out; the bandwidth derivation (bandwidth of the owner only,
 burned only, mixed); the receipt read once and the row left out without one;
-paging; the merge over several own addresses; the states of R21.10C.10; and
+paging; the merge over several own addresses, and a stored row recomputed when
+its receiver becomes a known address; the id of a token row being the same in
+a filtered and an unfiltered listing; the states of R21.10C.10; and
 the answers of both methods with `current_block` from the TRON node, including
 T21.10B.10 for a coin without a key.
 

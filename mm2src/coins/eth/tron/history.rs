@@ -86,6 +86,10 @@ pub(crate) struct WalkState {
     seen_trc20: HashSet<(Address, Vec<u8>)>,
     /// The token tickers the token walks covered.
     tokens: BTreeSet<String>,
+    /// The own addresses the stored TRX rows were last brought in line with ([`Target::reconcile`]).
+    reconciled_trx: Option<HashSet<Address>>,
+    /// The same for the stored token rows.
+    reconciled_trc20: Option<HashSet<Address>>,
 }
 
 /// How one pass ended, for the transaction listing and for the token listing.
@@ -313,7 +317,27 @@ impl Target {
         }
     }
 
-    /// Stores the rows, newest first, when this pass added any.
+    /// Brings the stored rows in line with `mine`, the addresses the wallet knows now. A row is built with the
+    /// addresses known at that time; when another address of it becomes known later (a new HD address), what the
+    /// wallet spent and received in it changes: a send to that address becomes a transfer between own addresses.
+    /// The figures are recomputed from the row's own members with the rules of the mapping: a TRX transfer is
+    /// spent with its fee by an own sender and received by an own receiver; a token transfer likewise without the
+    /// fee; a fee-only row and a row whose members cannot be read stay as they are.
+    fn reconcile(&mut self, mine: &HashSet<Address>, kind: RowKind) {
+        for row in self.rows.iter_mut() {
+            let Some((spent_by_me, received_by_me)) = own_amounts(row, mine, kind) else {
+                continue;
+            };
+            if row.spent_by_me != spent_by_me || row.received_by_me != received_by_me {
+                row.my_balance_change = &received_by_me - &spent_by_me;
+                row.spent_by_me = spent_by_me;
+                row.received_by_me = received_by_me;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Stores the rows, newest first, when this pass added or changed any.
     async fn save_if_dirty(&mut self, ctx: &MmArc) -> Result<(), TronHistoryError> {
         if !self.dirty {
             return Ok(());
@@ -333,6 +357,41 @@ impl Target {
         self.dirty = false;
         Ok(())
     }
+}
+
+/// Which history a stored row belongs to.
+#[derive(Clone, Copy)]
+enum RowKind {
+    /// A row of the TRX coin: an own sender also spends the fee.
+    Trx,
+    /// A row of a TRC20 coin: the fee is paid in TRX and is never part of what the token wallet spent.
+    Trc20,
+}
+
+/// What the wallet of `mine` spent and received in the stored transfer row `row`, from the row's own members.
+/// `None` for a row that is not a transfer (a fee-only row of TRX) and for a row whose members cannot be read.
+fn own_amounts(row: &TransactionDetails, mine: &HashSet<Address>, kind: RowKind) -> Option<(BigDecimal, BigDecimal)> {
+    let zero = BigDecimal::from(0);
+    if row.total_amount == zero {
+        return None;
+    }
+    let own = |addresses: &[String]| match addresses {
+        [address] => TronAddress::from_base58(address)
+            .ok()
+            .map(|address| mine.contains(&address.to_evm_address())),
+        _ => None,
+    };
+    let (from_is_mine, to_is_mine) = (own(&row.from)?, own(&row.to)?);
+    let spent_by_me = match (from_is_mine, kind) {
+        (false, _) => zero.clone(),
+        (true, RowKind::Trc20) => row.total_amount.clone(),
+        (true, RowKind::Trx) => match &row.fee_details {
+            Some(TxFeeDetails::Tron(fee)) => &row.total_amount + &fee.total_fee,
+            _ => return None,
+        },
+    };
+    let received_by_me = if to_is_mine { row.total_amount.clone() } else { zero };
+    Some((spent_by_me, received_by_me))
 }
 
 /// `transactions_left` of the coins that have not finished once: the rows of the page being worked on.
@@ -366,6 +425,12 @@ async fn walk_all_trx(
     bandwidth_price: NonZeroU64,
 ) -> Result<(), TronHistoryError> {
     let mut target = Target::load(platform, ctx).await?;
+    // At the first pass of a process, and whenever the wallet knows another address than before.
+    if state.reconciled_trx.as_ref() != Some(mine) {
+        target.reconcile(mine, RowKind::Trx);
+        target.save_if_dirty(ctx).await?;
+        state.reconciled_trx = Some(mine.clone());
+    }
     for address in addresses {
         walk_trx(api, ctx, state, &mut target, address, mine, bandwidth_price).await?;
     }
@@ -440,12 +505,21 @@ async fn walk_all_trc20(
     if !tickers.is_subset(&state.tokens) {
         state.walked_trc20.clear();
         state.seen_trc20.clear();
+        state.reconciled_trc20 = None;
     }
     state.tokens = tickers;
 
     let mut targets = Vec::with_capacity(tokens.len());
     for token in tokens {
         targets.push(Target::load(token, ctx).await?);
+    }
+    // At the first pass of a process, for a newly served token, and whenever the wallet knows another address.
+    if state.reconciled_trc20.as_ref() != Some(mine) {
+        for target in targets.iter_mut() {
+            target.reconcile(mine, RowKind::Trc20);
+            target.save_if_dirty(ctx).await?;
+        }
+        state.reconciled_trc20 = Some(mine.clone());
     }
     let mut unresolved = 0;
     for address in addresses {
@@ -489,7 +563,7 @@ async fn walk_trc20(
         contract: only_contract.as_ref(),
     };
 
-    let mut occurrences: HashMap<(String, Address, Address, U256), u32> = HashMap::new();
+    let mut occurrences: HashMap<(String, Address, Address, Address, U256), u32> = HashMap::new();
     // The receipts read in this walk; `None` for a transaction whose receipt could not be read.
     let mut receipts: HashMap<String, Option<TransactionInfoResponse>> = HashMap::new();
     let mut receipt_failures_in_a_row = 0u32;
@@ -934,22 +1008,27 @@ impl Trc20Event {
         }))
     }
 
-    /// What tells two events of one listing apart, before their position among equal events.
-    fn key(&self) -> (String, Address, Address, U256) {
+    /// What tells two events of one listing apart, before their position among equal events. The token contract
+    /// is part of it, so the position of an event is counted among the events of its own token only: it is the
+    /// same in a listing of every token and in a listing the provider filtered by the contract.
+    fn key(&self) -> (String, Address, Address, Address, U256) {
         (
             self.tx_id.clone(),
+            self.contract,
             self.from.to_evm_address(),
             self.to.to_evm_address(),
             self.value,
         )
     }
 
-    /// The id of the history row of this event: a hash of the transaction id, the two addresses, the position
-    /// among the equal events of the transaction (`occurrence`, from 0) and the value. A transaction can carry
-    /// several transfer events, so the transaction id alone does not name a row.
+    /// The id of the history row of this event: a hash of the transaction id, the token contract, the two
+    /// addresses, the position among the equal events of the transaction (`occurrence`, from 0) and the value. A
+    /// transaction can carry several transfer events, of one token or of several, so the transaction id alone
+    /// does not name a row.
     pub(crate) fn internal_id(&self, occurrence: u32) -> Vec<u8> {
-        let mut preimage = Vec::with_capacity(32 + 20 + 20 + 4 + 78);
+        let mut preimage = Vec::with_capacity(64 + 20 + 20 + 20 + 4 + 78);
         preimage.extend_from_slice(self.tx_id.as_bytes());
+        preimage.extend_from_slice(self.contract.as_bytes());
         preimage.extend_from_slice(self.from.to_evm_address().as_bytes());
         preimage.extend_from_slice(self.to.to_evm_address().as_bytes());
         preimage.extend_from_slice(&occurrence.to_be_bytes());

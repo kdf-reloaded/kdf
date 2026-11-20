@@ -41,6 +41,11 @@ const HD_0_3: &str = "TAr3S8gg3WJoRS9W3DwVhnj8pPNPtTfMzH";
 /// The token of the fixtures (a 6-decimal test token on Nile).
 const TOKEN: &str = "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf";
 const TOKEN_TICKER: &str = "USDT-TRC20";
+/// A second token contract, for a transaction that moves two tokens (not a token of the fixtures).
+const OTHER_TOKEN: &str = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+const OTHER_TOKEN_TICKER: &str = "OTHER-TRC20";
+/// A transaction id of this test file's own: it moves the same value between the same addresses in two tokens.
+const TX_TWO_TOKENS: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 /// A TRX transfer of W1 to an address the chain had not created: 2 TRX, fee 1.1 TRX.
 const TX_NEW_ACCOUNT: &str = "03105c110ff580f83dc72ae4f9d2aaf238edb2dc5492bc141c5d279377efbe1e";
@@ -468,6 +473,8 @@ struct Script {
     listings_fail: AtomicBool,
     /// The transactions the node does not know (it answers the empty object).
     unknown_receipts: Mutex<HashSet<String>>,
+    /// Rows put in front of the token listing of W1.
+    extra_token_rows: Mutex<Vec<Json>>,
 }
 
 fn without_cursor(fixture: &str) -> Json {
@@ -503,7 +510,7 @@ fn transaction_listing(script: &Script, address: &str, query: &str) -> Json {
     }
 }
 
-fn token_listing(address: &str, query: &str) -> Json {
+fn token_listing(script: &Script, address: &str, query: &str) -> Json {
     let mut listing = match address {
         W1 => without_cursor(W1_TRC20),
         W2 => without_cursor(W2_TRC20),
@@ -511,8 +518,16 @@ fn token_listing(address: &str, query: &str) -> Json {
         HD_0_3 => without_cursor(HD_0_3_TRC20),
         _ => empty_listing(),
     };
-    if let Some(contract) = query_value(query, "contract_address") {
-        if let Some(rows) = listing["data"].as_array_mut() {
+    if let Some(rows) = listing["data"].as_array_mut() {
+        if address == W1 {
+            let extra = script
+                .extra_token_rows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            rows.splice(0..0, extra);
+        }
+        if let Some(contract) = query_value(query, "contract_address") {
             rows.retain(|row| row["token_info"]["address"] == contract);
         }
     }
@@ -532,7 +547,7 @@ fn history_node(script: Arc<Script>) -> StubNode {
             }
             return match rest.split_once('/') {
                 Some((address, "transactions")) => Reply::ok(&transaction_listing(&script, address, query).to_string()),
-                Some((address, "transactions/trc20")) => Reply::ok(&token_listing(address, query).to_string()),
+                Some((address, "transactions/trc20")) => Reply::ok(&token_listing(&script, address, query).to_string()),
                 _ => Reply::status(404, "{}"),
             };
         }
@@ -611,6 +626,12 @@ fn history_ctx() -> MmArc {
                 "protocol": { "type": "TRC20", "protocol_data": { "platform": "TRX", "contract_address": TOKEN } },
                 "decimals": 6,
                 "mm2": 1
+            },
+            {
+                "coin": OTHER_TOKEN_TICKER,
+                "protocol": { "type": "TRC20", "protocol_data": { "platform": "TRX", "contract_address": OTHER_TOKEN } },
+                "decimals": 6,
+                "mm2": 1
             }
         ]
     });
@@ -657,14 +678,17 @@ async fn trx_coin(ctx: &MmArc, node_url: &str, enabled: bool) -> EthCoin {
 }
 
 /// The token of the fixtures, enabled on `platform` and registered.
-async fn token_on(ctx: &MmArc, platform: &EthCoin) -> EthCoin {
-    let contract = parse_trc20_contract(TOKEN).expect("a contract");
-    platform.add_erc20_token_info(TOKEN_TICKER.to_owned(), Erc20TokenInfo {
+async fn token_on(ctx: &MmArc, platform: &EthCoin) -> EthCoin { token_of(ctx, platform, TOKEN_TICKER, TOKEN).await }
+
+/// The 6-decimal token `ticker` at `contract`, enabled on `platform` and registered.
+async fn token_of(ctx: &MmArc, platform: &EthCoin, ticker: &str, contract: &str) -> EthCoin {
+    let contract = parse_trc20_contract(contract).expect("a contract");
+    platform.add_erc20_token_info(ticker.to_owned(), Erc20TokenInfo {
         token_addr: contract,
         decimals: 6,
     });
     let token = platform
-        .trc20_token_from_conf_or_contract(TOKEN_TICKER.to_owned(), contract, 1)
+        .trc20_token_from_conf_or_contract(ticker.to_owned(), contract, 1)
         .await
         .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
     register(ctx, &token).await;
@@ -925,6 +949,135 @@ fn a_token_row_without_a_receipt_is_left_out_and_asked_again() {
         assert_eq!(row(&rows, TX_W5).block_height, 72_595_425);
         assert_eq!(receipt_requests(&node), asked + 1);
         assert_eq!(state_json(&token), json!({ "state": "Finished" }));
+    });
+}
+
+/// A transfer event of 1 unit of `token` from W1 to W2 in the transaction [`TX_TWO_TOKENS`], as the listing has it.
+fn two_token_event(token: &str) -> Json {
+    json!({
+        "transaction_id": TX_TWO_TOKENS,
+        "token_info": { "symbol": "T", "address": token, "decimals": 6, "name": "T" },
+        "block_timestamp": 1_795_130_050_000u64,
+        "from": W1,
+        "to": W2,
+        "type": "Transfer",
+        "value": "1000000"
+    })
+}
+
+/// The id of a token row does not depend on the shape of the listing: a transaction that moves the same value
+/// between the same addresses in two tokens is stored once per token, whether the listing was filtered by one
+/// token's contract (one token served) or lists every token (two served), and whatever the order of its events.
+#[test]
+fn a_two_token_transaction_has_the_same_row_ids_in_a_filtered_and_an_unfiltered_listing() {
+    // The ids themselves: the token is part of them, and the position is counted per token.
+    let first = Trc20Event::read(&two_token_event(TOKEN))
+        .expect("readable")
+        .expect("a transfer");
+    let second = Trc20Event::read(&two_token_event(OTHER_TOKEN))
+        .expect("readable")
+        .expect("a transfer");
+    assert_ne!(first.internal_id(0), second.internal_id(0));
+
+    let ctx = history_ctx();
+    let script = Arc::new(Script::default());
+    // The other token's event comes first in the unfiltered listing.
+    *script.extra_token_rows.lock().unwrap_or_else(|e| e.into_inner()) =
+        vec![two_token_event(OTHER_TOKEN), two_token_event(TOKEN)];
+    let node = history_node(script);
+    block_on(async {
+        let platform = trx_coin(&ctx, &node.url(), true).await;
+        let token = token_on(&ctx, &platform).await;
+        let api = keyed_client(&node);
+        let mut state = WalkState::default();
+
+        // One token served: the provider filters by its contract.
+        let report = collect_history(&platform, &api, &ctx, &mut state, &[evm(W1)]).await;
+        assert!(matches!(report.tokens, Ok(0)));
+        let rows = stored(&ctx, &token).await;
+        assert_eq!(rows.len(), 7);
+        let filtered_id = row(&rows, TX_TWO_TOKENS).internal_id.clone();
+        assert_eq!(filtered_id.0, first.internal_id(0));
+
+        // Two tokens served: the listing is not filtered any more and is read again as a whole.
+        let other = token_of(&ctx, &platform, OTHER_TOKEN_TICKER, OTHER_TOKEN).await;
+        let report = collect_history(&platform, &api, &ctx, &mut state, &[evm(W1)]).await;
+        assert!(matches!(report.tokens, Ok(0)));
+        assert!(listing_requests(&node)
+            .last()
+            .is_some_and(|path| path.contains("/trc20") && !path.contains("contract_address=")));
+        let rows = stored(&ctx, &token).await;
+        assert_eq!(rows.len(), 7, "the row of the first token is not stored a second time");
+        assert_eq!(row(&rows, TX_TWO_TOKENS).internal_id, filtered_id);
+        let other_rows = stored(&ctx, &other).await;
+        assert_eq!(other_rows.len(), 1);
+        assert_eq!(row(&other_rows, TX_TWO_TOKENS).internal_id.0, second.internal_id(0));
+        assert_eq!(other_rows[0].coin, OTHER_TOKEN_TICKER);
+    });
+}
+
+/// A row built before its receiver was a known address of the wallet is a plain send; once the address is known
+/// (a new HD address), the stored row reads as a transfer between own addresses, and stays one row. The same
+/// holds after a restart, when the rows on disk are older than the addresses known now.
+#[test]
+fn a_stored_send_becomes_an_own_transfer_when_its_receiver_becomes_known() {
+    let ctx = history_ctx();
+    let node = history_node(Arc::default());
+    block_on(async {
+        let platform = trx_coin(&ctx, &node.url(), true).await;
+        let token = token_on(&ctx, &platform).await;
+        let api = keyed_client(&node);
+        let mut state = WalkState::default();
+
+        let report = collect_history(&platform, &api, &ctx, &mut state, &[evm(W1)]).await;
+        assert!(report.trx.is_ok() && matches!(report.tokens, Ok(0)));
+        let rows = stored(&ctx, &platform).await;
+        assert_eq!(rows.len(), 19);
+        let send = row(&rows, TX_W1_TO_HD);
+        assert_eq!(send.spent_by_me, dec("4.1"));
+        assert_eq!(send.received_by_me, dec("0"));
+        assert_eq!(send.my_balance_change, dec("-4.1"));
+        let fee_row_before = row(&rows, TX_TOKEN_CALL).clone();
+        let token_rows = stored(&ctx, &token).await;
+        let token_send = row(&token_rows, TX_FREE_TOKEN_CALL);
+        assert_eq!(token_send.received_by_me, dec("0"));
+        assert_eq!(token_send.my_balance_change, dec("-1"));
+
+        // The wallet now knows the receiving address too.
+        let known = [evm(W1), evm(HD_0_1)];
+        let report = collect_history(&platform, &api, &ctx, &mut state, &known).await;
+        assert!(report.trx.is_ok() && matches!(report.tokens, Ok(0)));
+        let rows = stored(&ctx, &platform).await;
+        // The two rows the listing of the new address adds; the transfer between the two is still one row.
+        assert_eq!(rows.len(), 21);
+        let transfer = row(&rows, TX_W1_TO_HD);
+        assert_eq!(transfer.spent_by_me, dec("4.1"));
+        assert_eq!(transfer.received_by_me, dec("3"));
+        assert_eq!(transfer.my_balance_change, dec("-1.1"));
+        // A fee-only row is left as it is.
+        assert_eq!(row(&rows, TX_TOKEN_CALL), &fee_row_before);
+        let token_rows = stored(&ctx, &token).await;
+        let token_transfer = row(&token_rows, TX_FREE_TOKEN_CALL);
+        assert_eq!(token_transfer.spent_by_me, dec("1"));
+        assert_eq!(token_transfer.received_by_me, dec("1"));
+        assert_eq!(token_transfer.my_balance_change, dec("0"));
+    });
+
+    // A restart: rows stored for one address, read by a process that knows two.
+    let ctx = history_ctx();
+    let node = history_node(Arc::default());
+    block_on(async {
+        let platform = trx_coin(&ctx, &node.url(), true).await;
+        let api = keyed_client(&node);
+        let report = collect_history(&platform, &api, &ctx, &mut WalkState::default(), &[evm(W1)]).await;
+        assert!(report.trx.is_ok());
+        let known = [evm(W1), evm(HD_0_1)];
+        let report = collect_history(&platform, &api, &ctx, &mut WalkState::default(), &known).await;
+        assert!(report.trx.is_ok());
+        let rows = stored(&ctx, &platform).await;
+        assert_eq!(rows.len(), 21);
+        assert_eq!(row(&rows, TX_W1_TO_HD).received_by_me, dec("3"));
+        assert_eq!(row(&rows, TX_W1_TO_HD).my_balance_change, dec("-1.1"));
     });
 }
 
