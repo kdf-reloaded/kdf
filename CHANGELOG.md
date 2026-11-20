@@ -157,7 +157,7 @@ the previous version used. The safe way:
   refused at once (see the 0.4.1-beta.1 entry below). On the versioned surface the refusal now has
   the error type `OrderNotMatchableMissingCapability`, HTTP 400, with the members `coin`,
   `capability` and `orders`; the legacy surface answers the same text as in 0.4.1. Detail: PR
-  #TBD-DEV; CRD ch.59 R59.4C.6.
+  #448; CRD ch.59 R59.4C.6.
 
 #### Shielded coins
 
