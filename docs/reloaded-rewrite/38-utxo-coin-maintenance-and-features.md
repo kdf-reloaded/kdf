@@ -1204,9 +1204,9 @@ the record knows as an output of a transaction this node built, for every
 UTXO coin, whether step 2 added it or the backend listed it. Such an output
 belongs to a transaction this node built and signed, so it is never a
 coinbase or coinstake output and counts as mature. The fetch was a read
-spread over the servers whose error answer is final (R38.6.4f item 1): a
-server that had not yet seen the fresh transaction failed the next spend from
-the same address. Every other listed output keeps the check as before.
+spread over the servers whose error answer is final (R38.6.4f item 1), so a
+server that had not yet seen the fresh transaction could fail the next spend
+from the same address. Every other listed output keeps the check as before.
 
 R38.5B.5 **Serialization of own-address spends.** (Reference-bound at both
 rows; also the baseline's behaviour.) Two locks order concurrent spends from

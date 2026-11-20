@@ -666,7 +666,7 @@ the previous version used. The safe way:
   yet seen the first one.** This applies to every UTXO coin that checks the maturity of its coins
   (QRC20 tokens always, QTUM by default, other coins with `check_utxo_maturity`). The next spend uses the
   change of the first transaction, and the maturity check fetched that transaction from one of the
-  servers; a server that had not seen it yet answered with an error, and the spend failed. The
+  servers; a server that had not seen it yet could answer with an error, and the spend then failed. The
   node built that transaction itself, so it cannot be a coinbase output, and the check no longer
   fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
   after R38.5B.4.
