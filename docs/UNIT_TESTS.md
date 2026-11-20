@@ -66,7 +66,7 @@ cargo test -p mm2_net --lib --features live-network-tests test_slurp_req
 The integration tests in `mm2_tests` need the `regtest-netid` feature (they start nodes on the test netid) and run
 as library tests of `mm2_main`, with no Docker. The `docker_tests` binary is only for the tests that need the
 local Docker chains: it pulls images and starts containers unless `_MM2_TEST_CONF` is set. The tests of
-`mm2_tests` that need no public server run in CI; see [Node tests of `mm2_main`](#node-tests-of-mm2_main-15-tests).
+`mm2_tests` that need no public server run in CI; see [Node tests of `mm2_main`](#node-tests-of-mm2_main).
 
 What carries the attribute:
 
@@ -94,14 +94,14 @@ What does not, and why:
 No CI job runs a gated test unless it passes the feature on purpose. The jobs that run unit tests select
 their tests by name. Only the filters of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4),
 of the `electrum-qrc20` row (`utxo::rpc_clients::electrum qrc20::`) and of the `node-tests` row
-(`mm2::mm2_tests::`) also match gated tests; those rows
-run without the feature, so they skip them and run the offline tests. The `docker-tests` job selects three gated tests by name
+(`mm2::mm2_tests::`) also match gated tests; those rows run without the feature, so they skip them and run the
+offline tests. The `docker-tests` job selects three gated tests by name
 (`test_withdraw_segwit`, `test_withdraw_cashaddresses` and
 `test_withdraw_to_different_cashaddress_network_should_fail`), so it passes the feature. A new test that needs
 a public server should carry the attribute, and it joins a CI job only if someone adds the feature to that
 job on purpose. If a gated test fails, look at the server before you look at the code.
 
-## Node tests of `mm2_main` (15 tests)
+## Node tests of `mm2_main`
 
 Location: `mm2src/mm2_main/src/mm2_tests.rs` and its `mm2_tests/` modules. CI cell: `node-tests`
 (`cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::`).
