@@ -696,6 +696,7 @@ the previous version used. The safe way:
   swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
   transaction of another coin family. It now refuses the transaction with an error message. In the
   same way, a payment event that a node reports without a transaction hash is an error, not an abort.
+  Detail: PR #452.
 
 #### Siacoin
 
