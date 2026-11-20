@@ -588,11 +588,14 @@ fn required_confirmations_follow_the_request_then_the_config_then_one() {
     );
 }
 
-/// `tx_history` is ignored: no history process starts and the coin reports no history state.
+/// `tx_history` without a keyed TronGrid node starts nothing: the history is not enabled, the coin reports no
+/// history state, and no account listing is asked (CRD ch.21 §21.10C; the reference behavior of R21.10B.6). A stub
+/// on the loopback is never a TronGrid host, so the keyed case is tested at the coin level
+/// (`coins/eth/tron/history_tests.rs`).
 #[test]
-fn tx_history_is_ignored() {
+fn tx_history_without_a_keyed_trongrid_node_starts_no_history() {
     let node = TronStub::start(healthy);
-    // The context has no SQL database: a history start would fail on it.
+    // The context has no SQL database: the TRON history needs none.
     let ctx = tron_ctx();
     activated(
         &ctx,
@@ -603,6 +606,18 @@ fn tx_history_is_ignored() {
         coin.history_sync_status(),
         coins::HistorySyncState::NotEnabled
     ));
+    assert!(!coin.tron_history_enabled());
+    let listings = node
+        .log
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(path, _)| path.starts_with("/v1/"))
+        .count();
+    assert_eq!(
+        listings, 0,
+        "an account listing was asked of a node that is not a keyed TronGrid node"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------------

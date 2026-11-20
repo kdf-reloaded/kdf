@@ -31,6 +31,9 @@ cargo test -p common --lib msgpack_bounds::
 cargo test -p mm2_p2p --features application --lib t4a_
 cargo test -p coins --lib t4a_
 cargo test -p mm2_main --lib t4a_
+
+# The node tests of `mm2_main` that need no public server (the CI row `node-tests`)
+cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::
 ```
 
 ## Tests that need public servers (`live-network-tests`)
@@ -62,7 +65,8 @@ cargo test -p mm2_net --lib --features live-network-tests test_slurp_req
 
 The integration tests in `mm2_tests` need the `regtest-netid` feature (they start nodes on the test netid) and run
 as library tests of `mm2_main`, with no Docker. The `docker_tests` binary is only for the tests that need the
-local Docker chains: it pulls images and starts containers unless `_MM2_TEST_CONF` is set.
+local Docker chains: it pulls images and starts containers unless `_MM2_TEST_CONF` is set. The tests of
+`mm2_tests` that need no public server run in CI; see [Node tests of `mm2_main`](#node-tests-of-mm2_main).
 
 What carries the attribute:
 
@@ -88,13 +92,47 @@ What does not, and why:
 - `polygon_check_if_my_payment_sent`, which skips itself when `POLYGON_RPC_URL` is not set.
 
 No CI job runs a gated test unless it passes the feature on purpose. The jobs that run unit tests select
-their tests by name. Only the filters of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4)
-and of the `electrum-qrc20` row (`utxo::rpc_clients::electrum qrc20::`) also match gated tests; those rows
-run without the feature, so they skip them and run the offline tests. The `docker-tests` job selects three gated tests by name
+their tests by name. Only the filters of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4),
+of the `electrum-qrc20` row (`utxo::rpc_clients::electrum qrc20::`) and of the `node-tests` row
+(`mm2::mm2_tests::`) also match gated tests; those rows run without the feature, so they skip them and run the
+offline tests. The `docker-tests` job selects three gated tests by name
 (`test_withdraw_segwit`, `test_withdraw_cashaddresses` and
 `test_withdraw_to_different_cashaddress_network_should_fail`), so it passes the feature. A new test that needs
 a public server should carry the attribute, and it joins a CI job only if someone adds the feature to that
 job on purpose. If a gated test fails, look at the server before you look at the code.
+
+## Node tests of `mm2_main`
+
+Location: `mm2src/mm2_main/src/mm2_tests.rs` and its `mm2_tests/` modules. CI cell: `node-tests`
+(`cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::`).
+
+Most of these tests start one or more real nodes: the test binary runs itself again as a child process
+with the node configuration, on its own loopback address (`127.0.0.x`) and a test netid, and the test
+talks to the node over its RPC port. The test netids exist only with the `regtest-netid` feature and have
+no seed nodes. The test helper turns the start-up clock check off (`"ntp_servers": []`) unless the test's
+own configuration sets that key, so a node start asks no time server.
+
+Without `live-network-tests` the cell runs the tests that need no public server, no passphrase variable
+and no Docker. It lists every other test of the module as ignored: those carry the `live-network-tests`
+attribute above or a plain `#[ignore]` with its reason.
+
+| Test | What is tested |
+|------|----------------|
+| `test_rpc` | A started node answers malformed and unknown requests with an error and the configured CORS origin, and answers `version` and `help` |
+| `test_rpc_password_from_json` | An empty or non-string `rpc_password` stops the start; a configured one is required by a protected call |
+| `test_rpc_password_from_json_no_userpass` | A protected call without `userpass` is refused |
+| `test_mmrpc_v2` | The mmrpc 2.0 errors for a missing `userpass`, a wrong `userpass` and an unknown `mmrpc` version |
+| `test_batch_requests` | A batch of a legacy call, an mmrpc 2.0 call and a call with a wrong `userpass` is answered item by item |
+| `test_startup_passphrase` | A seed phrase, a WIF key and a `0x` hex key as the passphrase give the same public key |
+| `test_get_public_key`, `test_get_public_key_hash` | The public key and its hash for a fixed passphrase |
+| `test_swap_status` | `my_swap_status` and `stats_swap_status` answer an unknown swap with an error |
+| `test_get_orderbook_with_same_orderbook_ticker` | An order book of two coins that share an order book ticker is refused for two UTXO entries of the same asset and answered for a UTXO coin and a token |
+| `test_mm2_db_migration` | A node starts on a database folder that holds a swap file of the old layout |
+| `test_start_and_stop_simple_market_maker_bot`, `test_start_and_stop_simple_market_maker_bot_from_ctx` | The bot starts once, refuses a second start, stops once and refuses a second stop; its price source is a closed loopback port |
+| `log_test_status`, `log_test_printed_dashboard` | The log status line and the dashboard |
+
+`test_mm_start` is also listed as passed. It is not a test: it is the entry point of the child processes
+and does nothing unless the node configuration is passed to it.
 
 ## tQTUM tests and their Electrum server
 

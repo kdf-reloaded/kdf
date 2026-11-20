@@ -843,10 +843,16 @@ impl PlatformWithTokensActivationOps for EthCoin {
         }
     }
 
-    /// A TRON platform has no history source yet: `tx_history` is ignored (CRD ch.21 R21.10B.2, R21.10B.6).
+    /// A TRON platform does not use this hook: its history needs no SQL store and also runs on the browser build,
+    /// so it is started in [`Self::on_platform_registered`] (CRD ch.21 §21.10C).
     fn history_supported(&self) -> bool { !self.is_tron_platform_coin() }
 
     fn on_platform_registered(ctx: &MmArc, ticker: &str, activation_request: &Self::ActivationRequest) {
+        // The TRON history starts here, once the platform and its tokens are registered. It runs only for a TRX
+        // platform whose history is enabled: `tx_history` asked and a keyed TronGrid node configured.
+        if activation_request.tx_history() {
+            coins::eth::tron::spawn_platform_history(ctx, ticker);
+        }
         if activation_request.nft_req.is_none() {
             return;
         }

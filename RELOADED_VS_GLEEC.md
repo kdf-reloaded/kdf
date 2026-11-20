@@ -767,6 +767,38 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `{"format": "hex"}`, accepts `from` as base58check, `41...` or `0x41...`, and refuses an EVM `0x` address and the EVM
   format values with the legacy error body; an EVM coin is unchanged. No switch; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R21.10B.8, D21.10B.2.
+- **TRON (still switched off) has a transaction history when a TronGrid API key is set.** GLEEC KDF has no TRON
+  history: its versioned `my_tx_history` answers `NotSupportedFor`, its legacy one an empty list, and it ignores
+  `tx_history` for TRON. Reloaded answers the same without a key. With `tx_history: true` and a keyed TronGrid node
+  (the node's own `TRON-PRO-API-KEY` header or `tron_api_key`), both methods list the transactions of TRX and TRC20
+  coins from TronGrid's account listings, over every known address of an HD wallet, with base58check addresses and the
+  fee details of a withdraw result. Only confirmed transactions; history requests go to keyed TronGrid hosts only. An
+  addition a GLEEC client does not meet unless it sets the key; no switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 §21.10C.
+
+- **The fee of a TRON withdrawal (TRON is still switched off) follows the node's bandwidth rule, and a TRC20 fee limit
+  has a margin and a maximum.** The withdraw estimate, its amounts, its errors and its fee details follow GLEEC KDF
+  `v3.0.0-beta` as the CRD records it, with three differences. (1) *Bandwidth.* GLEEC KDF charges only what the
+  sender's free and staked bandwidth, added together, do not cover. The TRON node takes a transaction's bandwidth from
+  the staked bandwidth as a whole, or from the free bandwidth as a whole, and otherwise charges TRX for all of it.
+  Reloaded estimates by the node's rule, so its estimate is never below what the node charges; for an account whose
+  two quotas only together reach the size it is higher than GLEEC KDF's, and `max` then sends less. (2) *Fee limit
+  margin.* GLEEC KDF sets a TRC20 transfer's `fee_limit` to the cost of the dry-run energy exactly. Reloaded adds 20%,
+  rounded up to whole SUN, so that a small change of the contract's state between the dry run and the block does not
+  fail the transfer; `total_fee` in the fee details stays the expected charge. (3) *Maximum.* Reloaded never sets a
+  `fee_limit` above 100 TRX and refuses, before signing, a transfer whose energy alone would cost more, with
+  `UnsupportedError` naming both figures. None of the three is visible to a peer and none changes the shape of an
+  answer, so no switch exists; rows in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.21 R21.10B.7, D21.10B.1.
+- **A TRC20 withdrawal whose dry run reverts is refused (TRON is still switched off).** GLEEC KDF `v3.0.0-beta`, as
+  the CRD records it, judges the energy dry run of a TRC20 transfer only by its `energy_used`: when the token contract
+  would refuse the transfer, it still returns a signed transaction and a fee estimate, and broadcasting it burns the
+  fee. Reloaded reads the dry run's revert indication and refuses the withdrawal before anything is signed, with
+  `UnsupportedError` and the text "the token contract refused this transfer (its dry run reverted)" followed by the
+  node's reason; no other node is asked. The energy a contract's deployer may pay is not modeled in either, so the
+  estimate of a TRC20 fee can be above the chain's charge in both. No peer sees the check and a successful dry run
+  answers the same, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.21 R21.10B.10 to R21.10B.13.
 
 ### Removed / disabled in KDF Reloaded
 

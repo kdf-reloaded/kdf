@@ -85,6 +85,10 @@ futures01 = { version = "0.1", package = "futures" }
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await"] }
 gstuff = { version = "0.7" }
 hex = "0.4.2"
+# HMAC-SHA256 of the GasFree provider's request authentication (CRD ch.63 §63.4.2). hmac 0.12 works on the
+# 0.10 line of the digest traits, so it takes sha2 0.10 under its own name; `sha2` below stays 0.9. Both versions
+# are already in the lock file through other crates of the workspace.
+hmac = "0.12"
 http = "1"
 itertools = { version = "0.10", features = ["use_std"] }
 jsonrpc-core = "8.0.1"
@@ -116,6 +120,7 @@ serialization = { package = "kdf_codec", path = "../kdf_codec" }
 serialization_derive = { package = "kdf_codec_derive", path = "../kdf_codec_derive" }
 spv_validation = { package = "kdf_spv_validation", path = "../kdf_spv_validation" }
 sha2 = "0.9"
+sha2_010 = { package = "sha2", version = "0.10" }
 sha3 = "0.9"
 sia-rust = { workspace = true }
 # using the same version as cosmrs
