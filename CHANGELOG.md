@@ -199,6 +199,20 @@ the previous version used. The safe way:
 
 #### TRON coins
 
+- **TRON is back, as a wallet-only coin family: TRX and TRC20 tokens can be activated and used as a wallet, and
+  cannot be traded.** 0.4.0 refused every TRON activation. From this version a TRX coin and its TRC20 tokens
+  activate through `enable_eth_with_tokens`, the `task::enable_eth::*` methods, `enable_erc20` and the
+  `task::enable_erc20::*` methods, the way GLEEC KDF serves TRON, and through the legacy `enable` and `electrum`
+  methods, which is a Reloaded extension. A TRON wallet covers balances and addresses, an HD wallet under a
+  global-HD login, withdrawals with their real fee (TRC20 amounts of any size; a transfer the token contract
+  refuses is not signed), and a transaction history when a TronGrid API key is set; the items below describe each.
+  *Swaps stay off.* Reloaded has no TRON swap, so every TRX and TRC20 coin counts as wallet-only, whatever its
+  coins-file entry says: `setprice`, `buy`, `sell` and `start_swap` refuse it with the usual "… is wallet only"
+  answer, as GLEEC KDF does for a coin configured `"wallet_only": true` (every published TRON entry is), a TRON
+  coin declines to match, and an order with a TRON coin saved earlier is cancelled at startup with a line in the
+  log. For a TRON entry that does not say `"wallet_only": true`, GLEEC KDF refuses the order at a later check;
+  the answer has the same form, so no setting exists for this. Gasless TRC20 transfers through GasFree are not
+  available yet. Detail: CRD ch.21 D6, R-D1, R21.10B.9, R21.B3 and their status notes of 2026-11-20; ch.55 D55.5.
 - **The TRON node client gives each node a time limit and fails over when a node answers badly.** A node
   that does not answer within 10 seconds is skipped, and so is a node that answers with an error status
   (a rate limit included), with something that is not the expected JSON, or with the node's own error form;
@@ -209,8 +223,7 @@ the previous version used. The safe way:
   and `https` URLs. A signed transaction that a node rejects with any other code ends the request with that code. An entry of the
   TRON `urls` list can now be an object `{"url": "...", "headers": {...}}` whose headers go to that node
   only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
-  hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
-  so none of this can be used yet. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
+  hosts over HTTPS only. Header values and the key are never logged or shown. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 - **TRON has an activation route on the standard platform-with-tokens methods.** `enable_eth_with_tokens`,
   `task::enable_eth::init` and its status, user-action and cancel calls accept a TRX platform with its TRC20
   tokens, and `enable_erc20` and `task::enable_erc20::init` accept a TRC20 token, the way GLEEC KDF serves TRON.
@@ -222,8 +235,7 @@ the previous version used. The safe way:
   policies are refused at activation.
   The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
   TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
-  `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
-  answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
+  `task::withdraw` takes TRX and TRC20 coins. Detail: PR #405; CRD
   ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
 - **TRON has an HD wallet under a global-HD login.** `enable_eth_with_tokens` and `task::enable_eth::init` derive the
   TRX address under the `derivation_path` of the coin config (coin type 195, `m/44'/195'`) with `path_to_address`,
@@ -243,13 +255,12 @@ the previous version used. The safe way:
   does; it was ignored before. The legacy `enable` method keeps the node's internal key under a global-HD login, as the
   EVM and UTXO legacy routes do in Reloaded, so its TRON address differs from the one the mmrpc 2.0 methods give for the
   same seed.
-  **TRON stays switched off in this build**, so every route still answers "TRON support is not available in this
-  build" and none of this can be used yet. Detail: PR #428; CRD ch.21 R-A2, R21.10B.4, R21.10B.5, R21.10B.8,
+  Detail: PR #428; CRD ch.21 R-A2, R21.10B.4, R21.10B.5, R21.10B.8,
   T21.10B.8.
 - **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
   `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
   address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
-  `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: PR #412;
+  `get_my_address` already answered as the CRD states. Detail: PR #412;
   CRD ch.21 R21.10B.8, D21.10B.2.
 - **A TRON withdrawal works out its real fee, takes it into account in the amount, and fails instead of guessing.**
   The fee of a TRX or TRC20 withdrawal is now estimated from the real size of the transaction, the sender's free and
@@ -274,12 +285,12 @@ the previous version used. The safe way:
   for TRX. A `memo` is refused with `UnsupportedError`, and the new optional request member `expiration_seconds` sets
   how long the transaction stays valid (60 seconds by default); other coins ignore it. An HD `from` is honored
   throughout: every balance and resource is read for that address.
-  **TRON stays switched off in this build**, so none of this can be used yet. Detail: PR #437; CRD ch.21 R21.10B.7,
+  Detail: PR #437; CRD ch.21 R21.10B.7,
   D21.10B.1 and their status notes of 2026-11-19; RELOADED_VS_GLEEC.md.
 - **A TRC20 withdrawal can send any amount the token balance holds.** The amount of a TRC20 transfer is now encoded
   as a 256-bit value, so a token's whole balance can be sent whatever its decimals; a token of 18 decimals could send
   at most about 18.4 whole tokens per withdrawal, and a larger amount answered `InternalError`. Transfers of smaller
-  amounts are built exactly as before. TRON stays switched off in this build. Detail: PR #442; CRD ch.21, the status
+  amounts are built exactly as before. Detail: PR #442; CRD ch.21, the status
   note of 2026-11-20 after R21.10B.7.
 - **A TRC20 withdrawal the token contract refuses is no longer signed.** Before a TRC20 transfer is built, the TRON
   node runs it as a trial to learn its energy. When that trial shows that the token contract would refuse the
@@ -290,7 +301,7 @@ the previous version used. The safe way:
   refusal is the contract's and not the node's. GLEEC KDF returns the signed transaction in this case.
   The fee estimate of a TRC20 withdrawal counts all of the transfer's energy as the sender's. Some token contracts
   let their deployer pay part of the energy; for such a token the estimate, and the TRX the withdrawal asks the
-  sender to hold, can be higher than what the chain then charges. TRON stays switched off in this build. Detail: PR
+  sender to hold, can be higher than what the chain then charges. Detail: PR
   #450; CRD ch.21 R21.10B.10 to R21.10B.13 and the status note of 2026-11-20 after T21.10B.18.
 - **TRON coins have a transaction history when a TronGrid API key is set.** With `tx_history: true` in the
   activation request and a TronGrid node that has an API key (the node's own `TRON-PRO-API-KEY` header, or the
@@ -305,7 +316,7 @@ the previous version used. The safe way:
   nothing changes: the legacy method answers an empty list with `NotEnabled` and the versioned one `NotSupportedFor`,
   as GLEEC KDF does. GLEEC KDF has no TRON history and ignores `tx_history` for TRON. The key is never logged or
   shown. In a browser build only the legacy method answers, and the keyed history has not been checked in a browser.
-  **TRON stays switched off in this build.** Detail: PR #440; CRD ch.21 §21.10C.
+  Detail: PR #440; CRD ch.21 §21.10C.
 - **Support code for gasless TRC20 transfers through GasFree was added; nothing uses it yet.** The code derives a
   user's GasFree custody address and checks it against the GasFree contract, prepares and signs a transfer
   authorization, and reads account and fee data from a GasFree provider. No RPC reaches it, so nothing changes for
@@ -861,6 +872,7 @@ the previous version used. The safe way:
   (PR #405). The TRON HD wallet is built on the same route, still switched off.
   The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
   The transaction history (work package 4) is built with a TronGrid API key, still switched off (PR #440).
+  On 2026-11-20 TRON was switched on as a wallet-only coin family; swaps stay off.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
   controller; the support modules are built and not yet reachable; the remaining PRs are listed again (activation
@@ -868,6 +880,19 @@ the previous version used. The safe way:
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); ZEC fees under ZIP 317 (Z10, PR #431); the coins entry follows. Z1–Z8 done.
+
+### Known limitations (additions since 0.4.0-beta.1)
+
+- **TRON coins cannot be traded.** TRX and TRC20 tokens are wallet-only: activation, balances, addresses,
+  withdrawals and the transaction history work, and orders and swaps do not. `setprice`, `buy`, `sell` and
+  `start_swap` refuse a TRON coin with the "… is wallet only" answer. This replaces the item of 0.4.0-beta.1 that
+  says TRON cannot be activated. More in [`tron-support`](docs/plans/tron-support.md) and
+  [`tron-swap-support`](docs/plans/tron-swap-support.md). Detail: CRD ch.21 R-D1, R21.B3.
+- **Gasless TRC20 transfers through GasFree are not available.** The support code is in the build and no RPC
+  reaches it yet; a TRC20 withdrawal pays its fee in TRX. More in [`tron-gasfree`](docs/plans/tron-gasfree.md).
+- **The TRON transaction history needs a TronGrid API key.** Without a keyed TronGrid node, or without
+  `tx_history: true` in the activation request, `my_tx_history` answers as for a coin without a history. Detail:
+  CRD ch.21 §21.10C.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

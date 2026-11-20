@@ -484,6 +484,11 @@ chapter 21 R-N9 (the `tron_api_key` applies to its URL as well); and the
 swap-contract members take the base58check and hex forms of chapter 21 R21.B2
 besides the EVM `0x` form. Chapter 21 §21.4 and R21.10B.2 govern the rest.
 
+*Status note (2026-11-20), TRON switched on.* `TRON_ACTIVATION_AVAILABLE` is
+`true` and the "not available" refusal is gone: this route activates a `TRX`
+platform and its `TRC20` tokens. A TRON coin is wallet-only while
+`TRON_SWAPS_AVAILABLE` is `false` (chapter 21 D6, R21.B3).
+
 ---
 
 ### 35.1.F Multi-node access contract

@@ -1,9 +1,9 @@
 //! Unit tests of the TRON wallet path (CRD ch.21 §21.9): the generic balance (`MarketCoinOps::my_balance`)
 //! and the broadcast of a signed transaction (`send_raw_tx` / `send_raw_tx_bytes`) of a TRX or TRC20 coin.
 //!
-//! Every test builds the coin the way activation does (`tron_coin_from_conf_and_request`, the function below the
-//! availability gate `TRON_ACTIVATION_AVAILABLE`, which stays `false`) against a stub node on the loopback
-//! interface, so the real HTTP layer and the real coin code run; only the node's answers are canned.
+//! Every test builds the coin the way the legacy activation does (`tron_coin_from_conf_and_request`) against a
+//! stub node on the loopback interface, so the real HTTP layer and the real coin code run; only the node's answers
+//! are canned.
 
 use super::test_node::{Reply, StubNode};
 use super::withdraw::withdraw_tron;
@@ -269,9 +269,7 @@ fn trc20_balance_of_a_non_2xx_answer_is_an_error_not_zero() {
 }
 
 #[test]
-fn activation_below_the_gate_builds_coins_against_a_stub_node() {
-    // The legacy `enable` route stays refused while the gate is off; its builder below the gate works.
-    assert!(!crate::TRON_ACTIVATION_AVAILABLE);
+fn the_legacy_builder_builds_coins_against_a_stub_node() {
     let node = StubNode::start(|_, _| Reply::status(404, "{}"));
     block_on(async {
         let (_ctx, trx) = trx_coin(&node.url()).await;
@@ -286,6 +284,105 @@ fn activation_below_the_gate_builds_coins_against_a_stub_node() {
     });
     // Building a coin sends nothing to the node.
     assert!(node.requests().is_empty());
+}
+
+/// The coins configuration of the wallet-only tests: a TRX and a TRC20 coin that say `"wallet_only": false`, the
+/// same two that say `true`, and an EVM coin of each kind.
+fn wallet_only_conf() -> serde_json::Value {
+    let trc20 = json!({ "type": "TRC20", "protocol_data": { "platform": "TRX", "contract_address": TRC20_CONTRACT } });
+    json!({ "coins": [
+        { "coin": "TRX", "mm2": 1, "wallet_only": false,
+          "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
+        { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "wallet_only": false, "protocol": trc20 },
+        { "coin": "TRXW", "mm2": 1, "wallet_only": true,
+          "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
+        { "coin": "USDTW-TRC20", "mm2": 1, "decimals": 6, "wallet_only": true, "protocol": trc20 },
+        { "coin": "ETH", "mm2": 1, "wallet_only": false, "protocol": { "type": "ETH" } },
+        { "coin": "JST", "mm2": 1, "wallet_only": true, "protocol": { "type": "ERC20", "protocol_data": {
+            "platform": "ETH", "contract_address": "0x2b294F029Fde858b2c62184e8390591755521d8E" } } },
+    ] })
+}
+
+/// The TRON coin `ticker` of [`wallet_only_conf`], built against a node that is never asked.
+async fn conf_coin(ctx: &MmArc, ticker: &str) -> EthCoin {
+    let conf = crate::coin_conf(ctx, ticker);
+    let protocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).expect("a TRON protocol");
+    let req = json!({ "urls": ["http://127.0.0.1:1"] });
+    tron_coin_from_conf_and_request(ctx, ticker, &conf, &req, &priv_key(), protocol)
+        .await
+        .expect("a TRON coin builds without a node request")
+}
+
+/// CRD ch.21 R-D1, R21.10B.9, R21.B3: while TRON swaps are switched off a TRX or TRC20 coin is wallet-only whatever
+/// its coins-config entry says; with the switch on the entry decides. An EVM coin follows its entry either way.
+#[test]
+fn a_tron_coin_is_wallet_only_whatever_its_config_says() {
+    const { assert!(!crate::TRON_SWAPS_AVAILABLE) };
+    let ctx = MmCtxBuilder::new().with_conf(wallet_only_conf()).into_mm_arc();
+    block_on(async {
+        for (ticker, config_says) in [
+            ("TRX", false),
+            ("USDT-TRC20", false),
+            ("TRXW", true),
+            ("USDTW-TRC20", true),
+        ] {
+            let coin = conf_coin(&ctx, ticker).await;
+            assert!(coin.is_tron_family(), "{ticker}");
+            assert!(MmCoin::wallet_only(&coin, &ctx), "{ticker}: the trait answer");
+            assert!(
+                MmCoinEnum::from(coin.clone()).wallet_only(&ctx),
+                "{ticker}: the enum answer"
+            );
+            assert!(coin.wallet_only_with_switch(&ctx, false), "{ticker}: switch off");
+            assert_eq!(
+                coin.wallet_only_with_switch(&ctx, true),
+                config_says,
+                "{ticker}: switch on"
+            );
+        }
+    });
+
+    let (_eth_ctx, eth) =
+        crate::eth::eth_tests::eth_coin_for_test(EthCoinType::Eth, vec!["http://127.0.0.1:1".to_owned()], None);
+    let (_jst_ctx, jst) = crate::eth::eth_tests::eth_coin_for_test(
+        EthCoinType::Erc20 {
+            platform: "ETH".to_owned(),
+            token_addr: Default::default(),
+        },
+        vec!["http://127.0.0.1:1".to_owned()],
+        None,
+    );
+    for switch in [false, true] {
+        assert!(!eth.wallet_only_with_switch(&ctx, switch), "ETH, switch {switch}");
+        assert!(jst.wallet_only_with_switch(&ctx, switch), "JST, switch {switch}");
+    }
+    assert!(!MmCoin::wallet_only(&eth, &ctx));
+    assert!(MmCoin::wallet_only(&jst, &ctx));
+}
+
+/// CRD ch.21 R-D1, R21.B3: while TRON swaps are switched off a TRX or TRC20 coin declines every new match, with
+/// and without counterparty protocol information. An EVM coin accepts every counterparty, as before.
+#[test]
+fn a_tron_coin_declines_every_match_while_tron_swaps_are_off() {
+    let ctx = MmCtxBuilder::new().with_conf(wallet_only_conf()).into_mm_arc();
+    let infos = [None, Some(Vec::new()), Some(vec![1u8, 2, 3])];
+    block_on(async {
+        for ticker in ["TRX", "USDT-TRC20", "TRXW"] {
+            let coin = conf_coin(&ctx, ticker).await;
+            for info in &infos {
+                assert!(!MmCoin::is_coin_protocol_supported(&coin, info), "{ticker} {info:?}");
+            }
+            assert!(!coin.protocol_supported_with_switch(false), "{ticker}");
+            assert!(coin.protocol_supported_with_switch(true), "{ticker}");
+        }
+    });
+
+    let (_ctx, eth) =
+        crate::eth::eth_tests::eth_coin_for_test(EthCoinType::Eth, vec!["http://127.0.0.1:1".to_owned()], None);
+    for info in &infos {
+        assert!(MmCoin::is_coin_protocol_supported(&eth, info), "ETH {info:?}");
+    }
+    assert!(eth.protocol_supported_with_switch(false) && eth.protocol_supported_with_switch(true));
 }
 
 /// A node whose `broadcasthex` answers `body` (HTTP 200) and which refuses every other endpoint.
