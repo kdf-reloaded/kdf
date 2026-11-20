@@ -250,6 +250,10 @@ impl MarketMakerIt {
         envs: &[(&str, &str)],
     ) -> Result<MarketMakerIt, String> {
         conf["allow_weak_password"] = true.into();
+        // No startup clock probe of public time servers, unless the test asks for one.
+        if conf["ntp_servers"].is_null() {
+            conf["ntp_servers"] = json!([]);
+        }
         let ip = try_s!(Self::myipaddr_from_conf(&mut conf));
         let folder = new_mm2_temp_folder_path(Some(ip));
         let db_dir = match conf["dbdir"].as_str() {
@@ -1235,78 +1239,6 @@ pub async fn wait_till_history_has_records(mm: &MarketMakerIt, coin: &str, expec
         Timer::sleep(1.).await;
         assert!(now_ms() <= wait_until, "wait_till_history_has_records timed out");
     }
-}
-
-pub async fn orderbook_v2(mm: &MarketMakerIt, base: &str, rel: &str) -> Json {
-    let request = mm
-        .rpc(&json! ({
-            "userpass": mm.userpass,
-            "method": "orderbook",
-            "mmrpc": "2.0",
-            "params": {
-                "base": base,
-                "rel": rel,
-            }
-        }))
-        .await
-        .unwrap();
-    assert_eq!(request.0, StatusCode::OK, "'orderbook' failed: {}", request.1);
-    json::from_str(&request.1).unwrap()
-}
-
-pub async fn best_orders_v2(mm: &MarketMakerIt, coin: &str, action: &str, volume: &str) -> Json {
-    let request = mm
-        .rpc(&json! ({
-            "userpass": mm.userpass,
-            "method": "best_orders",
-            "mmrpc": "2.0",
-            "params": {
-                "coin": coin,
-                "action": action,
-                "volume": volume,
-            }
-        }))
-        .await
-        .unwrap();
-    assert_eq!(request.0, StatusCode::OK, "'best_orders' failed: {}", request.1);
-    json::from_str(&request.1).unwrap()
-}
-
-pub async fn init_z_coin(mm: &MarketMakerIt, coin: &str) -> Json {
-    let request = mm
-        .rpc(&json! ({
-            "userpass": mm.userpass,
-            "method": "init_z_coin",
-            "mmrpc": "2.0",
-            "params": {
-                "ticker": coin,
-                "activation_params": {
-                    "mode": {
-                        "rpc": "Native",
-                    }
-                },
-            }
-        }))
-        .await
-        .unwrap();
-    assert_eq!(request.0, StatusCode::OK, "'init_z_coin' failed: {}", request.1);
-    json::from_str(&request.1).unwrap()
-}
-
-pub async fn init_z_coin_status(mm: &MarketMakerIt, task_id: u64) -> Json {
-    let request = mm
-        .rpc(&json! ({
-            "userpass": mm.userpass,
-            "method": "init_z_coin_status",
-            "mmrpc": "2.0",
-            "params": {
-                "task_id": task_id,
-            }
-        }))
-        .await
-        .unwrap();
-    assert_eq!(request.0, StatusCode::OK, "'init_z_coin_status' failed: {}", request.1);
-    json::from_str(&request.1).unwrap()
 }
 
 pub async fn sign_message(mm: &MarketMakerIt, coin: &str) -> Json {
