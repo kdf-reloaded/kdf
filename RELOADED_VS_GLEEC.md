@@ -820,13 +820,15 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `withdraw` and the transaction history work. Orders and swaps do not:
   Reloaded has no TRON swap, and neither has a GLEEC KDF release. `setprice`,
   `buy`, `sell` and `start_swap` refuse a TRON coin with the usual "… is wallet
-  only" answer, a TRON coin declines to match, and an order with a TRON coin
-  saved earlier is cancelled at startup. This holds whatever the coins-file
+  only" answer, a TRON coin declines to match, an order with a TRON coin
+  saved earlier is cancelled at startup, and an unfinished saved swap that
+  names a TRON coin is not resumed at startup (its record is kept, with a line
+  in the log). This holds whatever the coins-file
   entry says. For an entry with `"wallet_only": true`, which every published
   TRON entry has, the answer is GLEEC KDF's. For an entry without it GLEEC KDF
   passes the wallet-only check and refuses the order at its balance-and-fee
-  check, with the same error body and no order; Reloaded refuses one check
-  earlier. No switch exists: the build constant `TRON_SWAPS_AVAILABLE`
+  check, with an answer of the same form and no order; Reloaded refuses one
+  check earlier, and its text names the wallet-only ticker. No switch exists: the build constant `TRON_SWAPS_AVAILABLE`
   (`coins/lp_coins_ops.rs`) is `false` (CRD ch.21 R-D1, R21.10B.9, R21.B3).
   Gasless TRC20 transfers through GasFree are not available yet.
 - **A Tendermint activation refuses a hardware key policy.** A request that names the `Trezor` `priv_key_policy`

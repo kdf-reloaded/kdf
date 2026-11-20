@@ -1411,7 +1411,8 @@ a coin whose coins-config protocol is `TRX` or `TRC20` is cancelled at
 startup with a log line, as a saved Tendermint order is (Chapter 18,
 availability note). The read-only views (`orderbook`, `best_orders`,
 `trade_preimage`) read the coins-config `wallet_only` flag alone and are
-unchanged.
+unchanged, and so are `max_taker_vol`, `max_maker_vol` and the legacy
+`get_trade_fee`, which do not ask whether a coin is wallet-only.
 
 **D21.10B.1** *TRC20 `fee_limit` policy.* The reference sets `fee_limit` to
 the dry-run energy times the energy price with no margin; Reloaded today
@@ -2071,9 +2072,17 @@ TRON coin Reloaded can activate. From this date it is enforced before
 the deferral sites of §21.11 are reached: while `TRON_SWAPS_AVAILABLE`
 is `false` a TRX or TRC20 coin is wallet-only whatever its config says,
 so order placement refuses it before any balance or fee work, it
-declines every match, and a saved order naming it is cancelled at
-startup (the status note at R21.10B.9). The typed refusals of §21.11
-stay in place behind that. The swap-contract members of an activation
+declines every match, a saved order naming it is cancelled at
+startup (the status note at R21.10B.9), and an unfinished saved swap
+whose maker or taker coin is a TRON coin, by the coins-config protocol
+`TRX` or `TRC20`, is not resumed at startup, in the legacy swap files
+and in both v2 swap storages. Such a swap is skipped with one log line
+that names its uuid and the reason; its record is neither deleted nor
+marked failed, so it can resume in a build that has TRON swaps, and its
+coins are not among those the kick-start asks to be enabled. The typed
+refusals of §21.11 stay in place behind that; a
+`recover_funds_of_swap` asked for by hand for such a record is not
+stopped by this switch and meets them. The swap-contract members of an activation
 request are still validated by the rule of F21.B3 and still not bound.
 
 **R21.B4 (orderbook address).** When TRON swaps are enabled, the

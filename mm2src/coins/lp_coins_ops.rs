@@ -48,9 +48,11 @@ pub const TENDERMINT_SWAPS_AVAILABLE: bool = false;
 /// TRC20 token reports itself as wallet-only, whatever its coins-config entry says: activation, balances,
 /// addresses, `withdraw` and the transaction history work, while `setprice`, `buy`, `sell` and the other ways to
 /// start a new trade refuse the coin with the usual wallet-only error, and an order or request that already exists
-/// is not matched. An order with a TRON coin that was saved earlier is cancelled at startup. The read-only views
+/// is not matched. An order with a TRON coin that was saved earlier is cancelled at startup, and an unfinished
+/// saved swap that names a TRON coin is not resumed at startup (its record is kept). The read-only views
 /// (`orderbook`, `best_orders`, `trade_preimage`) look at the coins-config `wallet_only` flag alone and are not
-/// changed by this switch. Set it to `true` only together with a TRON swap implementation.
+/// changed by this switch, and neither are `max_taker_vol`, `max_maker_vol` and the legacy `get_trade_fee`, which
+/// do not ask whether a coin is wallet-only. Set it to `true` only together with a TRON swap implementation.
 pub const TRON_SWAPS_AVAILABLE: bool = false;
 
 /// The refusal text of every Solana activation route while [`SOLANA_ACTIVATION_AVAILABLE`] is `false`.

@@ -258,7 +258,8 @@ impl SwapOps for EthCoin {
                     }
                 },
                 // V1 ETH/ERC20 fee validation; TRON uses a separate fee validator.
-                // Activation gating prevents this branch. P10.2.5.
+                // TRON coins are wallet-only while
+                // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
                 EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                     return ERR!("TRON dex-fee validation not yet wired (pending P10.2.5)");
                 },

@@ -345,7 +345,8 @@ impl MmCoin for EthCoin {
                 (0.into(), data, token_addr, platform, self.gas_limit.eth_send_erc20)
             },
             // ETH-style fee preimage; TRON dex-fee preimage flows through the
-            // dedicated TRON estimator. Activation gating prevents this branch. P10.2.5.
+            // dedicated TRON estimator. TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return MmError::err(TradePreimageError::InternalError(
                     "TRON dex-fee preimage not yet wired (pending P10.2.5)".to_owned(),

@@ -470,8 +470,32 @@ pub async fn my_recent_swaps_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u
     Ok(try_s!(Response::builder().body(res)))
 }
 
+/// The log line for an unfinished saved swap that is not resumed at startup because its maker or taker coin is a
+/// TRON coin (TRX or TRC20, by the coins-config protocol) while [`coins::TRON_SWAPS_AVAILABLE`] is `false`; `None`
+/// when the swap is resumed (CRD ch.21 R-D1, R21.B3). The saved record is left as it is, neither deleted nor marked
+/// failed, so the swap can resume in a build that has TRON swaps. The coins configuration decides, so the coins do
+/// not have to be activated.
+pub(crate) fn tron_swap_skip_message(ctx: &MmArc, uuid: &Uuid, maker_coin: &str, taker_coin: &str) -> Option<String> {
+    let is_tron = |ticker: &str| {
+        matches!(
+            coins::coin_conf(ctx, ticker)["protocol"]["type"].as_str(),
+            Some("TRX" | "TRC20")
+        )
+    };
+    if coins::TRON_SWAPS_AVAILABLE || !(is_tron(maker_coin) || is_tron(taker_coin)) {
+        return None;
+    }
+    Some(format!(
+        "Not resuming saved swap {uuid} ({maker_coin}/{taker_coin}): TRON swaps are not available in this build; \
+         the saved swap is kept"
+    ))
+}
+
 /// Find out the swaps that need to be kick-started, continue from the point where swap was interrupted
-/// Return the tickers of coins that must be enabled for swaps to continue
+/// Return the tickers of coins that must be enabled for swaps to continue.
+///
+/// An unfinished swap that names a TRON coin is not resumed and its coins are not returned
+/// ([`tron_swap_skip_message`]).
 pub async fn swap_kick_starts(ctx: MmArc) -> Result<HashSet<String>, String> {
     let mut coins = HashSet::new();
     let swaps = try_s!(SavedSwap::load_all_my_swaps_from_db(&ctx).await);
@@ -480,7 +504,6 @@ pub async fn swap_kick_starts(ctx: MmArc) -> Result<HashSet<String>, String> {
             continue;
         }
 
-        info!("Kick starting the swap {}", swap.uuid());
         let maker_coin_ticker = match swap.maker_coin_ticker() {
             Ok(t) => t,
             Err(e) => {
@@ -495,6 +518,11 @@ pub async fn swap_kick_starts(ctx: MmArc) -> Result<HashSet<String>, String> {
                 continue;
             },
         };
+        if let Some(message) = tron_swap_skip_message(&ctx, swap.uuid(), &maker_coin_ticker, &taker_coin_ticker) {
+            info!("{}", message);
+            continue;
+        }
+        info!("Kick starting the swap {}", swap.uuid());
         coins.insert(maker_coin_ticker.clone());
         coins.insert(taker_coin_ticker.clone());
 
@@ -534,6 +562,10 @@ pub async fn swap_kick_starts(ctx: MmArc) -> Result<HashSet<String>, String> {
                     continue;
                 },
             };
+            if let Some(message) = tron_swap_skip_message(&ctx, &uuid, &repr.maker_coin, &repr.taker_coin) {
+                info!("{}", message);
+                continue;
+            }
             coins.insert(repr.maker_coin.clone());
             coins.insert(repr.taker_coin.clone());
             let ctx2 = ctx.clone();
@@ -566,6 +598,10 @@ pub async fn swap_kick_starts(ctx: MmArc) -> Result<HashSet<String>, String> {
                     continue;
                 },
             };
+            if let Some(message) = tron_swap_skip_message(&ctx, &uuid, &repr.maker_coin, &repr.taker_coin) {
+                info!("{}", message);
+                continue;
+            }
             coins.insert(repr.maker_coin.clone());
             coins.insert(repr.taker_coin.clone());
             let ctx2 = ctx.clone();

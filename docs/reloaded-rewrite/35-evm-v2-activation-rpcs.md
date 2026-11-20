@@ -2879,3 +2879,9 @@ is decided together with this item.
   chapter 49 §49.2.1 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
   2026-11-19, measure 0.02, no findings**, as recorded for §49.2.1 in chapter
   49's provenance footer.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status note of this date after the 2026-11-17 TRON platform note records
+  that `TRON_ACTIVATION_AVAILABLE` is `true` and that a TRON coin is
+  wallet-only while `TRON_SWAPS_AVAILABLE` is `false`. It rests on chapter
+  21 D6 and R21.B3 and on this repository's code. No cleared sentence was
+  edited.
