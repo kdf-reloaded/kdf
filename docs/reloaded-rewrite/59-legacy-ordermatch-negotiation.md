@@ -559,10 +559,12 @@ identifier (`match_by` carries the orders as a set), and within that order
 the order's base coin is judged before its rel coin. On a surface with typed
 errors the error type is `OrderNotMatchableMissingCapability`, with the
 members `coin`, `capability` and `orders`; on a surface without them it is
-the error text alone. In every other case -- no `match_by`, `match_by` by
-public key, a named order the node does not hold, a named order of the
-node's own or of another pair, or at least one named order that is
-presentable -- the request proceeds as before.
+the error text alone. Only an order the request could match by its coins is
+judged: an order on the request's pair and on the side the request takes. In
+every other case -- no `match_by`, `match_by` by public key, a named order
+the node does not hold, a named order of the node's own, a named order of
+another pair or of the side the request cannot match, or at least one named
+order that is presentable -- the request proceeds as before.
 
 **R59.4C.7** *Switch and logs.* There is no new switch. A requirement's own
 switch removes its key from the required set (R59.4C.1), and with it the
@@ -1015,9 +1017,11 @@ shall produce no `MakerReserved`, and a refused `MakerReserved` no
   fetch yields the filtered relay answer.
 - (g) *Early refusal (R59.4C.6).* `match_by` naming one held, unpresentable
   order is refused, and no taker order exists afterwards. It proceeds when
-  the named order is not held, when it is an order of another pair, when
-  one of two named orders is presentable, with `match_by` by public key,
-  and without `match_by`.
+  the named order is not held, when it is the node's own, when it is an
+  order of another pair or of the side the request cannot match, when one
+  of two named orders is presentable, with `match_by` by public key, and
+  without `match_by`. With two named orders that lack different
+  capabilities, the refusal names those of the lower identifier.
 - (h) *Switch (R59.4C.7).* With the requirement's switch off, (d), (f) and
   (g) give the results of a node without this section.
 
