@@ -1051,10 +1051,10 @@ about the energy a TRC20 contract pays itself is stated in R21.10B.10 --
 R21.10B.12 below, and what it does when the dry run reverts in R21.10B.13
 (Spec Reader round 0.5.0-17). The sentences of R21.10B.7 are unchanged.
 
-> **Clearance (chapter 01 R40) -- KDF Dirty Gate pending for R21.10B.10 --
-> R21.10B.13, T21.10B.16 -- T21.10B.18 and the notes between them (Spec
-> Reader round 0.5.0-17, 2026-11-20; scoped record in §21.13).** Until the
-> gate passes, this block is not cleared text.
+> **Clearance (chapter 01 R40) -- passed the KDF Dirty Gate on
+> 2026-11-20, measure 0.02, for R21.10B.10 -- R21.10B.13, T21.10B.16 --
+> T21.10B.18 and the notes between them (Spec Reader round 0.5.0-17;
+> attestation in §21.13).**
 
 **Origin-energy share of a TRC20 transfer (added 2026-11-20).** *Public
 rule (TRON Developer Hub, Resource Model and smart-contract energy
@@ -2183,8 +2183,9 @@ V3. The address encoding, protobuf transaction/contract formats,
   note after R21.10B.7 and the block that follows it (the public-rule
   paragraph, R21.10B.10 -- R21.10B.13, the two code-quality findings, the
   two not-established paragraphs, T21.10B.16 -- T21.10B.18); no other text
-  of this chapter was changed.* **KDF Dirty Gate: pending** (chapter 01 R40;
-  no clearance is recorded and no scope attestation exists yet).
+  of this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-20,
+  measure 0.02, no findings** (chapter 01 R40; the attestation closes
+  this item).
   *Inputs:* (1) the forbidden corpus at the rows `v3.0.0-beta` (read from
   a checkout at the row `dev (as of 2026-03-27)`, whose source tree was
   confirmed identical by mechanical difference), `v2.6.0-beta`,
@@ -2207,3 +2208,16 @@ V3. The address encoding, protobuf transaction/contract formats,
   row was added to chapter 02 §2.15A: every state read already had one.
   The remedies sketched in the two code-quality findings and the three
   acceptance rows are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-20, measure
+  0.02, no findings. *Extent:* the TRON wallet surface the block reaches:
+  the TRC20 withdraw fee estimate and its energy input, the `fee_limit`,
+  the check that the sender holds the TRX for the fee, the node client's
+  handling of a dry-run answer and of a token balance read, and the
+  endpoints requested; at the rows `dev (as of 2026-03-27)` and
+  `v3.0.0-beta` (identical trees), `v2.6.0-beta`, `feat/tron-swap-support
+  (as of 2026-04-23)` and `feat/tron-gasfree (as of 2026-05-04)`.
+  *Method:* reading plus mechanical comparison (word n-gram overlap at
+  lengths 6, 5, 4 and 3, and a per-token forced-versus-free inventory);
+  the repository's clean-room gate tool was not applicable because the
+  additions embed no code blocks. *Measure:* 0.02, on the
+  discretionary-expression basis.
