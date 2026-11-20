@@ -1198,6 +1198,16 @@ not a coinbase output counts as mature; only coinbase outputs are withheld
 until the configured maturity (R38.2). An unconfirmed change output is thus
 eligible as soon as the backend lists it.
 
+*Status note (2026-11-20, clean side; maintainer decision).* In this tree the
+maturity check of a listing does not fetch the transaction of an output that
+the record knows as an output of a transaction this node built, for every
+UTXO coin, whether step 2 added it or the backend listed it. Such an output
+belongs to a transaction this node built and signed, so it is never a
+coinbase or coinstake output and counts as mature. The fetch was a read
+spread over the servers whose error answer is final (R38.6.4f item 1): a
+server that had not yet seen the fresh transaction failed the next spend from
+the same address. Every other listed output keeps the check as before.
+
 R38.5B.5 **Serialization of own-address spends.** (Reference-bound at both
 rows; also the baseline's behaviour.) Two locks order concurrent spends from
 the coin's address. The listing of R38.5B.4 returns the record's lock to its
@@ -4479,8 +4489,11 @@ D38.6.4Q.4 is decided:* option (b), on 2026-11-15. Its key was decided on
    build that is not broadcast at once (a withdraw or a delegation), through
    signing and the pending entry of R38.5B.9. The listing request itself is
    sent before the lock is taken, so two builds can ask at the same time;
-   their selections are made one after the other. It replaces the process-wide lock for this
-   family; the other UTXO coins keep the process-wide lock. A pending entry
+   their selections are made one after the other. It replaces the
+   process-wide lock for this family; the other UTXO coins keep the
+   process-wide lock. A withdraw holds the lock through signing; with a
+   hardware wallet that includes the wait for the device, during which the
+   listings of that address wait too. A pending entry
    does not hide inputs: two builds made before either is broadcast can
    select the same input, and the backend refuses the second broadcast.
 5. *Lock order.* The record's lock is a lock of the send path. It is never
@@ -6475,6 +6488,12 @@ R38.8.6 **Tests (two-direction, observable).**
   read the forbidden corpus, from the maintainer's decisions and this
   repository's code. It takes no forbidden-class input, so chapter 01 R38 is
   not engaged and no gate pass is required.
+- *Maintainer decision (2026-11-20), clean side -- status note after
+  R38.5B.4 (no maturity fetch for an output the record supplied, for every
+  UTXO coin).* Written by a session that never read the forbidden corpus,
+  from the maintainer's decision and this repository's code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
 - *Maintainer decisions (2026-11-15 and 2026-11-19), clean side -- status
   note after D38.6.4Q.4 (one recently-spent record per platform and address
   for the QTUM family: key, lifetime, what is entered, ordering, and lock

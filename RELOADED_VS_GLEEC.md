@@ -597,10 +597,11 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **QTUM and its QRC20 tokens share one record of spent coins per address,
   and their builds no longer wait for other UTXO coins.** No switch. GLEEC
   KDF keeps a record of recently spent coins per coin instance, enters
-  nothing for a token's broadcast, and serializes the builds of every UTXO
-  coin of the process with one lock. So a QTUM send right after a token send
-  from the same address, or two token sends, can select the same coin, and
-  the second broadcast is rejected. KDF Reloaded keeps one record per
+  nothing for a token's broadcast, and serializes token broadcasts and the
+  withdraw builds of every UTXO coin with one process-wide lock; a QTUM swap
+  send does not take it and a delegation does not hold it. So a QTUM send
+  right after a token send from the same address, or two token sends, can
+  select the same coin, and the second broadcast is rejected. KDF Reloaded keeps one record per
   platform and address script for QTUM and its tokens. Every transaction it
   built from that address and the backend accepted is entered: QTUM's swap
   sends and merges, every token broadcast, and the withdraws and delegations

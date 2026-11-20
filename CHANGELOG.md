@@ -657,10 +657,19 @@ the previous version used. The safe way:
   the same address could pick the same coin and be rejected; two token sends could do the same. QTUM
   and its tokens now keep one record per address: every transaction the node built from that address
   and the network accepted is entered, and the next one uses other coins or the change. Token
-  withdraws and QTUM delegations are entered when they are broadcast with `send_raw_tx`. Building
-  such a transaction no longer waits for other UTXO coins, and theirs no longer wait for it. Under an
+  withdraws and QTUM delegations are entered when they are broadcast with `send_raw_tx`. A token
+  send, and a withdraw or delegation of QTUM or a token, no longer waits for the builds of other UTXO
+  coins, and theirs no longer wait for it. Under an
   HD login, QTUM's enabled address and the tokens' address are different addresses with separate
   records. Detail: PR #436; CRD ch.38 D38.6.4Q.4 and its status note.
+- **A spend right after another spend from the same address no longer fails when a server has not
+  yet seen the first one.** This applies to every UTXO coin that checks the maturity of its coins
+  (QRC20 tokens always, QTUM by default, other coins with `check_utxo_maturity`). The next spend uses the
+  change of the first transaction, and the maturity check fetched that transaction from one of the
+  servers; a server that had not seen it yet answered with an error, and the spend failed. The
+  node built that transaction itself, so it cannot be a coinbase output, and the check no longer
+  fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
+  after R38.5B.4.
 
 ### Tests
 
