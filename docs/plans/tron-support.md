@@ -16,11 +16,11 @@
 > `enable` / `electrum`, and the "TRON support is not available in this build"
 > refusal is gone. Swaps stay off behind a second constant,
 > `TRON_SWAPS_AVAILABLE` (`false`): every TRON coin is wallet-only whatever its
-> coins-file entry says, declines every match, a saved order that names one
-> is cancelled at startup, and a saved swap that names one is not resumed (CRD ch. 21 D6, R-D1, R21.10B.9, R21.B3 and their
-> status notes of this date; ch. 55 D55.5). Work package 2 (switching activation
-> on) is done with this; swap participation (work package 5) and the reachable
-> GasFree rail stay open.
+> coins-file entry says, declines every match, a saved order that names one is
+> cancelled at startup, and a saved swap that names one is not resumed (CRD
+> ch.21 D6, R-D1, R21.10B.9, R21.B3 and their status notes of this date; ch.55
+> D55.5). Work package 2 (switching activation on) is done with this; swap
+> participation (work package 5) and the reachable GasFree rail stay open.
 
 ## Goal
 
@@ -140,12 +140,13 @@ TronGrid hosts only. Only confirmed transactions are listed, and a chain reorgan
 store serves the legacy and the versioned `my_tx_history`. TRON stays switched off.
 
 *2026-11-20:* TRON is switched on as a wallet-only coin family (work package 2). Activation is open on every route;
-orders and swaps are refused for every TRX and TRC20 coin by the wallet-only check, whatever the coins-file entry says,
-behind the build constant `TRON_SWAPS_AVAILABLE` (`false`). The refusal text, the refusal tests and the test-only
-override of the activation switch are removed. No compatibility switch is needed: for a coin configured
+orders and swaps are refused for every TRX and TRC20 coin by the wallet-only check, whatever the coins-file entry
+says, behind the build constant `TRON_SWAPS_AVAILABLE` (`false`). The refusal text, the refusal tests and the
+test-only override of the activation switch are removed. No compatibility switch is needed: for a coin configured
 `"wallet_only": true` the order answers are the reference's, and for a trading-capable TRON entry the reference
 refuses the order too, one check later, with an answer of the same form (the text differs: Reloaded's names the
-wallet-only ticker). An unfinished saved swap that names a TRON coin is not resumed at startup and its record is kept.
+wallet-only ticker). An unfinished saved swap that names a TRON coin is not resumed at startup and its record is
+kept.
 
 *2026-11-17:* GasFree gets its modules before the switch-on, and its reachable
 rail (the user-visible fee method) after it. GasFree also submits the signed

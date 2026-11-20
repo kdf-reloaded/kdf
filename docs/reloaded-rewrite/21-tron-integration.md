@@ -2080,10 +2080,10 @@ and in both v2 swap storages. Such a swap is skipped with one log line
 that names its uuid and the reason; its record is neither deleted nor
 marked failed, so it can resume in a build that has TRON swaps, and its
 coins are not among those the kick-start asks to be enabled. The typed
-refusals of §21.11 stay in place behind that; a
-`recover_funds_of_swap` asked for by hand for such a record is not
-stopped by this switch and meets them. The swap-contract members of an activation
-request are still validated by the rule of F21.B3 and still not bound.
+refusals of §21.11 stay in place behind that; a `recover_funds_of_swap`
+asked for by hand for such a record is not stopped by this switch and meets
+them. The swap-contract members of an activation request are still validated
+by the rule of F21.B3 and still not bound.
 
 **R21.B4 (orderbook address).** When TRON swaps are enabled, the
 orderbook address derived from an order's public key for a `TRX` or

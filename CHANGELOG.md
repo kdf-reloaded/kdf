@@ -208,12 +208,12 @@ the previous version used. The safe way:
   refuses is not signed), and a transaction history when a TronGrid API key is set; the items below describe each.
   *Swaps stay off.* Reloaded has no TRON swap, so every TRX and TRC20 coin counts as wallet-only, whatever its
   coins-file entry says: `setprice`, `buy`, `sell` and `start_swap` refuse it with the usual "… is wallet only"
-  answer, as GLEEC KDF does for a coin configured `"wallet_only": true` (every published TRON entry is), a TRON
-  coin declines to match, an order with a TRON coin saved earlier is cancelled at startup with a line in the
-  log, and an unfinished saved swap that names a TRON coin is not resumed at startup (its record is kept). For a TRON entry that does not say `"wallet_only": true`, GLEEC KDF refuses the order at a later check;
-  the answer has the same form, so no setting exists for this. Gasless TRC20 transfers through GasFree are not
-  available yet. Detail: PR #451; CRD ch.21 D6, R-D1, R21.10B.9, R21.B3 and their status notes of 2026-11-20; ch.55
-  D55.5.
+  answer, as GLEEC KDF does for a coin configured `"wallet_only": true` (every published TRON entry is), a TRON coin
+  declines to match, an order with a TRON coin saved earlier is cancelled at startup with a line in the log, and an
+  unfinished saved swap that names a TRON coin is not resumed at startup (its record is kept). For a TRON entry that
+  does not say `"wallet_only": true`, GLEEC KDF refuses the order at a later check; the answer has the same form, so
+  no setting exists for this. Gasless TRC20 transfers through GasFree are not available yet. Detail: PR #451; CRD
+  ch.21 D6, R-D1, R21.10B.9, R21.B3 and their status notes of 2026-11-20; ch.55 D55.5.
 - **The TRON node client gives each node a time limit and fails over when a node answers badly.** A node
   that does not answer within 10 seconds is skipped, and so is a node that answers with an error status
   (a rate limit included), with something that is not the expected JSON, or with the node's own error form;
