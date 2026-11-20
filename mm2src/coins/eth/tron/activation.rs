@@ -96,8 +96,8 @@ pub struct TronCoinParams {
     pub nodes: Vec<TronNode>,
     /// The swap confirmations, resolved by [`tron_required_confirmations`].
     pub required_confirmations: u64,
-    /// Whether the legacy history process is requested. The mmrpc 2.0 route passes `false`: it ignores
-    /// `tx_history` (CRD ch.21 R21.10B.2).
+    /// Whether the request asks for the transaction history (`tx_history`, on both activation routes). The history
+    /// is enabled only when the node list also has a keyed TronGrid node (CRD ch.21 §21.10C).
     pub tx_history: bool,
 }
 
@@ -255,7 +255,9 @@ async fn build_tron_coin(
             EthCoinBuildError::Internal(format!("Failed to build placeholder alloy provider for TRON: {e}"))
         })?;
 
-    let initial_history_state = if tx_history {
+    // The history needs both the request and a keyed TronGrid node (CRD ch.21 §21.10C); without either the coin
+    // keeps the reference behavior of R21.10B.6.
+    let initial_history_state = if tx_history && tron_api.has_history_nodes() {
         HistorySyncState::NotStarted
     } else {
         HistorySyncState::NotEnabled
@@ -364,7 +366,12 @@ impl EthCoin {
             gas_station_policy: self.gas_station_policy.clone(),
             web3: self.web3.clone(),
             web3_instances: self.web3_instances.clone(),
-            history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
+            // The platform's history process also writes the history of its tokens (CRD ch.21 §21.10C).
+            history_sync_state: Mutex::new(if self.tron_history_enabled() {
+                HistorySyncState::NotStarted
+            } else {
+                HistorySyncState::NotEnabled
+            }),
             ctx: self.ctx.clone(),
             required_confirmations: required_confirmations.into(),
             chain_id: self.chain_id,

@@ -4,6 +4,10 @@
 //! one node at a time, each attempt bounded by a cutoff (R-N3). The node that answers becomes the first node of the
 //! order, the nodes that failed before it move to the tail (R-N5). No lock is held while a node is asked (R-N7).
 //!
+//! The account listings of the transaction history (CRD ch.21 §21.10C) are GET requests of the TronGrid account
+//! endpoints. They walk the same order with the same rules, restricted to the keyed TronGrid nodes: `https` nodes
+//! on a TronGrid host that carry the `TRON-PRO-API-KEY` header.
+//!
 //! # Invariants
 //!
 //! - Nothing this module logs or returns names a node by more than scheme, host and port, and no header value or
@@ -14,7 +18,7 @@
 
 use derive_more::Display;
 use mm2_err_handle::prelude::*;
-use mm2_net::transport::{slurp_post_json_with_headers_bounded, SlurpError};
+use mm2_net::transport::{slurp_post_json_with_headers_bounded, slurp_url_with_headers_bounded, SlurpError, SlurpResult};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -113,6 +117,18 @@ fn endpoint_url(base: &str, path: &str) -> String {
     }
 }
 
+/// Like [`endpoint_url`] for a request that has a query of its own: `query` (without the `?`) goes right after the
+/// path and the query of `base` stays at the end, joined by `&`, so `https://h/x?key=1` asked for `/p` with `a=1`
+/// gives `https://h/x/p?a=1&key=1`.
+fn endpoint_url_with_query(base: &str, path: &str, query: &str) -> String {
+    let url = endpoint_url(base, &format!("{path}?{query}"));
+    // `endpoint_url` put the query of `base`, if any, behind a second `?`: it becomes a further parameter.
+    match url.match_indices('?').nth(1) {
+        Some((at, _)) => format!("{}&{}", &url[..at], &url[at + 1..]),
+        None => url,
+    }
+}
+
 /// POST a JSON body to one node, bounded by `cutoff_s` seconds for the whole exchange, and decode a 2xx answer as
 /// `Resp`, then check it with `validate` (an [`TronApiError::InvalidResponse`] fails the attempt). `headers` are the node's own headers; redirects are not followed, so a 3xx answer is a non-2xx failure.
 ///
@@ -131,9 +147,38 @@ async fn post_json_checked<Resp>(
 where
     Resp: serde::de::DeserializeOwned,
 {
-    let (status, _headers, body) = slurp_post_json_with_headers_bounded(url, json_body, headers, cutoff_s)
-        .await
-        .map_err(TronApiError::from)?;
+    checked_answer(
+        slurp_post_json_with_headers_bounded(url, json_body, headers, cutoff_s).await,
+        validate,
+    )
+}
+
+/// GET from one node, bounded by `cutoff_s` seconds for the whole exchange, with the answer rules of
+/// [`post_json_checked`]: a non-2xx status (a redirect included) is a node failure, the node's error forms are
+/// node failures, and `validate` runs inside the attempt. `headers` are the node's own headers. The error texts
+/// carry no URL and no header value.
+async fn get_json_checked<Resp>(
+    url: &str,
+    headers: &http::HeaderMap,
+    cutoff_s: f64,
+    validate: fn(&Resp) -> Result<(), TronApiError>,
+) -> Result<Resp, TronApiError>
+where
+    Resp: serde::de::DeserializeOwned,
+{
+    checked_answer(slurp_url_with_headers_bounded(url, headers, cutoff_s).await, validate)
+}
+
+/// Judges the exchange with one node (R-N4): the status, the node's error forms, the decoding and the endpoint's
+/// own shape check.
+fn checked_answer<Resp>(
+    exchange: SlurpResult,
+    validate: fn(&Resp) -> Result<(), TronApiError>,
+) -> Result<Resp, TronApiError>
+where
+    Resp: serde::de::DeserializeOwned,
+{
+    let (status, _headers, body) = exchange.map_err(TronApiError::from)?;
     if !status.is_success() {
         return Err(TronApiError::Transport(format!(
             "node answered HTTP status {}",
@@ -270,6 +315,8 @@ pub struct TransactionInfoResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct TransactionReceipt {
+    /// The bandwidth the transaction drew from the owner's free or staked bandwidth, in bytes.
+    pub net_usage: Option<u64>,
     pub energy_usage_total: Option<u64>,
     pub net_fee: Option<i64>,
     pub energy_fee: Option<i64>,
@@ -294,6 +341,57 @@ pub struct ChainParameter {
 pub struct GetAccountResourceRequest {
     pub address: String,
     pub visible: bool,
+}
+
+/// One page of a TronGrid account listing (`GET /v1/accounts/{address}/transactions` and
+/// `/transactions/trc20`; the shapes are those of TronGrid's public API documentation). The rows are kept as JSON:
+/// a listing can carry rows of several kinds, and the history reads each row on its own (CRD ch.21 §21.10C).
+#[derive(Debug, Deserialize)]
+pub struct AccountListingPage {
+    pub success: bool,
+    pub data: Vec<serde_json::Value>,
+    pub meta: Option<AccountListingMeta>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccountListingMeta {
+    /// The cursor of the next page; absent on the last page.
+    pub fingerprint: Option<String>,
+}
+
+/// Which listing of an account is asked.
+#[derive(Clone, Copy, Debug)]
+pub enum AccountListing<'a> {
+    /// `GET /v1/accounts/{address}/transactions`.
+    Transactions,
+    /// `GET /v1/accounts/{address}/transactions/trc20`, of every token or of the token contract given.
+    Trc20 { contract: Option<&'a TronAddress> },
+}
+
+/// The page size asked of an account listing: the largest the public API documents.
+const LISTING_PAGE_LIMIT: u32 = 200;
+
+/// A listing page is an answer only when the provider marks it a success.
+fn check_listing_page(page: &AccountListingPage) -> Result<(), TronApiError> {
+    if page.success {
+        Ok(())
+    } else {
+        Err(TronApiError::InvalidResponse(
+            "account listing answer is not marked a success".to_owned(),
+        ))
+    }
+}
+
+/// A transaction-info answer for a transaction the node has: an answer without a block number (the node's empty
+/// object for a transaction it does not know) is a bad answer, so the next node is asked (R-N4 (d)).
+fn check_confirmed_info(info: &TransactionInfoResponse) -> Result<(), TronApiError> {
+    if info.block_number.is_some() {
+        Ok(())
+    } else {
+        Err(TronApiError::InvalidResponse(
+            "gettransactioninfobyid answer carries no block number".to_owned(),
+        ))
+    }
 }
 
 /// The public TRON `response_code` names that mark a node as busy or not yet in sync: the request moves on to the
@@ -381,6 +479,17 @@ struct Node {
     label: String,
     /// The coin's ticker and the node's position in the coin's list as the request gave it (R-N8).
     slot: NodeSlot,
+    /// Whether the node is a keyed TronGrid node, the only kind the account listings are asked of (CRD ch.21
+    /// §21.10C). Fixed when the client is built.
+    history: bool,
+}
+
+/// What a walk over the nodes asks of each node.
+enum Call<'a> {
+    /// A POST of `json_body` to the endpoint `path`, asked of every node.
+    Post { path: &'a str, json_body: String },
+    /// A GET of the endpoint `path` with `query`, asked of the keyed TronGrid nodes only.
+    GetKeyed { path: &'a str, query: &'a str },
 }
 
 impl std::fmt::Debug for TronApiClient {
@@ -414,6 +523,7 @@ impl TronApiClient {
             .into_iter()
             .zip(listed_nodes(ticker, urls))
             .map(|(node, listed)| Node {
+                history: node.is_keyed_trongrid(),
                 label: host_only(node.url()),
                 headers: node.headers().clone(),
                 url: listed.url,
@@ -435,6 +545,23 @@ impl TronApiClient {
     pub(crate) fn new_with_cutoff_s(ticker: &str, nodes: Vec<TronNode>, cutoff_s: f64) -> Self {
         Self::with_cutoff(ticker, nodes, cutoff_s, false)
     }
+
+    /// Test constructor like [`Self::new_with_cutoff_s`] in which `history[i]` says whether node `i` counts as a
+    /// keyed TronGrid node: a loopback stub can never be one by the production rule
+    /// ([`TronNode::is_keyed_trongrid`], which has its own tests).
+    #[cfg(test)]
+    pub(crate) fn new_with_history_nodes(ticker: &str, nodes: Vec<TronNode>, history: &[bool], cutoff_s: f64) -> Self {
+        let mut client = Self::with_cutoff(ticker, nodes, cutoff_s, false);
+        if let Some(inner) = Arc::get_mut(&mut client.inner) {
+            for (node, flag) in inner.nodes.iter_mut().zip(history) {
+                node.history = *flag;
+            }
+        }
+        client
+    }
+
+    /// Whether the client has a keyed TronGrid node, that is, whether an account listing can be asked at all.
+    pub(crate) fn has_history_nodes(&self) -> bool { self.inner.nodes.iter().any(|node| node.history) }
 
     /// The host-only names of the nodes in the order the next request starts with.
     #[cfg(test)]
@@ -470,22 +597,80 @@ impl TronApiClient {
         Resp: serde::de::DeserializeOwned + Send + 'static,
     {
         let json_body = serde_json::to_string(request).map_err(|e| TronApiError::InvalidResponse(e.to_string()))?;
+        self.walk(&Call::Post { path, json_body }, validate).await
+    }
+
+    /// GET the endpoint `path` with `query` from the keyed TronGrid nodes, one at a time in the current order, with
+    /// the rules of [`Self::try_post_validated`]: the same failover, cutoff, shape check inside the attempt and
+    /// scrubbed errors. No other node is ever asked, so the address listings and the key go to TronGrid only.
+    ///
+    /// # Errors
+    ///
+    /// [`TronApiError::AllNodesFailed`] without any request when the client has no keyed TronGrid node; the errors
+    /// of a walk otherwise.
+    async fn try_get_keyed_validated<Resp>(
+        &self,
+        path: &str,
+        query: &str,
+        validate: fn(&Resp) -> Result<(), TronApiError>,
+    ) -> Result<Resp, TronApiError>
+    where
+        Resp: serde::de::DeserializeOwned + Send + 'static,
+    {
+        if !self.has_history_nodes() {
+            return Err(TronApiError::AllNodesFailed(
+                "no TronGrid node with an API key is configured".to_owned(),
+            ));
+        }
+        self.walk(&Call::GetKeyed { path, query }, validate).await
+    }
+
+    /// The walk every request shares: the nodes the call is asked of are tried one at a time in the current order
+    /// (R-N4), the node that answers becomes the first node of the order and the nodes that failed before it move
+    /// to the tail in their relative order (R-N5); no lock is held while a node is asked (R-N7).
+    async fn walk<Resp>(
+        &self,
+        call: &Call<'_>,
+        validate: fn(&Resp) -> Result<(), TronApiError>,
+    ) -> Result<Resp, TronApiError>
+    where
+        Resp: serde::de::DeserializeOwned + Send + 'static,
+    {
         let inner = &self.inner;
         // The snapshot this request walks; concurrent requests work on their own snapshots.
         let order = inner.current_order();
         let mut failures: Vec<Failure> = Vec::new();
 
-        for (position, &index) in order.iter().enumerate() {
+        for &index in order.iter() {
             let node = &inner.nodes[index];
-            let url = endpoint_url(&node.url, path);
-            match post_json_checked::<Resp>(&url, json_body.clone(), &node.headers, inner.cutoff_s, validate).await {
+            let (path, url, attempt) = match call {
+                Call::Post { path, json_body } => {
+                    let url = endpoint_url(&node.url, path);
+                    let attempt =
+                        post_json_checked::<Resp>(&url, json_body.clone(), &node.headers, inner.cutoff_s, validate)
+                            .await;
+                    (*path, url, attempt)
+                },
+                Call::GetKeyed { path, query } => {
+                    if !node.history {
+                        continue;
+                    }
+                    let url = endpoint_url_with_query(&node.url, path, query);
+                    let attempt = get_json_checked::<Resp>(&url, &node.headers, inner.cutoff_s, validate).await;
+                    (*path, url, attempt)
+                },
+            };
+            match attempt {
                 Ok(resp) => {
                     // The answering node first, the nodes that failed before it at the tail in their relative
                     // order. The last store wins and is always a complete permutation.
-                    if position > 0 {
-                        let mut rotated = order.clone();
-                        rotated.rotate_left(position);
-                        inner.set_order(rotated);
+                    if !failures.is_empty() {
+                        let failed = |i: &usize| failures.iter().any(|failure| failure.node == *i);
+                        let mut next = Vec::with_capacity(order.len());
+                        next.push(index);
+                        next.extend(order.iter().copied().filter(|i| *i != index && !failed(i)));
+                        next.extend(order.iter().copied().filter(|i| *i != index && failed(i)));
+                        inner.set_order(next);
                     }
                     return Ok(resp);
                 },
@@ -641,6 +826,62 @@ impl TronApiClient {
             value: tx_hash.to_string(),
         };
         self.try_post("/wallet/gettransactioninfobyid", &req).await
+    }
+
+    /// The receipt of a transaction the chain has confirmed, for the height and the fee of a history row (CRD ch.21
+    /// §21.10C). A node that does not know the transaction answers an empty object: that is a bad answer here and
+    /// moves on to the next node.
+    pub(crate) async fn get_confirmed_transaction_info(
+        &self,
+        tx_hash: &str,
+    ) -> Result<TransactionInfoResponse, TronApiError> {
+        let req = TxByIdRequest {
+            value: tx_hash.to_string(),
+        };
+        self.try_post_validated("/wallet/gettransactioninfobyid", &req, check_confirmed_info)
+            .await
+    }
+
+    /// One page of a confirmed-only account listing from a keyed TronGrid node (CRD ch.21 §21.10C). `fingerprint`
+    /// is the cursor of the previous page (`meta.fingerprint`); the link the provider sends beside it is never
+    /// followed.
+    ///
+    /// # Errors
+    ///
+    /// [`TronApiError::InvalidResponse`] without any request for a cursor that is not made of letters, digits,
+    /// `-` and `_` (it is put into the request URL as it is); the errors of the walk otherwise.
+    pub(crate) async fn get_account_listing(
+        &self,
+        address: &TronAddress,
+        listing: AccountListing<'_>,
+        fingerprint: Option<&str>,
+    ) -> Result<AccountListingPage, TronApiError> {
+        let owner = address.to_base58();
+        let mut query = format!("only_confirmed=true&limit={LISTING_PAGE_LIMIT}");
+        let path = match listing {
+            AccountListing::Transactions => format!("/v1/accounts/{owner}/transactions"),
+            AccountListing::Trc20 { contract } => {
+                if let Some(contract) = contract {
+                    query.push_str("&contract_address=");
+                    query.push_str(&contract.to_base58());
+                }
+                format!("/v1/accounts/{owner}/transactions/trc20")
+            },
+        };
+        if let Some(fingerprint) = fingerprint {
+            let plain = !fingerprint.is_empty()
+                && fingerprint
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+            if !plain {
+                return Err(TronApiError::InvalidResponse(
+                    "the cursor of an account listing has an unexpected form".to_owned(),
+                ));
+            }
+            query.push_str("&fingerprint=");
+            query.push_str(fingerprint);
+        }
+        self.try_get_keyed_validated(&path, &query, check_listing_page).await
     }
 
     /// Get chain parameters (fee prices).
@@ -874,6 +1115,19 @@ mod tests {
         let err = common::block_on(client.get_now_block()).unwrap_err().to_string();
         for secret in ["user", "secret", "APIKEY", "OTHERKEY"] {
             assert!(!err.contains(secret), "a credential part is rendered");
+        }
+    }
+
+    #[test]
+    fn a_request_query_goes_before_the_query_of_a_node_url() {
+        for (base, expected) in [
+            ("https://h", "https://h/v1/p?a=1&b=2"),
+            ("https://h/", "https://h/v1/p?a=1&b=2"),
+            ("https://h/x", "https://h/x/v1/p?a=1&b=2"),
+            ("https://h/x?key=1", "https://h/x/v1/p?a=1&b=2&key=1"),
+            ("https://h/x?key=1&c=3#frag", "https://h/x/v1/p?a=1&b=2&key=1&c=3"),
+        ] {
+            assert_eq!(endpoint_url_with_query(base, "/v1/p", "a=1&b=2"), expected, "{base}");
         }
     }
 

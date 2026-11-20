@@ -3485,7 +3485,10 @@ mod docker_tests {
         )
         .unwrap();
         let tx_size = tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(unsigned)) as u64;
-        let txfee_sat = block_on(coin.get_tx_fee()).unwrap().fee_for_size(tx_size);
+        let txfee_sat = block_on(coin.get_tx_fee())
+            .unwrap()
+            .fee_for_size(tx_size)
+            .expect("the docker test coin has a per-kilobyte fee");
         let txfee = BigDecimal::from(txfee_sat as i64) / BigDecimal::from(100_000_000);
         let withdraw = block_on(mm.rpc(&json! ({
             "mmrpc": "2.0",

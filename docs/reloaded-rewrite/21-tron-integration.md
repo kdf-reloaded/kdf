@@ -239,6 +239,11 @@ history (`tx_history` is ignored), `convertaddress`, `get_my_address` and
 family than its active platform is `PlatformCoinMismatch` inside the task
 status, not at `init`.
 
+*Status note (2026-11-20), transaction history.* The item "transaction
+history (`tx_history` is ignored)" of the note above no longer holds: on both
+routes `tx_history: true` starts the TRON history when the node list has a
+keyed TronGrid node, and is without effect otherwise (§21.10C).
+
 > **Binding scope (R36).** The method strings above are dictated
 > public API (R33). The Tron coin is activated by supplying
 > `"ticker": "TRX"`, a `nodes` array whose entries each carry a
@@ -931,6 +936,11 @@ and `to` in base58check, `tx_hash` as 64 lowercase hex digits without
 `transaction_type` `StandardTransfer`, `memo` null and `fee_details` of
 R21.10B.7.
 
+*Status note (2026-11-20), Reloaded has a TRON history.* R21.10B.6 describes
+the reference. Reloaded keeps these answers for a TRON coin without a TronGrid
+API key or without `tx_history: true`, and otherwise serves a history from a
+provider's account listings through both methods: §21.10C.
+
 **R21.10B.7** *Withdraw fee estimate and amounts (completes R-F1, R-F2,
 R-W2, R-W3 and R-W6).*
 
@@ -1236,6 +1246,11 @@ balance is refused before building. The TRC20 `fee_limit` follows D21.10B.1
 and is no longer a fixed cap. The status notes after R21.10B.7 and at
 D21.10B.1 state the rules.
 
+*Status note (2026-11-20), compatibility block.* The sentence "Reloaded has no
+TRON history source either" of the block no longer holds for a coin with a
+TronGrid API key and `tx_history: true`: §21.10C. Without them the answers are
+those of R21.10B.6.
+
 *Not established.* (1) Nothing was measured against a running reference
 binary or a live node. (2) The exact text the legacy error body carries in
 R21.10B.8 and R21.10B.9 is deliberately not recorded. (3) Whether the TRON
@@ -1313,6 +1328,180 @@ T21.10B.14 *Address methods.* `validateaddress` accepts a base58check, a
 T21.10B.15 *Orders.* With TRX configured wallet-only, `setprice`, `buy`
 and `sell` against any active coin each answer the legacy error body and
 `my_orders` stays empty.
+
+## 21.10C Transaction history (Reloaded-original, added 2026-11-20)
+
+Reloaded-original rules for the transaction history of TRX and TRC20 coins. The
+reference has no TRON history (R21.10B.6); nothing in this section was taken
+from it. The request and answer shapes of the two account endpoints are those
+of TronGrid's public API documentation (TRON Developer Hub,
+developers.tron.network, the pages *Get transaction info by account address*
+and *Get TRC20 transaction info by account address*, read on 2026-11-20): the
+parameters `only_confirmed`, `limit` (at most 200), `fingerprint` and, on the
+TRC20 endpoint only, `contract_address`, and the answer members `data`,
+`success` and `meta.fingerprint`, which is present only when a further page
+exists. The receipt and
+chain-parameter shapes are those of the public TRON full-node HTTP API (§21.9).
+The figures the tests check are public Nile test-network data captured on
+2026-11-20 (chapter 01 R6).
+
+**R21.10C.1 (when the history runs).** The history of a TRON coin is enabled
+only when both hold: the activation request asks `tx_history: true`, and the
+coin's node list has a *keyed TronGrid node*, that is, a node whose URL is
+`https` on one of the TronGrid hosts of R-N9 (exact host match) and whose
+requests carry the `TRON-PRO-API-KEY` header. The header comes from the node's
+own `headers` entry or, failing that, from the `MM2.json` key `tron_api_key`,
+in the order R-N9 states. This holds on both activation routes (the mmrpc 2.0
+route and the legacy `enable` / `electrum` route). Honoring `tx_history` is a
+divergence from R21.10B.2, where the reference ignores the member for TRON; it
+is additive, not visible to a peer, and has no switch.
+
+**R21.10C.2 (without a key).** A coin whose history is not enabled keeps the
+reference behavior of R21.10B.6: the versioned `my_tx_history` answers
+`NotSupportedFor` (HTTP 400), the legacy `my_tx_history` answers an empty
+`transactions` list (unless rows were stored earlier), `current_block` from the
+TRON node and `sync_status` `{"state":"NotEnabled"}`, and no account listing is
+ever asked. A key header on a host that is not a TronGrid host, and a TronGrid
+host given as `http`, do not enable the history.
+
+**R21.10C.3 (source and hosts).** The rows come from two listings per address,
+asked by GET of keyed TronGrid nodes only, never of another node of the list:
+
+| Request | Use |
+| --- | --- |
+| `GET /v1/accounts/{address}/transactions?only_confirmed=true&limit=200` | TRX rows |
+| `GET /v1/accounts/{address}/transactions/trc20?only_confirmed=true&limit=200` (with `contract_address` when one token is served) | TRC20 rows |
+| `POST /wallet/gettransactioninfobyid` (any configured node) | block height and fee of a TRC20 row, once per new transaction |
+| `POST /wallet/getchainparameters` (any configured node) | the bandwidth price, once per pass |
+
+`{address}` is the base58check form. The GET requests follow R-N3 to R-N8 as
+the POST requests do: the per-attempt cutoff, failover on every node failure of
+R-N4 (a listing not marked `success: true` or without a `data` array is a bad
+answer), the order rotation of R-N5, no redirect, and the one all-failed error
+of R-N8. A rate-limit answer (HTTP 429) and a refusal of the key (HTTP 403) are
+non-2xx node failures like any other: the next keyed node is asked, and when
+none answers the pass fails and is tried again after the pause of R21.10C.9,
+not sooner. The next page is asked with the same parameters and the
+`meta.fingerprint` value as the `fingerprint` parameter; a page without
+`meta.fingerprint` is the last one. The link the provider sends beside it is
+not followed,
+and a cursor that is not made of letters, digits, `-` and `_` ends the walk
+with an error. The API key is a secret under R-N9: no log line, error text,
+RPC answer or history state shows it or any part of a node URL beyond the host.
+
+**R21.10C.4 (addresses).** Every address a row names is in base58check. The
+history covers every *known* address of the wallet: the enabled address of a
+single-key coin, and for an HD wallet the known (activated) external addresses
+of every account, read again on each pass, so an address added by
+`get_new_address` or a scan is covered from the next pass. The rows of all
+addresses form one history. A transaction that two own addresses list is one
+row. When the wallet comes to know a further address (and at the first pass
+after a start), `spent_by_me`, `received_by_me` and `my_balance_change` of the
+stored transfer rows are recomputed from the rows' own members by the rules of
+R21.10C.5 and R21.10C.7, so a send to an address that became known later reads
+as a transfer between own addresses; fee-only rows are left as they are. A TRC20 ticker enabled on a TRX platform is served by the platform's
+wallet and its addresses.
+
+**R21.10C.5 (TRX rows).** For each row of the transaction listing whose first
+contract is a successful `TransferContract` from or to an own address:
+`from` is `owner_address`, `to` is `to_address`, `total_amount` is `amount` in
+TRX, `received_by_me` is the amount when the receiver is an own address, and
+`spent_by_me` is the amount plus the fee when the sender is an own address
+(as R21.10B.7 states for a withdraw). `block_height` is `blockNumber`,
+`timestamp` is `block_timestamp` in seconds, `tx_hash` is `txID` (64 lowercase
+hex digits), `internal_id` is the transaction id, `transaction_type` is
+`StandardTransfer`, and `tx_hex` is the signed protobuf transaction assembled
+from `raw_data_hex` and `signature`. A row without a member named here is left
+out and logged; no member is ever filled with a stand-in value.
+
+**R21.10C.6 (fee-only rows).** Any other transaction of the listing that an
+own address sent and paid a fee for is a row of the TRX coin that carries the
+fee only: `total_amount` 0, `spent_by_me` the fee, `to` the contract called
+(when the transaction names one). Its `transaction_type` is `FeeForTokenTx`
+when it is a TRC20 `transfer(address,uint256)` call and `StandardTransfer`
+otherwise. The token amount of such a call is a row of the token's own history
+(R21.10C.7), so nothing is counted twice. A transaction that changes no TRX
+balance of the wallet (no fee paid by an own address, no transfer to or from
+one) is not a row.
+
+**R21.10C.7 (TRC20 rows).** Each `Transfer` event of the token listing whose
+token is an enabled TRC20 coin is a row of that coin: `from`, `to`,
+`total_amount` (`value` scaled by the coin's decimals), `spent_by_me` the
+amount when the sender is an own address, `received_by_me` the amount when the
+receiver is one; the fee is paid in TRX and is never part of `spent_by_me`.
+`timestamp` is the event's `block_timestamp` in seconds. The listing carries
+neither a block number nor a fee: both come from `gettransactioninfobyid`,
+read once for a new transaction and stored with the row. A row whose receipt no
+node has yet is not stored and is asked again on a later pass. `tx_hex` is
+empty, because neither source carries the raw transaction. `internal_id` is a
+hash over the transaction id, the token contract, the two addresses, the value
+and the position among equal events of that token in the transaction, since one
+transaction can carry several transfer events, of one token or of several. The
+id of an event is therefore the same whether the listing was filtered by the
+token contract or not. `transaction_type` is `StandardTransfer`.
+
+**R21.10C.8 (fee details).** `fee_details` has the shape of the withdraw result
+(R21.10B.7), with `coin` the platform ticker, from the chain's own figures (the
+listing row for TRX, the receipt for TRC20): `total_fee` is the fee the owner
+paid, `bandwidth_fee` is `net_fee`, `energy_fee` is `energy_fee`,
+`energy_used` is `energy_usage_total`, and `bandwidth_used` is the bytes the
+transaction consumed, whatever paid for them:
+`net_usage + net_fee / getTransactionFee`, with the chain parameter read once
+per pass (a pass that cannot read it fails; no price is assumed). On a TRX
+transfer row, the part of the fee beyond bandwidth and energy
+(`fee - net_fee - energy_fee`), when it is positive, is reported as
+`account_creation_fee`; on a transfer to an address the chain had not created
+this is the creation fee. For such a row `net_fee` is the chain's fixed
+create-account charge and not a price per byte, so `bandwidth_fee` is
+`net_fee` and `bandwidth_used` is `net_usage` alone (0 when the owner's staked
+bandwidth did not cover the transaction), as in a withdraw result. Other rows
+carry no `account_creation_fee`.
+
+**R21.10C.9 (the process).** One process per platform coin writes the history
+of the platform and of every TRC20 token enabled on it (a token enabled later
+is picked up on the next pass); a TRC20 coin activated on its own through the
+legacy route has a process of its own. A pass walks each known address, stores
+new rows page by page, and is followed by a pause of 60 seconds. The first walk
+of an address in a process reads its whole listing; a later walk stops at the
+first page with nothing new. A stored row is never asked for again. The
+process ends when the node stops or the coin is disabled. The rows go to the
+coin's history store, which both `my_tx_history` methods read, newest first.
+
+**R21.10C.10 (history state).** `sync_status` is `NotEnabled` without an
+enabled history, `NotStarted` before the first pass, `InProgress` with
+`{"transactions_left": n}` while the first pass works (the rows of the page in
+hand, or the token rows still waiting for a receipt), and `Finished` after a
+pass that left nothing open. A pass that fails before the first `Finished`
+shows `Error` with `{"message": "..."}`, a text under the secrecy rule of
+R21.10C.3; a pass that fails after it keeps `Finished` and is logged.
+
+**R21.10C.11 (limits).** Confirmed rows only; a reorganization of the chain is
+not followed, and a stored row is not removed. Amounts moved by staking, by
+TRC10 assets, by a contract call's own value and by internal transactions are
+not shown as amounts (an own transaction of these kinds shows its fee). A
+TRC20 row has an empty `tx_hex`. The bandwidth price is the current chain
+parameter, so `bandwidth_used` of a row older than a price change is derived
+with the newer price. On a browser build the same rules hold for the legacy
+`my_tx_history`; the versioned method answers `NotSupportedInWasm` there, as
+for every coin family, and the keyed history has not been verified in a
+browser.
+
+**T21.10C (tests).** Unit tests against loopback stub nodes
+(`coins/eth/tron/history_tests.rs`, `node_client_tests.rs`, `nodes.rs`, with
+the captured listings and receipts under
+`coins/eth/tron/test_fixtures/history/`): the key rule of R21.10C.1 and
+R21.10C.2 (no key, a key on another host, a TronGrid host over `http`), and
+that only keyed nodes are asked; failover, cutoff and the request forms of
+R21.10C.3, and that no error or state text carries a key or a URL part; the
+record mapping of R21.10C.5 to R21.10C.8 for a TRX transfer out and in, a
+transfer to a new account, a TRC20 transfer out and in, a fee-only row and the
+rows that are left out; the bandwidth derivation (bandwidth of the owner only,
+burned only, mixed); the receipt read once and the row left out without one;
+paging; the merge over several own addresses, and a stored row recomputed when
+its receiver becomes a known address; the id of a token row being the same in
+a filtered and an unfiltered listing; the states of R21.10C.10; and
+the answers of both methods with `current_block` from the TRON node, including
+T21.10B.10 for a coin without a key.
 
 ## 21.11 Deferred Work
 
@@ -1997,3 +2186,14 @@ V3. The address encoding, protobuf transaction/contract formats,
   shared EVM-family surface. Behavior only; no private identifier, body,
   error, log or comment text was reproduced. The sentences of R21.10B.4 are
   unchanged.
+- *§21.10C added 2026-11-20 (transaction history; clean-side,
+  Reloaded-original).* R21.10C.1 -- R21.10C.11, T21.10C, the status note
+  after R21.10B.6 and the dated notes of 2026-11-20 in §21.4 and after the
+  compatibility block of §21.10B. *Inputs:* TronGrid's public API
+  documentation for the two account listings (paths, parameters and answer
+  members); the public TRON full-node HTTP API for the receipt and the
+  chain parameters (§21.9); public Nile test-network data captured on
+  2026-11-20 (chapter 01 R6); and this repository's own code. *Forbidden
+  corpus:* not consulted for this section; R21.10B.6 already records that
+  the reference has no TRON history. No sentence of §21.0 -- §21.10B was
+  edited.

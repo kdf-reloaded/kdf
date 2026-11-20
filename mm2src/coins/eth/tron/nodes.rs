@@ -132,6 +132,13 @@ impl TronNode {
     pub(crate) fn url(&self) -> &str { &self.url }
 
     pub(crate) fn headers(&self) -> &HeaderMap { &self.headers }
+
+    /// Whether the node is a keyed TronGrid node: an `https` URL on a TronGrid host (an exact host match) whose
+    /// requests carry the `TRON-PRO-API-KEY` header, from the node's own entry or from `tron_api_key`. Only such
+    /// a node is asked for the account listings of the transaction history (CRD ch.21 §21.10C).
+    pub(crate) fn is_keyed_trongrid(&self) -> bool {
+        is_trongrid_host(&self.url) && self.headers.contains_key(&TRON_API_KEY_HEADER)
+    }
 }
 
 /// Whether `url` is an `https` URL whose host is one of the TronGrid hosts: an exact match, letter case ignored.
@@ -231,6 +238,59 @@ mod tests {
         node.headers()
             .get(HeaderName::from_bytes(name.as_bytes()).expect("a valid name"))
             .map(|value| value.to_str().expect("visible ASCII").to_owned())
+    }
+
+    /// The key gate of the transaction history (CRD ch.21 §21.10C): a TronGrid host over `https` with the key
+    /// header, from `tron_api_key` or from the node's own entry, and nothing else.
+    #[test]
+    fn only_an_https_trongrid_node_with_a_key_is_a_keyed_trongrid_node() {
+        let key = key();
+        let own_header = |name: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).expect("a valid name"),
+                HeaderValue::from_static("ENTRY-VALUE"),
+            );
+            headers
+        };
+        // Keyed: the key of `MM2.json`, or a header of the entry itself (letter case of the name ignored).
+        assert!(TronNode::new("https://api.trongrid.io".to_owned(), HeaderMap::new(), Some(&key)).is_keyed_trongrid());
+        assert!(
+            TronNode::new("https://NILE.trongrid.io/".to_owned(), HeaderMap::new(), Some(&key)).is_keyed_trongrid()
+        );
+        assert!(TronNode::new(
+            "https://api.shasta.trongrid.io".to_owned(),
+            own_header("Tron-Pro-Api-Key"),
+            None
+        )
+        .is_keyed_trongrid());
+        // Not keyed: no key at all.
+        assert!(!TronNode::plain("https://api.trongrid.io".to_owned()).is_keyed_trongrid());
+        // Not keyed: another header only.
+        assert!(
+            !TronNode::new("https://api.trongrid.io".to_owned(), own_header("X-Provider-Key"), None)
+                .is_keyed_trongrid()
+        );
+        // Not keyed: a key header on a host that is not TronGrid, with or without `tron_api_key`.
+        for url in [
+            "https://tron.example.org",
+            "https://api.trongrid.io.evil.example",
+            "https://api.trongrid.io@evil.example",
+            "http://127.0.0.1:8090",
+        ] {
+            assert!(
+                !TronNode::new(url.to_owned(), own_header("TRON-PRO-API-KEY"), Some(&key)).is_keyed_trongrid(),
+                "{url}"
+            );
+        }
+        // Not keyed: a TronGrid host over `http`, even with a key header of its own.
+        assert!(!TronNode::new(
+            "http://api.trongrid.io".to_owned(),
+            own_header("TRON-PRO-API-KEY"),
+            Some(&key)
+        )
+        .is_keyed_trongrid());
+        assert!(!TronNode::new("http://nile.trongrid.io".to_owned(), HeaderMap::new(), Some(&key)).is_keyed_trongrid());
     }
 
     #[test]
