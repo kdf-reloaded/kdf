@@ -268,13 +268,13 @@ the previous version used. The safe way:
   whose energy alone would cost more than 100 TRX is refused before anything is signed, with both figures in the
   error.
   The members of the TRON fee details changed to the documented ones: `coin`, `bandwidth_used`, `energy_used`,
-  `bandwidth_fee`, `energy_fee`, `total_fee` and, when an account is created, `account_creation_fee`, with the fees
-  as decimal amounts in TRX, as GLEEC KDF reports them. The earlier members in SUN (`total_fee_sun`,
-  `bandwidth_fee_sun`, `energy_fee_sun`, `activation_fee_sun`) are gone. `total_fee` is the expected charge. `spent_by_me` includes the fee for TRX. A `memo` is refused with
-  `UnsupportedError`, and the new optional request member `expiration_seconds` sets how long the transaction stays
-  valid (60 seconds by default); other coins ignore it. An HD `from` is honored throughout: every balance and
-  resource is read for that address.
-  **TRON stays switched off in this build**, so none of this can be used yet. Detail: CRD ch.21 R21.10B.7,
+  `bandwidth_fee`, `energy_fee`, `total_fee` and, when an account is created, `account_creation_fee`, with the fees as
+  decimal amounts in TRX, as GLEEC KDF reports them. The earlier members in SUN (`total_fee_sun`, `bandwidth_fee_sun`,
+  `energy_fee_sun`, `activation_fee_sun`) are gone. `total_fee` is the expected charge. `spent_by_me` includes the fee
+  for TRX. A `memo` is refused with `UnsupportedError`, and the new optional request member `expiration_seconds` sets
+  how long the transaction stays valid (60 seconds by default); other coins ignore it. An HD `from` is honored
+  throughout: every balance and resource is read for that address.
+  **TRON stays switched off in this build**, so none of this can be used yet. Detail: PR #437; CRD ch.21 R21.10B.7,
   D21.10B.1 and their status notes of 2026-11-19; RELOADED_VS_GLEEC.md.
 
 #### Tendermint (Cosmos) coins
