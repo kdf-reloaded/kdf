@@ -12136,6 +12136,82 @@ mod sighash_suffix_gate_tests {
             None
         );
     }
+
+    // --- CRD ch.59 §59.4C, T16 (a): the required set of a UTXO-family coin ---
+
+    #[test]
+    fn ch59_t16_a_a_coin_with_a_suffix_requires_the_word_and_nothing_with_its_switch_off() {
+        use crate::MmCoin;
+
+        for format in address_formats() {
+            let on = coin_with(&format, BC2_SUFFIX, true);
+            assert_eq!(
+                utxo_common::required_counterparty_capabilities(&on),
+                vec![CAPABILITY_SIGHASH_SUFFIX],
+                "{format:?}"
+            );
+            // The coin's trait method gives the same set.
+            assert_eq!(on.required_counterparty_capabilities(), vec![CAPABILITY_SIGHASH_SUFFIX]);
+            let off = coin_with(&format, BC2_SUFFIX, false);
+            assert!(
+                utxo_common::required_counterparty_capabilities(&off).is_empty(),
+                "{format:?}"
+            );
+            assert!(off.required_counterparty_capabilities().is_empty());
+            // A plain UTXO coin requires nothing, whatever the switch says.
+            for require_switch in [true, false] {
+                let plain = coin_with(&format, 0, require_switch);
+                assert!(plain.required_counterparty_capabilities().is_empty(), "{format:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ch59_t16_a_the_activated_coin_and_its_configuration_entry_give_the_same_set() {
+        use crate::coin_protocol_capability::required_capabilities_from_conf;
+
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        let entries = [
+            ("BC2", json!({ "sighash_suffix": "0x01324342" }), true),
+            ("BC2-segwit", json!({ "sighash_suffix": "0x01324342" }), true),
+            (
+                "BC2",
+                json!({ "sighash_suffix": "0x01324342", "require_suffix_counterparty": false }),
+                false,
+            ),
+            (
+                "BC2",
+                json!({ "sighash_suffix": "0x01324342", "require_suffix_counterparty": true }),
+                true,
+            ),
+            ("XYZ", json!({}), false),
+            ("XYZ", json!({ "sighash_suffix": "0x00000000" }), false),
+            ("XYZ", json!({ "require_suffix_counterparty": true }), false),
+        ];
+        for (ticker, extra, requires) in entries {
+            let mut coin_conf = json!({ "coin": ticker, "protocol": { "type": "UTXO" } });
+            for (key, value) in extra.as_object().unwrap() {
+                coin_conf[key] = value.clone();
+            }
+            let client = UtxoRpcClientEnum::Native(native_client_for_test());
+            let mut fields = utxo_coin_fields_for_test(client, None, false);
+            fields.conf = UtxoConfBuilder::new(&coin_conf, &params, ticker).build().unwrap();
+            let coin = utxo_coin_from_fields(fields);
+
+            let activated = utxo_common::required_counterparty_capabilities(&coin);
+            let expected: Vec<&str> = if requires {
+                vec![CAPABILITY_SIGHASH_SUFFIX]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(activated, expected, "{ticker} {extra}");
+            assert_eq!(
+                required_capabilities_from_conf(&coin_conf, ticker, 0),
+                activated,
+                "{ticker} {extra}"
+            );
+        }
+    }
 }
 
 /// CRD ch.05 R35a, R35c, T14a and T14c: HD accounts at a given index. Activation lists the address at
