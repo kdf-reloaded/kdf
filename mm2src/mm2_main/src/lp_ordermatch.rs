@@ -87,6 +87,8 @@ cfg_wasm32! {
 }
 
 #[path = "lp_ordermatch/best_orders.rs"] mod best_orders;
+#[path = "lp_ordermatch/capability_presentation.rs"]
+mod capability_presentation;
 #[path = "lp_ordermatch/lp_bot.rs"] mod lp_bot;
 #[path = "lp_ordermatch/maker_balance_watch.rs"]
 mod maker_balance_watch;

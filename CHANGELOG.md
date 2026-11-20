@@ -4,10 +4,59 @@ All notable changes to KDF Reloaded are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0 releases use the `0.MAJOR.MINOR-PRERELEASE.N` convention; expect breaking changes between alpha and beta.
 
-## [Unreleased]
+## [0.4.1-beta.1] — 2026-11-20
 
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
+
+### Upgrade note: a shielded wallet database already migrated by a development build
+
+**0.4.1-beta.1 cannot open a shielded (ARRR, Pirate) wallet database that a newer development
+build has already migrated.** This concerns only a data directory that a development build of
+the next version has run on. A data directory that only ran 0.4.0-beta.1 is not affected.
+
+To use such a wallet with 0.4.1-beta.1, stop the node, copy the
+`<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak` file that the development build wrote next to
+the wallet database over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal`
+and `<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start 0.4.1-beta.1. Anything the wallet
+recorded after the migration is not in the backup; the node scans it again. The changelog of the
+development line describes the migration and its backup under "Breaking changes and upgrade
+notes".
+
+### Changed
+
+#### Order book and peer-to-peer network
+
+- **The order book no longer shows ARRR or BC2 orders from nodes that cannot complete such a
+  swap.** Since v0.4.0 KDF Reloaded declines an ARRR swap with a node that does not state that it
+  builds version-6 transactions, and a BC2 swap with a node that does not state that it signs
+  with the BC2 suffix. The orders of those nodes were still listed, often at the best price, and a
+  taker that picked one got no swap: the request timed out after 30 seconds, and a
+  good-till-cancelled order was then turned into a maker order. Now `orderbook` and `best_orders`
+  (legacy and mmrpc 2.0), the order-book event stream and the `orderbook_depth` counts the node
+  takes from its own book leave such orders out, and the counts and volume totals cover the listed
+  orders only. `best_orders` reads the pair's full book when the best-priced orders are left out,
+  so it still returns the best orders the node can trade with. `buy` and `sell` that name only
+  such orders in `match_by` fail at once with an error that names the coin and the missing
+  capability, and no order is created. The same rule covers any coin that requires a capability
+  of its counterparty later.
+  - *Switching it off:* the existing settings `require_v6_counterparty` (ARRR, in the coin's
+    `consensus_params`) and `require_suffix_counterparty` (BC2, in the coin entry) list the orders
+    again, together with admitting those counterparties. While a setting is on, no request lists
+    the hidden orders.
+  - *Other nodes:* nothing changes for them. No message changes, and a KDF Reloaded relay still
+    passes every order on.
+  - *Limits:* counts that `orderbook_depth` gets from a relay still include such orders. A node of
+    another implementation still lists a KDF Reloaded maker's ARRR or BC2 order, and its request
+    times out.
+
+  Detail: PRs #446, #447; CRD ch.59 §59.4C.
+
+### Plans touched
+
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: the
+  decision that the order-book answer shows no capability flag was revised; the order book now
+  leaves out orders that lack a capability the node requires (PRs #446, #447).
 
 ## [0.4.0-beta.1] — 2026-11-14
 
