@@ -498,9 +498,13 @@ check decline a counterparty at this moment:
 The set is read from the activated coin when the coin is activated, and from
 the coin's configuration entry otherwise, by the same rules. Only the
 activated coin knows an Ironwood height the node discovered at run time
-(Chapter 39 R39.6.4e(a)). Reading the set has no side effect and writes no
-log line. The acceptance check and this section
-read one source, so they cannot disagree.
+(Chapter 39 R39.6.4e(a)). A configuration entry whose protocol or capability
+keys do not parse requires nothing; such a coin cannot be activated. Where a
+coin trades under another order-book ticker, the set is that of the coin the
+caller names, and that of the order's own ticker where the caller names none
+(the event stream, and the counterpart coin in `best_orders`). Reading the
+set has no side effect and writes no log line. The acceptance check and this
+section read one source, so they cannot disagree.
 
 **R59.4C.2** *Presentable.* An order is **presentable** exactly when, for
 each of its two coins, every key of that coin's required set is declared in
@@ -516,7 +520,8 @@ in:
 - the legacy and the mmrpc-2.0 `orderbook`;
 - the legacy and the mmrpc-2.0 `best_orders`;
 - the order-book event stream: no "new or updated" event for an order that
-  is not presentable, and no "removed" event for one either;
+  is not presentable, and no "removed" event for one either. The order is
+  judged at the moment the event would be sent;
 - the pair counts that `orderbook_depth` takes from the node's own book.
 
 Counts, totals and running sums in these answers shall be computed over the
@@ -539,25 +544,32 @@ fetch that pair's full order book once, with the request `orderbook` makes,
 and shall build the pair's part of the answer from its own book: the
 selection this node applies when it answers a best-orders request as a
 relay, by volume or by number as requested, over presentable orders only. If
-the fetch fails, the pair's part is the relay's answer without the orders
-that are not presentable, and one warning is logged.
+the fetch fails, or no relay answers it, the pair's part is the relay's
+answer without the orders that are not presentable, and one warning is
+logged. After the fetch the node stays subscribed to the pair, as it does
+after `orderbook`. The books of at most four pairs are fetched at a time.
 
 **R59.4C.6** *Early refusal.* When `buy` or `sell` names orders in
 `match_by`, the node's own book holds every named order, and none of them is
 presentable, the node shall refuse the request at once. No taker order is
-created. The error names the coin and the missing capability of the first
-named order (the base coin is judged before the rel coin). On a surface with
-typed errors its type is `OrderNotMatchableMissingCapability`, with the
+created. The error text is `None of the orders named in match_by can be
+matched: <coin> requires a counterparty that declares <capability>`. It names
+the coin and the missing capability of the named order with the lowest
+identifier (`match_by` carries the orders as a set), and within that order
+the order's base coin is judged before its rel coin. On a surface with typed
+errors the error type is `OrderNotMatchableMissingCapability`, with the
 members `coin`, `capability` and `orders`; on a surface without them it is
 the error text alone. In every other case -- no `match_by`, `match_by` by
-public key, a named order the node does not hold, or at least one named
-order that is presentable -- the request proceeds as before.
+public key, a named order the node does not hold, a named order of the
+node's own or of another pair, or at least one named order that is
+presentable -- the request proceeds as before.
 
 **R59.4C.7** *Switch and logs.* There is no new switch. A requirement's own
 switch removes its key from the required set (R59.4C.1), and with it the
 effects of R59.4C.3, R59.4C.5 and R59.4C.6. A call that leaves out at least
-one order logs one debug line naming the pair and the number left out; no
-line is logged per order.
+one order logs one debug line for each pair concerned, naming the pair and
+the number left out. No line is logged per order, and the event stream logs
+none.
 
 **R59.4C.8** *Coins that opt in later.* A coin that binds a capability under
 R59.4A.4 supplies its required set through the source of R59.4C.1. This
@@ -1003,8 +1015,9 @@ shall produce no `MakerReserved`, and a refused `MakerReserved` no
   fetch yields the filtered relay answer.
 - (g) *Early refusal (R59.4C.6).* `match_by` naming one held, unpresentable
   order is refused, and no taker order exists afterwards. It proceeds when
-  the named order is not held, when one of two named orders is
-  presentable, with `match_by` by public key, and without `match_by`.
+  the named order is not held, when it is an order of another pair, when
+  one of two named orders is presentable, with `match_by` by public key,
+  and without `match_by`.
 - (h) *Switch (R59.4C.7).* With the requirement's switch off, (d), (f) and
   (g) give the results of a node without this section.
 
@@ -1435,10 +1448,11 @@ its gating is not.*
   that day): §59.4C (R59.4C.1–R59.4C.8), T16, D6, the status note under D5
   and the sentence in §59.0.* Orders that lack a capability the node
   requires are left out of the order-book answers, with the requirement's
-  own switch as the opt-back. *Inputs:* this repository's own order-book, best-orders,
-  event-stream and taker-order code, its acceptance checks, a lab run of
-  this project's own node against a reference binary as a black box
-  (reported as the node's own log lines), and the maintainer's decisions.
+  own switch as the opt-back. *Inputs:* this repository's own order-book,
+  best-orders, event-stream and taker-order code, its acceptance checks, a
+  lab run of this project's own node against a reference binary as a black
+  box (reported as the node's own log lines), and the maintainer's
+  decisions.
   The forbidden corpus was not consulted for this item. Its compatibility
   note states no reference fact beyond §59.4A. It needs no Dirty Gate pass.
   The ids §59.4B and T15 are assigned on the development line and are left
