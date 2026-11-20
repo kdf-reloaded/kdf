@@ -292,15 +292,16 @@ async fn withdraw_trc20_token(
 
     let (balance_units, balance_dec) = fetch_trc20_balance(&api, &token.contract, &sender, decimals).await?;
 
-    // `max` sends the whole token balance: the fee is paid in TRX.
-    let (amount_units_u256, amount_dec) = if req.max {
+    // `max` sends the whole token balance: the fee is paid in TRX. A token amount is a 256-bit value from the
+    // request to the call data; only TRX amounts, in SUN, are held in 64 bits.
+    let (amount_units, amount_dec) = if req.max {
         (balance_units, balance_dec.clone())
     } else {
         let amount = wei_from_big_decimal(&req.amount, decimals).mm_err(Into::into)?;
         (amount, req.amount.clone())
     };
 
-    if amount_units_u256 > balance_units {
+    if amount_units > balance_units {
         return MmError::err(WithdrawError::NotSufficientBalance {
             coin: coin.ticker.clone(),
             available: balance_dec,
@@ -308,7 +309,6 @@ async fn withdraw_trc20_token(
         });
     }
 
-    let amount_units = u256_to_u64(amount_units_u256)?;
     let inputs = read_withdraw_inputs(&api, &sender, req.expiration_seconds).await?;
 
     let energy = dry_run_trc20_energy(&api, &sender, &token.contract, &receiver, amount_units).await?;
@@ -494,7 +494,7 @@ async fn dry_run_trc20_energy(
     sender: &TronAddress,
     contract: &TronAddress,
     receiver: &TronAddress,
-    amount_units: u64,
+    amount_units: U256,
 ) -> MmResult<u64, WithdrawError> {
     let data = abi_encode_trc20_transfer(receiver, amount_units);
     // Strip the 4-byte selector: triggerconstantcontract wants parameters only.
@@ -533,6 +533,7 @@ fn sun_to_trx(sun: u64) -> MmResult<BigDecimal, WithdrawError> {
     u256_to_big_decimal(U256::from(sun), TRX_DECIMALS).mm_err(Into::into)
 }
 
+/// A TRX amount in SUN as the 64-bit value the protocol carries. Token amounts never pass through here.
 fn u256_to_u64(v: U256) -> MmResult<u64, WithdrawError> {
     if v > U256::from(u64::MAX) {
         return MmError::err(WithdrawError::InternalError(
