@@ -1,8 +1,8 @@
 //! Tests of the gasless TRC20 withdraw (CRD ch.63 T8, T11, T12, T13, T15, T16, T17) through the withdraw RPCs.
 //!
 //! The TRON node and the GasFree provider are loopback stubs; the coins are built the way the mmrpc 2.0 activation
-//! builds them (below the availability gate `TRON_ACTIVATION_AVAILABLE`, which stays `false`) and registered, so
-//! that a test calls the direct `withdraw` method and `task::withdraw::init` as a client does.
+//! builds them and registered, so that a test calls the direct `withdraw` method and `task::withdraw::init` as a
+//! client does. TRON activation is on (`TRON_ACTIVATION_AVAILABLE`), so a client reaches the same rail.
 //!
 //! No assertion message of this module carries a credential, a signature, a rendering or an error text: only
 //! labels.
@@ -87,6 +87,8 @@ struct Chain {
     controller: Controller,
     /// An endpoint that answers HTTP 500.
     failing: Option<&'static str>,
+    /// Whether the dry run of the token transfer reverts.
+    transfer_reverts: bool,
     /// The sending addresses.
     senders: Vec<TronAddress>,
 }
@@ -192,6 +194,14 @@ fn node_over(chain: Arc<Mutex<Chain>>) -> StubNode {
                         };
                         Reply::ok(&json!({ "constant_result": [format!("{units:064x}")] }).to_string())
                     },
+                    Some(TRANSFER) if chain.transfer_reverts => Reply::ok(
+                        &json!({
+                            "result": { "result": true, "message": "REVERT opcode executed" },
+                            "constant_result": [""],
+                            "energy_used": 8_624
+                        })
+                        .to_string(),
+                    ),
                     Some(TRANSFER) => Reply::ok(
                         &json!({ "result": { "result": true }, "constant_result": ["00"], "energy_used": 14_000 })
                             .to_string(),
@@ -334,6 +344,7 @@ impl Lab {
             custody_units: 50_000_000,
             controller: Controller::Agrees,
             failing: None,
+            transfer_reverts: false,
             senders: Vec::new(),
         }));
         let provider_mode = Arc::new(Mutex::new(Provider::Account(Account::usual())));
@@ -1064,6 +1075,28 @@ fn t8_auto_is_native_first() {
     lab.set_chain(|chain| chain.failing = Some("/wallet/getchainparameters"));
     assert!(matches!(lab.refused(auto(json!({}))), WithdrawError::Transport(_)));
     assert_eq!(lab.provider.requests().len(), provider_before, "the provider was asked");
+}
+
+/// ch.63 R16 and CRD ch.21 R21.10B.13: the refusal of a transfer whose dry run reverts belongs to the native rail.
+/// It is no funding failure, so `auto` answers it and does not turn to the gasless rail; the gasless rail makes
+/// no dry run and signs as before.
+#[test]
+fn a_reverting_dry_run_stays_on_the_native_rail() {
+    let lab = Lab::new(Setup::usual());
+    lab.set_chain(|chain| chain.transfer_reverts = true);
+
+    for extra in [json!({}), json!({ "fee_method": "auto" })] {
+        assert!(matches!(
+            lab.refused(request(TOKEN, extra)),
+            WithdrawError::UnsupportedError(_)
+        ));
+    }
+    assert_eq!(lab.contract_calls(TRANSFER), 2);
+    assert!(lab.provider.requests().is_empty(), "the provider was asked");
+    assert_eq!(lab.contract_calls(GET_GASFREE_ADDRESS), 0);
+
+    assert!(is_gasless(&lab.withdrawn(gasless(json!({})))));
+    assert_eq!(lab.contract_calls(TRANSFER), 2, "the gasless rail made a dry run");
 }
 
 /// ch.63 T8, R16: where the rail does not apply to the coin, `auto` answers the native rail's error.

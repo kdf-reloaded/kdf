@@ -19,6 +19,11 @@
 > activation back on (ch.21 D6) precedes the activation-time steps below and is
 > part of any revival of this plan.
 
+> **Status (2026-11-20).** TRON activation is switched on again, as a
+> wallet-only coin family: `TRON_ACTIVATION_AVAILABLE` is `true`, and swaps stay
+> off behind `TRON_SWAPS_AVAILABLE` (`false`) (CRD ch.21 D6 and its status
+> note; plan `tron-support`). The box above describes the tree until that date.
+
 ## Relation to the TRON work (2026-11-08)
 
 The maintainer decided on 2026-11-08 that the branch is not revived as such: the topic is covered by a new chapter and
@@ -78,8 +83,9 @@ new PRs, and the branch stays until the second PR below has landed.
 > validated provider binding is kept on the TRX platform coin and the token's
 > fee cap, in base units, on the token coin. `gasfree_address` is shown at the
 > placements ch.63 R18 lists, attached in one place, after the controller check
-> of R29 (the status note after ch.63 §63.3.3). All of it is behind
-> `TRON_ACTIVATION_AVAILABLE`. Not built: the `fee_method` and `gasless`
+> of R29 (the status note after ch.63 §63.3.3). TRON activation is on since
+> 2026-11-20 (`TRON_ACTIVATION_AVAILABLE`), so all of it is reachable in a
+> build. Not built: the `fee_method` and `gasless`
 > members of the withdraw request, the withdraw dispatcher, and submission.
 
 > **Sign-only gasless withdraw built (2026-11-20).** The shared withdraw
@@ -90,10 +96,16 @@ new PRs, and the branch stays until the second PR below has landed.
 > `PermitTransfer`; the result is the sign-only result of §63.8A in its D63.8
 > (a) form, with the `TronGasless` fee details. The rail makes no TRX fee
 > estimate. The `MM2.json` switch `tron_gasfree_guard_allows_fallback` is
-> built. All of it is behind `TRON_ACTIVATION_AVAILABLE`. Not built:
-> submission to the provider and settlement tracking (ch.63 D63.6); the
+> built. TRON activation is on since 2026-11-20
+> (`TRON_ACTIVATION_AVAILABLE`), so all of it is reachable in a build. Not
+> built: submission to the provider and settlement tracking (ch.63 D63.6); the
 > sentence above about the withdraw request and the dispatcher describes the
-> state before this date.
+> state before this date. Until submission is built, the rail only signs: the
+> node does not hand the signed authorization to the provider and no RPC does,
+> so a token on the GasFree address moves only if the user submits the
+> authorization to the provider themselves. The same holds for the recovery
+> procedure of ch.63 D63.4 (a gasless withdraw to the user's own address): it
+> gives a signed authorization and no transfer.
 
 ## Blocker: the derived custody address is knowingly wrong
 

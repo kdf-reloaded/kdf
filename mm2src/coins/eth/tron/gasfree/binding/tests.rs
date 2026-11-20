@@ -2,7 +2,8 @@
 //! R9, R18, R29).
 //!
 //! The node and the provider are loopback stubs. The coins are built the way the mmrpc 2.0 activation builds them
-//! (`tron_coin_from_params`, below the availability gate `TRON_ACTIVATION_AVAILABLE`, which stays `false`).
+//! (`tron_coin_from_params`). TRON activation is on (`TRON_ACTIVATION_AVAILABLE`), so what these tests reach is
+//! reachable in a build.
 //!
 //! No assertion message of this module carries a credential, a rendering or an error text: only labels.
 

@@ -53,6 +53,13 @@ shape.
 > §63.3.6). TRON stays switched off, so only the two refusals can be met
 > today.
 
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The last
+> sentence of the note above describes the tree before TRON activation was
+> switched on ([Chapter 21](21-tron-integration.md) D6 and its status note of
+> this date). With it on, a request for an activated TRC20 token reaches the
+> sign-only gasless rail of chapter 63 §63.8A, and the two task progress
+> values can be met.
+
 > **The `fee` descriptor's EVM forms (cross-reference).** The descriptor is a
 > single enumeration shared by every coin family, tagged by a `type` member.
 > Its EVM forms, the rule for an absent descriptor, the gas-limit estimation
@@ -1244,3 +1251,7 @@ addresses.
   Reloaded-original, clean side: it records the two request members, the
   `Gasless` error arm and the two task progress values as built; no
   forbidden-class input.
+- *Status note added 2026-11-20 (TRON switched on; after the note of the
+  item above).* Reloaded-original, clean side: it corrects, from chapter 21
+  D6 and this repository's code, what that note says about TRON being
+  switched off; no forbidden-class input. No cleared sentence was edited.

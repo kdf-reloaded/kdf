@@ -266,6 +266,20 @@ gains an optional gasless block:
 >   not an object, and a member of the wrong JSON type, fail request decoding
 >   with a fixed text that repeats no part of the value.
 
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The note
+> above says that TRON stays behind `TRON_ACTIVATION_AVAILABLE` (`false`) and
+> that no request reaches §63.3.1 and §63.3.2. `TRON_ACTIVATION_AVAILABLE` is
+> `true` in this tree (chapter 21 D6 and its status note of this date): the
+> activation requests reach both, and the reports answer the
+> `gasfree_address` of §63.3.3. The withdraw rail is still not built, so
+> nothing sends a provider request.
+
+> *Status note (2026-11-20, Reloaded-original), the withdraw rail.* The last
+> sentence of the note above describes the tree before the sign-only rail of
+> §63.8 and §63.8A was built. With that rail (the status note after §63.3.6) a
+> gasless withdraw reads the provider's token list and account record; it
+> still submits nothing to the provider.
+
 ### 63.3.3 Where the custody address is reported (dictated by our public API)
 
 The locally derived (§63.5) GasFree custody address is reported
@@ -442,6 +456,16 @@ Whether Reloaded adopts these exact values is decision D63.2
 >   `SubmittingGaslessAuthorization`, `WaitingForGaslessProvider` and
 >   `WaitingForGaslessSettlement` are reserved for the submission flow (D63.6)
 >   and are not part of the status vocabulary yet.
+
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The note
+> above says that TRON stays behind `TRON_ACTIVATION_AVAILABLE` (`false`) and
+> that no request reaches the rail. `TRON_ACTIVATION_AVAILABLE` is `true` in
+> this tree ([Chapter 21](21-tron-integration.md) D6 and its status note of
+> this date): a withdraw request for an activated TRC20 token reaches the
+> rail. The rail is sign-only (§63.8A): the node does not hand the signed
+> authorization to the provider, and no RPC does until the submission flow
+> exists (D63.6). Until then a token at the custody address moves only when
+> the caller submits the authorization to the provider.
 
 ## 63.4 GasFree Provider REST API (dictated interop)
 
@@ -1862,3 +1886,14 @@ V2. The baseline withdraw request has no fee-rail selector and no
   record the sign-only withdraw rail as built, the omitted `memo` of the
   sign-only result, the switch `tron_gasfree_guard_allows_fallback` and the
   recovery procedure, and take no reference input.
+- *Addition of 2026-11-20:* the second status note of this date after
+  §63.3.2 (TRON switched on) is Reloaded-original, clean side: it corrects
+  the switch value the note before it names, from chapter 21 D6 and this
+  repository's code, and takes no reference input. No cleared sentence was
+  edited.
+- *Additions of 2026-11-20 (TRON switched on, the withdraw rail):* the
+  third status note of this date after §63.3.2 and the second one after
+  §63.3.6 are Reloaded-original, clean side: they correct, from chapter 21
+  D6 and this repository's code, what the notes before them say about the
+  switch and about the withdraw rail not being built, and take no reference
+  input. No cleared sentence was edited.

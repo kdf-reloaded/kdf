@@ -663,8 +663,8 @@ fn tron_stub_node(stop: std::sync::Arc<AtomicBool>, controller_reads: std::sync:
 /// CRD ch.63 T10 (§63.3.3, R18) for `my_balance`: a TRX coin whose activation gave a GasFree provider, and its TRC20
 /// token, answer `gasfree_address` beside `address`, equal to the local derivation for that address, on the legacy
 /// and on the versioned surface; the platform and the token share one controller confirmation (R29). Without a
-/// provider the member is absent from the body text, not `null`. The coins are built below the activation gate,
-/// which stays closed.
+/// provider the member is absent from the body text, not `null`. The coins are built with the coin builder the
+/// activation routes use.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn my_balance_of_a_tron_coin_carries_the_gasfree_address_only_with_a_provider() {
