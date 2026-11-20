@@ -596,15 +596,19 @@ async fn enable_erc20_token(
 
     let platform_coin =
         evm_platform_coin(ctx, &protocol.platform_coin_ticker, &req.ticker, protocol.tron, false).await?;
-    let token = build_erc20_token(
-        ctx,
-        &platform_coin,
-        &req.ticker,
-        &protocol,
-        req.activation_params.required_confirmations,
-    )
-    .await
-    .mm_err(EnableTokenError::from)?;
+    // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD ch.43
+    // R43.1E.5 item 4, §43.1E not-established item (1)).
+    let work = coins::coin_work::PendingCoinWork::new();
+    let token = work
+        .scope(build_erc20_token(
+            ctx,
+            &platform_coin,
+            &req.ticker,
+            &protocol,
+            req.activation_params.required_confirmations,
+        ))
+        .await
+        .mm_err(EnableTokenError::from)?;
 
     let balances = match &platform_coin.derivation_method {
         DerivationMethod::Iguana(_) => {
@@ -650,7 +654,7 @@ async fn enable_erc20_token(
 
     let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(EnableTokenError::Internal)?;
     coins_ctx
-        .add_token(platform_coin.ticker(), token.clone().into())
+        .add_token_with_work(platform_coin.ticker(), token.clone().into(), work)
         .await
         .mm_err(|e| EnableTokenError::TokenIsAlreadyActivated(e.ticker))?;
     // The token is recorded on its platform only once it is registered (CRD R35.2.6).

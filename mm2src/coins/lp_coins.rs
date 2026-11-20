@@ -219,6 +219,7 @@ pub mod activation_locks;
 pub(crate) mod answer_stub;
 pub mod coin_balance;
 pub mod coin_protocol_capability;
+pub mod coin_work;
 #[doc(hidden)]
 #[cfg(test)]
 pub mod coins_tests;
@@ -229,6 +230,7 @@ pub mod hd_wallet_storage;
 pub(crate) mod history_absence;
 #[cfg(not(target_arch = "wasm32"))] pub mod lightning;
 // R39.6.1: z_coin is available on WASM (with IndexedDB storage backend).
+#[cfg(test)] mod coin_work_removal_tests;
 pub(crate) mod endpoint_suspension;
 #[cfg(test)] mod lp_coins_dependents_tests;
 pub mod my_tx_history_v2;

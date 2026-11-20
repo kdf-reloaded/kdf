@@ -457,13 +457,13 @@ impl PlatformWithTokensActivationOps for BchCoin {
         initial_balance: BigDecimal,
     ) -> AbortHandle {
         let ticker = self.ticker().to_owned();
-        let (fut, abort_handle) = abortable(bch_and_slp_history_loop(
+        let (fut, abort_handle) = abortable(coins::coin_work::carry_current_scope(bch_and_slp_history_loop(
             self.clone(),
             ctx,
             storage,
             metrics,
             initial_balance,
-        ));
+        )));
         spawn(async move {
             if let Err(e) = fut.await {
                 info!("bch_and_slp_history_loop stopped for {}, reason {}", ticker, e);

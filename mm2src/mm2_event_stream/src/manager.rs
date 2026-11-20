@@ -217,6 +217,28 @@ impl StreamingManager {
         Ok(())
     }
 
+    /// Ends the streamer `streamer_id` for every client at once: the streamer is shut down and removed, and each
+    /// subscribed client stops listening to it, as after the last unsubscribe. Returns `false` when the streamer is not
+    /// running. A later subscription starts a new streamer.
+    ///
+    /// Used when the subject of a streamer goes away, for example a removed coin (CRD ch.43 R43.1E.5 item 4).
+    pub fn end_streamer(&self, streamer_id: &StreamerId) -> bool {
+        let origin = streamer_id.to_string();
+        let mut inner = self.inner.write();
+        let Some(mut info) = inner.streamers.remove(streamer_id) else {
+            return false;
+        };
+        if let Some(tx) = info.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        for client_id in &info.subscribers {
+            if let Some(client) = inner.clients.get_mut(client_id) {
+                client.listening_to.remove(&origin);
+            }
+        }
+        true
+    }
+
     pub fn client_subscribed_to(&self, client_id: u64, streamer_id: &StreamerId) -> bool {
         let inner = self.inner.read();
         inner
@@ -394,6 +416,24 @@ mod tests {
         mgr.stop(2, &StreamerId::Heartbeat);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!mgr.is_active(&StreamerId::Heartbeat));
+    }
+
+    #[tokio::test]
+    async fn end_streamer_shuts_the_streamer_down_for_every_subscriber() {
+        let mgr = StreamingManager::default();
+        let _h1 = mgr.new_client(1);
+        let _h2 = mgr.new_client(2);
+        mgr.add(1, TestStreamer).await.unwrap();
+        mgr.add(2, TestStreamer).await.unwrap();
+        assert!(mgr.client_subscribed_to(1, &StreamerId::Heartbeat));
+        assert!(mgr.client_subscribed_to(2, &StreamerId::Heartbeat));
+
+        assert!(mgr.end_streamer(&StreamerId::Heartbeat));
+        assert!(!mgr.is_active(&StreamerId::Heartbeat));
+        assert!(!mgr.client_subscribed_to(1, &StreamerId::Heartbeat));
+        assert!(!mgr.client_subscribed_to(2, &StreamerId::Heartbeat));
+        // A streamer that is not running ends nothing.
+        assert!(!mgr.end_streamer(&StreamerId::Heartbeat));
     }
 
     #[tokio::test]

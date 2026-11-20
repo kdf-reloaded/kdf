@@ -245,15 +245,19 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
             Err(e) => return MmError::err(InitTokenError::Internal(e)),
         }
 
-        let (token, result) = Token::init_token(
-            &self.ctx,
-            &self.ticker,
-            &self.platform_coin,
-            &self.request,
-            &self.protocol_info,
-            task_handle,
-        )
-        .await?;
+        // The work the build spawns belongs to the instance, and ends with this task if the instance is not
+        // registered (CRD ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+        let work = coins::coin_work::PendingCoinWork::new();
+        let (token, result) = work
+            .scope(Token::init_token(
+                &self.ctx,
+                &self.ticker,
+                &self.platform_coin,
+                &self.request,
+                &self.protocol_info,
+                task_handle,
+            ))
+            .await?;
 
         task_handle
             .update_in_progress_status(InitTokenInProgressStatus::Finishing)
@@ -262,7 +266,7 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
         // Registering is the last step (CRD R48.11.7): a concurrent registration of the same ticker ends the task.
         let coins_ctx = CoinsContext::from_ctx(&self.ctx).map_to_mm(InitTokenError::Internal)?;
         coins_ctx
-            .add_token(self.protocol_info.platform_coin_ticker(), token.clone().into())
+            .add_token_with_work(self.protocol_info.platform_coin_ticker(), token.clone().into(), work)
             .await
             .mm_err(|e| InitTokenError::TokenIsAlreadyActivated { ticker: e.ticker })?;
         self.registered_by_task.store(true, Ordering::SeqCst);

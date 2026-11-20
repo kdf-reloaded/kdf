@@ -690,6 +690,18 @@ one-shot activation of the same ticker (R55.5.7).
 > Closing it needs an instance identity on every coin type and a
 > compare-and-remove in the registry.
 
+> **Reloaded status (clean side, 2026-11-20).** The registry now has an instance
+> identity: each registered entry carries the id of its background-work record,
+> unique in the process. The clean-up of a failed legacy activation reads the id
+> of the instance the call registered and removes the coin only when the
+> registered instance of the ticker still has that id; another instance of the
+> same ticker stays registered. The history loops of the UTXO family, EVM and Sia
+> compare the same id on every pass instead of only whether the ticker is
+> registered, so a loop of a removed instance ends even when the ticker was
+> registered again at once. The identity is the registry's, not a field of the
+> coin types. The clean-ups of the task activations on cancellation still remove
+> by ticker, and only when the task has registered its coin.
+
 ---
 
 **R55.4.10** *The legacy methods under a global-HD login (reference

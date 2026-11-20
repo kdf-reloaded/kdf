@@ -2074,8 +2074,23 @@ names.
 >     `TokenIsAlreadyActivated` without putting it back, so the platform can
 >     then be removed by an unforced `disable_coin` while its NFT chain is
 >     active.
-> 11. *Not yet built.* Ending the background work of a removed coin
->     (R43.1E.5 items 2 and 4).
+> 11. *Background work of a removed coin (R43.1E.5 item 4).* Each registered
+>     instance has a record of its background work, kept in the registry beside
+>     the coin, and an instance identity (R55.4.9). Removing a coin, by
+>     `disable_coin` of a coin or token, by the forced removal of a platform
+>     and each of its dependents, or by the clean-up of a failed or cancelled
+>     activation, aborts the work of that instance: the history collector of
+>     every family that has one (UTXO, BCH and SLP, QTUM, QRC20, EVM, Sia,
+>     Tendermint) and the block-header loop of the UTXO family. The event
+>     streams of the removed ticker (balance, fee estimate, transaction
+>     history) end for every client, as after the last unsubscribe. A passive
+>     platform keeps its work; only removal ends it (R43.1F.10 item 2), and a
+>     re-activation keeps the instance and its record. Work that holds the
+>     instance only weakly (the UTXO merge loop, the Electrum client loops,
+>     Zcash loops) ends when the last strong handle is dropped. The work of a
+>     Lightning coin (graph and scorer persistence, peer listener, reconnect,
+>     announcement and best-block loops) is not on the record and goes on
+>     until the node stops; ending it is a separate change.
 > 12. *The `reactivation_registered_token` setting (D43.1F.1).* The node reads
 >     the top-level startup-configuration member `reactivation_registered_token`
 >     when it starts: `"refuse"` (also when the member is absent) or `"keep"`;
@@ -2198,6 +2213,12 @@ examined. (4) Nothing was measured against a running reference binary.
 > or when an instance built for an activation is discarded, is built as a
 > separate change, the fifth of the passive-state work. Item (1) above and
 > item (1) of the not-established paragraph of §43.1E stay open until then.
+
+> *Reloaded status (clean side, 2026-11-20):* the change is built. The
+> background work of an instance that was built and then discarded (a refused,
+> failed or cancelled activation) is ended, and so is the work of a removed
+> coin, except that of a Lightning coin, which goes on until the node stops.
+> See item 11 of the status note of §43.1E and §43.1F.
 
 *Acceptance rows.* Each row runs against a node with mock backends; *parity*
 is the reference behavior above. Rows that need a passive platform apply to

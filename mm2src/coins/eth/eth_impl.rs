@@ -1745,6 +1745,8 @@ impl EthCoin {
         let delta = U256::from(1000);
 
         let mut success_iteration = 0i32;
+        // The instance this loop serves (CRD ch.55 R55.4.9).
+        let own_instance = crate::coin_work::CoinWork::current_id();
         loop {
             if ctx.is_stopping() {
                 break;
@@ -1753,7 +1755,7 @@ impl EthCoin {
                 let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
                 let coins = coins_ctx.coins.lock().await;
                 // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
-                if !coins.registered().contains(&self.ticker) {
+                if !crate::coin_work::is_same_instance(coins.registered().instance_id(&self.ticker), own_instance) {
                     ctx.log.log("", &[&"tx_history", &self.ticker], "Loop stopped");
                     break;
                 };
@@ -2146,6 +2148,8 @@ impl EthCoin {
         let delta = U256::from(10000);
 
         let mut success_iteration = 0i32;
+        // The instance this loop serves (CRD ch.55 R55.4.9).
+        let own_instance = crate::coin_work::CoinWork::current_id();
         loop {
             if ctx.is_stopping() {
                 break;
@@ -2154,7 +2158,7 @@ impl EthCoin {
                 let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
                 let coins = coins_ctx.coins.lock().await;
                 // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
-                if !coins.registered().contains(&self.ticker) {
+                if !crate::coin_work::is_same_instance(coins.registered().instance_id(&self.ticker), own_instance) {
                     ctx.log.log("", &[&"tx_history", &self.ticker], "Loop stopped");
                     break;
                 };
