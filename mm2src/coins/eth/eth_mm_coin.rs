@@ -87,7 +87,15 @@ impl MmCoin for EthCoin {
         // CRD R50.24 / R49.6: the direct legacy `withdraw` method does not support
         // Trezor user-action signing; clients must use the `task::withdraw` API.
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-        if matches!(self.signer, EthSigner::Trezor(_)) {
+        if let EthSigner::Trezor(signer) = &self.signer {
+            if req.from.is_some() && matches!(self.coin_type, EthCoinType::Erc20 { .. }) {
+                let refusal = crate::eth::eth_trezor_withdraw::refuse_direct_trezor_token_withdraw(
+                    self.clone(),
+                    signer.clone(),
+                    req,
+                );
+                return Box::new(Box::pin(refusal).compat());
+            }
             return Box::new(futures01::future::err(MmError::new(WithdrawError::UnsupportedError(
                 "Unsupported under the Trezor signing policy: Trezor EVM withdrawals require the \
                      'task::withdraw' API for device user-action signing"

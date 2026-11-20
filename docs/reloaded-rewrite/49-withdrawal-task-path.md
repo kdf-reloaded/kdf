@@ -421,6 +421,34 @@ sender-resolution step, on the direct `withdraw` method and on
 > R49.34. Closing the gap means resolving a token's HD surfaces against its
 > platform's HD wallet (R49.32's last paragraph, R49.34 item 1).
 
+*Status note (2026-11-20), ERC-20 `from` under HD (as built).* Item (b) of
+the Reloaded status above is closed for its `from` half and for the token
+ticker of the HD address methods. A token activated through the public
+routines on a software-HD platform now accepts `from` on `withdraw` and
+`task::withdraw::init`: the selector is resolved against the platform's HD
+wallet (R49.34 items 1 and 3, refused before any balance or nonce query), the
+token's balance, the nonce and the signing key are those of the selected
+address, and `from` of the result is that address (R49.5, R49.34 item 2). A
+token on a single-key platform keeps the refusal of R49.3. Under the Trezor
+policy, the task route resolves the selector in the platform's wallet and signs
+at the selected path (T49.9); the direct route answers the selector errors
+first and then `UnsupportedError` (R49.34 item 2). T49.9's emulator test now
+builds the token through the platform coin's token builder, so it carries the
+single-address derivation of an activated token. The software route is covered
+by `evm_hd_p1_a_token_withdraw_with_from_is_sent_from_the_selected_address_on_both_routes`,
+`evm_hd_p1_a_token_withdraw_without_from_is_sent_from_the_activated_address`,
+`evm_hd_p1_a_token_selector_that_does_not_resolve_is_refused_before_any_query`
+and `evm_hd_p1_a_token_on_a_single_key_platform_refuses_from_with_the_existing_text`
+(T49.32). `get_new_address` on an EVM coin used to write the address in an
+abbreviated form; it now writes the full EIP-55 string (R49.33), like the other
+answers. `get_new_address`, `account_balance`, `task::account_balance::init`
+and `task::scan_for_new_addresses::init` asked for a token ticker are served
+from the platform's wallet with that token's balance only, and the scan counts
+an address as used by its nonce or that token's balance (R49.32, last
+paragraph). Still open from item (a): the platform ticker's maps carry the
+platform ticker only, its scan rule is unchanged, and the intervening unused
+entries of a scan carry a zero entry.
+
 > **Code-quality finding (informative; this repository).** The Trezor
 > emulator test that stands for T49.9 builds the ERC-20 coin directly with
 > an HD derivation instead of activating it on a Trezor platform. It

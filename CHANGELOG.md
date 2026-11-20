@@ -423,6 +423,18 @@ the previous version used. The safe way:
   to close them first by activating under the previous `priv_key_policy`. Closed channels, and an empty or
   missing history of the other identity, allow the activation. Detail: PR #400; CRD ch.05 R46,
   status note of 2026-11-17.
+- **An ERC-20 withdraw accepts `from` under an HD wallet.** `withdraw` and `task::withdraw::init` of a token take
+  the address from the platform coin's HD wallet (address id or derivation path), check the token balance and the
+  nonce at that address, and sign with its key; `from` of the result is that address. A selector that does not
+  resolve is refused before any node request. A token on a single-key platform still refuses `from`. Under a
+  hardware wallet the task route signs at the selected path. Detail: CRD ch.49 R49.34.
+- **The HD address methods answer an ERC-20 token ticker from its platform's HD wallet, with the token's balance
+  only.** `get_new_address`, `account_balance`, `task::account_balance::init` and `task::scan_for_new_addresses::init`
+  asked for a token ticker use the platform's accounts and known addresses, so an address found or created through
+  the token is listed by the platform as well. The scan counts an address as used when its nonce or that token's
+  balance is not zero. Detail: CRD ch.49 R49.32.
+- **`task::scan_for_new_addresses::init` serves EVM coins under an HD wallet.** It was answered only for TRON coins
+  and UTXO coins; an EVM platform now answers it. Detail: CRD ch.05 R54.
 
 #### Solana coins
 
@@ -485,6 +497,12 @@ the previous version used. The safe way:
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
 ### Fixed
+
+#### EVM coins
+
+- **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
+  abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
+  checksummed `0x` address, as in every other HD answer. Detail: CRD ch.35 R35.1.3, ch.49 R49.33.
 
 #### WalletConnect
 

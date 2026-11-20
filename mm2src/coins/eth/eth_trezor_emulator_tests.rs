@@ -514,7 +514,7 @@ fn ctx_with_hw(material_client: TrezorClient, internal_pubkey: H264) -> MmArc {
         "netid": mm2_net_config::SUPPORTED_NETIDS[0],
         "coins": [
             {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80,"mm2":1},
-            {"coin":"JST","name":"jst","rpcport":80,"mm2":1,"protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
+            {"coin":"JST","name":"jst","rpcport":80,"mm2":1,"decimals":18,"protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
         ]
     });
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
@@ -780,8 +780,8 @@ fn emulator_trezor_withdraw_native_no_from() {
     );
 }
 
-/// T50.2: ERC20 Trezor withdraw with a derivation-path `from` selector resolving
-/// to the activated default HD address. Exercises the `transfer(address,uint256)`
+/// T50.2 / T49.9: ERC20 Trezor withdraw with a derivation-path `from` selector resolving
+/// to the activated default HD address of the token's platform. Exercises the `transfer(address,uint256)`
 /// ABI payload (the `EthereumTxAck` streaming path) and device signing.
 #[test]
 fn emulator_trezor_withdraw_erc20_with_from_path() {
@@ -803,16 +803,29 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
         "0x0",
         "0x00000000000000000000000000000000000000000000003635c9adc5dea00000",
     );
-    let coin = device_trezor_hd_coin(
+    // The token is built the way the token activation builds it, from its platform coin, and so carries the
+    // single-address derivation method of an activated token (CRD ch.49 R49.34, T49.9). The platform is registered,
+    // as `from` is resolved against its HD wallet.
+    let platform = device_trezor_hd_coin(
         &ctx,
-        EthCoinType::Erc20 {
-            platform: "ETH".to_string(),
-            token_addr: Address::from_str(TOKEN_ADDR.trim_start_matches("0x")).unwrap(),
-        },
+        EthCoinType::Eth,
         node.url.clone(),
         material.eth_account_xpub.clone(),
         device_addr,
         material.eth_public,
+    );
+    let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+    block_on(coins_ctx.add_coin(MmCoinEnum::EthCoin(platform.clone()))).unwrap();
+    let coin = block_on(platform.erc20_token_from_conf_or_contract(
+        "JST".to_string(),
+        Address::from_str(TOKEN_ADDR.trim_start_matches("0x")).unwrap(),
+        1,
+        false,
+    ))
+    .expect("the token builds from its platform coin");
+    assert!(
+        matches!(coin.derivation_method, DerivationMethod::Iguana(_)),
+        "an activated token carries the single-address derivation method"
     );
 
     let req = WithdrawRequest {
