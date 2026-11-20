@@ -324,6 +324,11 @@ suffix signing is generally supported by those implementations; until then the
 switch of R61.5A.4 is the only opt-out. The user documents say so in plain
 words.
 
+> **Status (2026-11-20).** From v0.4.1 the order book no longer lists an order
+> of a counterparty that R61.5A.2 would decline
+> ([Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4C). The switch of
+> R61.5A.4 governs both the decline and the listing.
+
 ## 61.6 Other BC2 consensus rules that began at the same height (informative)
 
 Three BC2 rules share the activation height 57,750 and are listed so that an
@@ -606,3 +611,6 @@ windows of 2026-11-07, and the signing was accepted by the BC2 network the same 
   MIT-licensed consensus parameters and signature-hash rule that the network
   dictates.
 - *Authorship:* written on the clean side of the wall from the inputs above.
+- *Reloaded-original addition (2026-11-20) -- the status note of that date
+  under R61.5A.7.* A pointer to chapter 59 §59.4C. No forbidden-class input; it
+  needs no Dirty Gate pass.

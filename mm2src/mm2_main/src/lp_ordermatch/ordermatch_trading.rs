@@ -2332,6 +2332,16 @@ async fn place_taker_order(
     if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
         return MmError::err(TakerOrderError::ClockOutOfRange(error));
     }
+    // CRD ch.59 R59.4C.6: orders named in `match_by` that the own book holds and that all lack a capability this
+    // node requires cannot be matched, so the request is refused before a taker order exists.
+    if let MatchBy::Orders(named) = &req.match_by {
+        let refusal =
+            capability_presentation::named_orders_refusal(ctx, &action, base_coin.ticker(), rel_coin.ticker(), named)
+                .await;
+        if let Some(refusal) = refusal {
+            return MmError::err(TakerOrderError::from(refusal));
+        }
+    }
     // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
     check_pre_trade_spend_safety(ctx, base_coin, rel_coin, req.min_volume.clone(), &req.price)
         .await

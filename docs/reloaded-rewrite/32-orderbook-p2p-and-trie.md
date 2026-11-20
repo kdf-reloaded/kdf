@@ -1984,6 +1984,16 @@ the order-matching or swap paths reads it back.
 > the routing change it has none and may be removed as dead code;
 > this rule does not require its removal.
 
+**Orders left out for a missing capability.** *(Reloaded-original,
+2026-11-20.)* Besides the omission of R-F6c, the `orderbook` and
+`best_orders` answers of both generations, the order-book event
+stream and the node's own `orderbook_depth` counts leave out an
+order whose protocol information lacks a capability the node
+requires of a counterparty for one of its coins
+([Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4C). The
+order stays in the stored book and in the trie, and every answer
+to a peer still contains it.
+
 **T-F6.1** *Legacy orderbook with a shielded-coin order
 succeeds.* A test shall place a maker order selling a
 `ZHTLC`-protocol coin for a UTXO coin on one node, then call the
@@ -4860,3 +4870,6 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   §59.4B for the KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-20,
   measure 0.01, no findings**, as recorded for §59.4B in chapter 59's
   provenance footer.
+- *Reloaded-original addition (2026-11-20) -- the paragraph "Orders left out
+  for a missing capability" after R-F6e.* A pointer to chapter 59 §59.4C.
+  No forbidden-class input; it needs no Dirty Gate pass.

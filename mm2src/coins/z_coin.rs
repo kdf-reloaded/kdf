@@ -1,5 +1,5 @@
-use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, CapabilityWordStatus,
-                                      CAPABILITY_TX_V6};
+use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, missing_capabilities,
+                                      CapabilityWordStatus, CAPABILITY_TX_V6};
 use crate::lp_coins_context::PrivKeyActivationPolicy;
 use crate::node_url::lightwalletd_endpoint_label;
 use crate::rpc_command::get_my_address::PathToAddress;
@@ -362,6 +362,46 @@ fn v6_counterparty_required_at(
     }
     // Saturating, as in `ironwood_swap_freeze_active_at`.
     activation_time.is_some_and(|time| now_sec >= u64::from(time).saturating_sub(freeze_margin_secs))
+}
+
+/// The capability keys a shielded coin requires of a counterparty as of `now_sec` (CRD ch.59 R59.4C.1):
+/// `tx_v6` while [`v6_counterparty_required_at`] holds for these inputs, nothing otherwise. The acceptance
+/// check and the order book's presentation both read this.
+fn v6_required_capabilities(
+    require_switch: bool,
+    activation_time: Option<u32>,
+    activation_height: Option<u32>,
+    now_sec: u64,
+) -> Vec<&'static str> {
+    if v6_counterparty_required_at(
+        require_switch,
+        activation_time,
+        activation_height,
+        IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+        now_sec,
+    ) {
+        vec![CAPABILITY_TX_V6]
+    } else {
+        Vec::new()
+    }
+}
+
+/// [`v6_required_capabilities`] from a coin's `consensus_params` and ticker, as R39.6.4f reads them: the
+/// activation time configured or built-in, whether or not `ironwood_gate_disabled` is set, and the height
+/// configured or discovered (CRD ch.59 R59.4C.1). The parameters of an activated coin carry a height
+/// discovered at run time; parameters parsed from a configuration entry do not, so for a coin that is not
+/// activated the height is the configured one.
+pub(crate) fn v6_required_capabilities_from_params(
+    params: &ZcoinConsensusParams,
+    ticker: &str,
+    now_sec: u64,
+) -> Vec<&'static str> {
+    v6_required_capabilities(
+        params.require_v6_counterparty(),
+        configured_or_builtin_ironwood_time(params, ticker),
+        params.effective_ironwood_activation_height(),
+        now_sec,
+    )
 }
 
 /// Why a counterparty's protocol information does not declare `tx_v6` (CRD ch.39 R39.6.4f(d)).
@@ -1932,6 +1972,223 @@ mod ironwood_v6_counterparty_tests {
             ACTIVATION as u64
         ));
     }
+
+    // --- CRD ch.59 §59.4C, T16 (a) and (c): the required set, and its parity with the acceptance check ---
+
+    /// The required set of an activated coin with `params`, as `ZCoin::v6_required_capabilities_at` reads it:
+    /// the shared cell of `params` holds a height discovered at run time.
+    fn required_when_activated(params: &ZcoinConsensusParams, ticker: &str, now_sec: u64) -> Vec<&'static str> {
+        v6_required_capabilities_from_params(params, ticker, now_sec)
+    }
+
+    /// The required set read from the configuration entry `params` were parsed from: a fresh parse knows no
+    /// discovered height.
+    fn required_from_configuration(params: &ZcoinConsensusParams, ticker: &str, now_sec: u64) -> Vec<&'static str> {
+        let entry: ZcoinConsensusParams = serde_json::from_value(serde_json::to_value(params).unwrap()).unwrap();
+        v6_required_capabilities_from_params(&entry, ticker, now_sec)
+    }
+
+    #[test]
+    fn ch59_t16_a_a_shielded_coin_requires_tx_v6_inside_the_window_only() {
+        let arrr = arrr_params(json!({}));
+        let inside = [WINDOW_START, ACTIVATION as u64, ACTIVATION as u64 + 365 * 86_400];
+        for now in inside {
+            assert_eq!(required_when_activated(&arrr, "ARRR", now), vec![CAPABILITY_TX_V6]);
+        }
+        assert!(required_when_activated(&arrr, "ARRR", WINDOW_START - 1).is_empty());
+
+        // Its switch off, and a coin without an Ironwood upgrade: nothing, at any time.
+        let off = arrr_params(json!({"require_v6_counterparty": false}));
+        let off_with_height =
+            arrr_params(json!({"require_v6_counterparty": false, "ironwood_activation_height": 100u32}));
+        for now in inside {
+            assert!(required_when_activated(&off, "ARRR", now).is_empty());
+            assert!(required_when_activated(&off_with_height, "OTHER", now).is_empty());
+            assert!(required_when_activated(&arrr, "OTHER", now).is_empty());
+        }
+
+        // A configured height opens the window at any time; `ironwood_gate_disabled` changes nothing.
+        let height = arrr_params(json!({"ironwood_activation_height": 100u32}));
+        assert_eq!(required_when_activated(&height, "OTHER", 0), vec![CAPABILITY_TX_V6]);
+        let gate = arrr_params(json!({"ironwood_gate_disabled": true}));
+        assert_eq!(required_when_activated(&gate, "ARRR", ACTIVATION as u64), vec![
+            CAPABILITY_TX_V6
+        ]);
+
+        // The set is the predicate of the acceptance check, at every instant.
+        for params in [&arrr, &off, &height, &gate] {
+            for ticker in ["ARRR", "OTHER"] {
+                for now in [0, WINDOW_START - 1, WINDOW_START, ACTIVATION as u64, u64::MAX] {
+                    let required = v6_counterparty_required_at(
+                        params.require_v6_counterparty(),
+                        configured_or_builtin_ironwood_time(params, ticker),
+                        params.effective_ironwood_activation_height(),
+                        IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+                        now,
+                    );
+                    assert_eq!(
+                        !required_when_activated(params, ticker, now).is_empty(),
+                        required,
+                        "{ticker} at {now}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ch59_t16_a_the_activated_coin_and_its_configuration_entry_give_the_same_set() {
+        // An Ironwood time or height that is configured or built in: both sources agree, at every instant.
+        let cases = [
+            ("ARRR", json!({})),
+            ("ARRR", json!({"require_v6_counterparty": false})),
+            ("ARRR", json!({"ironwood_gate_disabled": true})),
+            ("OTHER", json!({})),
+            ("OTHER", json!({"ironwood_activation_time": ACTIVATION})),
+            ("OTHER", json!({"ironwood_activation_height": 4_161_185u32})),
+            (
+                "OTHER",
+                json!({"ironwood_activation_height": 4_161_185u32, "require_v6_counterparty": false}),
+            ),
+        ];
+        for (ticker, extra) in cases {
+            let params = arrr_params(extra.clone());
+            for now in [0, WINDOW_START - 1, WINDOW_START, ACTIVATION as u64, u64::MAX] {
+                assert_eq!(
+                    required_when_activated(&params, ticker, now),
+                    required_from_configuration(&params, ticker, now),
+                    "{ticker} {extra} at {now}"
+                );
+            }
+        }
+
+        // A height discovered at run time is known to the activated coin only (R59.4C.1).
+        let discovered = arrr_params(json!({}));
+        assert!(required_when_activated(&discovered, "OTHER", 0).is_empty());
+        discovered.record_discovered_ironwood_height(100);
+        assert_eq!(required_when_activated(&discovered, "OTHER", 0), vec![CAPABILITY_TX_V6]);
+        assert!(required_from_configuration(&discovered, "OTHER", 0).is_empty());
+    }
+
+    /// One coin of the parity table: its required set and the capability decision of its acceptance check.
+    struct ParityCoin {
+        name: String,
+        required: Vec<&'static str>,
+        /// Whether the capability rule of the coin's acceptance check declines the value.
+        declines_for_capability: Box<dyn Fn(&Option<Vec<u8>>) -> bool>,
+    }
+
+    /// A UTXO coin with the given resolved suffix and switch, and the same coin with the switch off: the twin
+    /// shows the outcome of the first-value test alone.
+    fn utxo_parity_coin(is_segwit: bool, suffix: u32, require_switch: bool) -> ParityCoin {
+        use crate::utxo::rpc_clients::{NativeClient, NativeClientImpl, UtxoRpcClientEnum};
+        use crate::utxo::utxo_common::suffix_counterparty_decline;
+        use crate::utxo::utxo_standard::UtxoStandardCoin;
+        use crate::utxo::utxo_tests::{utxo_coin_fields_for_test, utxo_coin_from_fields};
+
+        let build = |require_switch: bool| -> UtxoStandardCoin {
+            let client = NativeClient(Arc::new(NativeClientImpl::default()));
+            let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, is_segwit);
+            fields.conf.sighash_suffix = suffix;
+            fields.conf.require_suffix_counterparty = require_switch;
+            utxo_coin_from_fields(fields)
+        };
+        let coin = build(require_switch);
+        let first_value_only = build(false);
+        ParityCoin {
+            name: format!("UTXO segwit={is_segwit} suffix={suffix:#x} switch={require_switch}"),
+            required: coin.required_counterparty_capabilities(),
+            declines_for_capability: Box::new(move |info| {
+                let declines = suffix_counterparty_decline(suffix, require_switch, info).is_some();
+                // The acceptance check itself: the first-value test, then the capability rule.
+                assert_eq!(
+                    coin.is_coin_protocol_supported(info),
+                    first_value_only.is_coin_protocol_supported(info) && !declines,
+                    "{info:?}"
+                );
+                declines
+            }),
+        }
+    }
+
+    fn shielded_parity_coin(ticker: &'static str, extra: Json, discovered: Option<u32>, now_sec: u64) -> ParityCoin {
+        let params = arrr_params(extra.clone());
+        if let Some(height) = discovered {
+            params.record_discovered_ironwood_height(height);
+        }
+        ParityCoin {
+            name: format!("shielded {ticker} {extra} discovered={discovered:?} at {now_sec}"),
+            required: required_when_activated(&params, ticker, now_sec),
+            declines_for_capability: Box::new(move |info| declined(&params, ticker, info, now_sec)),
+        }
+    }
+
+    #[test]
+    fn ch59_t16_c_an_order_is_not_presentable_exactly_when_the_acceptance_check_declines_for_a_capability() {
+        use crate::coin_protocol_capability::{append_capability_word, missing_capabilities, CAPABILITY_SIGHASH_SUFFIX};
+
+        const BC2_SUFFIX: u32 = 0x0132_4342;
+        let now = ACTIVATION as u64;
+        let coins = vec![
+            utxo_parity_coin(false, 0, true),
+            utxo_parity_coin(false, BC2_SUFFIX, true),
+            utxo_parity_coin(false, BC2_SUFFIX, false),
+            utxo_parity_coin(true, BC2_SUFFIX, true),
+            utxo_parity_coin(true, 0, false),
+            shielded_parity_coin("ARRR", json!({}), None, now),
+            shielded_parity_coin("ARRR", json!({}), None, WINDOW_START - 1),
+            shielded_parity_coin("ARRR", json!({"require_v6_counterparty": false}), None, now),
+            shielded_parity_coin("OTHER", json!({}), None, now),
+            shielded_parity_coin("OTHER", json!({"ironwood_activation_height": 100u32}), None, 0),
+            shielded_parity_coin("OTHER", json!({}), Some(100), 0),
+        ];
+
+        let first = first_value();
+        let suffix_word = append_capability_word(Vec::new(), &[CAPABILITY_SIGHASH_SUFFIX]);
+        let both_words = append_capability_word(Vec::new(), &[CAPABILITY_SIGHASH_SUFFIX, CAPABILITY_TX_V6]);
+        let values: Vec<Option<Vec<u8>>> = vec![
+            None,
+            Some(Vec::new()),
+            Some(first.clone()),
+            with_word(&first, &WORD),
+            with_word(&first, &suffix_word),
+            with_word(&first, &both_words),
+            with_word(&first, &FALSE_WORD),
+            with_word(&first, &WORD[..WORD.len() - 1]),
+            with_word(&first, &suffix_word[..suffix_word.len() - 1]),
+            with_word(&first, &[0x01]),
+            with_word(&first, &[0x80]),
+            Some(vec![0xc1]),
+            with_word(&[0xc1], &both_words),
+            Some([first.as_slice(), &both_words, &[0xff]].concat()),
+        ];
+
+        let (mut presentable_seen, mut unpresentable_seen) = (0, 0);
+        for coin in &coins {
+            for value in &values {
+                let presentable = missing_capabilities(&coin.required, value.as_deref()).is_empty();
+                assert_eq!(
+                    !presentable,
+                    (coin.declines_for_capability)(value),
+                    "{} with {value:?}",
+                    coin.name
+                );
+                if presentable {
+                    presentable_seen += 1;
+                } else {
+                    unpresentable_seen += 1;
+                }
+            }
+            // A coin that requires nothing never makes an order unpresentable.
+            if coin.required.is_empty() {
+                assert!(values.iter().all(|value| !(coin.declines_for_capability)(value)));
+            }
+        }
+        // Both outcomes occur, so the equality above is not vacuous.
+        assert!(presentable_seen > 0 && unpresentable_seen > 0);
+        let requiring = coins.iter().filter(|coin| !coin.required.is_empty()).count();
+        assert_eq!(requiring, 5);
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -2791,19 +3048,21 @@ impl ZCoin {
         )
     }
 
+    /// The capability keys R39.6.4f(b) requires of a counterparty as of `now_sec` (CRD ch.59 R59.4C.1).
+    /// No side effect and no log line.
+    fn v6_required_capabilities_at(&self, now_sec: u64) -> Vec<&'static str> {
+        v6_required_capabilities_from_params(&self.z_fields.consensus_params, &self.utxo_arc.conf.ticker, now_sec)
+    }
+
     /// R39.6.4f(b): whether `info` is declined for lacking `tx_v6`, as of `now_sec`. Logs a decline
     /// (R39.6.4f(d)).
     fn v6_counterparty_declined_at(&self, info: &Option<Vec<u8>>, now_sec: u64) -> bool {
-        let (time, height) = self.v6_capability_inputs();
-        if !v6_counterparty_required_at(
-            self.z_fields.consensus_params.require_v6_counterparty(),
-            time,
-            height,
-            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
-            now_sec,
-        ) {
+        // CRD ch.59 R59.4C.1: the decision is the one the order book's presentation reads.
+        let required = self.v6_required_capabilities_at(now_sec);
+        if missing_capabilities(&required, info.as_deref()).is_empty() {
             return false;
         }
+        // The cause only distinguishes the log line.
         let Some(cause) = v6_decline_cause(info) else {
             return false;
         };
@@ -3822,6 +4081,12 @@ impl MmCoin for ZCoin {
         }
         // R39.6.4f: the counterparty must declare that it builds version-6 transactions.
         !self.v6_counterparty_declined_at(info, now_ms() / 1000)
+    }
+
+    fn required_counterparty_capabilities(&self) -> Vec<&'static str> {
+        let mut required = utxo_common::required_counterparty_capabilities(self);
+        required.extend(self.v6_required_capabilities_at(now_ms() / 1000));
+        required
     }
 }
 

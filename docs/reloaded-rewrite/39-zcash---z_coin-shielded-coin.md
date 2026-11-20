@@ -1315,6 +1315,12 @@ is the shielded coin's use of the capability word of
 > **Status (2026-11-07).** The check is temporary, by the maintainer's decision of
 > 2026-11-07: it will be removed once version 6 is generally supported. The user documents
 > (README, changelog, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md`) say the same.
+>
+> **Status (2026-11-20).** From v0.4.1 the order book no longer lists an order of a
+> counterparty that (b) would decline, by the maintainer's decision of 2026-11-20:
+> [Chapter 59](59-legacy-ordermatch-negotiation.md) §59.4C. The order book still shows no
+> capability flag, as the last sentence of (e) says; what changed is that such an order is
+> not listed. The switch of (c) governs both the decline and the listing.
 
 T39.6.4f *Counterparty version-6 capability.*
 - (a) The protocol information of an ARRR coin is its address-format bytes followed by the
@@ -9246,3 +9252,6 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   *Method:* reading, plus token searches for identifiers, numeric values
   and band constants across both tag trees; the figures of the acceptance
   rows do not occur in the corpus. *Measure:* 0.03.
+- *Reloaded-original addition (2026-11-20) -- the status note of that date under
+  R39.6.4f.* A pointer to chapter 59 §59.4C. No forbidden-class input; it needs no Dirty
+  Gate pass.
