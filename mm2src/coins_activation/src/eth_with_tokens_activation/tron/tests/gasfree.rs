@@ -2,8 +2,8 @@
 //! R18, R29, T9, T10).
 //!
 //! The activation routines and the HD methods run end to end against a loopback stub of a TRON node whose
-//! controller contract answers `getGasFreeAddress`. The build switch `TRON_ACTIVATION_AVAILABLE` stays `false`; a
-//! context opens the gate for itself, as in the parent module.
+//! controller contract answers `getGasFreeAddress`. TRON activation is on (`TRON_ACTIVATION_AVAILABLE`), so every
+//! path these tests reach is reachable in a build.
 //!
 //! The `my_balance` placement of §63.3.3 is tested where its handler lives (`mm2_main`).
 //!

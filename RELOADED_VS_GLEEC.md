@@ -724,7 +724,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.36 R36.3.5, ch.18 R18.6B, ch.49 R49.28 to
   R49.30, ch.35 R35.6.8, R35.6.9. PR #323.
 
-- **The TRON node client (TRON is still switched off) gives each node a time limit, fails over on bad answers and
+- **The TRON node client gives each node a time limit, fails over on bad answers and
   accepts request headers and an API key.** A TRON node that does not answer within 10 seconds is skipped, and so is a
   node that answers with an error status, with something that is not the expected JSON, or with the node's own
   error form; a rate-limit answer is never read as an empty account. The node that answers is asked first next time,
@@ -735,7 +735,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   needed because a request without them is served as before. The values are secrets and are never logged or shown.
   Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 
-- **TRON (still switched off) gets the standard platform-with-tokens activation route, and keeps the legacy one.**
+- **TRON gets the standard platform-with-tokens activation route, and keeps the legacy one.**
   `enable_eth_with_tokens`, `task::enable_eth::*`, `enable_erc20` and `task::enable_erc20::init` accept a TRX
   platform and TRC20 tokens, as GLEEC KDF `v3.0.0-beta` serves them; Reloaded also keeps TRX and TRC20 on the legacy
   `enable` and `electrum` methods, which GLEEC KDF refuses for them, as an extension a GLEEC client never reaches.
@@ -747,7 +747,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
   CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
 
-- **TRON (still switched off) has an HD wallet on the standard methods; the legacy route keeps the internal key.**
+- **TRON has an HD wallet on the standard methods; the legacy route keeps the internal key.**
   Under a global-HD login `enable_eth_with_tokens` and `task::enable_eth::init` derive the TRX address under the
   `derivation_path` of the coin config (coin type 195), as GLEEC KDF does; the HD methods (`get_new_address`,
   `account_balance` and the task forms of `get_new_address`, `scan_for_new_addresses` and `account_balance`) answer
@@ -762,13 +762,21 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   and signs with that key, and refuses `from` on a single-key coin (it was ignored before). A TRC20 withdraw under a global-HD login takes an HD `from` resolved in the platform's HD wallet (any activated address of the platform); this is a Reloaded extension, and an EVM ERC-20 coin in Reloaded refuses `from`. No switch; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R-A2, R21.10B.4.
 
-- **`convertaddress` for a TRON coin (still switched off) converts between the base58check and the `41...` hex form.**
+- **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.**
   GLEEC KDF answers an EVM `0x` form for a TRX or TRC20 address. Reloaded takes `{"format": "base58"}` or
   `{"format": "hex"}`, accepts `from` as base58check, `41...` or `0x41...`, and refuses an EVM `0x` address and the EVM
   format values with the legacy error body; an EVM coin is unchanged. No switch; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R21.10B.8, D21.10B.2.
+- **TRON has a transaction history when a TronGrid API key is set.** GLEEC KDF has no TRON
+  history: its versioned `my_tx_history` answers `NotSupportedFor`, its legacy one an empty list, and it ignores
+  `tx_history` for TRON. Reloaded answers the same without a key. With `tx_history: true` and a keyed TronGrid node
+  (the node's own `TRON-PRO-API-KEY` header or `tron_api_key`), both methods list the transactions of TRX and TRC20
+  coins from TronGrid's account listings, over every known address of an HD wallet, with base58check addresses and the
+  fee details of a withdraw result. Only confirmed transactions; history requests go to keyed TronGrid hosts only. An
+  addition a GLEEC client does not meet unless it sets the key; no switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 §21.10C.
 
-- **The fee of a TRON withdrawal (TRON is still switched off) follows the node's bandwidth rule, and a TRC20 fee limit
+- **The fee of a TRON withdrawal follows the node's bandwidth rule, and a TRC20 fee limit
   has a margin and a maximum.** The withdraw estimate, its amounts, its errors and its fee details follow GLEEC KDF
   `v3.0.0-beta` as the CRD records it, with three differences. (1) *Bandwidth.* GLEEC KDF charges only what the
   sender's free and staked bandwidth, added together, do not cover. The TRON node takes a transaction's bandwidth from
@@ -782,10 +790,19 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `UnsupportedError` naming both figures. None of the three is visible to a peer and none changes the shape of an
   answer, so no switch exists; rows in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
   CRD ch.21 R21.10B.7, D21.10B.1.
+- **A TRC20 withdrawal whose dry run reverts is refused.** GLEEC KDF `v3.0.0-beta`, as
+  the CRD records it, judges the energy dry run of a TRC20 transfer only by its `energy_used`: when the token contract
+  would refuse the transfer, it still returns a signed transaction and a fee estimate, and broadcasting it burns the
+  fee. Reloaded reads the dry run's revert indication and refuses the withdrawal before anything is signed, with
+  `UnsupportedError` and the text "the token contract refused this transfer (its dry run reverted)" followed by the
+  node's reason; no other node is asked. The energy a contract's deployer may pay is not modeled in either, so the
+  estimate of a TRC20 fee can be above the chain's charge in both. No peer sees the check and a successful dry run
+  answers the same, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.21 R21.10B.10 to R21.10B.13.
 
-- **A TRON GasFree custody address (TRON is still switched off) is checked against the GasFree controller before it
-  is shown or used.** No released GLEEC KDF version that the CRD records carries GasFree; the reference's GasFree
-  work is an open, unmerged draft (as of 2026-05-04, CRD ch.63 §63.0), and this check is a KDF Reloaded addition.
+- **A TRON GasFree custody address is checked against the GasFree controller before it is shown or used.** No
+  released GLEEC KDF version that the CRD records carries GasFree; the reference's GasFree work is an open, unmerged
+  draft (as of 2026-05-04, CRD ch.63 §63.0), and this check is a KDF Reloaded addition.
   Reloaded compares it with the answer of the controller contract's `getGasFreeAddress` and keeps a confirmation for
   10 minutes. In the answers that carry `gasfree_address`, an address the controller contradicts is left out, with a
   warning in the log; when the controller cannot be read, the derived address is shown. Before a gasless transfer is
@@ -796,21 +813,36 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
-- **TRON (TRX, TRC20) and Solana (SOL, SPL tokens) are switched off in this
-  beta.** Their support is not finished, so Reloaded does not activate them at
-  all: the legacy `enable` / `electrum` answer "TRON support is not available
-  in this build" or "Solana support is not available in this build", and
-  `enable_solana_with_tokens` / `enable_spl` answer the Solana text. Nothing is
-  registered and the rest of the node is unaffected. Both families are planned
-  to return in the next beta. No switch exists: the build constants
-  `TRON_ACTIVATION_AVAILABLE` and `SOLANA_ACTIVATION_AVAILABLE`
-  (`coins/lp_coins_ops.rs`) are `false`. When TRON returns, Reloaded activates
-  TRX and TRC20 on the legacy methods as an extension, and, since the route of
-  the entry above, on the platform-with-tokens activation too. GLEEC KDF `v3.0.0-beta`
-  serves them only through the platform-with-tokens activation,
-  `enable_eth_with_tokens` and the `task::enable_eth::*` family, and refuses
-  them on the legacy methods, so a client written for GLEEC never sends such a
-  request (CRD ch.21 §21.4, ch.55 D55.5).
+- **Solana (SOL, SPL tokens) is switched off in this beta.** Its support is
+  not finished, so Reloaded does not activate it at all: the legacy `enable` /
+  `electrum`, `enable_solana_with_tokens` and `enable_spl` answer "Solana
+  support is not available in this build". Nothing is registered and the rest
+  of the node is unaffected. Solana is planned to return in the next beta. No
+  switch exists: the build constant `SOLANA_ACTIVATION_AVAILABLE`
+  (`coins/lp_coins_ops.rs`) is `false`.
+- **TRON (TRX, TRC20) coins are wallet-only.** Since 2026-11-20 TRON can be
+  activated again (0.4.0 refused it on every route): on the
+  platform-with-tokens activation, `enable_eth_with_tokens` and the
+  `task::enable_eth::*` family, where GLEEC KDF `v3.0.0-beta` serves it, and on
+  the legacy `enable` / `electrum` methods as a Reloaded extension, which GLEEC
+  KDF refuses for TRON, so a client written for GLEEC never sends such a
+  request (CRD ch.21 §21.4, ch.55 D55.5). Activation, balances, addresses,
+  `withdraw` and the transaction history work. Orders and swaps do not:
+  Reloaded has no TRON swap, and neither has a GLEEC KDF release. `setprice`,
+  `buy`, `sell` and `start_swap` refuse a TRON coin with the usual "… is wallet
+  only" answer, a TRON coin declines to match, an order with a TRON coin
+  saved earlier is cancelled at startup, and an unfinished saved swap that names
+  a TRON coin is not resumed at startup (its record is kept, with a line in the
+  log). This holds whatever the coins-file entry says. For an entry with
+  `"wallet_only": true`, which every published TRON entry has, the answer is
+  GLEEC KDF's. For an entry without it GLEEC KDF passes the wallet-only check
+  and refuses the order at its balance-and-fee check, with an answer of the same
+  form and no order; Reloaded refuses one check earlier, and its text names the
+  wallet-only ticker. No switch exists: the build constant
+  `TRON_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false` (CRD ch.21 R-D1,
+  R21.10B.9, R21.B3). Gasless TRC20 transfers through GasFree are not available
+  yet; the provider setting of the activation and the `gasfree_address` of the
+  reports are (CRD ch.63 §63.3.1 to §63.3.3).
 - **A Tendermint activation refuses a hardware key policy.** A request that names the `Trezor` `priv_key_policy`
   fails before any node is contacted, with a `PlatformCoinCreationError` (HTTP 500) that says the hardware key policy
   is not supported for Tendermint coins and to activate with the local key; GLEEC KDF ignores the member and activates

@@ -266,6 +266,14 @@ gains an optional gasless block:
 >   not an object, and a member of the wrong JSON type, fail request decoding
 >   with a fixed text that repeats no part of the value.
 
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The note
+> above says that TRON stays behind `TRON_ACTIVATION_AVAILABLE` (`false`) and
+> that no request reaches §63.3.1 and §63.3.2. `TRON_ACTIVATION_AVAILABLE` is
+> `true` in this tree (chapter 21 D6 and its status note of this date): the
+> activation requests reach both, and the reports answer the
+> `gasfree_address` of §63.3.3. The withdraw rail is still not built, so
+> nothing sends a provider request.
+
 ### 63.3.3 Where the custody address is reported (dictated by our public API)
 
 The locally derived (§63.5) GasFree custody address is reported
@@ -1677,3 +1685,8 @@ V2. The baseline withdraw request has no fee-rail selector and no
   §63.3.2, §63.3.3, R29, T9 and T10) are Reloaded-original, clean side: they
   record what is built and the report rule for R29, and take no reference
   input.
+- *Addition of 2026-11-20:* the second status note of this date after
+  §63.3.2 (TRON switched on) is Reloaded-original, clean side: it corrects
+  the switch value the note before it names, from chapter 21 D6 and this
+  repository's code, and takes no reference input. No cleared sentence was
+  edited.

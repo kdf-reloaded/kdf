@@ -12,7 +12,8 @@
 
 use super::proto;
 use super::test_node::{Reply, StubNode};
-use super::wallet_path_tests::{trc20_coin, trx_coin, NOW_BLOCK_BODY, TRC20_CONTRACT};
+use super::wallet_path_tests::{trc20_coin, trc20_coin_of_decimals, trc20_coin_over, trx_coin, NOW_BLOCK_BODY,
+                               TRC20_CONTRACT};
 use super::withdraw::withdraw_tron;
 use super::TronAddress;
 use crate::eth::EvmWithdrawSender;
@@ -39,8 +40,8 @@ const PARAMETERS: &str = r#"{"chainParameter":[{"key":"getTransactionFee","value
 struct Chain {
     /// The TRX balance of every account the chain has created, in SUN.
     trx_sun: u64,
-    /// The token balance of every address, in token units.
-    token_units: u64,
+    /// The token balance of every address, in token units. A balance may be above what 64 bits hold.
+    token_units: u128,
     /// Whether the chain has created the recipient's account.
     recipient_exists: bool,
     /// The `getaccountresource` answer.
@@ -49,6 +50,8 @@ struct Chain {
     parameters: &'static str,
     /// The `energy_used` of the transfer's dry run, when the answer carries one.
     energy: Option<u64>,
+    /// The whole answer to the transfer's dry run, in place of the successful one built from `energy`.
+    dry_run: Option<&'static str>,
     /// An endpoint that answers HTTP 500.
     failing: Option<&'static str>,
 }
@@ -64,6 +67,7 @@ impl Chain {
             resources: r#"{"freeNetLimit":600}"#,
             parameters: PARAMETERS,
             energy: Some(14_000),
+            dry_run: None,
             failing: None,
         }
     }
@@ -90,7 +94,16 @@ impl Chain {
                         Reply::ok(&json!({ "constant_result": [format!("{:064x}", self.token_units)] }).to_string())
                     },
                     Some("transfer(address,uint256)") => {
-                        let mut answer = json!({ "result": { "result": true }, "constant_result": ["00"] });
+                        if let Some(dry_run) = self.dry_run {
+                            return Reply::ok(dry_run);
+                        }
+                        // The form of a successful dry run on a public mainnet node (2026-11-20): no message, the
+                        // returned `true` word, and an empty simulated result.
+                        let mut answer = json!({
+                            "result": { "result": true },
+                            "constant_result": [format!("{:064x}", 1)],
+                            "transaction": { "ret": [{}] },
+                        });
                         if let Some(energy) = self.energy {
                             answer["energy_used"] = json!(energy);
                         }
@@ -124,6 +137,17 @@ fn withdraw(node: &StubNode, trc20: bool, mut request: WithdrawRequest) -> Resul
         } else {
             trx_coin(&node.url()).await
         };
+        request.coin = coin.ticker.clone();
+        withdraw_tron(coin.clone(), request, EvmWithdrawSender::activated(&coin))
+            .await
+            .map_err(|e| e.into_inner())
+    })
+}
+
+/// Runs the withdraw `request` of a TRC20 coin of 18 decimals against `node`.
+fn withdraw_18_decimals(node: &StubNode, mut request: WithdrawRequest) -> Result<TransactionDetails, WithdrawError> {
+    block_on(async {
+        let (_ctx, coin) = trc20_coin_of_decimals(&node.url(), 18).await;
         request.coin = coin.ticker.clone();
         withdraw_tron(coin.clone(), request, EvmWithdrawSender::activated(&coin))
             .await
@@ -186,6 +210,22 @@ fn trc20_amount_of(raw: &proto::TransactionRaw) -> u64 {
     let mut word = [0u8; 8];
     word.copy_from_slice(&call.data[60..68]);
     u64::from_be_bytes(word)
+}
+
+/// The call data of the TRC20 transfer in `raw`, in hex.
+fn trc20_call_data_of(raw: &proto::TransactionRaw) -> String {
+    let any = raw.contract[0].parameter.as_ref().expect("a contract parameter");
+    let call = proto::TriggerSmartContract::decode(any.value.as_slice()).expect("a contract call");
+    hex::encode(call.data)
+}
+
+/// The `parameter` members of the transfer dry runs `node` was asked for.
+fn dry_run_parameters(node: &StubNode) -> Vec<Json> {
+    node.bodies_for("/wallet/triggerconstantcontract")
+        .into_iter()
+        .filter(|body| body["function_selector"] == "transfer(address,uint256)")
+        .map(|body| body["parameter"].clone())
+        .collect()
 }
 
 fn sender_base58() -> String {
@@ -486,6 +526,214 @@ fn a_dry_run_without_a_positive_energy_figure_is_a_transport_error() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// A dry run that reverts (CRD ch.21 R21.10B.13 and its finding, T21.10B.18)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The dry run of a transfer the token refuses, as a public mainnet node answered it on 2026-11-20: the success
+/// flag is true, the message is plain text, `constant_result` holds one empty entry, the simulated result is
+/// `FAILED`, and the energy figures are positive.
+const REVERTED_DRY_RUN: &str = r#"{"result":{"result":true,"message":"REVERT opcode executed"},"energy_used":8624,"energy_penalty":6640,"constant_result":[""],"transaction":{"ret":[{"ret":"FAILED"}],"visible":true,"txID":"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90","raw_data":{},"raw_data_hex":"0a02"}}"#;
+/// The stub of T21.10B.18: the success flag true, a revert message, error-string data in `constant_result`
+/// (`Error(string)` with the text "frozen") and a positive `energy_used`.
+const REVERTED_WITH_ERROR_STRING: &str = r#"{"result":{"result":true,"message":"REVERT opcode executed"},"energy_used":8624,"constant_result":["08c379a00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000666726f7a656e0000000000000000000000000000000000000000000000000000"]}"#;
+/// Only the simulated result says that the call failed.
+const FAILED_SIMULATED_RESULT: &str =
+    r#"{"result":{"result":true},"energy_used":8624,"constant_result":[""],"transaction":{"ret":[{"ret":"FAILED"}]}}"#;
+/// The same under the other member name a node may use.
+const FAILED_CONTRACT_RET: &str = r#"{"result":{"result":true},"energy_used":8624,"constant_result":[""],"transaction":{"ret":[{"contractRet":"REVERT"}]}}"#;
+
+/// The text of the refusal for the reason `reason`.
+fn refusal_text(reason: &str) -> String {
+    format!("the token contract refused this transfer (its dry run reverted): {reason}")
+}
+
+/// T21.10B.18 for Reloaded: a dry run that reverts with the success flag true and a positive `energy_used`
+/// answers `UnsupportedError` naming the contract's refusal, for an amount and for `max`. Nothing is signed (no
+/// result, so no `tx_hex`), the dry run is asked once, and no broadcast reaches the node. A revert message, a
+/// simulated result other than success, or both: each is a revert.
+#[test]
+fn a_reverting_dry_run_refuses_the_withdraw_before_anything_is_signed() {
+    for (dry_run, reason) in [
+        (REVERTED_DRY_RUN, "REVERT opcode executed"),
+        (REVERTED_WITH_ERROR_STRING, "REVERT opcode executed"),
+        (FAILED_SIMULATED_RESULT, "simulated result FAILED"),
+        (FAILED_CONTRACT_RET, "simulated result REVERT"),
+    ] {
+        for amount in [Some("1"), None] {
+            let node = Chain {
+                dry_run: Some(dry_run),
+                ..Chain::new()
+            }
+            .start();
+            match refused(&node, true, request("USDT-TRC20", amount)) {
+                WithdrawError::UnsupportedError(text) => assert_eq!(text, refusal_text(reason), "{dry_run}"),
+                other => panic!("unexpected error for {dry_run}: {other:?}"),
+            }
+            assert_eq!(
+                dry_run_parameters(&node).len(),
+                1,
+                "the dry run is asked once: {dry_run}"
+            );
+            assert!(
+                node.requests().iter().all(|(path, _)| !path.contains("broadcast")),
+                "no broadcast request reaches the node"
+            );
+            // The refusal comes before the TRX-for-fee read: the last request is the dry run.
+            let requests = node.requests();
+            assert_eq!(
+                requests.last().map(|(path, _)| path.as_str()),
+                Some("/wallet/triggerconstantcontract")
+            );
+        }
+    }
+}
+
+/// The refusal is the contract's, not the node's: with two nodes that both answer the revert, the dry run is asked
+/// of one node only.
+#[test]
+fn a_reverting_dry_run_is_not_moved_to_another_node() {
+    let reverting = || {
+        Chain {
+            dry_run: Some(REVERTED_DRY_RUN),
+            ..Chain::new()
+        }
+        .start()
+    };
+    let (first, second) = (reverting(), reverting());
+    let result = block_on(async {
+        let (_ctx, coin) = trc20_coin_over(&[&first.url(), &second.url()], 6).await;
+        let mut request = request("USDT-TRC20", Some("1"));
+        request.coin = coin.ticker.clone();
+        withdraw_tron(coin.clone(), request, EvmWithdrawSender::activated(&coin))
+            .await
+            .map_err(|e| e.into_inner())
+    });
+    match result {
+        Err(WithdrawError::UnsupportedError(text)) => assert_eq!(text, refusal_text("REVERT opcode executed")),
+        other => panic!("unexpected result: {:?}", other.map(|details| details.tx_hash)),
+    }
+    assert_eq!(
+        dry_run_parameters(&first).len() + dry_run_parameters(&second).len(),
+        1,
+        "one node is asked for the dry run"
+    );
+}
+
+/// A dry run that succeeds, in the full form of a public mainnet node (2026-11-20: no message, the returned word,
+/// an empty simulated result, logs and an energy penalty), is no revert: the fee and the fee limit are those of
+/// its `energy_used`. 64 285 x 420 SUN = 26.9997 TRX of energy; the fee limit adds a fifth: 32 399 640 SUN.
+#[test]
+fn a_successful_dry_run_in_the_nodes_full_form_keeps_the_fee_and_the_fee_limit() {
+    const SUCCEEDED: &str = r#"{"result":{"result":true},"energy_used":64285,"energy_penalty":49635,"constant_result":["0000000000000000000000000000000000000000000000000000000000000001"],"logs":[{"address":"a614f803b6fd780986a42c78ec9c7f77e6ded13c","data":"00000000000000000000000000000000000000000000000000000000000f4240","topics":["ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]}],"transaction":{"ret":[{}],"visible":true,"txID":"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90","raw_data":{},"raw_data_hex":"0a02"}}"#;
+    let node = Chain {
+        dry_run: Some(SUCCEEDED),
+        ..Chain::new()
+    }
+    .start();
+    let details = withdrawn(&node, true, request("USDT-TRC20", Some("1")));
+    let raw = raw_of(&details);
+    assert_eq!(raw.fee_limit, 32_399_640);
+    assert_eq!(trc20_amount_of(&raw), 1_000_000);
+    let fee = fee_json(&details);
+    assert_eq!(fee["energy_used"], 64_285);
+    assert_eq!(fee["energy_fee"], "26.9997");
+    assert_eq!(fee["bandwidth_fee"], "0");
+    assert_eq!(fee["total_fee"], "26.9997");
+}
+
+/// T21.10B.18, second half: `energy_used` zero on every node answers `Transport` and nothing is signed.
+#[test]
+fn a_dry_run_of_zero_energy_on_every_node_is_a_transport_error() {
+    let zero = || {
+        Chain {
+            energy: Some(0),
+            ..Chain::new()
+        }
+        .start()
+    };
+    let (first, second) = (zero(), zero());
+    let result = block_on(async {
+        let (_ctx, coin) = trc20_coin_over(&[&first.url(), &second.url()], 6).await;
+        let mut request = request("USDT-TRC20", Some("1"));
+        request.coin = coin.ticker.clone();
+        withdraw_tron(coin.clone(), request, EvmWithdrawSender::activated(&coin))
+            .await
+            .map_err(|e| e.into_inner())
+    });
+    match result {
+        Err(WithdrawError::Transport(_)) => (),
+        other => panic!("unexpected result: {:?}", other.map(|details| details.tx_hash)),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The energy a contract's deployer may pay is not modeled (CRD ch.21 R21.10B.10 to R21.10B.12)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// T21.10B.16: a TRC20 withdraw reads no contract metadata and asks the resources of the sender only. The whole
+/// dry-run energy counts as the sender's: 14 000 less the 4 000 of staked energy that are left, times 420 SUN, is
+/// 4.2 TRX, and the fee limit counts the whole 14 000 (with Reloaded's margin of a fifth, D21.10B.1).
+#[test]
+fn a_trc20_withdraw_reads_no_contract_metadata() {
+    let node = Chain {
+        resources: r#"{"freeNetLimit":600,"EnergyLimit":10000,"EnergyUsed":6000}"#,
+        ..Chain::new()
+    }
+    .start();
+    let details = withdrawn(&node, true, request("USDT-TRC20", Some("1")));
+    assert_eq!(raw_of(&details).fee_limit, 7_056_000);
+    let fee = fee_json(&details);
+    assert_eq!(fee["energy_used"], 14_000);
+    assert_eq!(fee["energy_fee"], "4.2");
+
+    let requests = node.requests();
+    for (path, _) in &requests {
+        assert!(
+            [
+                "/wallet/getnowblock",
+                "/wallet/getaccount",
+                "/wallet/getaccountresource",
+                "/wallet/getchainparameters",
+                "/wallet/triggerconstantcontract",
+            ]
+            .contains(&path.as_str()),
+            "an endpoint outside the withdraw's own: {path}"
+        );
+    }
+    assert!(requests.iter().all(|(path, _)| !path.contains("getcontract")));
+    let resources = node.bodies_for("/wallet/getaccountresource");
+    assert!(!resources.is_empty());
+    assert!(
+        resources.iter().all(|body| body["address"] == sender_base58()),
+        "{resources:?}"
+    );
+}
+
+/// T21.10B.17: the TRX check is against the full `total_fee`. Without resources that is 5.88 TRX of energy plus
+/// 0.345 TRX of bandwidth; a sender with 1 TRX covers the bandwidth and is refused with the full figure.
+#[test]
+fn the_trx_check_of_a_trc20_withdraw_uses_the_full_fee() {
+    let node = Chain {
+        trx_sun: 1_000_000,
+        resources: "{}",
+        ..Chain::new()
+    }
+    .start();
+    match refused(&node, true, request("USDT-TRC20", Some("1"))) {
+        WithdrawError::NotSufficientPlatformBalanceForFee {
+            coin,
+            available,
+            required,
+        } => {
+            assert_eq!(coin, "TRX");
+            assert_eq!(available, dec("1"));
+            assert_eq!(required, dec("6.225"));
+        },
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Amounts
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -623,6 +871,105 @@ fn a_trc20_withdraw_without_the_trx_for_its_fee_is_refused() {
     }
     .start();
     withdrawn(&exact, true, request("USDT-TRC20", Some("1")));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Token amounts above 64 bits
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The selector of `transfer(address,uint256)`.
+const TRANSFER_SELECTOR: &str = "a9059cbb";
+/// [`RECEIVER`] as the address word of the call data: its 20 bytes (the wire form without the leading `41`),
+/// right-aligned.
+const RECEIVER_WORD: &str = "0000000000000000000000008840e6c55b9ada326d211d818c34a994aeced808";
+
+/// A token of 18 decimals: 1 000 000 tokens are 10^24 units = 0xd3c21bcecceda1000000, more than 64 bits hold.
+/// The withdraw builds, and the dry run and the signed transaction carry that amount whole. The call data is
+/// still 68 bytes, so the sizes at the head of this file hold.
+#[test]
+fn a_trc20_amount_above_64_bits_is_carried_whole() {
+    let amount_word = "00000000000000000000000000000000000000000000d3c21bcecceda1000000";
+    let node = Chain {
+        token_units: 2_000_000_000_000_000_000_000_000,
+        ..Chain::new()
+    }
+    .start();
+    let details = withdraw_18_decimals(&node, request("USDT-TRC20", Some("1000000")))
+        .unwrap_or_else(|e| panic!("the withdraw must succeed: {e:?}"));
+    let raw = raw_of(&details);
+    assert_eq!(
+        trc20_call_data_of(&raw),
+        format!("{TRANSFER_SELECTOR}{RECEIVER_WORD}{amount_word}")
+    );
+    assert_eq!(dry_run_parameters(&node), vec![json!(format!(
+        "{RECEIVER_WORD}{amount_word}"
+    ))]);
+    assert_eq!(details.total_amount, dec("1000000"));
+    assert_eq!(details.spent_by_me, dec("1000000"));
+    assert_eq!(details.my_balance_change, dec("-1000000"));
+    assert_eq!(fee_json(&details)["bandwidth_used"], 345);
+}
+
+/// `max` with a token balance above 64 bits sends the whole balance: 123 456 789.012345678901234567 tokens of 18
+/// decimals are 123 456 789 012 345 678 901 234 567 units = 0x661efdf158f2a82c9f4b87.
+#[test]
+fn trc20_max_sends_a_whole_token_balance_above_64_bits() {
+    let amount_word = "000000000000000000000000000000000000000000661efdf158f2a82c9f4b87";
+    let node = Chain {
+        token_units: 123_456_789_012_345_678_901_234_567,
+        ..Chain::new()
+    }
+    .start();
+    let details = withdraw_18_decimals(&node, request("USDT-TRC20", None))
+        .unwrap_or_else(|e| panic!("the withdraw must succeed: {e:?}"));
+    assert_eq!(
+        trc20_call_data_of(&raw_of(&details)),
+        format!("{TRANSFER_SELECTOR}{RECEIVER_WORD}{amount_word}")
+    );
+    assert_eq!(dry_run_parameters(&node), vec![json!(format!(
+        "{RECEIVER_WORD}{amount_word}"
+    ))]);
+    assert_eq!(details.total_amount, dec("123456789.012345678901234567"));
+    assert_eq!(details.spent_by_me, dec("123456789.012345678901234567"));
+}
+
+/// A token amount above the token balance answers `NotSufficientBalance` with both figures, also where both are
+/// above 64 bits, and nothing is dry-run or built.
+#[test]
+fn a_trc20_amount_above_the_token_balance_is_refused() {
+    let node = Chain {
+        token_units: 2_000_000_000_000_000_000_000_000,
+        ..Chain::new()
+    }
+    .start();
+    match withdraw_18_decimals(&node, request("USDT-TRC20", Some("2000000.000000000000000001"))) {
+        Err(WithdrawError::NotSufficientBalance {
+            coin,
+            available,
+            required,
+        }) => {
+            assert_eq!(coin, "USDT-TRC20");
+            assert_eq!(available, dec("2000000"));
+            assert_eq!(required, dec("2000000.000000000000000001"));
+        },
+        other => panic!("unexpected result: {:?}", other.map(|details| details.tx_hash)),
+    }
+    assert!(dry_run_parameters(&node).is_empty());
+    // The whole balance, to the unit, is not above it.
+    withdraw_18_decimals(&node, request("USDT-TRC20", Some("2000000")))
+        .unwrap_or_else(|e| panic!("the withdraw must succeed: {e:?}"));
+
+    // The same for the 6-decimal token: 5 tokens are held.
+    let node = Chain::new().start();
+    match refused(&node, true, request("USDT-TRC20", Some("5.000001"))) {
+        WithdrawError::NotSufficientBalance {
+            available, required, ..
+        } => {
+            assert_eq!(available, dec("5"));
+            assert_eq!(required, dec("5.000001"));
+        },
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
