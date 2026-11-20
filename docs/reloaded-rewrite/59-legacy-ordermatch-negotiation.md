@@ -1431,11 +1431,11 @@ its gating is not.*
   and it needs no Dirty Gate pass.
 - *Reloaded-original addition (2026-11-05) -- the pointer to ch. 32 R-GH14
   under R59.6.4.* No forbidden-class input; it needs no Dirty Gate pass.
-- *Reloaded-original addition (2026-11-20, maintainer decisions LCP to LCZ):
-  §59.4C (R59.4C.1–R59.4C.8), T16, D6, the status note under D5 and the
-  sentence in §59.0.* Orders that lack a capability the node requires are
-  left out of the order-book answers, with the requirement's own switch as
-  the opt-back. *Inputs:* this repository's own order-book, best-orders,
+- *Reloaded-original addition (2026-11-20, by the maintainer's decisions of
+  that day): §59.4C (R59.4C.1–R59.4C.8), T16, D6, the status note under D5
+  and the sentence in §59.0.* Orders that lack a capability the node
+  requires are left out of the order-book answers, with the requirement's
+  own switch as the opt-back. *Inputs:* this repository's own order-book, best-orders,
   event-stream and taker-order code, its acceptance checks, a lab run of
   this project's own node against a reference binary as a black box
   (reported as the node's own log lines), and the maintainer's decisions.
