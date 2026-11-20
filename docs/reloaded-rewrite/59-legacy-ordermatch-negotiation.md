@@ -470,12 +470,14 @@ While only Reloaded sends it, it also marks a node as Reloaded.
 > for these bytes -- in the full-orderbook answer, the synchronization
 > answer and both best-orders answers -- and how it treats a best-orders
 > peer request with one more trailing member, is recorded in §59.4B
-> (pending the KDF Dirty Gate). Nothing in this section is changed by it.
+> (passed the KDF Dirty Gate on 2026-11-20). Nothing in this section is
+> changed by it.
 
 ## 59.4B What a relay returns for an order's protocol information
 
-*(Pending the KDF Dirty Gate. Reference facts, KDF Spec Reader,
-2026-11-20, round 0.5.0-18. Rows `v2.6.0-beta` and `v3.0.0-beta` of
+*(Passed the KDF Dirty Gate on 2026-11-20, measure 0.01, attestation in
+§59.11. Reference facts, KDF Spec Reader, 2026-11-20, round 0.5.0-18.
+Rows `v2.6.0-beta` and `v3.0.0-beta` of
 chapter 02 §2.15A, identical at both in everything stated here; the rows
 `dev (as of 2026-03-27)` and `main (as of 2026-10-07)` do not differ from
 `v3.0.0-beta` in the material read. The decoder properties used are those
@@ -993,9 +995,9 @@ shall produce no `MakerReserved`, and a refused `MakerReserved` no
   - with the capability, both go ahead;
   - in no case is a swap started or a penalty record created.
 
-**T15.** *Relay carriage of protocol information (§59.4B).* *(Pending
-the KDF Dirty Gate with §59.4B. Reloaded-original test obligations on
-the reference facts of that section.)*
+**T15.** *Relay carriage of protocol information (§59.4B).* *(Passed
+the KDF Dirty Gate with §59.4B on 2026-11-20. Reloaded-original test
+obligations on the reference facts of that section.)*
 
 - (a) *Unchanged in every answer (R59.4B.1, R59.4B.2).* A relay receives
   a `MakerOrderCreated` whose two protocol-information strings each hold
@@ -1411,7 +1413,9 @@ its gating is not.*
   tokens were excluded from the measured set.
 - *Scoped addition (2026-11-20, Spec Reader round 0.5.0-18) -- §59.4B
   (R59.4B.1--R59.4B.7 and its compatibility note), T15, and the status
-  note at the end of §59.4A.* **Pending the KDF Dirty Gate.** Prompted by
+  note at the end of §59.4A.* **KDF Dirty Gate: PASS on 2026-11-20, measure
+  0.01, no findings** (chapter 01 R40; the attestation closes this item).
+  Prompted by
   the plan to hide, at RPC presentation, orders whose protocol
   information lacks a required capability. *Inputs:* the forbidden corpus
   at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
@@ -1434,8 +1438,27 @@ its gating is not.*
   dictated wire names (the four request kinds, `MakerOrderCreated`) and
   public RPC names; no private identifier, function body, helper
   decomposition, error, log or comment text was reproduced. The
-  compatibility note and T15 are Reloaded-original. No clearance is
-  recorded for this item yet.
+  compatibility note and T15 are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-20, measure
+  0.01, no findings; the pointer in chapter 32 under R-W2a passed with this
+  item. *Extent:* the order-matching peer-to-peer subject matter of
+  §59.4B and chapter 32 §32.7.1: the peer request definitions, the maker
+  order-creation message, the relay's storage of orders, the four answers
+  (full orderbook, synchronization, best orders by volume and by number),
+  the reading side and request decoding. The row `v3.0.0-beta` was read
+  (the relevant parts of four of the six source files located);
+  `v2.6.0-beta` by its full difference; `dev (as of 2026-03-27)`,
+  `staging (as of 2026-03-27)` and `main (as of 2026-10-07)` by
+  mechanical difference; all five rows by a whole-tree search for the
+  upgrade name and the shielded-library pin record (row `librustzcash
+  k-1.4.2`). The decoder statements of the public MessagePack library and
+  the listing of the live public repository are outside the gate's
+  extent; the listing was checked against the reading clone's remote
+  references of 2026-11-18. *Method:* reading plus mechanical comparison
+  (a per-token forced-versus-free inventory and version-control
+  differences); the repository's clean-room gate tool was not applicable
+  because the additions embed no code blocks. *Measure:* 0.01, on the
+  discretionary-expression basis.
 - *Reloaded-original addition (2026-11-04, Decisions BM and BO): §59.4A
   (R59.4A.1–R59.4A.7), T14 and D5.* The capability word in coin protocol
   information, read by the coin's acceptance check, with no switch on the
