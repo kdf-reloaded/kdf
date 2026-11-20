@@ -572,7 +572,8 @@ impl UtxoRpcClientOps for NativeClient {
             {
                 let maybe_spend_tx_bytes = try_s!(selfi.get_raw_transaction_bytes(&transaction.txid).compat().await);
                 let maybe_spend_tx: UtxoTx =
-                    try_s!(deserialize(maybe_spend_tx_bytes.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                    try_s!(crate::utxo::utxo_common::read_utxo_tx(maybe_spend_tx_bytes.as_slice())
+                        .map_err(|e| ERRL!("{:?}", e)));
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
@@ -692,11 +693,13 @@ impl NativeClientImpl {
     ) -> Box<dyn Future<Item = u64, Error = String> + Send + 'static> {
         let fut = self.get_raw_transaction_bytes(&txid).map_err(|e| ERRL!("{}", e));
         Box::new(fut.and_then(move |bytes| {
-            let tx: UtxoTx = try_s!(deserialize(bytes.as_slice()).map_err(|e| ERRL!(
-                "Error {:?} trying to deserialize the transaction {:?}",
-                e,
-                bytes
-            )));
+            let tx: UtxoTx = try_s!(
+                crate::utxo::utxo_common::read_utxo_tx(bytes.as_slice()).map_err(|e| ERRL!(
+                    "Error {:?} trying to deserialize the transaction {:?}",
+                    e,
+                    bytes
+                ))
+            );
             Ok(tx.outputs[index].value)
         }))
     }

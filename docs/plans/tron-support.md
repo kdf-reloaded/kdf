@@ -99,6 +99,12 @@ switched back on: the node client, the mmrpc 2.0 activation route, HD wallets,
 transaction history and the accuracy of the fee estimate. Switching activation
 on (work package 2) is the last step, after these.
 
+*2026-11-19:* The TRON HD wallet is built on the mmrpc 2.0 route (CRD ch.21 R-A2, R21.10B.4, R21.10B.5, R21.10B.8):
+the TRX address is derived under the coin config's `derivation_path`, the HD methods and `task::create_new_account::init`
+answer as the chapter states, and `withdraw` takes an HD `from`. `IguanaPrivKey` keeps the node's internal key. The legacy
+`enable` route keeps the internal key under a global-HD login, as the EVM and UTXO legacy routes do (decided 2026-11-19).
+TRON stays switched off.
+
 *2026-11-17:* GasFree gets its modules before the switch-on, and its reachable
 rail (the user-visible fee method) after it. GasFree also submits the signed
 transfer to the provider and tracks it until it ends; that is a KDF Reloaded

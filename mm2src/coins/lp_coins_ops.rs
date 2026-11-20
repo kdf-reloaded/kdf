@@ -192,9 +192,12 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         // TRON activation routes through a dedicated builder that populates
         // `EthCoin.tron_api`. P10.2 wiring.
         // Docs vs reference (CRD ch.55 R55.4.7, D55.5): the reference release rejects TRX and TRC20 on the
-        // legacy path and requires an mmrpc 2.0 activation. Reloaded has no mmrpc 2.0 TRON activation, so
-        // rejecting them here would remove TRON activation entirely; it keeps them as a documented extension
-        // (maintainer decision 2026-10-11). A client written for the reference never sends such a request.
+        // legacy path and requires an mmrpc 2.0 activation. Reloaded has that activation now
+        // (`enable_eth_with_tokens`, `task::enable_eth`), and builds the TRON HD wallet there under a global-HD
+        // login (CRD ch.21 R-A2). This legacy route stays as a documented extension (maintainer decision
+        // 2026-10-11). Under a global-HD login it keeps the node's internal key, as the EVM and UTXO legacy routes
+        // do in Reloaded (decided 2026-11-19), so its address differs from the one the mmrpc 2.0 HD route gives for
+        // the same seed. A client written for the reference never sends such a request.
         CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } => try_s!(
             crate::eth::tron::tron_coin_from_conf_and_request(ctx, ticker, &coins_en, req, &secret, protocol).await
         )

@@ -516,6 +516,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         str_d_zeel,
         hash_algo,
         sighash_suffix: coin.as_ref().conf.sighash_suffix,
+        read_by_library: false,
     };
     let signed_input = try_s!(p2sh_spend(
         &unsigned,
@@ -549,6 +550,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         consensus_branch_id,
         sapling_v5: unsigned.sapling_v5,
         orchard: unsigned.orchard,
+        opaque: None,
     })
 }
 
@@ -613,7 +615,7 @@ pub fn send_raw_tx_bytes_promoting_withdraw(
 }
 
 pub fn tx_enum_from_bytes(coin: &UtxoCoinFields, bytes: &[u8]) -> Result<TransactionEnum, String> {
-    let mut transaction: UtxoTx = try_s!(deserialize(bytes).map_err(|err| format!("{:?}", err)));
+    let mut transaction: UtxoTx = try_s!(read_utxo_tx(bytes).map_err(|err| format!("{:?}", err)));
     transaction.tx_hash_algo = coin.tx_hash_algo;
     Ok(transaction.into())
 }
