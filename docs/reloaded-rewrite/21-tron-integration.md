@@ -1056,6 +1056,15 @@ each point above, against a stub node, with hand-computed figures),
 `tron/fee.rs`, `tron/withdraw.rs` and, for the HD sender,
 `tron/hd_tests.rs`.
 
+*Status note (2026-11-20), TRC20 amounts.* A TRC20 amount is encoded as a
+256-bit value, in the balance comparison, the energy dry run and the
+transaction's call data, so a token's whole balance can be sent whatever its
+decimals. Before this date the amount was narrowed to 64 bits and a larger one
+answered `InternalError`. Call data of an amount that fits 64 bits is
+unchanged; TRX amounts in SUN stay 64-bit values. Tests:
+`tron/tx_builder.rs` and `tron/withdraw_fee_tests.rs`, against hand-computed
+call data.
+
 *Status note (2026-11-20), origin-energy share.* What the reference does
 about the energy a TRC20 contract pays itself is stated in R21.10B.10 --
 R21.10B.12 below, and what it does when the dry run reverts in R21.10B.13
@@ -2271,6 +2280,11 @@ V3. The address encoding, protobuf transaction/contract formats,
   sizes. The whole-draw bandwidth rule, the margin and maximum of the
   `fee_limit`, the refusal above the maximum and the settling of a TRX `max`
   amount are Reloaded's own. No cleared sentence was edited.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status note of this date on TRC20 amounts after R21.10B.7 is
+  Reloaded-original. It rests on this repository's own code and on the public
+  token standard's `transfer(address,uint256)` interface. No cleared sentence
+  was edited.
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
   with its status remark, is Reloaded-original. It rests on the maintainer

@@ -276,6 +276,11 @@ the previous version used. The safe way:
   throughout: every balance and resource is read for that address.
   **TRON stays switched off in this build**, so none of this can be used yet. Detail: PR #437; CRD ch.21 R21.10B.7,
   D21.10B.1 and their status notes of 2026-11-19; RELOADED_VS_GLEEC.md.
+- **A TRC20 withdrawal can send any amount the token balance holds.** The amount of a TRC20 transfer is now encoded
+  as a 256-bit value, so a token's whole balance can be sent whatever its decimals; a token of 18 decimals could send
+  at most about 18.4 whole tokens per withdrawal, and a larger amount answered `InternalError`. Transfers of smaller
+  amounts are built exactly as before. TRON stays switched off in this build. Detail: PR #442; CRD ch.21, the status
+  note of 2026-11-20 after R21.10B.7.
 - **TRON coins have a transaction history when a TronGrid API key is set.** With `tx_history: true` in the
   activation request and a TronGrid node that has an API key (the node's own `TRON-PRO-API-KEY` header, or the
   `MM2.json` key `tron_api_key`), TRX and TRC20 coins list their transactions through `my_tx_history`, in both the

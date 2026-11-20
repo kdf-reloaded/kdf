@@ -12,7 +12,7 @@
 
 use super::proto;
 use super::test_node::{Reply, StubNode};
-use super::wallet_path_tests::{trc20_coin, trx_coin, NOW_BLOCK_BODY, TRC20_CONTRACT};
+use super::wallet_path_tests::{trc20_coin, trc20_coin_of_decimals, trx_coin, NOW_BLOCK_BODY, TRC20_CONTRACT};
 use super::withdraw::withdraw_tron;
 use super::TronAddress;
 use crate::eth::EvmWithdrawSender;
@@ -39,8 +39,8 @@ const PARAMETERS: &str = r#"{"chainParameter":[{"key":"getTransactionFee","value
 struct Chain {
     /// The TRX balance of every account the chain has created, in SUN.
     trx_sun: u64,
-    /// The token balance of every address, in token units.
-    token_units: u64,
+    /// The token balance of every address, in token units. A balance may be above what 64 bits hold.
+    token_units: u128,
     /// Whether the chain has created the recipient's account.
     recipient_exists: bool,
     /// The `getaccountresource` answer.
@@ -131,6 +131,17 @@ fn withdraw(node: &StubNode, trc20: bool, mut request: WithdrawRequest) -> Resul
     })
 }
 
+/// Runs the withdraw `request` of a TRC20 coin of 18 decimals against `node`.
+fn withdraw_18_decimals(node: &StubNode, mut request: WithdrawRequest) -> Result<TransactionDetails, WithdrawError> {
+    block_on(async {
+        let (_ctx, coin) = trc20_coin_of_decimals(&node.url(), 18).await;
+        request.coin = coin.ticker.clone();
+        withdraw_tron(coin.clone(), request, EvmWithdrawSender::activated(&coin))
+            .await
+            .map_err(|e| e.into_inner())
+    })
+}
+
 fn withdrawn(node: &StubNode, trc20: bool, request: WithdrawRequest) -> TransactionDetails {
     withdraw(node, trc20, request).unwrap_or_else(|e| panic!("the withdraw must succeed (trc20={trc20}): {e:?}"))
 }
@@ -186,6 +197,22 @@ fn trc20_amount_of(raw: &proto::TransactionRaw) -> u64 {
     let mut word = [0u8; 8];
     word.copy_from_slice(&call.data[60..68]);
     u64::from_be_bytes(word)
+}
+
+/// The call data of the TRC20 transfer in `raw`, in hex.
+fn trc20_call_data_of(raw: &proto::TransactionRaw) -> String {
+    let any = raw.contract[0].parameter.as_ref().expect("a contract parameter");
+    let call = proto::TriggerSmartContract::decode(any.value.as_slice()).expect("a contract call");
+    hex::encode(call.data)
+}
+
+/// The `parameter` members of the transfer dry runs `node` was asked for.
+fn dry_run_parameters(node: &StubNode) -> Vec<Json> {
+    node.bodies_for("/wallet/triggerconstantcontract")
+        .into_iter()
+        .filter(|body| body["function_selector"] == "transfer(address,uint256)")
+        .map(|body| body["parameter"].clone())
+        .collect()
 }
 
 fn sender_base58() -> String {
@@ -623,6 +650,105 @@ fn a_trc20_withdraw_without_the_trx_for_its_fee_is_refused() {
     }
     .start();
     withdrawn(&exact, true, request("USDT-TRC20", Some("1")));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Token amounts above 64 bits
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The selector of `transfer(address,uint256)`.
+const TRANSFER_SELECTOR: &str = "a9059cbb";
+/// [`RECEIVER`] as the address word of the call data: its 20 bytes (the wire form without the leading `41`),
+/// right-aligned.
+const RECEIVER_WORD: &str = "0000000000000000000000008840e6c55b9ada326d211d818c34a994aeced808";
+
+/// A token of 18 decimals: 1 000 000 tokens are 10^24 units = 0xd3c21bcecceda1000000, more than 64 bits hold.
+/// The withdraw builds, and the dry run and the signed transaction carry that amount whole. The call data is
+/// still 68 bytes, so the sizes at the head of this file hold.
+#[test]
+fn a_trc20_amount_above_64_bits_is_carried_whole() {
+    let amount_word = "00000000000000000000000000000000000000000000d3c21bcecceda1000000";
+    let node = Chain {
+        token_units: 2_000_000_000_000_000_000_000_000,
+        ..Chain::new()
+    }
+    .start();
+    let details = withdraw_18_decimals(&node, request("USDT-TRC20", Some("1000000")))
+        .unwrap_or_else(|e| panic!("the withdraw must succeed: {e:?}"));
+    let raw = raw_of(&details);
+    assert_eq!(
+        trc20_call_data_of(&raw),
+        format!("{TRANSFER_SELECTOR}{RECEIVER_WORD}{amount_word}")
+    );
+    assert_eq!(dry_run_parameters(&node), vec![json!(format!(
+        "{RECEIVER_WORD}{amount_word}"
+    ))]);
+    assert_eq!(details.total_amount, dec("1000000"));
+    assert_eq!(details.spent_by_me, dec("1000000"));
+    assert_eq!(details.my_balance_change, dec("-1000000"));
+    assert_eq!(fee_json(&details)["bandwidth_used"], 345);
+}
+
+/// `max` with a token balance above 64 bits sends the whole balance: 123 456 789.012345678901234567 tokens of 18
+/// decimals are 123 456 789 012 345 678 901 234 567 units = 0x661efdf158f2a82c9f4b87.
+#[test]
+fn trc20_max_sends_a_whole_token_balance_above_64_bits() {
+    let amount_word = "000000000000000000000000000000000000000000661efdf158f2a82c9f4b87";
+    let node = Chain {
+        token_units: 123_456_789_012_345_678_901_234_567,
+        ..Chain::new()
+    }
+    .start();
+    let details = withdraw_18_decimals(&node, request("USDT-TRC20", None))
+        .unwrap_or_else(|e| panic!("the withdraw must succeed: {e:?}"));
+    assert_eq!(
+        trc20_call_data_of(&raw_of(&details)),
+        format!("{TRANSFER_SELECTOR}{RECEIVER_WORD}{amount_word}")
+    );
+    assert_eq!(dry_run_parameters(&node), vec![json!(format!(
+        "{RECEIVER_WORD}{amount_word}"
+    ))]);
+    assert_eq!(details.total_amount, dec("123456789.012345678901234567"));
+    assert_eq!(details.spent_by_me, dec("123456789.012345678901234567"));
+}
+
+/// A token amount above the token balance answers `NotSufficientBalance` with both figures, also where both are
+/// above 64 bits, and nothing is dry-run or built.
+#[test]
+fn a_trc20_amount_above_the_token_balance_is_refused() {
+    let node = Chain {
+        token_units: 2_000_000_000_000_000_000_000_000,
+        ..Chain::new()
+    }
+    .start();
+    match withdraw_18_decimals(&node, request("USDT-TRC20", Some("2000000.000000000000000001"))) {
+        Err(WithdrawError::NotSufficientBalance {
+            coin,
+            available,
+            required,
+        }) => {
+            assert_eq!(coin, "USDT-TRC20");
+            assert_eq!(available, dec("2000000"));
+            assert_eq!(required, dec("2000000.000000000000000001"));
+        },
+        other => panic!("unexpected result: {:?}", other.map(|details| details.tx_hash)),
+    }
+    assert!(dry_run_parameters(&node).is_empty());
+    // The whole balance, to the unit, is not above it.
+    withdraw_18_decimals(&node, request("USDT-TRC20", Some("2000000")))
+        .unwrap_or_else(|e| panic!("the withdraw must succeed: {e:?}"));
+
+    // The same for the 6-decimal token: 5 tokens are held.
+    let node = Chain::new().start();
+    match refused(&node, true, request("USDT-TRC20", Some("5.000001"))) {
+        WithdrawError::NotSufficientBalance {
+            available, required, ..
+        } => {
+            assert_eq!(available, dec("5"));
+            assert_eq!(required, dec("5.000001"));
+        },
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
