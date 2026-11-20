@@ -158,12 +158,13 @@ fn test_rpc() {
     let no_method = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "coin": "DOC",
-        "ipaddr": "electrum1.cipig.net",
         "port": 10017
     })))
     .unwrap();
-    // A request without a method is retried as an mmrpc 2.0 request and refused there as invalid.
-    assert!(no_method.0.is_client_error(), "{}", no_method.1);
+    // CRD ch.43 R43.1A.1d: a request without a method is retried as an mmrpc 2.0 request and refused there as invalid.
+    assert_eq!(no_method.0, StatusCode::BAD_REQUEST, "{}", no_method.1);
+    let no_method_body: Json = json::from_str(&no_method.1).unwrap();
+    assert_eq!(no_method_body["error_type"], "InvalidRequest", "{}", no_method.1);
     assert_eq!((no_method.2)[ACCESS_CONTROL_ALLOW_ORIGIN], "http://localhost:4000");
 
     let not_json = mm.rpc_str("It's just a string").unwrap();
@@ -822,19 +823,17 @@ fn test_rpc_password_from_json_no_userpass() {
     .unwrap();
     let (_dump_log, _dump_dashboard) = mm.mm_dump();
     log!({"Log path: {}", mm.log_path.display()});
-    let electrum = block_on(mm.rpc(&json! ({
-        "method": "electrum",
-        "coin": "DOC",
-        "urls": ["doc.electrum2.cipig.net:10020"],
+    let version = block_on(mm.rpc(&json! ({
+        "method": "version",
     })))
     .unwrap();
 
-    // electrum call must return 500 status code
+    // a protected call without `userpass` must return 500 status code
     assert!(
-        electrum.0.is_server_error(),
-        "RPC «electrum» should have failed with server error, but got «{}», response «{}»",
-        electrum.0,
-        electrum.1
+        version.0.is_server_error(),
+        "RPC «version» should have failed with server error, but got «{}», response «{}»",
+        version.0,
+        version.1
     );
 }
 
