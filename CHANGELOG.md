@@ -357,7 +357,7 @@ the previous version used. The safe way:
   of BCH, EVM and Tendermint platforms ran until the node stopped, and a removed coin stayed alive in its streams. A
   passive platform keeps its work. A removed Lightning coin keeps its background work (graph persistence, peer
   listener, reconnect and announcement loops) until the node stops; that is a known limitation of this release. Detail:
-  PR #TBD; CRD ch.43 R43.1E.5 item 4.
+  PR #439; CRD ch.43 R43.1E.5 item 4.
 - **A token or layer-two activation waits for a `disable_coin` of its platform, and the other way round.** The token
   and layer-two activation methods (`enable_erc20`, `enable_nft`, `enable_slp`, `enable_tendermint_token`, the Solana
   token method, the Lightning activation, and the task forms) now take the activation lock of the platform with the lock of
@@ -549,7 +549,7 @@ the previous version used. The safe way:
   longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
   of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at
   once when the same ticker is enabled again. The clean-up of a failed `enable` or `electrum` balance read removes only the
-  coin that call registered. Detail: PR #TBD; CRD ch.55 R55.4.9.
+  coin that call registered. Detail: PR #439; CRD ch.55 R55.4.9.
 - **EVM transaction history could fail to start after an activation with `tx_history`.** The history collection
   started just before the platform was registered, and its first check for the registered coin could run before
   the registration, which ended the collection. It now starts after the registration, and a failed activation no
