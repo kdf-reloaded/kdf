@@ -915,6 +915,13 @@ addresses and their derivation paths) and an empty `nfts_infos`.
 `enable_erc20` reports the token contract in base58check as
 `token_contract_address`.
 
+*Status note (2026-11-20), `gasfree_address`.* R21.10B.5 describes the rows it
+names, which have no GasFree. When the platform was activated with a GasFree
+provider, the address entries of the result also carry `gasfree_address`
+([Chapter 63](63-tron-gasfree-fee-delegation.md) §63.3.3 and its status note of
+2026-11-20); without one the result is as R21.10B.5 states. The sentences of
+R21.10B.5 above are unchanged.
+
 **R21.10B.6** *Transaction history (completes R-T4).* No TRON history source
 exists at either row: the reference reads none of the full-node API, a
 provider's account endpoints or the event service for history, and no

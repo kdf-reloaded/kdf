@@ -497,12 +497,8 @@ impl HDWalletBalanceOps for EthCoin {
         // [`HDWalletBalanceOps::known_addresses_balances`] returns pairs in the order they were requested.
         let mut reported = Vec::with_capacity(derived.len());
         for ((address, balance), (_, derivation_path)) in balances.into_iter().zip(derived) {
-            reported.push(HDAddressBalance {
-                address: self.hd_address_string(&address),
-                derivation_path: RpcDerivationPath(derivation_path),
-                chain,
-                balance: self.hd_balance_map(&address, balance).await?,
-            });
+            let balance = self.hd_balance_map(&address, balance).await?;
+            reported.push(self.hd_address_balance(&address, derivation_path, chain, balance).await);
         }
         Ok(reported)
     }
@@ -593,19 +589,21 @@ async fn scan_for_new_addresses_impl(
                     let empty_address = coin
                         .derive_address(hd_account, chain, empty_address_id)
                         .mm_err(Into::into)?;
-                    balances.push(HDAddressBalance {
-                        address: coin.hd_address_string(&empty_address.address),
-                        derivation_path: RpcDerivationPath(empty_address.derivation_path),
-                        chain,
-                        balance: coin.hd_empty_balance_map(),
-                    });
+                    balances.push(
+                        coin.hd_address_balance(
+                            &empty_address.address,
+                            empty_address.derivation_path,
+                            chain,
+                            coin.hd_empty_balance_map(),
+                        )
+                        .await,
+                    );
                 }
-                balances.push(HDAddressBalance {
-                    address: coin.hd_address_string(&checking_address),
-                    derivation_path: RpcDerivationPath(checking_address_der_path),
-                    chain,
-                    balance: coin.hd_balance_map(&checking_address, non_empty_balance).await?,
-                });
+                let balance = coin.hd_balance_map(&checking_address, non_empty_balance).await?;
+                balances.push(
+                    coin.hd_address_balance(&checking_address, checking_address_der_path, chain, balance)
+                        .await,
+                );
                 unused_addresses_counter = 0;
             },
             AddressBalanceStatus::NotUsed => unused_addresses_counter += 1,
@@ -735,13 +733,9 @@ async fn tron_get_new_address_rpc(
         .await
         .mm_err(Into::into)?;
     let balance = coin.known_address_balance(&address).await.mm_err(Into::into)?;
+    let balance = coin.hd_balance_map(&address, balance).await.mm_err(Into::into)?;
     Ok(GetNewHDAddressResponse {
-        new_address: HDAddressBalance {
-            address: coin.hd_address_string(&address),
-            derivation_path: RpcDerivationPath(derivation_path),
-            chain,
-            balance: coin.hd_balance_map(&address, balance).await.mm_err(Into::into)?,
-        },
+        new_address: coin.hd_address_balance(&address, derivation_path, chain, balance).await,
     })
 }
 
@@ -802,6 +796,28 @@ impl EthCoin {
             TronAddress::from_evm_address(*address).to_base58()
         } else {
             checksum_address(&format!("{:#x}", address))
+        }
+    }
+
+    /// One address entry of an HD wallet report of this coin. Every HD report of the EVM family is built from the
+    /// entries this function makes (`get_new_address`, `account_balance`, the task forms of the account balance
+    /// and of the scan for new addresses, and the HD results of the platform and token activations), so the GasFree
+    /// custody address is attached here and nowhere else (CRD ch.63 §63.3.3, R18, and the finding in §63.10). The
+    /// field is `None` for a coin that is not a TRON coin with a provider binding
+    /// ([`Self::gasfree_report_address`]).
+    pub(crate) async fn hd_address_balance(
+        &self,
+        address: &Address,
+        derivation_path: DerivationPath,
+        chain: Bip44Chain,
+        balance: CoinBalanceMap,
+    ) -> HDAddressBalance {
+        HDAddressBalance {
+            address: self.hd_address_string(address),
+            gasfree_address: self.gasfree_report_address(address).await,
+            derivation_path: RpcDerivationPath(derivation_path),
+            chain,
+            balance,
         }
     }
 
@@ -916,12 +932,15 @@ impl EthCoin {
                     .derive_address(account, Bip44Chain::External, address_id)
                     .mm_err(Into::into)?;
                 let balance = self.erc20_balance_of(info, hd_address.address).await?;
-                addresses.push(HDAddressBalance {
-                    address: self.hd_address_string(&hd_address.address),
-                    derivation_path: RpcDerivationPath(hd_address.derivation_path),
-                    chain: Bip44Chain::External,
-                    balance: coin_balance_map_for_ticker(token_ticker, balance),
-                });
+                addresses.push(
+                    self.hd_address_balance(
+                        &hd_address.address,
+                        hd_address.derivation_path,
+                        Bip44Chain::External,
+                        coin_balance_map_for_ticker(token_ticker, balance),
+                    )
+                    .await,
+                );
             }
             report.accounts.push(HDAccountBalance {
                 account_index: account.account_id,

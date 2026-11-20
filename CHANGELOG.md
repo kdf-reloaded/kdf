@@ -255,6 +255,16 @@ the previous version used. The safe way:
   user's GasFree custody address and checks it against the GasFree contract, prepares and signs a transfer
   authorization, and reads account and fee data from a GasFree provider. No RPC reaches it, so nothing changes for
   users. Detail: PR #433; CRD ch.63 §63.4 to §63.7, R29.
+- **A GasFree provider can be configured when TRON is activated, and the balance answers show the GasFree deposit
+  address.** The platform activation takes a `tron_gasless_provider` object (the provider's URL as scheme and host,
+  its API key and secret, and the provider's address), and a TRC20 token activation takes a `gasless` block with an
+  optional fee cap. A request with these members on a coin that is not a TRON coin, a provider URL with a path, or a
+  fee cap the token cannot express is refused. With a provider configured, `my_balance`, the activation results and
+  the HD address methods show `gasfree_address` next to each address: the address to send a token to before it can be
+  moved without TRX. The address is checked against the GasFree contract first and is left out if the contract
+  disagrees. The API key and secret are never logged or shown. Gasless withdrawals themselves are not available yet.
+  **TRON stays switched off in this build**, so none of this can be used yet. Detail: CRD ch.63 §63.3.1 to §63.3.3,
+  R18, R29.
 
 #### Tendermint (Cosmos) coins
 
@@ -788,8 +798,9 @@ the previous version used. The safe way:
   (PR #405). The TRON HD wallet is built on the same route, still switched off.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
-  controller; the support modules are built and not yet reachable; the remaining PRs are listed again (activation
-  binding, fields and withdraw dispatcher; then submission and settlement).
+  controller; the support modules are built and not yet reachable; the activation binding and the `gasfree_address`
+  fields in the reports are built, behind the TRON switch; the withdraw dispatcher, then submission and settlement,
+  remain.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.

@@ -223,6 +223,48 @@ gains an optional gasless block:
   when the platform has a `tron_gasless_provider`; otherwise
   activation is rejected with an invalid-payload error.
 
+> *Status note (2026-11-20), §63.3.1 and §63.3.2 built (Reloaded-original
+> where it states a choice; takes no reference input).*
+> `enable_eth_with_tokens` and `task::enable_eth::init` read
+> `tron_gasless_provider`. The entries of `erc20_tokens_requests`, and the
+> `activation_params` of `enable_erc20` and `task::enable_erc20::init`, read
+> `gasless`. TRON stays behind `TRON_ACTIVATION_AVAILABLE` (`false`), so no
+> request reaches any of this yet.
+>
+> - *The provider object.* On an EVM platform it answers `InvalidPayload`
+>   (HTTP 400) before any key is read and any node is contacted. On a TRON
+>   platform a `base_url` that is not an `http` or `https` URL of a scheme and
+>   a host alone, and a `service_provider` that is not a base58check TRON
+>   address, answer `InvalidPayload`; the hex forms of an address are not
+>   accepted for `service_provider`. Neither a node nor the provider is
+>   contacted at activation. `base_url`, `api_key`, `api_secret` and
+>   `service_provider` are required: a request without one of them fails
+>   request decoding. The defaults are 15 000 ms and 3 000 ms (R20).
+> - *The token block.* A block with `enabled: false` is treated as absent,
+>   whatever else it holds. An enabled block is refused for a token that is
+>   not a TRC20 token (an ERC-20 token, an NFT), for a TRON platform without a
+>   provider binding, for a negative `transfer_max_fee`, and for a
+>   `transfer_max_fee` that has more decimal places than the token or does not
+>   fit the token's amount type. The first three need no token decimals and
+>   are refused before any node is asked for the token; the cap is converted
+>   once the token's decimals are known, which may take a read of the contract.
+> - *Which error.* The platform routes, in both forms, and `enable_erc20`
+>   answer `InvalidPayload` (HTTP 400). `task::enable_erc20` has no such
+>   member in its error set: it reports the refusal in the task status as
+>   `Transport`, the token chapter 35 R35.3A.6 gives an invalid-payload class
+>   failure of the token construction.
+> - *Where the settings live.* The validated provider binding (the host-only
+>   base, the two credentials, the service provider, the timeout and the poll
+>   interval) lives on the TRX platform coin; a TRC20 token resolves it from
+>   its platform coin. The enabled token block, with the cap in the token's
+>   smallest unit, lives on the token coin. The legacy `enable` and `electrum`
+>   route has neither member. Nothing sends a provider request yet: the
+>   withdraw rail reads both settings.
+> - *Secrets (R9).* The debug form of the request and of the binding shows
+>   neither credential and names the URL by its host; no refusal repeats a
+>   value of the object; a credential of another JSON type than a string fails
+>   request decoding without being repeated.
+
 ### 63.3.3 Where the custody address is reported (dictated by our public API)
 
 The locally derived (§63.5) GasFree custody address is reported
@@ -251,6 +293,48 @@ non-conforming. (Informative: at the reference row the field is
 carried by the shared cross-coin balance-report structures as an
 interim choice, attached by each reporting site rather than by the
 report builder. See the code-quality finding in §63.10.)
+
+> *Status note (2026-11-20), §63.3.3 built, and the report rule for R29
+> (Reloaded-original; takes no reference input).*
+>
+> - *Placements.* `gasfree_address` stands:
+>   - in the shared per-address entry of an HD report, hence in the HD form
+>     of the platform-with-tokens result, in `get_new_address`,
+>     `account_balance`, `task::account_balance::init`,
+>     `task::scan_for_new_addresses::init` and in the HD forms of the token
+>     results;
+>   - in both address-information blocks of the single-address
+>     platform-with-tokens result, also when `get_balances` is `false`;
+>   - in `wallet_balance` of the single-address task-based token result,
+>     beside `address`;
+>   - in each entry of the `balances` map of the one-shot token result,
+>     beside `spendable` and `unspendable` (the map is keyed by the address
+>     and has no other member next to it);
+>   - in the legacy `my_balance` answer, beside `address`.
+>
+>   `task::create_new_account::init` is refused for every TRON coin
+>   ([Chapter 21](21-tron-integration.md) R21.10B.4), so that placement does
+>   not arise. For every other coin, and for a TRON coin whose platform has no
+>   provider binding, the member is omitted, never `null`.
+> - *One place.* The value comes from one function of the EVM coin family.
+>   Every HD report entry of that family is made by one constructor that calls
+>   it, and the single-address results call the same function; no RPC attaches
+>   the member afterwards (the finding in §63.10).
+> - *Report rule for R29.* A report does not show a custody address that the
+>   controller contradicts. Before an address is shown, the check of R29 runs
+>   for it, with its 10-minute confirmation:
+>   - the controller confirms the derived address, now or within the last
+>     10 minutes: the member carries it;
+>   - the controller reports another address: the member is omitted for that
+>     address, and one warning line is logged per check;
+>   - the controller cannot be read: the member carries the locally derived
+>     address, as the reference row shows it (R18); nothing is remembered, so
+>     the next report reads the controller again.
+>
+>   None of the three outcomes fails the balance read or the activation. The
+>   confirmations are kept per platform coin and shared with its tokens; they
+>   are gone after a restart and after the platform is activated again. The
+>   refusal of the gasless rail in R29 is unchanged.
 
 ### 63.3.4 Withdraw request (dictated by our public API)
 
@@ -1193,6 +1277,10 @@ R29. **Custody derivation checked against the controller
     available. This refusal is not a deterministic unavailability for
     §63.8 step 6. *(Takes no reference input.)*
 
+    *Status note (2026-11-20).* The same check runs before a report shows a
+    custody address; what a report does with each outcome is stated in the
+    status note after §63.3.3.
+
 > **Code-quality finding (informative; trigger: a comment at the
 > reference row states the problem itself).** At the reference row the custody address is not produced
 > by the balance-report builder but attached afterwards at each
@@ -1272,10 +1360,29 @@ T9. **Activation configuration.** The per-network request base of
     rejection of §63.3.2, and the Tron-only/provider-required
     activation gates are exercised.
 
+    *Status note (2026-11-20).* The tests exist: the provider object and the
+    token block at the coin level (the request base through a loopback
+    provider, the path-bearing URL, the defaults, the malformed
+    `service_provider`, the cap conversion), and the activation gates on the
+    one-shot and task forms of the platform and token routes against a
+    loopback node, for a TRON and for an EVM platform.
+
 T10. **Custody address placements.** With a provider configured on
     a Tron platform, every RPC §63.3.3 lists carries
     `gasfree_address`, and none of them carries it without a
     provider or for a non-Tron coin (R18).
+
+    *Status note (2026-11-20).* The tests exist, through the RPCs: the
+    platform-with-tokens result in its single-address and HD forms, the
+    one-shot and the task-based token result, `get_new_address`,
+    `account_balance`, `task::account_balance::init`,
+    `task::scan_for_new_addresses::init` and the legacy `my_balance`, each
+    with the member equal to the local derivation for its address; without a
+    provider, and for an EVM coin, the member is absent from the answer text.
+    The report rule for R29 (§63.3.3 status note) is tested on the same
+    answers: a contradicting controller omits the member, an unreadable one
+    leaves the derived address, and a second report within 10 minutes makes
+    no controller read.
 
 T11. **Error collapse.** Each provider-interaction condition of
     §63.9.3 reaches the withdraw RPC as the mapped arm and status, and no
@@ -1562,3 +1669,7 @@ V2. The baseline withdraw request has no fee-rail selector and no
 - *Additions of 2026-11-19:* R29, T17 and the status notes dated
   2026-11-19 (§63.4.5, §63.5, R23, T1, T2) are Reloaded-original and take no
   reference input.
+- *Additions of 2026-11-20:* the status notes dated 2026-11-20 (after
+  §63.3.2, §63.3.3, R29, T9 and T10) are Reloaded-original, clean side: they
+  record what is built and the report rule for R29, and take no reference
+  input.

@@ -28,6 +28,8 @@ mod wallet_path_tests;
 pub use activation::{parse_trc20_contract, tron_coin_from_conf_and_request, tron_coin_from_params,
                      tron_coin_from_params_with_global_hd, tron_required_confirmations, TronCoinParams};
 pub use address::{TronAddress, TronAddressFormat};
+pub use gasfree::binding::{gasfree_custody_address, GasFreeBinding, GaslessConfigError, TronGaslessProviderRequest,
+                           TronTokenGaslessRequest};
 
 use serde::{Deserialize, Serialize};
 

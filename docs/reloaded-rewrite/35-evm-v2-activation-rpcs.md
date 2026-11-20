@@ -191,6 +191,19 @@ reference version at all. A malformed value in any of these five fields shall
 > are bound by [Chapter 63](63-tron-gasfree-fee-delegation.md)
 > §63.3.1–§63.3.2 (passed the KDF Dirty Gate on 2026-11-08).
 
+*Status note (2026-11-20), the two GasFree members.* Both are read now, for a
+TRON platform only (behind `TRON_ACTIVATION_AVAILABLE`, `false`):
+`tron_gasless_provider` on this request and on `task::enable_eth::init`, and
+`gasless` on each entry of `erc20_tokens_requests`, in the `activation_params`
+of `enable_erc20` (R35.2.1) and of `task::enable_erc20::init` (R35.3A.2). An EVM
+platform refuses `tron_gasless_provider`, and a token that is not a TRC20 token
+refuses an enabled `gasless` block, with `InvalidPayload` (HTTP 400); on
+`task::enable_erc20` the refusal is the `Transport` of R35.3A.6 in the task
+status. With a provider on the platform, the address entries of the results of
+R35.1.3, R35.2.3 and R35.3A.5 also carry `gasfree_address`. The two credentials
+of the object are credentials under R35.1.17. Chapter 63 §63.3.1 -- §63.3.3 and
+their status notes of 2026-11-20 govern.
+
 ### 35.1.B Activation flow and failure precedence
 
 R35.1.2 Activation shall proceed through the following phases, and when a

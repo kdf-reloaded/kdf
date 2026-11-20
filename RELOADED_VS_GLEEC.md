@@ -768,6 +768,15 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   format values with the legacy error body; an EVM coin is unchanged. No switch; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R21.10B.8, D21.10B.2.
 
+- **A TRON GasFree custody address (TRON is still switched off) is checked against the GasFree controller before it
+  is shown or used.** GLEEC KDF has no released GasFree support (its implementation is an unmerged draft, CRD ch.63 §63.0), and this check is a KDF Reloaded addition.
+  Reloaded compares it with the answer of the controller contract's `getGasFreeAddress` and keeps a confirmation for
+  10 minutes. In the answers that carry `gasfree_address`, an address the controller contradicts is left out, with a
+  warning in the log; when the controller cannot be read, the derived address is shown. Before a gasless transfer is
+  signed, a contradicted address refuses the gasless rail and leaves the native one. A safety divergence: no switch;
+  row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.63 R29, §63.3.3.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.

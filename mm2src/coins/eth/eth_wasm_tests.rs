@@ -64,6 +64,7 @@ async fn test_send() {
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         logs_window: Default::default(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),

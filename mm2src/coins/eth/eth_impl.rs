@@ -1773,6 +1773,7 @@ impl EthCoin {
             estimate_gas_mult,
             taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: None,
+            tron_gasfree: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
             erc20_tokens_infos: Default::default(),

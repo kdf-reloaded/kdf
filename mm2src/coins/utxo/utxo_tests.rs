@@ -4877,6 +4877,7 @@ fn test_account_balance_rpc() {
             addresses_map.insert($address.to_string(), $balance);
             balances_by_der_path.insert($der_path.to_string(), HDAddressBalance {
                 address: $address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(
@@ -5217,6 +5218,7 @@ fn test_scan_for_new_addresses() {
             checking_addresses.insert($address.to_string(), balance);
             balances_by_der_path.insert($der_path.to_string(), HDAddressBalance {
                 address: $address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(

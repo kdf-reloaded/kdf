@@ -150,6 +150,7 @@ fn params(node_url: &str) -> TronCoinParams {
         nodes: vec![TronNode::plain(node_url.to_owned())],
         required_confirmations: 1,
         tx_history: false,
+        gasfree: None,
     }
 }
 
@@ -408,7 +409,7 @@ fn a_trc20_ticker_answers_its_own_ticker_only_and_its_scan_finds_a_token_only_ad
             decimals: 6,
         });
         let token = platform
-            .trc20_token_from_conf_or_contract("USDT-TRC20".to_owned(), contract, 1)
+            .trc20_token_from_conf_or_contract("USDT-TRC20".to_owned(), contract, 1, None)
             .await
             .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
 
@@ -591,6 +592,7 @@ fn a_trc20_withdraw_from_an_hd_address_signs_with_the_derived_key() {
                 "USDT-TRC20".to_owned(),
                 parse_trc20_contract(TRC20_CONTRACT).expect("a contract"),
                 1,
+                None,
             )
             .await
             .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
