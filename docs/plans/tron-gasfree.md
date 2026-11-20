@@ -1,6 +1,6 @@
 # Plan: Tron GasFree fee-delegated TRC20 withdraw rail
 
-**Status:** parked (branch-only; gated on pinning the GasFree proxy creation bytecode) — **Last reviewed:** 2026-11-08
+**Status:** in progress — **Last reviewed:** 2026-11-19
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a complete, test-covered GasFree implementation and an
@@ -65,10 +65,12 @@ new PRs, and the branch stays until the second PR below has landed.
 - **Withdraw task path.** dev ch.49 R49.9 refuses TRON withdrawals under hardware signing. The gasless rail states how
   it relates to `task::withdraw`.
 - **PRs.**
-  - First, after the amended chapter passes the gate: the chapter with its gate verdict in the text, and the module
-    with the pinned and verified bytecode. No shared request or balance fields; unreachable.
-  - Then, after the activation route: the activation binding, the request and balance fields, the withdraw
-    dispatcher, and submission with settlement tracking, all in the release that carries the fields.
+  - First: the module group `mm2src/coins/eth/tron/gasfree/` with the pinned and verified bytecode: the
+    per-network constants, the custody-address derivation and its check against the controller (ch.63 R29), the
+    `PermitTransfer` signer and artifact, the provider client with its payloads, and the preflight decision. No
+    shared request, balance or error fields; unreachable from every RPC.
+  - Then: the activation binding, the fields at every placement ch.63 R18 lists, and the withdraw dispatcher.
+  - Then: submission and settlement tracking (ch.63 D63.6), as a Reloaded extension.
 
 ## Blocker: the derived custody address is knowingly wrong
 
@@ -78,6 +80,16 @@ new PRs, and the branch stays until the second PR below has landed.
 > derivation must reproduce every custody-address vector the SDK publishes:
 > five per network, Shasta included (T1). The text below records the state of
 > the parked branch.
+
+> **Bytecode pinned and verified (2026-11-19).** The creation bytecode of each
+> network is embedded in the module group `mm2src/coins/eth/tron/gasfree/`,
+> taken from the deploying transactions (ch.63 §63.5, status note of
+> 2026-11-19). The derivation reproduces all ten custody-address vectors the
+> SDK publishes for mainnet and Nile, with the Nile salts and init-code
+> hashes. For Shasta it reproduces the five answers of the live controller's
+> `getGasFreeAddress(address)`: the SDK's Shasta vectors predate the Shasta
+> controller's upgrade of 2026-07-04 and no longer apply. The module group is
+> unreachable from every RPC.
 
 **Nothing reachable may be built on this derivation until the proxy creation
 bytecode is pinned and the derivation is verified against at least two

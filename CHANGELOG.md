@@ -281,6 +281,10 @@ the previous version used. The safe way:
   at most about 18.4 whole tokens per withdrawal, and a larger amount answered `InternalError`. Transfers of smaller
   amounts are built exactly as before. TRON stays switched off in this build. Detail: CRD ch.21, the status note of
   2026-11-20 after R21.10B.7.
+- **Support code for gasless TRC20 transfers through GasFree was added; nothing uses it yet.** The code derives a
+  user's GasFree custody address and checks it against the GasFree contract, prepares and signs a transfer
+  authorization, and reads account and fee data from a GasFree provider. No RPC reaches it, so nothing changes for
+  users. Detail: PR #433; CRD ch.63 §63.4 to §63.7, R29.
 
 #### Tendermint (Cosmos) coins
 
@@ -813,6 +817,10 @@ the previous version used. The safe way:
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
   (PR #405). The TRON HD wallet is built on the same route, still switched off.
   The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
+- [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
+  from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
+  controller; the support modules are built and not yet reachable; the remaining PRs are listed again (activation
+  binding, fields and withdraw dispatcher; then submission and settlement).
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.
