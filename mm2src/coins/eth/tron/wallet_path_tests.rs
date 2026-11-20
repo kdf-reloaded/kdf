@@ -51,8 +51,14 @@ pub(super) async fn trc20_coin(node_url: &str) -> (MmArc, EthCoin) { trc20_coin_
 
 /// A TRC20 coin of `decimals` decimals activated against `node_url`.
 pub(super) async fn trc20_coin_of_decimals(node_url: &str, decimals: u8) -> (MmArc, EthCoin) {
+    trc20_coin_over(&[node_url], decimals).await
+}
+
+/// A TRC20 coin of `decimals` decimals activated against the nodes `node_urls`. The coin puts them into an order
+/// of its own.
+pub(super) async fn trc20_coin_over(node_urls: &[&str], decimals: u8) -> (MmArc, EthCoin) {
     let ctx = MmCtxBuilder::new().into_mm_arc();
-    let req = json!({ "urls": [node_url] });
+    let req = json!({ "urls": node_urls });
     let conf = json!({ "decimals": decimals });
     let coin = tron_coin_from_conf_and_request(&ctx, "USDT-TRC20", &conf, &req, &priv_key(), CoinProtocol::TRC20 {
         platform: "TRX".to_owned(),

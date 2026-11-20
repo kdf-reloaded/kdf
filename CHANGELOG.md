@@ -281,6 +281,17 @@ the previous version used. The safe way:
   at most about 18.4 whole tokens per withdrawal, and a larger amount answered `InternalError`. Transfers of smaller
   amounts are built exactly as before. TRON stays switched off in this build. Detail: PR #442; CRD ch.21, the status
   note of 2026-11-20 after R21.10B.7.
+- **A TRC20 withdrawal the token contract refuses is no longer signed.** Before a TRC20 transfer is built, the TRON
+  node runs it as a trial to learn its energy. When that trial shows that the token contract would refuse the
+  transfer (a frozen or blacklisted address, a paused token, a balance that changed in the meantime), the withdrawal
+  now fails with `UnsupportedError` and the text "the token contract refused this transfer (its dry run reverted)",
+  followed by the node's reason. It used to return a signed transaction with a fee estimate, and broadcasting it
+  would have burned the fee without moving any token. Nothing is signed, and no other node is asked, because the
+  refusal is the contract's and not the node's. GLEEC KDF returns the signed transaction in this case.
+  The fee estimate of a TRC20 withdrawal counts all of the transfer's energy as the sender's. Some token contracts
+  let their deployer pay part of the energy; for such a token the estimate, and the TRX the withdrawal asks the
+  sender to hold, can be higher than what the chain then charges. TRON stays switched off in this build. Detail: CRD
+  ch.21 R21.10B.10 to R21.10B.13 and the status note of 2026-11-20 after T21.10B.18.
 - **TRON coins have a transaction history when a TronGrid API key is set.** With `tx_history: true` in the
   activation request and a TronGrid node that has an API key (the node's own `TRON-PRO-API-KEY` header, or the
   `MM2.json` key `tron_api_key`), TRX and TRC20 coins list their transactions through `my_tx_history`, in both the
