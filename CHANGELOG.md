@@ -690,6 +690,13 @@ the previous version used. The safe way:
   balance change, and one WARN line names the height from which the chain changed. At most one small request is made
   per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
 
+#### EVM coins
+
+- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
+  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
+  transaction of another coin family. It now refuses the transaction with an error message. In the
+  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
+
 #### Siacoin
 
 - **Under an HD login the Sia activation answer now lists the coin's address.** The answer of
