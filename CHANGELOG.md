@@ -279,8 +279,8 @@ the previous version used. The safe way:
 - **A TRC20 withdrawal can send any amount the token balance holds.** The amount of a TRC20 transfer is now encoded
   as a 256-bit value, so a token's whole balance can be sent whatever its decimals; a token of 18 decimals could send
   at most about 18.4 whole tokens per withdrawal, and a larger amount answered `InternalError`. Transfers of smaller
-  amounts are built exactly as before. TRON stays switched off in this build. Detail: CRD ch.21, the status note of
-  2026-11-20 after R21.10B.7.
+  amounts are built exactly as before. TRON stays switched off in this build. Detail: PR #442; CRD ch.21, the status
+  note of 2026-11-20 after R21.10B.7.
 - **Support code for gasless TRC20 transfers through GasFree was added; nothing uses it yet.** The code derives a
   user's GasFree custody address and checks it against the GasFree contract, prepares and signs a transfer
   authorization, and reads account and fee data from a GasFree provider. No RPC reaches it, so nothing changes for
