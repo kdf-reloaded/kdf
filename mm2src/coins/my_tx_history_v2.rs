@@ -523,10 +523,16 @@ pub async fn my_tx_history_v2_rpc(
     // path: it is deliberately not classified through `HistoryCoinType` (CRD ch.53
     // R53.3.1). Accepting it here is the additive extension of R53.2.7, so
     // `NotSupportedFor` is not observable for an activated Sia coin (R53.2.10).
-    if matches!(
-        coin,
-        MmCoinEnum::UtxoCoin(_) | MmCoinEnum::QtumCoin(_) | MmCoinEnum::SiaCoin(_)
-    ) {
+    // A TRX or TRC20 coin whose history is enabled (a TronGrid key and `tx_history`, CRD ch.21 §21.10C) is served
+    // from the same store; without it the coin answers `NotSupportedFor` below, as the whole EVM family does
+    // (R21.10B.6).
+    let tron_with_history = matches!(&coin, MmCoinEnum::EthCoin(eth) if eth.tron_history_enabled());
+    if tron_with_history
+        || matches!(
+            coin,
+            MmCoinEnum::UtxoCoin(_) | MmCoinEnum::QtumCoin(_) | MmCoinEnum::SiaCoin(_)
+        )
+    {
         return build_response_from_runtime_history(ctx, request, coin).await;
     }
 

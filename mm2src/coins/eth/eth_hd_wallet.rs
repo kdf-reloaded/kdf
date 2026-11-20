@@ -805,6 +805,34 @@ impl EthCoin {
         }
     }
 
+    /// Every address of this coin's wallet that is known now: the enabled address of a single-key coin, and for an
+    /// HD wallet the known (activated) external addresses of every account. No node is asked. The TRON
+    /// transaction history lists each of them (CRD ch.21 §21.10C).
+    ///
+    /// # Errors
+    ///
+    /// The text of why an address of the HD wallet cannot be derived.
+    pub(crate) async fn known_wallet_addresses(&self) -> Result<Vec<Address>, String> {
+        let hd_wallet = match &self.derivation_method {
+            DerivationMethod::HDWallet(hd_wallet) => hd_wallet,
+            DerivationMethod::Iguana(address) => return Ok(vec![*address]),
+        };
+        let accounts = hd_wallet.accounts.lock().await;
+        let mut addresses = Vec::new();
+        for account in accounts.values() {
+            for address_id in 0..account.external_addresses_number {
+                let hd_address = self
+                    .derive_address(account, Bip44Chain::External, address_id)
+                    .map_err(|e| e.into_inner().to_string())?;
+                addresses.push(hd_address.address);
+            }
+        }
+        if !addresses.contains(&self.my_address) {
+            addresses.push(self.my_address);
+        }
+        Ok(addresses)
+    }
+
     /// The balance map of one address of an HD wallet report: the coin's own ticker, and for a TRON platform also
     /// every enabled TRC20 token (CRD ch.21 R21.10B.4). An EVM coin reports its own ticker only; its tokens are
     /// added by [`Self::add_erc20_balances_to_hd_report`].

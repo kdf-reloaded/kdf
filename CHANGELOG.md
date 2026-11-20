@@ -251,6 +251,20 @@ the previous version used. The safe way:
   address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
   `get_my_address` already answered as the CRD states. TRON stays switched off in this build. Detail: PR #412;
   CRD ch.21 R21.10B.8, D21.10B.2.
+- **TRON coins have a transaction history when a TronGrid API key is set.** With `tx_history: true` in the
+  activation request and a TronGrid node that has an API key (the node's own `TRON-PRO-API-KEY` header, or the
+  `MM2.json` key `tron_api_key`), TRX and TRC20 coins list their transactions through `my_tx_history`, in both the
+  legacy and the `mmrpc: "2.0"` form. The rows come from TronGrid's account listings, and those requests go to keyed
+  TronGrid hosts over HTTPS only. Addresses are shown in the form that starts with `T`. Under an HD wallet the history
+  covers every known address, and a transfer between two own addresses is one row. A TRX row carries the amount and
+  the fee; a TRC20 row carries the token amount, with the block and the TRX fee read once from a node; an own token
+  transfer also shows as a fee-only row of TRX, so nothing is counted twice. The fee details have the shape of a
+  withdraw result. Only confirmed transactions are listed and a chain reorganization is not followed; a TRC20 row has
+  an empty `tx_hex`; amounts moved by staking, TRC10 assets and internal transactions are not shown. Without a key
+  nothing changes: the legacy method answers an empty list with `NotEnabled` and the versioned one `NotSupportedFor`,
+  as GLEEC KDF does. GLEEC KDF has no TRON history and ignores `tx_history` for TRON. The key is never logged or
+  shown. In a browser build only the legacy method answers, and the keyed history has not been checked in a browser.
+  **TRON stays switched off in this build.** Detail: CRD ch.21 §21.10C.
 
 #### Tendermint (Cosmos) coins
 
@@ -781,7 +795,8 @@ the previous version used. The safe way:
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
-  (PR #405). The TRON HD wallet is built on the same route, still switched off.
+  (PR #405). The TRON HD wallet is built on the same route, still switched off. The transaction history (work
+  package 4) is built with a TronGrid API key, still switched off.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); the coins entry follows. Z1–Z8 done.
