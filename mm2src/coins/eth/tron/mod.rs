@@ -10,6 +10,7 @@ pub mod api;
 pub(crate) mod balance;
 pub(crate) mod broadcast;
 pub mod fee;
+pub(crate) mod gasfree;
 pub(crate) mod hd;
 pub mod history;
 pub mod nodes;
