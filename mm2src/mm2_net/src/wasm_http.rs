@@ -89,6 +89,42 @@ pub async fn slurp_post_json_with_headers_bounded(
     }
 }
 
+/// Executes a GET with the caller's own headers, returning the response status, headers and body, the whole
+/// exchange bounded by `timeout_s` seconds (the executor's timer; see below).
+///
+/// - At the bound the call returns [`SlurpError::Timeout`]. The browser's `fetch` itself is not aborted (no abort
+///   signal is wired): only the wait ends, the late answer is dropped.
+/// - A redirect is **not** followed (`redirect: manual`): the browser then reports an opaque redirect, which is a
+///   failure here, so `headers` never go to another host.
+/// - Header values are never logged and never put into an error text.
+/// - The returned header map is empty, because `wasm_bindgen` doesn't provide the way to extract all headers.
+///
+/// This path is compiled for the browser target but has no browser test.
+pub async fn slurp_url_with_headers_bounded(url: &str, headers: &HeaderMap, timeout_s: f64) -> SlurpResult {
+    use common::executor::Timer;
+    use futures::future::{select, Either};
+
+    let mut request = FetchRequest::get(url).redirect_manual();
+    for (name, value) in headers {
+        // A value that is not visible ASCII cannot be sent through the browser API: refuse it, never render it.
+        let value = value
+            .to_str()
+            .map_to_mm(|_| SlurpError::InvalidRequest("a request header value is not visible ASCII".to_owned()))?;
+        request = request.header(name.as_str(), value);
+    }
+
+    let fetch = Box::pin(request.request_str());
+    match select(fetch, Timer::sleep(timeout_s)).await {
+        Either::Left((result, _)) => {
+            result.map(|(status_code, response)| (status_code, HeaderMap::new(), response.into_bytes()))
+        },
+        Either::Right(_) => MmError::err(SlurpError::Timeout {
+            uri: host_only(url),
+            error: format!("no complete response within {timeout_s} s"),
+        }),
+    }
+}
+
 pub struct FetchRequest {
     uri: String,
     method: FetchMethod,
