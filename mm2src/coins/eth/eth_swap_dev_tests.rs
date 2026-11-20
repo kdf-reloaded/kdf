@@ -250,6 +250,7 @@ fn withdraw_eth_and_erc20() {
     let details = eth_coin
         .withdraw(WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
             coin: "ETH".into(),
             from: None,
             to: recipient.into(),
@@ -280,6 +281,7 @@ fn withdraw_eth_and_erc20() {
     let details = erc20_coin
         .withdraw(WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
             coin: "TEST".into(),
             from: None,
             to: recipient.into(),

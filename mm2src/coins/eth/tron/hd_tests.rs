@@ -103,7 +103,9 @@ fn payload_hex(base58: &str) -> String {
 
 /// A scripted node: the accounts of `accounts` (base58check) exist on chain with 2.5 TRX, every other account is the
 /// documented empty answer; the token holders of `holders` (base58check) hold 1.234567 of a 6-decimal token, every
-/// other address holds none.
+/// other address holds none. For a withdraw it serves the inputs of the fee estimate (CRD ch.21 R21.10B.7): every
+/// address has the free bandwidth of a fresh account and staked energy above the 14 000 a token transfer's dry run
+/// uses, and the chain prices include both account-creation fees.
 fn scripted_node(accounts: &[&str], holders: &[&str]) -> StubNode {
     let accounts: Vec<String> = accounts.iter().map(|address| (*address).to_owned()).collect();
     let holders: Vec<String> = holders.iter().map(|address| payload_hex(address)).collect();
@@ -138,8 +140,21 @@ fn scripted_node(accounts: &[&str], holders: &[&str]) -> StubNode {
                     };
                     Reply::ok(&json!({ "constant_result": [format!("{units:064x}")] }).to_string())
                 },
+                Some("transfer(address,uint256)") => {
+                    Reply::ok(&json!({ "result": { "result": true }, "energy_used": 14_000 }).to_string())
+                },
                 _ => Reply::status(404, "{}"),
             },
+            "/wallet/getaccountresource" => Reply::ok(r#"{"freeNetLimit":600,"EnergyLimit":100000}"#),
+            "/wallet/getchainparameters" => Reply::ok(
+                &json!({ "chainParameter": [
+                    { "key": "getTransactionFee", "value": 1000 },
+                    { "key": "getEnergyFee", "value": 420 },
+                    { "key": "getCreateNewAccountFeeInSystemContract", "value": 1_000_000 },
+                    { "key": "getCreateAccountFee", "value": 100_000 }
+                ] })
+                .to_string(),
+            ),
             other => Reply::status(404, &format!("unexpected endpoint {other}")),
         }
     })
@@ -606,6 +621,70 @@ fn a_trc20_withdraw_from_an_hd_address_signs_with_the_derived_key() {
         assert_eq!(details.coin, "USDT-TRC20");
         assert_eq!(details.from, [ADDRESS_1]);
         assert!(signed_by(&details, ADDRESS_1) && !signed_by(&details, ADDRESS_0));
+    });
+}
+
+/// The base58check addresses the node was asked about at `path`, in arrival order.
+fn asked_addresses(node: &StubNode, path: &str) -> Vec<String> {
+    node.bodies_for(path)
+        .iter()
+        .map(|body| body["address"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// CRD ch.21 R21.10B.7: the fee estimate of a withdraw with an HD `from` reads the resources of that address, not
+/// of the activated one, for TRX and for a token; the token's dry run and its TRX balance for the fee are read for
+/// that address too.
+#[test]
+fn a_withdraw_from_an_hd_address_reads_the_resources_of_that_address() {
+    let from = || json!({ "account_id": 0, "chain": "External", "address_id": 1 });
+
+    let ctx = hd_ctx();
+    let node = scripted_node(&[ADDRESS_0, ADDRESS_1], &[]);
+    block_on(async {
+        let coin = hd_coin(&ctx, &node.url()).await;
+        enable_wallet(&coin, 2).await;
+        let details = withdrawn(&ctx, &coin, withdraw_request("TRX", from())).await;
+        assert_eq!(details.from, [ADDRESS_1]);
+    });
+    assert_eq!(asked_addresses(&node, "/wallet/getaccountresource"), [ADDRESS_1]);
+
+    let ctx = hd_ctx();
+    let node = scripted_node(&[ADDRESS_0, ADDRESS_1], &[ADDRESS_0, ADDRESS_1]);
+    block_on(async {
+        let platform = hd_coin(&ctx, &node.url()).await;
+        enable_wallet(&platform, 2).await;
+        let registered = lp_register_coin(&ctx, MmCoinEnum::EthCoin(platform.clone()), RegisterCoinParams {
+            ticker: "TRX".to_owned(),
+            tx_history: false,
+        })
+        .await;
+        assert!(registered.is_ok(), "the platform registers");
+        let token = platform
+            .trc20_token_from_conf_or_contract(
+                "USDT-TRC20".to_owned(),
+                parse_trc20_contract(TRC20_CONTRACT).expect("a contract"),
+                1,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
+        let accounts_before = asked_addresses(&node, "/wallet/getaccount").len();
+
+        let details = withdrawn(&ctx, &token, withdraw_request("USDT-TRC20", from())).await;
+        assert_eq!(details.from, [ADDRESS_1]);
+
+        assert_eq!(asked_addresses(&node, "/wallet/getaccountresource"), [ADDRESS_1]);
+        // The TRX balance that must cover the fee is the sender's.
+        let accounts = asked_addresses(&node, "/wallet/getaccount");
+        assert_eq!(accounts[accounts_before..], [ADDRESS_1]);
+        let dry_runs: Vec<Json> = node
+            .bodies_for("/wallet/triggerconstantcontract")
+            .into_iter()
+            .filter(|body| body["function_selector"] == "transfer(address,uint256)")
+            .collect();
+        assert_eq!(dry_runs.len(), 1);
+        assert_eq!(dry_runs[0]["owner_address"], ADDRESS_1);
     });
 }
 

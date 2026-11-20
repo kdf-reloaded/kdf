@@ -107,6 +107,7 @@ fn test_spl_transactions() {
         usdc_sol_coin
             .withdraw(WithdrawRequest {
                 memo: None,
+                expiration_seconds: None,
                 coin: "USDC".to_string(),
                 from: None,
                 to: "AYJmtzc9D4KU6xsDzhKShFyYKUNXY622j9QoQEo4LfpX".to_string(),

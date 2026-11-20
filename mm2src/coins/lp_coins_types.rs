@@ -575,6 +575,10 @@ pub struct WithdrawRequest {
     /// the transaction and of an unsigned result). Absent is the empty memo. Ignored by every other family.
     #[serde(default)]
     pub(crate) memo: Option<String>,
+    /// TRON only (CRD ch.21 R21.10B.7): the transaction expires this many seconds after the time of its reference
+    /// block. Absent is 60. Ignored by every other family.
+    #[serde(default)]
+    pub(crate) expiration_seconds: Option<u64>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -627,6 +631,7 @@ impl WithdrawRequest {
             max,
             fee,
             memo: None,
+            expiration_seconds: None,
         }
     }
 
@@ -639,6 +644,7 @@ impl WithdrawRequest {
             max: true,
             fee: None,
             memo: None,
+            expiration_seconds: None,
         }
     }
 }
@@ -712,7 +718,7 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
         // `Solana { fee_amount, rent_amount, total_amount }` (CRD ch.40 R40.6B.12) needs no particular place: all
         // three members are required and `fee_amount` is in no other family's fee object, so it reads no other
         // family's entry (Sia has a `total_amount` but no `fee_amount`) and no other arm reads its entry (every
-        // other family requires a member it lacks: `amount`, `coin`, `gas`, `miner_fee`, `total_fee_sun`).
+        // other family requires a member it lacks: `amount`, `coin`, `gas`, `miner_fee`, `bandwidth_used`).
         //
         // `Slp { amount, coin: String }` is deliberately NOT added: its shape
         // is *identical* to Utxo's whenever `coin` is present, so no
@@ -1427,12 +1433,22 @@ mod tx_fee_details_tests {
             total_gas_fee: "0.04".parse().unwrap(),
         }));
         roundtrip(TxFeeDetails::Tron(crate::eth::tron::fee::TronTxFeeDetails {
-            total_fee_sun: 1000,
-            bandwidth_used: 270,
-            bandwidth_fee_sun: 1000,
+            coin: "TRX".to_owned(),
+            bandwidth_used: 267,
             energy_used: 0,
-            energy_fee_sun: 0,
-            activation_fee_sun: 0,
+            bandwidth_fee: "0.267".parse().unwrap(),
+            energy_fee: 0.into(),
+            total_fee: "1.267".parse().unwrap(),
+            account_creation_fee: Some(1.into()),
+        }));
+        roundtrip(TxFeeDetails::Tron(crate::eth::tron::fee::TronTxFeeDetails {
+            coin: "TRX".to_owned(),
+            bandwidth_used: 345,
+            energy_used: 14_000,
+            bandwidth_fee: 0.into(),
+            energy_fee: "5.88".parse().unwrap(),
+            total_fee: "5.88".parse().unwrap(),
+            account_creation_fee: None,
         }));
         roundtrip(TxFeeDetails::Sia(siacoin::SiaFeeDetails {
             coin: "SC".to_owned(),
