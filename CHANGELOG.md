@@ -36,13 +36,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     another implementation still lists a KDF Reloaded maker's ARRR or BC2 order, and its request
     times out.
 
-  Detail: PRs #446, #TBD-CODE; CRD ch.59 §59.4C.
+  Detail: PRs #446, #447; CRD ch.59 §59.4C.
 
 ### Plans touched
 
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: the
   decision that the order-book answer shows no capability flag was revised; the order book now
-  leaves out orders that lack a capability the node requires (PRs #446, #TBD-CODE).
+  leaves out orders that lack a capability the node requires (PRs #446, #447).
 
 ## [0.4.0-beta.1] — 2026-11-14
 
