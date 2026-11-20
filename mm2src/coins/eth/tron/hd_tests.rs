@@ -1,9 +1,9 @@
 //! Unit tests of the TRON HD wallet at the coin level (CRD ch.21 R-A2, R21.10B.4, R21.10B.8, T21.10B.8): the key and
 //! address the wallet activates, the used-address rule, the scan, and the withdraw from an HD `from`.
 //!
-//! The coin is built the way the mmrpc 2.0 activation builds it (`tron_coin_from_params_with_global_hd`, below the
-//! availability gate `TRON_ACTIVATION_AVAILABLE`, which stays `false`) against a scripted stub node on the loopback
-//! interface. The login is a global-HD one over a fixed public BIP-39 test mnemonic.
+//! The coin is built the way the mmrpc 2.0 activation builds it (`tron_coin_from_params_with_global_hd`) against a
+//! scripted stub node on the loopback interface. The login is a global-HD one over a fixed public BIP-39 test
+//! mnemonic.
 
 use super::nodes::TronNode;
 use super::proto;

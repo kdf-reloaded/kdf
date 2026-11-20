@@ -1028,53 +1028,6 @@ mod tests {
         }
     }
 
-    /// TRON is postponed for this beta: the mmrpc 2.0 routes `enable_eth_with_tokens`, `enable_erc20` and
-    /// `task::enable_erc20::init` refuse a TRON platform or TRC20 token with the "not available in this build" text
-    /// and register nothing (the switch is `coins::TRON_ACTIVATION_AVAILABLE`, which the legacy routes read too).
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn tron_mmrpc_activation_routes_refuse_while_tron_is_switched_off() {
-        use coins::{lp_coinfind, TRON_ACTIVATION_AVAILABLE, TRON_NOT_AVAILABLE};
-
-        const { assert!(!TRON_ACTIVATION_AVAILABLE) };
-        let ctx = MmCtxBuilder::default()
-            .with_conf(json!({ "coins": [
-                { "coin": "TRX", "mm2": 1, "wallet_only": true,
-                  "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
-                { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "protocol": { "type": "TRC20", "protocol_data": {
-                    "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } } },
-            ] }))
-            .into_mm_arc();
-        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tron gate test passphrase").unwrap();
-
-        let (status, body) = answer_of(
-            &ctx,
-            "enable_eth_with_tokens",
-            json!({
-                "ticker": "TRX",
-                "nodes": [{ "url": "http://127.0.0.1:1" }],
-                "erc20_tokens_requests": [{ "ticker": "USDT-TRC20" }],
-            }),
-        );
-        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
-        assert_eq!(body["error_data"]["ticker"], "TRX");
-        assert_eq!(body["error_data"]["error"], TRON_NOT_AVAILABLE);
-
-        for method in ["enable_erc20", "task::enable_erc20::init"] {
-            let (status, body) = answer_of(&ctx, method, json!({ "ticker": "USDT-TRC20", "activation_params": {} }));
-            assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR, "{method}: {body}");
-            assert_eq!(body["error_type"], "Internal", "{method}: {body}");
-            assert_eq!(body["error_data"], TRON_NOT_AVAILABLE, "{method}: {body}");
-        }
-        for ticker in ["TRX", "USDT-TRC20"] {
-            assert!(
-                block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
-                "{ticker} registered"
-            );
-        }
-    }
-
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     #[test]
     fn shutdown_signal_enable_routes_through_stream_namespace() {

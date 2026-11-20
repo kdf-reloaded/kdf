@@ -19,6 +19,11 @@
 > activation back on (ch.21 D6) precedes the activation-time steps below and is
 > part of any revival of this plan.
 
+> **Status (2026-11-20).** TRON activation is switched on again, as a
+> wallet-only coin family: `TRON_ACTIVATION_AVAILABLE` is `true`, and swaps stay
+> off behind `TRON_SWAPS_AVAILABLE` (`false`) (CRD ch.21 D6 and its status
+> note; plan `tron-support`). The box above describes the tree until that date.
+
 ## Relation to the TRON work (2026-11-08)
 
 The maintainer decided on 2026-11-08 that the branch is not revived as such: the topic is covered by a new chapter and
