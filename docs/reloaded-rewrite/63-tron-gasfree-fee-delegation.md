@@ -421,7 +421,8 @@ Whether Reloaded adopts these exact values is decision D63.2
 >   token are answered with `InvalidFeePolicy` (HTTP 400), as §63.9.4 states,
 >   and not as a request that does not decode. A `fee_method` other than the
 >   three values, and a `deadline_seconds` or `fallback_to_native` of the
->   wrong JSON type, fail request decoding.
+>   wrong JSON type, fail request decoding. `deadline_seconds` has no upper
+>   bound: the caller owns the length of the authorization window.
 > - *Where R21 sits.* One check, made by the direct method and by
 >   `task::withdraw::init` right after the coin is found and before anything
 >   else is done with the request. For a coin that is not a TRON coin,
@@ -924,8 +925,11 @@ observable and is not bound.
 > - *Step 3.* The lock is one lock per sending address and platform coin,
 >   held from the controller check to the signature. Nothing is submitted, so
 >   the lock orders the node's own gasless withdraws of one address; it does
->   not see a transfer another client submits. The EVM family's nonce lock is
->   one lock for all EVM sends and is not used by the TRON paths.
+>   not see a transfer another client submits. Two sign-only results taken
+>   back to back carry the same provider nonce, because nothing is submitted
+>   between them (D63.6); the lock does not change that. The EVM family's
+>   nonce lock is one lock for all EVM sends and is not used by the TRON
+>   paths.
 > - *Step 6.* "Not configured for the coin" covers native TRX, a token
 >   activated without `gasless.enabled`, and a token whose platform coin has
 >   no provider binding or is not active. With `fallback_to_native` the

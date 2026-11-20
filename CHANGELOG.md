@@ -296,11 +296,13 @@ the previous version used. The safe way:
   GasFree deposit address, and the answer holds the signed authorization and the fee in the token instead of a
   transaction: it has no `tx_hex` and no `tx_hash`, and KDF does not yet hand it to the provider. With `auto`, the
   ordinary TRX-paid transfer is tried first and the gasless one only when it cannot be funded. Other coins refuse
-  `gasless` and `auto`. To move tokens back from the GasFree deposit address, make a gasless withdraw to your own
-  address. The new `MM2.json` setting `tron_gasfree_guard_allows_fallback` (default `false`) decides whether a
-  withdraw with `fallback_to_native` may use the TRX-paid transfer when the GasFree contract check refuses.
-  **TRON stays switched off in this build**, so none of this can be used yet. Detail: CRD ch.63 §63.3.4 to §63.3.6,
-  §63.8, §63.8A, R29; RELOADED_VS_GLEEC.md.
+  `gasless` and `auto`. On every coin, a request that carries a `gasless` object without `fee_method` `gasless` or
+  `auto` is now refused (`InvalidFeePolicy`, HTTP 400); until now an unknown `gasless` member was ignored. To move
+  tokens back from the GasFree deposit address, make a gasless withdraw to your own address. The new `MM2.json`
+  setting `tron_gasfree_guard_allows_fallback` (default `false`) decides whether a withdraw with
+  `fallback_to_native` may use the TRX-paid transfer when the GasFree contract check refuses.
+  **TRON stays switched off in this build**, so none of this can be used yet. Detail: PR #445; CRD ch.63 §63.3.4 to
+  §63.3.6, §63.8, §63.8A, R29; RELOADED_VS_GLEEC.md.
 
 #### Tendermint (Cosmos) coins
 

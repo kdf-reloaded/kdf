@@ -801,8 +801,10 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   writes each name once: `coin` once, `from` always as the array with the sending address, and no selector. The
   other members of the signed authorization's envelope (`relay_type`, `chain_id`, `from_address`,
   `gasfree_address`, `verifying_contract`, `signed_authorization`, `created_at`) are the draft's, at the top level
-  of the result, and the result has no `tx_hex` and no `tx_hash`. A client that needs the selector has it in its own
-  request. No peer sees the result, so no switch exists. CRD ch.63 §63.8A, D63.8.
+  of the result, and the result has no `tx_hex` and no `tx_hash`. It also has no `memo` member, where the draft
+  writes `null`: Reloaded omits an absent memo in every withdraw result outside the Tendermint family. A client that
+  needs the selector has it in its own request. No peer sees the result, so no switch exists. CRD ch.63 §63.8A,
+  D63.8.
 
 ### Removed / disabled in KDF Reloaded
 

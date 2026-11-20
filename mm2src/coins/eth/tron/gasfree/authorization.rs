@@ -135,6 +135,9 @@ pub(crate) fn typed_data_hash(network: &Network, permit: &PermitTransfer) -> Res
     preimage.extend_from_slice(&struct_hash(permit));
     let digest = keccak(&preimage);
 
+    // The cross-check is deliberately partial: the shared encoder cannot take an integer above 128 bits, so it runs
+    // only when both amounts fit. Above that range the struct encoding is covered by the test that pins it by hand
+    // (`a_value_above_128_bits_is_hashed_as_its_whole_256_bit_word`).
     let shared_encoder_range = U256::from(u128::MAX);
     let in_shared_range = permit.value <= shared_encoder_range && permit.max_fee <= shared_encoder_range;
     if in_shared_range && shared_encoder_hash(network, permit)? != digest {
