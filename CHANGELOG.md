@@ -4,10 +4,24 @@ All notable changes to KDF Reloaded are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0 releases use the `0.MAJOR.MINOR-PRERELEASE.N` convention; expect breaking changes between alpha and beta.
 
-## [Unreleased]
+## [0.4.1-beta.1] — 2026-11-20
 
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
+
+### Upgrade note: a shielded wallet database already migrated by a development build
+
+**0.4.1-beta.1 cannot open a shielded (ARRR, Pirate) wallet database that a newer development
+build has already migrated.** This concerns only a data directory that a development build of
+the next version has run on. A data directory that only ran 0.4.0-beta.1 is not affected.
+
+To use such a wallet with 0.4.1-beta.1, stop the node, copy the
+`<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak` file that the development build wrote next to
+the wallet database over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal`
+and `<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start 0.4.1-beta.1. Anything the wallet
+recorded after the migration is not in the backup; the node scans it again. The changelog of the
+development line describes the migration and its backup under "Breaking changes and upgrade
+notes".
 
 ### Changed
 
