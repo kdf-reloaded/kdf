@@ -1119,6 +1119,12 @@ the activated address; a single-key TRON coin refuses `from` with
 `UnexpectedFromAddress`. `show_priv_key` answers the key of the activated
 address (R21.10B.8).
 
+*Status note (2026-11-20), ERC-20 `from`.* The clause above that an EVM ERC-20
+coin in Reloaded refuses `from` describes the code before PR #438. Since then an
+ERC-20 withdraw under a global-HD login resolves `from` in the platform's HD
+wallet as well (chapter 49 R49.34 and its as-built status note); the TRC20 rule
+above is unchanged.
+
 > **Compatibility (this repository on dev, 2026-11-17; its own code, not
 > the reference).** TRX and TRC20 activate only through legacy `enable`
 > and `electrum`, behind the availability constant (D55.5); the request

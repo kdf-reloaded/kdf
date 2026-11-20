@@ -630,6 +630,20 @@ fn device_trezor_hd_coin(
     leaf_address: Address,
     leaf_public: Public,
 ) -> EthCoin {
+    device_trezor_hd_coin_with_addresses(ctx, coin_type, url, account_xpub, leaf_address, leaf_public, 1)
+}
+
+/// Same as [`device_trezor_hd_coin`], with `external_addresses_number` known
+/// external addresses on account 0 (address 0 stays the default address).
+fn device_trezor_hd_coin_with_addresses(
+    ctx: &MmArc,
+    coin_type: EthCoinType,
+    url: String,
+    account_xpub: Secp256k1ExtendedPublicKey,
+    leaf_address: Address,
+    leaf_public: Public,
+    external_addresses_number: u32,
+) -> EthCoin {
     let ticker = match coin_type {
         EthCoinType::Eth => "ETH",
         EthCoinType::Erc20 { .. } => "JST",
@@ -642,7 +656,7 @@ fn device_trezor_hd_coin(
         account_id: 0,
         extended_pubkey: account_xpub,
         account_derivation_path,
-        external_addresses_number: 1,
+        external_addresses_number,
     };
     let mut accounts = BTreeMap::new();
     accounts.insert(0, account);
@@ -781,7 +795,7 @@ fn emulator_trezor_withdraw_native_no_from() {
 }
 
 /// T50.2 / T49.9: ERC20 Trezor withdraw with a derivation-path `from` selector resolving
-/// to the activated default HD address of the token's platform. Exercises the `transfer(address,uint256)`
+/// to a non-default activated HD address (external address 1) of the token's platform. Exercises the `transfer(address,uint256)`
 /// ABI payload (the `EthereumTxAck` streaming path) and device signing.
 #[test]
 fn emulator_trezor_withdraw_erc20_with_from_path() {
@@ -806,13 +820,14 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
     // The token is built the way the token activation builds it, from its platform coin, and so carries the
     // single-address derivation method of an activated token (CRD ch.49 R49.34, T49.9). The platform is registered,
     // as `from` is resolved against its HD wallet.
-    let platform = device_trezor_hd_coin(
+    let platform = device_trezor_hd_coin_with_addresses(
         &ctx,
         EthCoinType::Eth,
         node.url.clone(),
         material.eth_account_xpub.clone(),
         device_addr,
         material.eth_public,
+        2,
     );
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     block_on(coins_ctx.add_coin(MmCoinEnum::EthCoin(platform.clone()))).unwrap();
@@ -828,11 +843,27 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
         "an activated token carries the single-address derivation method"
     );
 
+    // The selected, non-default address: external address 1 of account 0, derived from the account xpub.
+    let selected_public = pubkey_from_extended(
+        &material
+            .eth_account_xpub
+            .derive_child(ChildNumber::new(0, false).unwrap())
+            .unwrap()
+            .derive_child(ChildNumber::new(1, false).unwrap())
+            .unwrap(),
+    );
+    let selected_addr = public_to_address(&selected_public);
+    assert_ne!(
+        selected_addr, device_addr,
+        "address 1 must differ from the default address"
+    );
+    println!("SELECTED_ADDR = {:#x}", selected_addr);
+
     let req = WithdrawRequest {
         memo: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::DerivationPath {
-            derivation_path: EVM_PATH.to_string(),
+            derivation_path: "m/44'/60'/0'/0/1".to_string(),
         }),
         to: RECIPIENT.to_string(),
         coin: "JST".to_string(),
@@ -846,7 +877,13 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
     let _confirm = ConfirmLoop::spawn(120);
     let details = drive_withdraw(&ctx, coin, req, Duration::from_secs(120)).expect("erc20 withdraw Ok");
 
-    let expected_from = checksum_address(&format!("{:#02x}", device_addr));
+    let expected_from = checksum_address(&format!("{:#02x}", selected_addr));
+    let default_from = checksum_address(&format!("{:#02x}", device_addr));
+    assert_ne!(
+        details.from,
+        vec![default_from],
+        "`from` must not be the default address"
+    );
     println!("FROM = {:?}", details.from);
     println!("TX_HASH = {}", details.tx_hash);
     assert_eq!(details.from, vec![expected_from]);
@@ -857,8 +894,8 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
     println!("RECOVERED_SENDER = {:#x}", signed.sender());
     assert_eq!(
         signed.sender(),
-        device_addr,
-        "recovered sender must be the resolved address"
+        selected_addr,
+        "recovered sender must be the selected address"
     );
 
     // The signed payload data must be the ERC20 transfer(address,uint256) call:
