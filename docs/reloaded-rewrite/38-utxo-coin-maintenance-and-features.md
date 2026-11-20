@@ -4866,6 +4866,18 @@ at `v2.6.0-beta`. In the `v2.5.0-beta`, `v2.5.1-beta` and `v2.5.2-beta`
 releases the rule was `10 × D` for every UTXO coin; before `v2.5.0-beta`
 it was `10 × D` for every UTXO coin except the ticker `BTC` (R38.6.6f).
 
+> *Reloaded status (clean side, 2026-11-18):* by the maintainer's decisions of
+> 2026-11-18 a ZEC entry that is `overwintered`, has `txversion` 5 and names a
+> Zcash branch id from NU7 on pays ZIP 317's conventional fee instead of the
+> policies of R38.6.6a -- R38.6.6b ([Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> R39.11.4V.10 status note of 2026-11-18). For such an entry `F` in R38.6.6e is
+> the conventional fee of a version-1 HTLC claim, 10000 base units (two logical
+> actions), not an estimate over 496 bytes. With the default dust of 1,000 base
+> units ZEC's minimum trading volume is therefore 0.001 ZEC, which is also the
+> default minimum volume of a new ZEC order (chapter 60 R60.4.2); the value
+> stays independent of any fee estimate or network state. The ZEC row of
+> R38.6.6h keeps the per-kilobyte figures of a version-4 entry.
+
 R38.6.6f *No ticker exception.* Every ticker follows R38.6.6e, Bitcoin
 included. `BTC` and `BTC-segwit` are dynamic-fee coins without a `dust`
 key, so their floor is 0.0001 BTC. The baseline anchor (R1) instead fixed the
@@ -6434,3 +6446,7 @@ R38.8.6 **Tests (two-direction, observable).**
   read the forbidden corpus, from the maintainer's decisions and this
   repository's code. It takes no forbidden-class input, so chapter 01 R38 is
   not engaged and no gate pass is required.
+- *Status note added 2026-11-18 -- after R38.6.6e.* Reloaded-original, clean
+  side: it records the maintainer's decisions of 2026-11-18 on the ZIP 317 fee
+  for ZEC and its minimum trading volume, written from this repository's code
+  and the public ZIP 317; no forbidden-class input, chapter 01 R38 not engaged.
