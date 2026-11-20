@@ -827,7 +827,7 @@ the previous version used. The safe way:
   none; the nodes of the tests no longer ask a public time server at start. Nine tests were removed: three
   exact copies, four that need a native ZOMBIE daemon nobody can run, and two whose checks already run offline
   in CI. The other node tests still need public servers and stay off by default; the two that were ignored
-  without a reason now state it. Only test code changed.
+  without a reason now state it. Only test code changed. Detail: PR #453.
 
 ### Plans touched
 
