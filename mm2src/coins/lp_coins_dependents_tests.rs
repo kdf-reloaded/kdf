@@ -344,6 +344,36 @@ fn the_requested_token_check_refuses_only_a_registered_token_of_another_platform
     assert_eq!(RegisteredTokenPolicy::DEFAULT, RegisteredTokenPolicy::Refuse);
 }
 
+/// CRD ch.43 D43.1F.1: the `reactivation_registered_token` member is optional (absent or `null` is the default `"refuse"`), takes `"refuse"` or `"keep"`, and
+/// any other value is an error that names the member and both values.
+#[test]
+fn the_registered_token_setting_is_read_from_the_configuration() {
+    use serde_json::json;
+    assert_eq!(
+        RegisteredTokenPolicy::from_conf(&json!({})).unwrap(),
+        RegisteredTokenPolicy::Refuse
+    );
+    assert_eq!(
+        RegisteredTokenPolicy::from_conf(&json!({ "reactivation_registered_token": "refuse" })).unwrap(),
+        RegisteredTokenPolicy::Refuse
+    );
+    assert_eq!(
+        RegisteredTokenPolicy::from_conf(&json!({ "reactivation_registered_token": "keep" })).unwrap(),
+        RegisteredTokenPolicy::Keep
+    );
+    assert_eq!(
+        RegisteredTokenPolicy::from_conf(&json!({ "reactivation_registered_token": null })).unwrap(),
+        RegisteredTokenPolicy::DEFAULT
+    );
+    for bad in [json!("Keep"), json!("none"), json!(true), json!(0)] {
+        let err = RegisteredTokenPolicy::from_conf(&json!({ "reactivation_registered_token": bad })).unwrap_err();
+        assert!(
+            err.contains("reactivation_registered_token") && err.contains("refuse") && err.contains("keep"),
+            "{bad}: {err}"
+        );
+    }
+}
+
 #[test]
 fn a_re_activation_makes_the_platform_active_and_registers_the_new_tokens_once() {
     let (ctx, coins_ctx) = passive_platform();
