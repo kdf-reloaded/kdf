@@ -160,6 +160,8 @@ fn solana_transaction_simulations() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -190,6 +192,8 @@ fn solana_transaction_zero_balance() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -221,6 +225,8 @@ fn solana_transaction_simulations_not_enough_for_fees() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -257,6 +263,8 @@ fn solana_transaction_simulations_max() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -288,6 +296,8 @@ fn solana_test_transactions() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),

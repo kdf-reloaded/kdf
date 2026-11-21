@@ -689,7 +689,7 @@ async fn token_of(ctx: &MmArc, platform: &EthCoin, ticker: &str, contract: &str)
         decimals: 6,
     });
     let token = platform
-        .trc20_token_from_conf_or_contract(ticker.to_owned(), contract, 1)
+        .trc20_token_from_conf_or_contract(ticker.to_owned(), contract, 1, None)
         .await
         .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
     register(ctx, &token).await;
@@ -1213,7 +1213,7 @@ fn a_passive_platform_keeps_its_history_process_until_it_is_removed() {
             decimals: 6,
         });
         let token = platform
-            .trc20_token_from_conf_or_contract(TOKEN_TICKER.to_owned(), contract, 1)
+            .trc20_token_from_conf_or_contract(TOKEN_TICKER.to_owned(), contract, 1, None)
             .await
             .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
         let coins_ctx = CoinsContext::from_ctx(&ctx).expect("a coins context");

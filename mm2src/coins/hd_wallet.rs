@@ -657,6 +657,7 @@ pub mod common_impl {
         Ok(GetNewHDAddressResponse {
             new_address: HDAddressBalance {
                 address: address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(derivation_path),
                 chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(coin.ticker(), balance),

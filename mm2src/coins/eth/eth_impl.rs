@@ -962,6 +962,17 @@ pub(crate) fn build_evm_withdraw_details(
 }
 
 pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> WithdrawResult {
+    withdraw_impl_with_progress(ctx, coin, req, None).await
+}
+
+/// [`withdraw_impl`] for the task that `progress` is the handle of. Only the TRON gasless rail reports phases of
+/// its own to it (CRD ch.63 §63.3.6).
+pub(crate) async fn withdraw_impl_with_progress(
+    ctx: MmArc,
+    coin: EthCoin,
+    req: WithdrawRequest,
+    progress: Option<&crate::rpc_command::init_withdraw::WithdrawTaskHandle>,
+) -> WithdrawResult {
     // TRON uses a dedicated pipeline: its transaction format, address
     // encoding, signing digest and fee model all differ from the EVM flow.
     if matches!(coin.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
@@ -987,7 +998,7 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         } else {
             EvmWithdrawSender::activated(&coin)
         };
-        return crate::eth::tron::withdraw::withdraw_tron(coin, req, sender).await;
+        return crate::eth::tron::withdraw::withdraw_tron_with_progress(coin, req, sender, progress).await;
     }
 
     validate_evm_withdraw_request(&coin, &req)?;
@@ -1773,6 +1784,7 @@ impl EthCoin {
             estimate_gas_mult,
             taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: None,
+            tron_gasfree: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
             erc20_tokens_infos: Default::default(),

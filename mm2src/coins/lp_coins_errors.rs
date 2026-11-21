@@ -615,6 +615,27 @@ pub enum WithdrawError {
     /// The Electrum servers of the coin disagree about the chain (CRD ch.38 R38.6.4o item 12); the text is the error.
     #[display(fmt = "{}", _0)]
     ChainDisagreement(String),
+    /// CRD ch.63 §63.9.2, D63.3 (c): a gasless withdraw is short at the sender's GasFree custody address, the
+    /// account the provider debits. On the wire it is the shared `NotSufficientBalance` with its shared
+    /// `error_data` (`coin`, `available`, `required`, the custody account's figures in token units); only the
+    /// human-readable text differs, by naming the custody address, which is no member of `error_data`.
+    #[display(
+        fmt = "Not enough {} at the GasFree custody address {} for a gasless withdraw: available {}, required at \
+               least {} (the amount plus the provider's fee). The balance of the sending address is not used on \
+               this rail",
+        coin,
+        custody_address,
+        available,
+        required
+    )]
+    #[serde(rename(serialize = "NotSufficientBalance"))]
+    NotSufficientCustodyBalance {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+        #[serde(skip_serializing, default)]
+        custody_address: String,
+    },
     #[display(fmt = "Balance is zero")]
     ZeroBalanceToWithdrawMax,
     #[display(fmt = "The amount {} is too small, required at least {}", amount, threshold)]
@@ -672,6 +693,51 @@ pub enum WithdrawError {
     /// than 500, following `UnsupportedError` above.
     #[display(fmt = "Unsupported after a network upgrade: {}", _0)]
     UnsupportedAfterNetworkUpgrade(String),
+    /// CRD ch.63 §63.9.1: the error family of the gasless withdraw rail. On the wire the outer `error_type` is
+    /// `Gasless` and `error_data` is an object whose own `error_type` names the member.
+    #[display(fmt = "{}", _0)]
+    Gasless(GaslessWithdrawError),
+}
+/// The members of the gasless error family of a withdraw (CRD ch.63 §63.9.1). Each carries free human-readable
+/// text as its `error_data`; a client classifies by the two `error_type` values and the HTTP status alone.
+#[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum GaslessWithdrawError {
+    /// No gasless rail exists for the coin the request names, or the rail is refused for its network. HTTP 503.
+    #[display(fmt = "The gasless withdraw rail is unavailable: {}", _0)]
+    Unavailable(String),
+    /// The provider withholds submit permission while an earlier transfer of the account is unsettled. HTTP 409.
+    #[display(fmt = "A gasless transfer of this account is still pending: {}", _0)]
+    PendingTransfer(String),
+    /// The quoted provider fee exceeds the effective cap. HTTP 400.
+    #[display(fmt = "The gasless fee exceeds the accepted maximum: {}", _0)]
+    MaxFeeExceeded(String),
+    /// The deadline of the quote passed before use. HTTP 400.
+    #[display(fmt = "The gasless quote expired: {}", _0)]
+    QuoteExpired(String),
+    /// The provider refused the request. HTTP 502.
+    #[display(fmt = "The gasless provider rejected the request: {}", _0)]
+    ProviderRejected(String),
+    /// The provider's answer could not be trusted or decoded. HTTP 502.
+    #[display(fmt = "The gasless provider's answer cannot be used: {}", _0)]
+    InvalidProviderResponse(String),
+    /// A trace id the provider does not know. HTTP 404.
+    #[display(fmt = "The gasless provider does not know the trace: {}", _0)]
+    TraceNotFound(String),
+}
+impl GaslessWithdrawError {
+    /// The HTTP status of the member (CRD ch.63 §63.9.1; binding).
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            GaslessWithdrawError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            GaslessWithdrawError::PendingTransfer(_) => StatusCode::CONFLICT,
+            GaslessWithdrawError::MaxFeeExceeded(_) | GaslessWithdrawError::QuoteExpired(_) => StatusCode::BAD_REQUEST,
+            GaslessWithdrawError::ProviderRejected(_) | GaslessWithdrawError::InvalidProviderResponse(_) => {
+                StatusCode::BAD_GATEWAY
+            },
+            GaslessWithdrawError::TraceNotFound(_) => StatusCode::NOT_FOUND,
+        }
+    }
 }
 impl WithdrawError {
     /// The hardware-wallet condition `word`, as the string of the `HwError` token (CRD ch.55 R55.2.17).
@@ -685,6 +751,7 @@ impl HttpStatusCode for WithdrawError {
             WithdrawError::CoinDoesntSupportInitWithdraw { .. }
             | WithdrawError::UnexpectedUserAction { .. }
             | WithdrawError::NotSufficientBalance { .. }
+            | WithdrawError::NotSufficientCustodyBalance { .. }
             | WithdrawError::NotSufficientPlatformBalanceForFee { .. }
             | WithdrawError::BalanceLockedByUnconfirmedTransaction { .. }
             | WithdrawError::ChainDisagreement(_)
@@ -702,6 +769,8 @@ impl HttpStatusCode for WithdrawError {
             // user's to resolve, not a server fault.
             | WithdrawError::UnsupportedAfterNetworkUpgrade(_) => StatusCode::BAD_REQUEST,
             WithdrawError::HwError(_) => StatusCode::GONE,
+            // CRD ch.63 §63.9.1: each member of the gasless family has its own status.
+            WithdrawError::Gasless(member) => member.status_code(),
             // CRD ch.43 R43.1D.2: a failure of the backend the coin talks to is a bad gateway.
             WithdrawError::Transport(_) => StatusCode::BAD_GATEWAY,
             // A node's verdict on a fee the daemon chose, transient by nature: not a fault of the request.

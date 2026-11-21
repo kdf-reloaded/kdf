@@ -223,6 +223,63 @@ gains an optional gasless block:
   when the platform has a `tron_gasless_provider`; otherwise
   activation is rejected with an invalid-payload error.
 
+> *Status note (2026-11-20), §63.3.1 and §63.3.2 built (Reloaded-original
+> where it states a choice; takes no reference input).*
+> `enable_eth_with_tokens` and `task::enable_eth::init` read
+> `tron_gasless_provider`. The entries of `erc20_tokens_requests`, and the
+> `activation_params` of `enable_erc20` and `task::enable_erc20::init`, read
+> `gasless`. TRON stays behind `TRON_ACTIVATION_AVAILABLE` (`false`), so no
+> request reaches any of this yet.
+>
+> - *The provider object.* On an EVM platform it answers `InvalidPayload`
+>   (HTTP 400) before any key is read and any node is contacted. On a TRON
+>   platform a `base_url` that is not an `http` or `https` URL of a scheme and
+>   a host alone, and a `service_provider` that is not a base58check TRON
+>   address, answer `InvalidPayload`; the hex forms of an address are not
+>   accepted for `service_provider`. Neither a node nor the provider is
+>   contacted at activation. `base_url`, `api_key`, `api_secret` and
+>   `service_provider` are required: a request without one of them fails
+>   request decoding. The defaults are 15 000 ms and 3 000 ms (R20).
+> - *The token block.* A block with `enabled: false` is treated as absent,
+>   whatever else it holds. An enabled block is refused for a token that is
+>   not a TRC20 token (an ERC-20 token, an NFT), for a TRON platform without a
+>   provider binding, for a negative `transfer_max_fee`, and for a
+>   `transfer_max_fee` that has more decimal places than the token or does not
+>   fit the token's amount type. The first three need no token decimals and
+>   are refused before any node is asked for the token; the cap is converted
+>   once the token's decimals are known, which may take a read of the contract.
+> - *Which error.* The platform routes, in both forms, and `enable_erc20`
+>   answer `InvalidPayload` (HTTP 400). `task::enable_erc20` has no such
+>   member in its error set: it reports the refusal in the task status as
+>   `Transport`, the token chapter 35 R35.3A.6 gives an invalid-payload class
+>   failure of the token construction.
+> - *Where the settings live.* The validated provider binding (the host-only
+>   base, the two credentials, the service provider, the timeout and the poll
+>   interval) lives on the TRX platform coin; a TRC20 token resolves it from
+>   its platform coin. The enabled token block, with the cap in the token's
+>   smallest unit, lives on the token coin. The legacy `enable` and `electrum`
+>   route has neither member. Nothing sends a provider request yet: the
+>   withdraw rail reads both settings.
+> - *Secrets (R9).* The debug form of the request and of the binding shows
+>   neither credential and names the URL by its host; no refusal repeats a
+>   value of the object; a `tron_gasless_provider` or `gasless` value that is
+>   not an object, and a member of the wrong JSON type, fail request decoding
+>   with a fixed text that repeats no part of the value.
+
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The note
+> above says that TRON stays behind `TRON_ACTIVATION_AVAILABLE` (`false`) and
+> that no request reaches §63.3.1 and §63.3.2. `TRON_ACTIVATION_AVAILABLE` is
+> `true` in this tree (chapter 21 D6 and its status note of this date): the
+> activation requests reach both, and the reports answer the
+> `gasfree_address` of §63.3.3. The withdraw rail is still not built, so
+> nothing sends a provider request.
+
+> *Status note (2026-11-20, Reloaded-original), the withdraw rail.* The last
+> sentence of the note above describes the tree before the sign-only rail of
+> §63.8 and §63.8A was built. With that rail (the status note after §63.3.6) a
+> gasless withdraw reads the provider's token list and account record; it
+> still submits nothing to the provider.
+
 ### 63.3.3 Where the custody address is reported (dictated by our public API)
 
 The locally derived (§63.5) GasFree custody address is reported
@@ -251,6 +308,51 @@ non-conforming. (Informative: at the reference row the field is
 carried by the shared cross-coin balance-report structures as an
 interim choice, attached by each reporting site rather than by the
 report builder. See the code-quality finding in §63.10.)
+
+> *Status note (2026-11-20), §63.3.3 built, and the report rule for R29
+> (Reloaded-original; takes no reference input).*
+>
+> - *Placements.* `gasfree_address` stands:
+>   - in the shared per-address entry of an HD report, hence in the HD form
+>     of the platform-with-tokens result, in `get_new_address`,
+>     `account_balance`, `task::account_balance::init`,
+>     `task::scan_for_new_addresses::init` and in the HD forms of the token
+>     results;
+>   - in both address-information blocks of the single-address
+>     platform-with-tokens result, also when `get_balances` is `false`;
+>   - in `wallet_balance` of the single-address task-based token result,
+>     beside `address`;
+>   - in each entry of the `balances` map of the one-shot token result,
+>     beside `spendable` and `unspendable` (the map is keyed by the address
+>     and has no other member next to it);
+>   - in the legacy `my_balance` answer, beside `address`.
+>
+>   `task::create_new_account::init` is refused for every TRON coin
+>   ([Chapter 21](21-tron-integration.md) R21.10B.4), so that placement does
+>   not arise. For every other coin, and for a TRON coin whose platform has no
+>   provider binding, the member is omitted, never `null`.
+> - *One place.* The value comes from one function of the EVM coin family.
+>   Every HD report entry of that family is made by one constructor that calls
+>   it, and the single-address results call the same function; no RPC attaches
+>   the member afterwards (the finding in §63.10).
+> - *Report rule for R29.* A report does not show a custody address that the
+>   controller contradicts. Before an address is shown, the check of R29 runs
+>   for it, with its 10-minute confirmation:
+>   - the controller confirms the derived address, now or within the last
+>     10 minutes: the member carries it;
+>   - the controller reports another address: the member is omitted for that
+>     address, and one warning line is logged per check;
+>   - the controller cannot be read: the member carries the locally derived
+>     address, as the reference row shows it (R18); nothing is remembered, so
+>     the next report reads the controller again.
+>
+>   None of the three outcomes fails the balance read or the activation. The
+>   confirmations are kept per platform coin and shared with its tokens; they
+>   are gone after a restart and after the platform is activated again. With
+>   a provider configured, every report reads the controller once per address
+>   at most every 10 minutes, so an HD scan with gap N makes up to N reads,
+>   empty entries included. The refusal of the gasless rail in R29 is
+>   unchanged.
 
 ### 63.3.4 Withdraw request (dictated by our public API)
 
@@ -320,6 +422,50 @@ enumeration's wire vocabulary, `FetchingGaslessQuote`,
 `WaitingForGaslessProvider` and `WaitingForGaslessSettlement`.
 Whether Reloaded adopts these exact values is decision D63.2
 (§63.12A). *(Reference fact.)*
+
+> *Status note (2026-11-20), §63.3.4 to §63.3.6 built (Reloaded-original where
+> it states a choice; takes no reference input).* TRON stays behind
+> `TRON_ACTIVATION_AVAILABLE` (`false`), so no request reaches the rail yet.
+>
+> - *The request.* `fee_method` and `gasless` are optional members of the
+>   shared withdraw request, read by the direct `withdraw` method (legacy and
+>   `mmrpc` 2.0) and by `task::withdraw::init`. `gasless.max_fee` is taken as a
+>   JSON string or a JSON number; a value that does not read as a decimal
+>   amount, a negative value and a value with more decimal places than the
+>   token are answered with `InvalidFeePolicy` (HTTP 400), as §63.9.4 states,
+>   and not as a request that does not decode. A `fee_method` other than the
+>   three values, and a `deadline_seconds` or `fallback_to_native` of the
+>   wrong JSON type, fail request decoding. `deadline_seconds` has no upper
+>   bound: the caller owns the length of the authorization window.
+> - *Where R21 sits.* One check, made by the direct method and by
+>   `task::withdraw::init` right after the coin is found and before anything
+>   else is done with the request. For a coin that is not a TRON coin,
+>   `gasless` and `auto` answer `Gasless`/`Unavailable` (HTTP 503). For every
+>   coin, a TRON coin included, `gasless` options without `fee_method`
+>   `gasless` or `auto` answer `InvalidFeePolicy` (HTTP 400). On the task route
+>   both are answered by the `init` call itself; no task is started.
+> - *The error family (§63.9.1, D63.2 (a)).* The outer `error_type` is
+>   `Gasless`; `error_data` is an object whose `error_type` is one of the seven
+>   members and whose own `error_data` is free human-readable text. A client
+>   classifies by the two `error_type` values and the HTTP status.
+> - *The fee details (§63.3.5, D63.2 (a)).* The tag is `TronGasless`. `coin` is
+>   the ticker of the token; `signed_max_fee` is always present on this path;
+>   `trace_id` is always present and `null`.
+> - *The progress phases (D63.2 (a)).* The sign-only path reports
+>   `FetchingGaslessQuote` and `SigningGaslessAuthorization`.
+>   `SubmittingGaslessAuthorization`, `WaitingForGaslessProvider` and
+>   `WaitingForGaslessSettlement` are reserved for the submission flow (D63.6)
+>   and are not part of the status vocabulary yet.
+
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The note
+> above says that TRON stays behind `TRON_ACTIVATION_AVAILABLE` (`false`) and
+> that no request reaches the rail. `TRON_ACTIVATION_AVAILABLE` is `true` in
+> this tree ([Chapter 21](21-tron-integration.md) D6 and its status note of
+> this date): a withdraw request for an activated TRC20 token reaches the
+> rail. The rail is sign-only (§63.8A): the node does not hand the signed
+> authorization to the provider, and no RPC does until the submission flow
+> exists (D63.6). Until then a token at the custody address moves only when
+> the caller submits the authorization to the provider.
 
 ## 63.4 GasFree Provider REST API (dictated interop)
 
@@ -774,6 +920,68 @@ that D63.6 adds a call and not a contract; whether an
 implementation exercises those exchanges before D63.6 lands is not
 observable and is not bound.
 
+> *Status note (2026-11-20), §63.8 steps 1 to 6 and §63.8A built
+> (Reloaded-original where it states a choice; takes no reference input).*
+>
+> - *Order of the refusals.* For a TRON coin: a sender without a local key
+>   (R22); a `fee` descriptor and a `memo`
+>   ([Chapter 21](21-tron-integration.md) R21.10B.7); the request-shape
+>   rejections of §63.9.4 that need no amount (`gasless` options with the
+>   native rail, an unusable `max_fee`, a zero `deadline_seconds`), for
+>   `gasless` and for `auto` alike; a max-amount request under `gasless`
+>   (R14). All of these come before any node or provider request. An amount of
+>   zero and a `max_fee` finer than the token are refused when the gasless
+>   rail is entered, before its first node or provider request.
+> - *R22.* The TRON withdraw refuses a sender for which the node holds no
+>   local key with `UnsupportedError`, as its first step. The earlier refusals
+>   stay in front of it: the direct method and the task route refuse a coin
+>   under the hardware-wallet policy, and a browser build refuses the
+>   browser-extension policy ([Chapter 49](49-withdrawal-task-path.md) R49.9,
+>   R49.27a). This repository has no WalletConnect signer for the EVM family
+>   that a TRON coin could be activated with.
+> - *The gasless rail and TRX.* The rail makes no TRX fee estimate: it reads
+>   neither the sender's TRX balance nor its resources nor the chain's prices,
+>   builds no transaction and makes no dry run of the transfer. The check that
+>   the TRX balance covers the fee, which the native TRC20 path makes, is not
+>   applied; a sender without any TRX is served. Its node reads are the
+>   controller's `getGasFreeAddress` (R29) and the token balance of the custody
+>   address, the latter only when the preflight needs it.
+> - *Step 3.* The lock is one lock per sending address and platform coin,
+>   held from the controller check to the signature. Nothing is submitted, so
+>   the lock orders the node's own gasless withdraws of one address; it does
+>   not see a transfer another client submits. Two sign-only results taken
+>   back to back carry the same provider nonce, because nothing is submitted
+>   between them (D63.6); the lock does not change that. The EVM family's
+>   nonce lock is one lock for all EVM sends and is not used by the TRON
+>   paths.
+> - *Step 6.* "Not configured for the coin" covers native TRX, a token
+>   activated without `gasless.enabled`, and a token whose platform coin has
+>   no provider binding or is not active. With `fallback_to_native` the
+>   native rail then runs with the request as it is, and its result or its
+>   error is the answer.
+> - *Errors (§63.9.2, §63.9.3, D63.3 (c)).* The custody shortfall is answered
+>   with `error_type` `NotSufficientBalance` and the shared `error_data`
+>   (`coin`, `available`, `required`, the custody account's figures in token
+>   units); its human-readable text names the custody address and says that
+>   the balance of the sending address is not used. A provider failure of the
+>   shared `Transport` arm (401, 403, 429, 5xx, no connection, the timeout)
+>   has one fixed text at the RPC; its kind is written to the log. A failed
+>   node read (the controller, the custody balance) is the node's error, as
+>   on the native rail.
+> - *The result (D63.8 (a)).* The members of R26 without the selector of row
+>   4, `coin` once, `from` the address array, the shared members of R28, no
+>   `tx_hex` and no `tx_hash`. The payload's members follow the shared members
+>   in the answer text, where R26 records them ahead; nothing depends on the
+>   order. `memo` is omitted, as in every withdraw result of this repository
+>   outside the Tendermint family, where R28 records `null`. `timestamp` is
+>   the time of `created_at`. `spent_by_me` is the amount plus
+>   `total_token_fee`.
+> - *Amounts.* Every token amount of the rail is a 256-bit integer in the
+>   token's smallest unit, and the signed `value` and `maxFee` are hashed as
+>   their 32-byte big-endian words, over the whole 256-bit range. The shared
+>   typed-data encoder takes integers up to 128 bits; within that range its
+>   hash is required to equal the rail's own before anything is signed.
+
 ## 63.8A The Sign-Only Result: Members Around the Signed Authorization
 
 *(Added 2026-11-19 by the KDF Spec Reader; reference facts at the
@@ -862,6 +1070,14 @@ R28. **Shared members on this path, and two repeated names
     survives: the later value, at the earlier position. Which routes
     do so was not examined one by one in this pass.
 
+    *Status note (2026-11-20, Reloaded-original).* Decided 2026-11-20:
+    Reloaded's sign-only result has no `memo` member where this rule
+    records `memo` `null`. Every withdraw result of this repository outside
+    the Tendermint family omits an absent memo, and a TRON withdraw refuses
+    a request that carries a memo, so the member would always be `null`. The
+    other shared members are as this rule states them. The deviation is
+    recorded in `RELOADED_VS_GLEEC.md`.
+
 > **Reading the payload back (informative; not bound).** The
 > reference row defines a typed reading of the nine members that
 > refuses any member outside the nine and accepts a missing `from`;
@@ -926,6 +1142,12 @@ T16. **One member per name (conditional on D63.8).** Under D63.8
     as the chosen option states. Under D63.8 (c) this test is
     replaced by a byte-parity check of the answer text against the
     repeated names and order of R28.
+
+    *Status note (2026-11-20), T15 and T16.* The tests exist in their D63.8
+    (a) form (`coins/eth/tron/gasfree/withdraw_tests.rs`, the `t15_t16_`
+    tests), for a single-key login and for an HD login with both forms of
+    `from`, on the direct method and on the task route. They also check that
+    the signature recovers to the sending address for the typed-data hash.
 
 ## 63.9 Error Taxonomy and Status Codes
 
@@ -1193,6 +1415,31 @@ R29. **Custody derivation checked against the controller
     available. This refusal is not a deterministic unavailability for
     §63.8 step 6. *(Takes no reference input.)*
 
+    *Status note (2026-11-20).* The same check runs before a report shows a
+    custody address; what a report does with each outcome is stated in the
+    status note after §63.3.3.
+
+    *Status note (2026-11-20), the check in the withdraw rail and the switch
+    (Reloaded-original; takes no reference input).* The gasless rail runs the
+    check for the sending address before it asks the provider anything, with
+    the confirmations the reports of the same platform coin use. A contradicted
+    address refuses the rail with `Gasless`/`Unavailable` (HTTP 503) and one
+    warning line; nothing is signed, the provider is not asked and nothing is
+    remembered. A controller that cannot be read fails the withdraw with the
+    node's error (`Transport`). Under `auto` either outcome is the answer of an
+    attempted rail (R16).
+
+    The refusal is not a deterministic unavailability, so `fallback_to_native`
+    alone does not turn it into a native withdraw. An operator can change
+    that with the top-level `MM2.json` boolean
+    `tron_gasfree_guard_allows_fallback` (default `false`): with `true`, a
+    request that carries `fallback_to_native: true` runs the native rail after
+    the refusal and gets the native fee details (R24). The switch never causes
+    a fallback for a request without `fallback_to_native`, and it changes
+    nothing for a failed read of the controller. A value that is not a JSON
+    boolean counts as `false`; the first time such a value is read, one
+    warning line says so.
+
 > **Code-quality finding (informative; trigger: a comment at the
 > reference row states the problem itself).** At the reference row the custody address is not produced
 > by the balance-report builder but attached afterwards at each
@@ -1265,6 +1512,12 @@ T8. **Rail selection and fallback.** `native`/`gasless`/`auto`
     error; rail attempted and failed: the gasless error), and the
     zero-amount and zero-deadline rejections are exercised.
 
+    *Status note (2026-11-20).* The tests exist, through the direct `withdraw`
+    method against a loopback node and a loopback provider
+    (`coins/eth/tron/gasfree/withdraw_tests.rs`, the `t8_` tests): they also
+    check that the gasless rail reads none of the inputs of the TRX fee
+    estimate and serves a sender without TRX.
+
 T9. **Activation configuration.** The per-network request base of
     §63.4.1 formed from a host-only `base_url`, rejection of a
     path-bearing base URL, the defaults of
@@ -1272,10 +1525,29 @@ T9. **Activation configuration.** The per-network request base of
     rejection of §63.3.2, and the Tron-only/provider-required
     activation gates are exercised.
 
+    *Status note (2026-11-20).* The tests exist: the provider object and the
+    token block at the coin level (the request base through a loopback
+    provider, the path-bearing URL, the defaults, the malformed
+    `service_provider`, the cap conversion), and the activation gates on the
+    one-shot and task forms of the platform and token routes against a
+    loopback node, for a TRON and for an EVM platform.
+
 T10. **Custody address placements.** With a provider configured on
     a Tron platform, every RPC §63.3.3 lists carries
     `gasfree_address`, and none of them carries it without a
     provider or for a non-Tron coin (R18).
+
+    *Status note (2026-11-20).* The tests exist, through the RPCs: the
+    platform-with-tokens result in its single-address and HD forms, the
+    one-shot and the task-based token result, `get_new_address`,
+    `account_balance`, `task::account_balance::init`,
+    `task::scan_for_new_addresses::init` and the legacy `my_balance`, each
+    with the member equal to the local derivation for its address; without a
+    provider, and for an EVM coin, the member is absent from the answer text.
+    The report rule for R29 (§63.3.3 status note) is tested on the same
+    answers: a contradicting controller omits the member, an unreadable one
+    leaves the derived address, and a second report within 10 minutes makes
+    no controller read.
 
 T11. **Error collapse.** Each provider-interaction condition of
     §63.9.3 reaches the withdraw RPC as the mapped arm and status, and no
@@ -1292,6 +1564,16 @@ T13. **Non-Tron refusal.** On an EVM coin that is not Tron,
     `fee_method = gasless | auto` is refused with 503 and gasless
     options with the native rail with 400 (R21).
 
+    *Status note (2026-11-20), T11 to T13.* The tests exist in the same file.
+    T11 covers every condition of §63.9.3, with one text for all conditions of
+    the `Transport` arm, and every outcome of §63.7. T12 runs under the
+    hardware-wallet policy, on the direct method, on the task route and at the
+    TRON withdraw itself, and counts the node and provider requests; no
+    WalletConnect signer exists for the EVM family here, so that policy is
+    covered by the refusal of a sender without a local key. T13 runs for an
+    EVM coin and for a UTXO coin, on the direct method and on
+    `task::withdraw::init`.
+
 T14. **Nile end-to-end (lab row; deferred with D63.6).** A
     sign-and-submit round trip on the Nile testnet against the
     public test provider, verifying the custody address the provider
@@ -1305,6 +1587,11 @@ T17. **Controller check (R29) (Reloaded-original, 2026-11-19).** A
     restart, the controller is read again; a mismatch refuses with
     `Unavailable` (503), signs nothing and keeps nothing cached; a failed
     read is reported through the node error.
+
+    *Status note (2026-11-20).* The tests exist for the check itself
+    (`coins/eth/tron/gasfree/custody.rs`) and, through the withdraw, for the
+    rail and for the switch `tron_gasfree_guard_allows_fallback`
+    (`coins/eth/tron/gasfree/withdraw_tests.rs`).
 
 ## 63.12 Deferred Work
 
@@ -1337,6 +1624,33 @@ D63.7. **Return path for tokens held at the custody address
     whether any path is owed for a provider that no longer answers. (That the reference row has no return path
     either is a reference fact; the
     deferral itself takes no reference input.)
+
+    *Status note (2026-11-20), the recovery procedure (D63.4 (b);
+    Reloaded-original; takes no reference input).* Tokens that stay at the
+    custody address are moved back with a gasless withdraw whose `to` is the
+    user's own address:
+
+    ```json
+    {
+      "method": "withdraw",
+      "mmrpc": "2.0",
+      "params": {
+        "coin": "USDT-TRC20",
+        "to": "<the user's own TRON address>",
+        "amount": "12.5",
+        "fee_method": "gasless"
+      }
+    }
+    ```
+
+    The amount plus the provider's fee must be at the custody address, so the
+    largest amount that can be returned is the custody balance less the fee the
+    provider quotes; `max` is not taken on this rail (R14). The answer is the
+    sign-only result of §63.8A: it is a signed authorization, not a
+    transaction, and until the submission flow exists (D63.6) the node does
+    not hand it to the provider. A residue below the provider's fee cannot be
+    returned this way. What is owed for a provider that no longer answers
+    stays deferred.
 
 ### 63.12A Decisions for the maintainer (Reloaded-only; take no reference input; resolved 2026-11-09)
 
@@ -1562,3 +1876,24 @@ V2. The baseline withdraw request has no fee-rail selector and no
 - *Additions of 2026-11-19:* R29, T17 and the status notes dated
   2026-11-19 (§63.4.5, §63.5, R23, T1, T2) are Reloaded-original and take no
   reference input.
+- *Additions of 2026-11-20:* the status notes dated 2026-11-20 (after
+  §63.3.2, §63.3.3, R29, T9 and T10) are Reloaded-original, clean side: they
+  record what is built and the report rule for R29, and take no reference
+  input.
+- *Further additions of 2026-11-20:* the status notes dated 2026-11-20 after
+  §63.3.6, before §63.8A, after R28, the second one after R29, and those
+  after D63.7, T8, T13, T16 and T17 are Reloaded-original, clean side: they
+  record the sign-only withdraw rail as built, the omitted `memo` of the
+  sign-only result, the switch `tron_gasfree_guard_allows_fallback` and the
+  recovery procedure, and take no reference input.
+- *Addition of 2026-11-20:* the second status note of this date after
+  §63.3.2 (TRON switched on) is Reloaded-original, clean side: it corrects
+  the switch value the note before it names, from chapter 21 D6 and this
+  repository's code, and takes no reference input. No cleared sentence was
+  edited.
+- *Additions of 2026-11-20 (TRON switched on, the withdraw rail):* the
+  third status note of this date after §63.3.2 and the second one after
+  §63.3.6 are Reloaded-original, clean side: they correct, from chapter 21
+  D6 and this repository's code, what the notes before them say about the
+  switch and about the withdraw rail not being built, and take no reference
+  input. No cleared sentence was edited.

@@ -127,6 +127,7 @@ pub(super) fn eth_coin_for_test_with_providers(
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -224,6 +225,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -411,6 +413,7 @@ fn test_wait_for_payment_spend_timeout() {
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -593,6 +596,7 @@ mod search_for_swap_tx_spend_scripted {
             ctx: ctx.weak(),
             required_confirmations: 1.into(),
             tron_api: None,
+            tron_gasfree: None,
             nft_swap_v2_contract: None,
             swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
             erc20_tokens_infos: Default::default(),
@@ -2028,6 +2032,8 @@ fn test_withdraw_impl_manual_fee() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2071,6 +2077,8 @@ fn test_withdraw_impl_fee_details() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2119,6 +2127,8 @@ fn test_withdraw_impl_refuses_the_cosmos_fee_forms() {
         let withdraw_req = WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: 1.into(),
             from: None,
             to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2137,6 +2147,8 @@ fn task_withdraw_evm_native_accepts_omitted_from_sender() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2164,6 +2176,8 @@ fn task_withdraw_evm_token_accepts_omitted_from_sender() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2187,6 +2201,8 @@ fn task_withdraw_evm_token_explicit_hd_from_resolves_selected_sender() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -2214,6 +2230,8 @@ fn direct_withdraw_evm_explicit_hd_from_signs_with_selected_sender() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -2255,6 +2273,8 @@ fn direct_withdraw_evm_single_key_explicit_from_is_structured_sender_error() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -2832,6 +2852,7 @@ fn test_message_hash() {
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -2888,6 +2909,7 @@ fn test_sign_verify_message() {
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -3091,6 +3113,7 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -3183,6 +3206,8 @@ fn direct_withdraw_rejected_for_trezor_signer() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -3728,6 +3753,7 @@ mod swap_send_path_wire_form {
             ctx: ctx.weak(),
             required_confirmations: 1.into(),
             tron_api: None,
+            tron_gasfree: None,
             nft_swap_v2_contract: None,
             swap_gas_fee_policy: Mutex::new(policy),
             erc20_tokens_infos: Default::default(),

@@ -1880,3 +1880,9 @@ fn task_enable_erc20_activates_a_trc20_token_and_reports_base58check() {
     );
     assert!(is_registered(&ctx, "USDT-TRC20"));
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// TRON GasFree: the activation binding and the custody address in the reports (CRD ch.63)
+// ---------------------------------------------------------------------------------------------------------------
+
+mod gasfree;
