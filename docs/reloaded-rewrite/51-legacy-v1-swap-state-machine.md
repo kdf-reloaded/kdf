@@ -995,9 +995,12 @@ dropped and the taker refunded) is not part of this rule.
 > resumes at `STAGE-SPEND-TAKER-PAYMENT` (R19). That stage runs again, and every
 > way out of it records `TakerPaymentSpent` or `TakerPaymentSpendFailed` before
 > the refund stage is reached, including the exit taken when four fifths of the
-> lock duration have passed, which sends nothing. The claim step is therefore
-> reached, and the look of this rule applies, whether or not the claim sent
-> before the restart reached the chain. T35 pins this path. No code is changed.
+> lock duration have passed, which sends nothing. The swap has therefore
+> reached the claim step as this rule defines it, and its refund stage makes
+> the look of this rule, whether or not the claim sent before the restart
+> reached the chain. A second send that is accepted records the claim, and the
+> wait for its confirmation decides as before. T35 pins this path. No code is
+> changed.
 
 ## 51.6D Bound Manual Refund After a Lost Claim
 
@@ -1081,8 +1084,10 @@ changed by this rule.
 > The manual recovery refuses (item 4 above), because a claim that is still
 > waiting in a pool may not be visible to every coin's search, and refusing is
 > the cautious answer until the taker's refund is shown. The manual recovery
-> reaches this case only after the run loop ended without a refund (R82 item
-> 3). In every other case the two answer alike.
+> reaches this case only after the run loop ended without a refund: the look
+> could not decide by the refund deadline (R82 item 3), or the look answered
+> that nothing spent the taker payment and the refund that followed was
+> rejected. In every other case the two answer alike.
 
 > **Status note (2026-11-13, Reloaded-original).** R84 narrows R83: it covers the
 > record without a sent spend, after a failed claim call.
@@ -2376,6 +2381,9 @@ note of 2026-11-21).* With a maker swap restored from a saved log that ends at
    in item 2;
 4. the same log with nothing found by the search: the refund is built once the
    maker payment's refund time has passed.
+
+A second send that is accepted records `TakerPaymentSpent`, and the wait for
+the claim's confirmation decides as before; T35 has no item for it.
 
 *(Added 2026-11-21 with the status note under R82.)*
 
