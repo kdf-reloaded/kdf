@@ -4521,6 +4521,324 @@ fn t38_6_4o_11_with_the_checks_off_the_wait_polls_the_first_connection() {
     });
 }
 
+/// The INFO lines of the pool of `ticker` logged so far, in order; empty under the same condition as [`warn_lines`].
+fn info_lines(ticker: &str) -> Vec<String> {
+    use crate::eth::alloy_compat::transport::test_support::captured_log_lines;
+    let prefix = format!("INFO {ticker}: ");
+    captured_log_lines()
+        .into_iter()
+        .filter(|line| line.starts_with(&prefix))
+        .collect()
+}
+
+/// A wait for one confirmation that gives up `secs` seconds from now and polls every second.
+async fn wait_for_one_confirmation_for(client: &ElectrumClient, secs: u64) -> Result<(), String> {
+    let wait_until = now_ms() / 1000 + secs;
+    client
+        .wait_for_confirmations_on_one_server(H256Json::default(), 0, 1, false, wait_until, 1)
+        .await
+}
+
+/// T38.6.4o.23: with two maintained stubs, A chosen first and answering 0 confirmations and B answering 3, a wait for
+/// 1 confirmation stays on A while A is up to date (T38.6.4o.7); when A turns out of date the wait continues on B and
+/// ends on its answer, with one INFO line naming A, B and the reason. With the tip checks off the wait stays on A.
+#[test]
+fn t38_6_4o_23_the_wait_leaves_a_server_that_turns_out_of_date() {
+    use futures::future::{select, Either};
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_result(TX_GET, verbose_tx(0));
+        b.set_result(TX_GET, verbose_tx(3));
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup::new("WAIT23"),
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b]).await;
+        let electrum = ElectrumClient(client.clone());
+        let mut wait = Box::pin(wait_for_one_confirmation(&electrum));
+        // While A is up to date the wait stays on A.
+        match select(wait.as_mut(), Box::pin(Timer::sleep(2.5))).await {
+            Either::Left((result, _)) => panic!("the wait ended on {result:?} while A answers 0 confirmations"),
+            Either::Right(_) => (),
+        }
+        assert!(a.requests(TX_GET) >= 2, "{}", a.requests(TX_GET));
+        assert_eq!(b.requests(TX_GET), 0);
+        assert!(info_lines("WAIT23").iter().all(|line| !line.contains("moves from")));
+
+        // B reaches a height far above A's: A is out of date (behind), and the wait goes on with B.
+        b.set_tip(H + 10);
+        wait_until("A to be out of date", || {
+            view_of(&client, &a).out_of_date == Some("behind")
+        })
+        .await;
+        wait.await.unwrap();
+        assert!(b.requests(TX_GET) >= 1);
+        if capturing {
+            let moves: Vec<String> = info_lines("WAIT23")
+                .into_iter()
+                .filter(|line| line.contains("moves from"))
+                .collect();
+            assert_eq!(moves.len(), 1, "{moves:?}");
+            let line = &moves[0];
+            let (from, to) = (line.find(&a.addr()).unwrap(), line.find(&b.addr()).unwrap());
+            assert!(from < to, "{line}");
+            assert!(line.contains("out of date"), "{line}");
+        }
+
+        // A fails in transport first and the wait moves to B; when B turns out of date while A is up to date
+        // again, the wait returns to A (which failed earlier) and ends on its answer.
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_result(TX_GET, verbose_tx(0));
+        b.set_result(TX_GET, verbose_tx(0));
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup::new("WAIT23C"),
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b]).await;
+        let electrum = ElectrumClient(client.clone());
+        let mut wait = Box::pin(wait_for_one_confirmation(&electrum));
+        let mut observer = Box::pin(async {
+            wait_until("the wait to poll A", || a.requests(TX_GET) >= 1).await;
+            a.set_behavior(StubBehavior::Down).await;
+            wait_until("the wait to poll B", || b.requests(TX_GET) >= 1).await;
+            a.set_result(TX_GET, verbose_tx(3));
+            a.set_behavior(StubBehavior::Answer).await;
+            // A is suspended after its failure: pass again until it has joined once more.
+            for _ in 0..40 {
+                client.pool.run_pass().await;
+                if a.accepted() >= 2 {
+                    break;
+                }
+                Timer::sleep(0.2).await;
+            }
+            join_with_heights(&client, &[&a, &b]).await;
+            a.set_tip(H + 10);
+            wait_until("B to be out of date", || {
+                view_of(&client, &b).out_of_date == Some("behind")
+            })
+            .await;
+        });
+        match futures::future::select(wait.as_mut(), observer.as_mut()).await {
+            Either::Left((result, _)) => panic!("the wait ended early: {result:?}"),
+            Either::Right(_) => (),
+        }
+        wait.await.unwrap();
+        assert!(a.requests(TX_GET) >= 1, "{}", a.requests(TX_GET));
+        if capturing {
+            let moves: Vec<String> = info_lines("WAIT23C")
+                .into_iter()
+                .filter(|line| line.contains("moves from"))
+                .collect();
+            assert_eq!(moves.len(), 2, "{moves:?}");
+            assert!(moves[0].contains("request failed"), "{}", moves[0]);
+            assert!(moves[1].contains("out of date"), "{}", moves[1]);
+            assert!(
+                moves[1].find(&b.addr()).unwrap() < moves[1].find(&a.addr()).unwrap(),
+                "{}",
+                moves[1]
+            );
+        }
+
+        // With the tip checks off no server is out of date: the wait stays on A until its deadline.
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_result(TX_GET, verbose_tx(0));
+        b.set_result(TX_GET, verbose_tx(3));
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup {
+                tip_checks: false,
+                ..PoolSetup::new("WAIT23B")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client).len(), 2);
+        b.set_tip(H + 10);
+        let result = wait_for_one_confirmation_for(&ElectrumClient(client.clone()), 3).await;
+        assert!(result.unwrap_err().contains("Waited too long"));
+        assert!(a.requests(TX_GET) >= 2);
+        assert_eq!(b.requests(TX_GET), 0);
+    });
+}
+
+/// T38.6.4o.24: with two maintained stubs, A chosen first and B answering 3 confirmations, a wait for 1 confirmation
+/// that gets three error answers in a row from A continues on B and ends on its answer, with one INFO line. Two error
+/// answers and then an answer keep the wait on A, and the count starts again. With the tip checks off error answers
+/// keep the wait on A until its deadline.
+#[test]
+fn t38_6_4o_24_the_wait_leaves_a_server_that_answers_errors() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        // Three error answers in a row.
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_error(TX_GET, "boom");
+        b.set_result(TX_GET, verbose_tx(3));
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup::new("WAIT24"),
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b]).await;
+        wait_for_one_confirmation(&ElectrumClient(client.clone()))
+            .await
+            .unwrap();
+        assert_eq!(a.requests(TX_GET), 3);
+        assert!(b.requests(TX_GET) >= 1);
+        if capturing {
+            let moves: Vec<String> = info_lines("WAIT24")
+                .into_iter()
+                .filter(|line| line.contains("moves from"))
+                .collect();
+            assert_eq!(moves.len(), 1, "{moves:?}");
+            let line = &moves[0];
+            assert!(line.find(&a.addr()).unwrap() < line.find(&b.addr()).unwrap(), "{line}");
+            assert!(line.contains("three error answers in a row"), "{line}");
+        }
+
+        // Two errors, then an answer, then two more errors: the count starts again, the wait stays on A.
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_error(TX_GET, "boom");
+        b.set_result(TX_GET, verbose_tx(3));
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup::new("WAIT24B"),
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b]).await;
+        let electrum = ElectrumClient(client.clone());
+        let mut wait = Box::pin(wait_for_one_confirmation(&electrum));
+        let mut observer = Box::pin(async {
+            wait_until("two error answers", || a.requests(TX_GET) >= 2).await;
+            a.clear_error(TX_GET);
+            a.set_result(TX_GET, verbose_tx(0));
+            wait_until("an answer of 0 confirmations", || a.requests(TX_GET) >= 3).await;
+            a.set_error(TX_GET, "boom");
+            wait_until("two more error answers", || a.requests(TX_GET) >= 5).await;
+            assert_eq!(b.requests(TX_GET), 0, "the count started again after the answer");
+            a.clear_error(TX_GET);
+            a.set_result(TX_GET, verbose_tx(1));
+        });
+        match futures::future::select(wait.as_mut(), observer.as_mut()).await {
+            futures::future::Either::Left((result, _)) => panic!("the wait ended early: {result:?}"),
+            futures::future::Either::Right(_) => (),
+        }
+        wait.await.unwrap();
+        assert_eq!(b.requests(TX_GET), 0);
+
+        // With the tip checks off error answers keep the wait on A until its deadline.
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_error(TX_GET, "boom");
+        b.set_result(TX_GET, verbose_tx(3));
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup {
+                tip_checks: false,
+                ..PoolSetup::new("WAIT24C")
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client).len(), 2);
+        let result = wait_for_one_confirmation_for(&ElectrumClient(client.clone()), 5).await;
+        assert!(result.unwrap_err().contains("Waited too long"));
+        assert!(a.requests(TX_GET) >= 4, "{}", a.requests(TX_GET));
+        assert_eq!(b.requests(TX_GET), 0);
+    });
+}
+
+/// CRD ch.51 R31a, status note of 2026-11-21: the search for the spend of an output on every usable server. With
+/// three stubs, one that fails every request, one whose history of the HTLC script is empty and one that holds the
+/// spend, the spend is found; with every server failing or empty nothing is found. Each stub receives only directed
+/// requests of its own, and the search names the server that found the spend in one INFO line.
+#[test]
+fn r31a_the_search_for_a_spend_asks_every_server() {
+    use chain::{OutPoint, TransactionInput, TransactionOutput};
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let payment_hash = H256::from([0x11; 32]);
+        let script_pubkey = vec![0xa9, 0x14, 0x22, 0x33];
+        let script_hash = hex::encode(electrum_script_hash(&script_pubkey));
+        let spend = UtxoTx {
+            inputs: vec![TransactionInput {
+                previous_output: OutPoint {
+                    hash: payment_hash,
+                    index: 0,
+                },
+                script_sig: vec![0x51].into(),
+                sequence: 0xffff_ffff,
+                script_witness: vec![],
+            }],
+            outputs: vec![TransactionOutput {
+                value: 1,
+                script_pubkey: vec![0x51].into(),
+            }],
+            ..UtxoTx::default()
+        };
+        let history = json!([{"tx_hash": "aa".repeat(32), "height": 5}, {"tx_hash": "bb".repeat(32), "height": 6}]);
+        let spend_hex = json!(hex::encode(serialize(&spend).take()));
+        let found = |info: SpentOutputInfo| Some(info.spending_tx.hash());
+
+        let (failing, empty, holding) = (stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H).await);
+        failing.set_error(GET_HISTORY, "history too large");
+        empty.set_scripthash_result(GET_HISTORY, &script_hash, json!([]));
+        holding.set_scripthash_result(GET_HISTORY, &script_hash, history.clone());
+        holding.set_result(TX_GET, spend_hex.clone());
+        let client = checked_pool(
+            &[&failing, &empty, &holding],
+            PoolSetup::new("R31A"),
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&failing, &empty, &holding]).await;
+        let electrum = ElectrumClient(client.clone());
+        let answer = electrum
+            .find_output_spend_on_every_server(payment_hash, &script_pubkey, 0, found)
+            .await;
+        assert_eq!(answer, Some(spend.hash()));
+        for server in [&failing, &empty, &holding] {
+            assert_eq!(server.requests(GET_HISTORY), 1, "{}", server.addr());
+        }
+        assert_eq!(failing.requests(TX_GET) + empty.requests(TX_GET), 0);
+        if capturing {
+            let lines: Vec<String> = info_lines("R31A")
+                .into_iter()
+                .filter(|line| line.contains("found the spend"))
+                .collect();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].contains(&holding.addr()), "{}", lines[0]);
+        }
+
+        // Every server failing, or with nothing in its history, finds nothing.
+        let (down, empty) = (stub_at(5, H).await, stub_at(5, H).await);
+        down.set_error(GET_HISTORY, "history too large");
+        empty.set_scripthash_result(GET_HISTORY, &script_hash, json!([]));
+        let client = checked_pool(
+            &[&down, &empty],
+            PoolSetup::new("R31B"),
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&down, &empty]).await;
+        let answer = ElectrumClient(client.clone())
+            .find_output_spend_on_every_server(payment_hash, &script_pubkey, 0, found)
+            .await;
+        assert_eq!(answer, None);
+        assert_eq!(down.requests(GET_HISTORY) + empty.requests(GET_HISTORY), 2);
+    });
+}
+
 /// T38.6.4o.9 (the backoff): with `max_connected` 1, two listed stubs and every candidate not eligible, successive
 /// re-measure rounds start 5, 10, 20, 40, 60 and 60 time units apart (the timings are scaled: the unit is 60 ms and the
 /// cap 12 units). When the poor condition clears the next round waits the base again.

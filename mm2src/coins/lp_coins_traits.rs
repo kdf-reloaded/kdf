@@ -129,6 +129,24 @@ pub trait SwapOps {
         swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String>;
 
+    /// CRD ch.51 R31a, status note of 2026-11-21: the spend or refund of the taker's own payment `tx`, looked
+    /// for once on every usable server of the coin's rank at the same time, for a coin that reads its chain
+    /// through Electrum servers. The first spend or refund a server finds is returned; `None` when none finds
+    /// one. The caller bounds the time the search takes.
+    ///
+    /// The default is `None`: a coin that is not an Electrum-backed UTXO coin has no other source than the
+    /// single search of [`SwapOps::search_for_swap_tx_spend_my`].
+    async fn search_for_swap_tx_spend_my_on_every_server(
+        &self,
+        _time_lock: u32,
+        _my_pub: &[u8],
+        _other_pub: &[u8],
+        _secret_hash: &[u8],
+        _tx: &[u8],
+    ) -> Option<FoundSwapTxSpend> {
+        None
+    }
+
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,

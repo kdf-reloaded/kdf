@@ -2788,6 +2788,27 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    ends the wait therefore always comes from the server the wait is polling,
    never from whichever server a spread read reached. No request is added
    (D38.6.4o.3).
+
+   *Status note (2026-11-21, clean side; Reloaded-original; maintainer
+   decision of 2026-11-21).* While `electrum_tip_checks` is `true`, the wait
+   also chooses again in two more cases. (i) After every poll that does not
+   end the wait, the state of item 4 of the polled server is looked at; when
+   that server is out of date, the wait continues on the first up-to-date
+   maintained connection in priority order that has not failed during this
+   wait, or, when there is none, on the first up-to-date one that has; a
+   server taken this way no longer counts as failed, and the wait polls it
+   only after its usual pause. The out-of-date server is not counted as failed
+   and a later choice may return to it. (ii) Three error answers in a row of
+   the polled server to the transaction request count as a failure of that
+   server for this wait: it is left out while another choice exists, as after
+   a failed request, and the wait chooses again. An answer that is not an
+   error resets the count. An up-to-date server that answers too few
+   confirmations keeps the wait, as before. Every change of server logs one
+   INFO line naming both servers by host and port (§38.6.9) and the reason.
+   With `electrum_tip_checks` `false` neither case applies. This is prompted
+   by a field report in which a taker payment had its confirmations 88 minutes
+   before the wait's deadline, and the wait still timed out on the server it
+   had chosen.
 7. *Headers at the same height (amends R38.6.4l item 4).* Two servers that
    answer different header bytes for the same height, in a measurement round
    or in their header notifications, are not judged by the majority: the
@@ -3114,6 +3135,10 @@ from turning every node into a periodic prober of the public servers.
 >   too few confirmations, never too many, so the cost is a longer wait or a
 >   timed-out swap step, not a false confirmation. Choosing again when the
 >   chosen server turns out of date is a candidate for a later change.
+>
+>   *Status note (2026-11-21).* Closed by the status note of 2026-11-21 under
+>   item 6: the wait now chooses again when its server turns out of date and
+>   after three error answers in a row.
 > - The per-round WARN of item 9 (a measured server behind or ahead) is logged
 >   in every re-measure round, without the once-per-change state of the WARNs
 >   for maintained connections, and can repeat the text of such a WARN for the
@@ -3609,6 +3634,26 @@ unconfirmed, the coin shall not enter the disagreement state, and no further
 wake shall be scheduled for the period end that has passed; the pair is tried
 again after the comparison limit (item 12, D38.6.4o.15).
 
+T38.6.4o.23 *The wait leaves a server that turns out of date.* With two
+maintained stubs, *A* chosen first and up to date when the wait starts and
+answering 0 confirmations, and *B* answering 3: when *A* turns out of date
+(item 4) during a wait for 1 confirmation, the wait shall continue on *B* and
+end on its answer, with one INFO line naming *A*, *B* and the reason. While
+*A* stays up to date, the wait shall stay on *A* (T38.6.4o.7). When a request
+to *A* fails first, so that the wait moves to *B*, and *B* then turns out of
+date while *A* is up to date again, the wait shall return to *A* and end on its
+answer. With
+`electrum_tip_checks` `false` the wait shall stay on *A* (item 6, status note
+of 2026-11-21).
+
+T38.6.4o.24 *The wait leaves a server that answers errors.* With two
+maintained stubs, *A* chosen first and *B* answering 3 confirmations: when *A*
+answers the transaction request with an error three times in a row, the wait
+shall continue on *B* and end on its answer. When *A* answers two errors and
+then 0 confirmations, the wait shall stay on *A*, and the count shall start
+again. With `electrum_tip_checks` `false`, error answers of *A* shall keep the
+wait on *A* until its deadline (item 6, status note of 2026-11-21).
+
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
 moment to the maintainer: with the implementation, or after a field run on a
@@ -3760,6 +3805,12 @@ one server define it.
 D38.6.4o.3 *(Decided 2026-11-09, maintainer.)* *Confirmation waits.* Sticky to
 one server only. Corroborating a "confirmed" answer by a second server for
 coins without `spv_conf` was considered and left for a later change.
+
+*Status note (2026-11-21, maintainer decision).* The wait still polls one
+server at a time and still trusts that server's answer alone, but it no
+longer stays with a server that is out of date or that answers errors three
+times in a row (status note of 2026-11-21 under item 6). Corroboration
+remains open.
 
 D38.6.4o.4 *(Decided 2026-11-09, maintainer.)* *Header request on joining under
 every order.* Yes: without heights no connection can be judged under the
@@ -6517,3 +6568,12 @@ R38.8.6 **Tests (two-direction, observable).**
   the maintainer's decisions and this repository's code. It takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
+- *Maintainer decision (2026-11-21), clean side -- status notes after
+  R38.6.4o item 6, after the first known limitation of the R38.6.4o as-built
+  note and after D38.6.4o.3, and T38.6.4o.23 and T38.6.4o.24 (a swap's
+  confirmation wait chooses again when its server turns out of date or
+  answers errors three times in a row).* Written by a session that never read
+  the forbidden corpus, from the maintainer's decision, a field report, this
+  project's own reads of public LCC Electrum servers and this repository's
+  code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
+  and no gate pass is required.
