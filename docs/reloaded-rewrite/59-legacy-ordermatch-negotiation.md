@@ -665,8 +665,9 @@ in:
 - the order-book event stream: no "new or updated" event for an order that
   is not presentable, and no "removed" event for one either. The order is
   judged at the moment the event would be sent. If a coin's required set
-  changes between an order's arrival and its removal, which can happen only
-  where the requirement rests on an Ironwood height discovered at run time,
+  changes between an order's arrival and its removal, which can happen
+  where the window of Chapter 39 R39.6.4f(b) opens while the node runs, or
+  where it rests on an Ironwood height that only the activated coin knows,
   a stream client can keep an entry whose removal it never receives, or
   receive the removal of an entry it never saw;
 - the pair counts that `orderbook_depth` takes from the node's own book.
