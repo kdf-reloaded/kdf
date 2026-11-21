@@ -2134,6 +2134,8 @@ fn t38_6_4q_4_builds_of_the_family_do_not_wait_for_the_process_wide_lock() {
             fee: None,
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
         };
         let qtum_request = |to: String| WithdrawRequest {
             amount: BigDecimal::from_str("0.1").unwrap(),
@@ -2317,6 +2319,8 @@ fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx
                 fee: None,
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
             };
             token.withdraw(request).compat().await.unwrap()
         };
@@ -2392,6 +2396,8 @@ fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx
                 fee: None,
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
             };
             token.withdraw(request).compat().await.unwrap()
         };
@@ -2405,6 +2411,8 @@ fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx
                 fee: None,
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
             };
             qtum.withdraw(request).compat().await.unwrap()
         };
