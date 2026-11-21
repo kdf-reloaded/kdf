@@ -1022,6 +1022,13 @@ the previous version used. The safe way:
 - **Tests of a repeated QTUM or QRC20 activation.** A second activation of an active QTUM or QRC20 token, one
   after the other or started together, answers "already initialized" and starts no second connection,
   subscription or history collector. Only test code changed. Detail: PR #462.
+- **Tests of a maker restart before the outcome of its claim is saved.** A maker swap restored at the step that
+  claims the taker payment claims again; when that send fails, or when the claim time is over and nothing is sent,
+  the refund step still looks at the taker payment first and does not refund once it finds the maker's own
+  confirmed claim. When nothing spent the taker payment, the refund goes ahead as before. The design chapter
+  also states why a recorded but lost claim is answered differently by the automatic refund and by the manual
+  recovery. Only test code and docs changed. Detail: PR #TBD; CRD ch.51, status notes of 2026-11-21 after
+  R82 and R83, T35.
 
 ### Plans touched
 
