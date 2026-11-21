@@ -52,7 +52,7 @@ impl MarketCoinOps for TestCoin {
 
     fn base_coin_balance(&self) -> BalanceFut<BigDecimal> { unimplemented!() }
 
-    fn platform_ticker(&self) -> &str { unimplemented!() }
+    fn platform_ticker(&self) -> &str { &self.ticker }
 
     /// Receives raw transaction bytes in hexadecimal format as input and returns tx hash in hexadecimal format
     fn send_raw_tx(&self, tx: &str) -> Box<dyn Future<Item = String, Error = String> + Send> { unimplemented!() }
@@ -212,6 +212,17 @@ impl SwapOps for TestCoin {
         swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         unimplemented!()
+    }
+
+    async fn search_for_swap_tx_spend_my_on_every_server(
+        &self,
+        time_lock: u32,
+        my_pub: &[u8],
+        other_pub: &[u8],
+        secret_hash: &[u8],
+        tx: &[u8],
+    ) -> Option<FoundSwapTxSpend> {
+        None
     }
 
     async fn search_for_swap_tx_spend_other(

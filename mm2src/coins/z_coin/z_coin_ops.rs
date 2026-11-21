@@ -1,5 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::z_tx_addresses::AddressSide;
+#[cfg(not(target_arch = "wasm32"))]
+use super::z_tx_assembler::TxAssembler;
 use super::*;
 
 /// How long a send waits for an in-flight shielded spend to be scanned before it
@@ -384,7 +386,14 @@ impl ZCoin {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn get_one_kbyte_tx_fee(&self) -> UtxoRpcResult<BigDecimal> {
         let fee = self.get_tx_fee().await?;
-        Ok(big_decimal_from_sat_unsigned(fee.rate_per_kb(), self.decimals()))
+        // A shielded coin pays one fixed fee per transaction; a ZIP 317 coin has no such fee, so it is refused
+        // here rather than priced per kilobyte.
+        let rate_per_kb = fee.rate_per_kb().ok_or_else(|| {
+            MmError::new(crate::utxo::rpc_clients::UtxoRpcError::Internal(
+                "a shielded coin cannot follow the ZIP 317 fee rule".to_owned(),
+            ))
+        })?;
+        Ok(big_decimal_from_sat_unsigned(rate_per_kb, self.decimals()))
     }
 
     /// Generates a tx sending outputs from our address
@@ -569,24 +578,18 @@ impl ZCoin {
             .first()
             .map(|(_, witness)| witness.root().into())
             .unwrap_or_else(sapling::Anchor::empty_tree);
-        let mut tx_builder = ZTxBuilder::new(
+        let mut assembler = TxAssembler::new(
             self.z_fields.consensus_params.clone(),
             current_block.into(),
-            BuildConfig::Standard {
-                sapling_anchor: Some(sapling_anchor),
-                orchard_anchor: None,
-                ironwood_anchor: None,
-                orchard_padding: BundlePadding::DEFAULT,
-                ironwood_padding: BundlePadding::DEFAULT,
-            },
+            sapling_anchor,
         );
-        let fvk = FullViewingKey::from_expanded_spending_key(&self.z_fields.z_spending_key.expsk);
+        let fvk = FullViewingKey::from_expanded_spending_key(self.z_fields.z_spending_key.expsk());
         for (note, witness) in selected_notes_with_witness {
-            tx_builder.add_sapling_spend(
+            assembler.add_sapling_spend(
                 fvk.clone(),
                 note,
                 witness.path().or_mm_err(|| GenTxError::FailedToGetMerklePath)?,
-            )?;
+            );
         }
 
         for z_out in z_outputs {
@@ -594,19 +597,19 @@ impl ZCoin {
                 received_by_me += u64::from(z_out.amount);
             }
 
-            tx_builder.add_sapling_output(
+            assembler.add_sapling_output(
                 z_out.viewing_key,
                 z_out.to_addr,
                 z_out.amount,
                 z_out.memo.unwrap_or_else(MemoBytes::empty),
-            )?;
+            );
         }
 
         if change > BigDecimal::from(0u8) {
             let change_sat = sat_from_big_decimal(&change, self.utxo_arc.decimals).mm_err(Into::into)?;
             received_by_me += change_sat;
 
-            tx_builder.add_sapling_output(
+            assembler.add_sapling_output(
                 None,
                 self.z_fields.my_z_addr.clone(),
                 Amount::from_u64(change_sat).map_to_mm(|_| {
@@ -616,28 +619,25 @@ impl ZCoin {
                     )))
                 })?,
                 MemoBytes::empty(),
-            )?;
+            );
         }
 
         for output in t_outputs {
-            tx_builder.add_transparent_output_raw(output);
+            assembler.add_transparent_output_raw(output);
         }
 
         let fee_amount = Amount::from_u64(sat_from_big_decimal(&tx_fee, self.decimals()).mm_err(Into::into)?)
             .map_to_mm(|_| GenTxError::NumConversion(NumConversError("Invalid ZCash fee amount".to_owned())))?;
         let fee_rule = FixedFeeRule::non_standard(fee_amount);
         let tx = tokio::task::block_in_place(|| {
-            tx_builder.build(
-                &TransparentSigningSet::new(),
+            assembler.build(
+                os_rng(),
                 std::slice::from_ref(&self.z_fields.z_spending_key),
-                &[],
-                rand::rngs::OsRng,
                 &self.z_fields.z_tx_prover,
                 &self.z_fields.z_tx_prover,
                 &fee_rule,
             )
-        })?
-        .into_transaction();
+        })?;
 
         let additional_data = AdditionalTxData {
             received_by_me,
@@ -876,7 +876,7 @@ impl ZCoin {
             self.z_fields.shielded_history.wallet_db_path(),
             self.z_fields.consensus_params.clone(),
             zcash_client_sqlite::util::SystemClock,
-            rand::rngs::OsRng,
+            os_rng(),
         )
         .ok()?;
         let (target_height, _) = wallet_db.get_target_and_anchor_heights(NonZeroU32::MIN).ok()??;
@@ -1094,7 +1094,7 @@ pub(crate) fn build_from_wallet_db(
         inputs.wallet_db_path,
         inputs.params.clone(),
         zcash_client_sqlite::util::SystemClock,
-        rand::rngs::OsRng,
+        os_rng(),
     )
     .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?;
     let account_id = wallet_db
@@ -1159,28 +1159,16 @@ pub(crate) fn build_from_wallet_db(
     // at the root of the empty Ironwood tree, which it spends nothing of, as the dictated chain's own
     // wallets build a payment into Ironwood; no tree state is read for it (R39.6.5d, R39.6.5e). The bundle
     // is padded to the default two actions. Every other transaction carries no Ironwood bundle.
-    let ironwood_anchor = ironwood.is_some().then(orchard::Anchor::empty_tree);
-    let build_config = BuildConfig::Standard {
-        sapling_anchor: Some(sapling_anchor.into()),
-        orchard_anchor: None,
-        ironwood_anchor,
-        orchard_padding: BundlePadding::DEFAULT,
-        ironwood_padding: BundlePadding::DEFAULT,
-    };
-    let mut tx_builder = if ironwood.is_some() {
-        ZTxBuilder::new_with_output_only_ironwood(inputs.params.clone(), builder_height.into(), build_config)
-    } else {
-        ZTxBuilder::new(inputs.params.clone(), builder_height.into(), build_config)
-    };
-    let fvk = FullViewingKey::from_expanded_spending_key(&inputs.spending_key.expsk);
+    let mut assembler = TxAssembler::new(inputs.params.clone(), builder_height.into(), sapling_anchor.into());
+    let fvk = FullViewingKey::from_expanded_spending_key(inputs.spending_key.expsk());
     for (note, merkle_path) in selected_notes_with_paths {
-        tx_builder.add_sapling_spend(fvk.clone(), note, merkle_path)?;
+        assembler.add_sapling_spend(fvk.clone(), note, merkle_path);
     }
     let carries_ironwood = ironwood.is_some();
     if let Some(payment) = ironwood {
         // No outgoing viewing key and an empty memo (R39.6.5d). Only this output enters Ironwood: the
         // change below is a Sapling output to the wallet's own address, never an Ironwood one.
-        tx_builder.add_ironwood_output(None, payment.recipient, payment.amount, MemoBytes::empty())?;
+        assembler.add_ironwood_output(payment.recipient, payment.amount, MemoBytes::empty());
     }
 
     let mut received_by_me = 0u64;
@@ -1188,18 +1176,18 @@ pub(crate) fn build_from_wallet_db(
         if z_out.to_addr == *inputs.my_addr {
             received_by_me += u64::from(z_out.amount);
         }
-        tx_builder.add_sapling_output(
+        assembler.add_sapling_output(
             z_out.viewing_key,
             z_out.to_addr,
             z_out.amount,
             z_out.memo.unwrap_or_else(MemoBytes::empty),
-        )?;
+        );
     }
 
     let change_sat = selected_value_sat - total_required_sat;
     if change_sat > 0 {
         received_by_me += change_sat;
-        tx_builder.add_sapling_output(
+        assembler.add_sapling_output(
             None,
             inputs.my_addr.clone(),
             Amount::from_u64(change_sat).map_to_mm(|_| {
@@ -1209,14 +1197,14 @@ pub(crate) fn build_from_wallet_db(
                 )))
             })?,
             MemoBytes::empty(),
-        )?;
+        );
     }
 
     // Swap HTLCs are transparent P2SH outputs paid for out of shielded notes, so the
     // light-wallet path has to emit them too. Added last to keep the vout ordering the
     // native path produces: `z_p2sh_spend` spends transparent output 0.
     for output in t_outputs {
-        tx_builder.add_transparent_output_raw(output);
+        assembler.add_transparent_output_raw(output);
     }
 
     let fee_rule = FixedFeeRule::non_standard(
@@ -1224,21 +1212,18 @@ pub(crate) fn build_from_wallet_db(
             .map_to_mm(|_| GenTxError::NumConversion(NumConversError("Invalid ZCash fee amount".to_owned())))?,
     );
     // The first build in the process that carries an Ironwood bundle derives the proving key from the
-    // circuit and caches it for the life of the process (R39.6.5h); the builder does that inside `build`.
+    // circuit and caches it for the life of the process (R39.6.5h); the assembler does that inside `build`.
     let first_ironwood_build = carries_ironwood && !FIRST_IRONWOOD_BUILD_STARTED.swap(true, AtomicOrdering::SeqCst);
     let started = std::time::Instant::now();
     let tx = tokio::task::block_in_place(|| {
-        tx_builder.build(
-            &TransparentSigningSet::new(),
+        assembler.build(
+            os_rng(),
             std::slice::from_ref(inputs.spending_key),
-            &[],
-            rand::rngs::OsRng,
             inputs.prover,
             inputs.prover,
             &fee_rule,
         )
-    })?
-    .into_transaction();
+    })?;
     if first_ironwood_build {
         log::info!(
             "ZCoin {}: the first Ironwood transaction of this process was built in {:?}, including the \
@@ -1272,7 +1257,7 @@ pub(crate) fn record_sent_in_wallet_db(
         wallet_db_path,
         params.clone(),
         zcash_client_sqlite::util::SystemClock,
-        rand::rngs::OsRng,
+        os_rng(),
     )
     .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?;
     let account_id = wallet_db

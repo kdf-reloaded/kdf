@@ -146,7 +146,10 @@ async fn t39_8_9e1_a_sapling_withdrawal_reports_its_fee_in_every_state() {
     };
     let to = encode_payment_address(
         fixture.coin.z_fields.consensus_params.hrp_sapling_payment_address(),
-        &ExtendedSpendingKey::master(&[97; 32]).default_address().1,
+        &ExtendedSpendingKey::master(&[97; 32])
+            .expect("a valid master key")
+            .default_address()
+            .1,
     );
     let fee = fixture.fee_sat;
     withdrawal_fee_lifecycle(fixture, &to, fee).await;

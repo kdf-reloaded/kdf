@@ -85,6 +85,10 @@ futures01 = { version = "0.1", package = "futures" }
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await"] }
 gstuff = { version = "0.7" }
 hex = "0.4.2"
+# HMAC-SHA256 of the GasFree provider's request authentication (CRD ch.63 §63.4.2). hmac 0.12 works on the
+# 0.10 line of the digest traits, so it takes sha2 0.10 under its own name; `sha2` below stays 0.9. Both versions
+# are already in the lock file through other crates of the workspace.
+hmac = "0.12"
 http = "1"
 itertools = { version = "0.10", features = ["use_std"] }
 jsonrpc-core = "8.0.1"
@@ -116,6 +120,7 @@ serialization = { package = "kdf_codec", path = "../kdf_codec" }
 serialization_derive = { package = "kdf_codec_derive", path = "../kdf_codec_derive" }
 spv_validation = { package = "kdf_spv_validation", path = "../kdf_spv_validation" }
 sha2 = "0.9"
+sha2_010 = { package = "sha2", version = "0.10" }
 sha3 = "0.9"
 sia-rust = { workspace = true }
 # using the same version as cosmrs
@@ -140,22 +145,44 @@ tower = { workspace = true }
 # fileapi + ntdef: GetDiskFreeSpaceExW and ULARGE_INTEGER (z_coin/z_disk_space.rs).
 winapi = { version = "0.3", features = ["shlobj", "minwindef", "fileapi", "ntdef"] }
 zbase32 = "0.1.2"
-incrementalmerkletree = { version = "=0.8.2", features = ["legacy-api", "std"] }
-zcash_note_encryption = "=0.4.2"
-zcash_keys = { version = "=0.16.1", default-features = false, features = ["sapling", "std", "unstable"] }
-zcash_protocol = "=0.10.6"
-zcash_script = "=0.4.5"
-zcash_transparent = { version = "=0.10.0", features = ["transparent-inputs"] }
-zip32 = "=0.2.1"
+incrementalmerkletree = { version = "=0.9.0", features = ["legacy-api", "std"] }
+zcash_note_encryption = "=0.5.1"
+zcash_address = "=0.14.0"
+zcash_keys = { version = "=0.17.0", default-features = false, features = ["sapling", "std", "unstable"] }
+zcash_protocol = "=0.11.0"
+zcash_script = "=0.6.0"
+zcash_transparent = { version = "=0.11.1", features = ["transparent-inputs"] }
+zip32 = "=0.3.0"
+
+# Solana stack — modular `solana-*` 2.x crates plus `spl-token` 8 and
+# the `spl-associated-token-account-client` helper. The legacy
+# `solana-client` 1.x and `solana-sdk` 1.x crates were removed in P14
+# because their transitive deps (`solana-remote-wallet` -> `hidapi` ->
+# `libudev`) only build on Linux desktop. The modular crates carry no
+# hardware-wallet code and rely on a hand-rolled async JSON-RPC client
+# (`solana::rpc_client`) that runs on every target: it sends through
+# `mm2_net::transport`, which is the tokio client on native and `fetch` on WASM.
+solana-commitment-config = { version = "2", default-features = false, features = ["serde"] }
+solana-hash = { version = "2", default-features = false, features = ["serde"] }
+solana-keypair = { version = "2", default-features = false }
+solana-message = { version = "2", default-features = false, features = ["bincode"] }
+solana-native-token = { version = "2", default-features = false }
+solana-program-error = { version = "2", default-features = false }
+solana-pubkey = { version = "2", default-features = false, features = ["serde", "std"] }
+solana-signature = { version = "2", default-features = false, features = ["serde", "verify"] }
+solana-signer = { version = "2", default-features = false }
+solana-system-transaction = { version = "2", default-features = false }
+solana-transaction = { version = "2", default-features = false, features = ["bincode"] }
+spl-associated-token-account-client = { version = "2", default-features = false }
+spl-token = { version = "8", default-features = false }
 
 [dev-dependencies]
 # The get_private_keys tests install a hardware context beside a software login (`init_trezor_ctx_for_tests`).
 crypto = { path = "../crypto", features = ["test-helpers"] }
 # Used only by z_coin/z_v6_construction_tests.rs, to implement Sapling provers that must never be called
 # (a transparent-only transaction has no Sapling bundle); versions are those already locked.
-bls12_381 = "0.8"
-jubjub = "0.10"
-rand_core = "0.6"
+bls12_381 = "0.9"
+jubjub = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # Test certificates for the Electrum TLS handshake tests. Default features are ring-based in 0.13; the
@@ -163,7 +190,7 @@ rand_core = "0.6"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 # Also a normal dependency below (CRD ch.39 R39.6.5a). Here it adds the `circuit` feature the Halo2 verifying key
 # and the batch validator of z_coin/z_ironwood_read_tests.rs (T39.6.5a, T39.6.5c) need.
-orchard = { version = "=0.15.5", default-features = false, features = ["circuit"] }
+orchard = { version = "=0.16.0", default-features = false, features = ["circuit"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.27" }
@@ -176,9 +203,9 @@ web-sys = { version = "0.3.55", features = ["console", "Headers", "Request", "Re
 # R39.6.1: zcash_primitives (shielded types) and zcash_client_backend (note
 # trial-decryption) are needed on WASM for sapling state sync and balance
 # reporting.  zcash_proofs (LocalTxProver) remains native-only.
-zcash_client_backend = { version = "=0.24.0", default-features = false, features = ["transparent-inputs"] }
-sapling = { package = "sapling-crypto", version = "=0.7.0", default-features = false, features = ["std"] }
-zcash_primitives = { version = "=0.30.1", default-features = false, features = ["non-standard-fees", "std", "transparent-inputs"] }
+zcash_client_backend = { version = "=0.25.0", default-features = false, features = ["transparent-inputs"] }
+sapling = { package = "sapling-crypto", version = "=0.9.0", default-features = false, features = ["std"] }
+zcash_primitives = { version = "=0.31.1", default-features = false, features = ["non-standard-fees", "std", "transparent-inputs"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = { version = "0.3.2" }
@@ -228,47 +255,31 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tonic = { version = "0.14", default-features = false, features = ["transport", "channel", "codegen", "tls-ring", "tls-webpki-roots"] }
 tonic-prost = "0.14"
 webpki-roots = { version = "1.0" }
-# CRD ch.39 R39.6.5a--R39.6.5e: the Pirate1 (Ironwood) payment address type and the empty-tree Ironwood anchor
-# of a withdrawal. Already in the tree (same version) through zcash_primitives, whose transaction builder takes
-# this crate's `Address` and `Anchor`. Native only: a WASM build refuses to activate a shielded coin.
-orchard = { version = "=0.15.5", default-features = false }
+# The Zcash library (0.10 line of `rand_core`) takes an infallible `Rng`; the operating-system generator is
+# `getrandom`'s `SysRng` behind `UnwrapErr` (see `z_coin::os_rng`). `rand` 0.8 stays for the rest of the crate.
+rand_core = "0.10"
+getrandom = { version = "0.4", features = ["sys_rng"] }
+# CRD ch.39 R39.6.5a--R39.6.5e: the Pirate1 (Ironwood) payment address type, and the builder of the output-only
+# Ironwood bundle with the empty-tree anchor of a withdrawal, both driven by this crate's own transaction
+# assembler (`z_coin/z_tx_assembler.rs`). Already in the tree (same version) through zcash_primitives. Native
+# only: a WASM build refuses to activate a shielded coin.
+orchard = { version = "=0.16.0", default-features = false }
 # Classic Bech32 (BIP 173) for the Pirate1 address; the Bech32m checksum is refused (R39.6.5a). Already in
 # the tree at this version.
 bech32 = "0.11"
-# 0.24 makes `orchard` a default feature; Ironwood actions live behind it and
-# we neither read nor build that bundle, so default features stay off.
-zcash_client_backend = { version = "=0.24.0", default-features = false, features = ["transparent-inputs", "zcash_proofs"] }
-zcash_client_sqlite = { version = "=0.22.0", default-features = false, features = ["multicore", "transparent-inputs"] }
-sapling = { package = "sapling-crypto", version = "=0.7.0" }
-zcash_primitives = { version = "=0.30.1", features = ["non-standard-fees", "transparent-inputs"] }
-zcash_proofs = "=0.30.0"
+# 0.25 makes `orchard` a default feature. This crate leaves it off here; `zcash_client_sqlite` below turns it
+# on (the wallet database must record a sent transaction that carries an Ironwood bundle, R39.6.5g), and the
+# assembler builds the output-only Ironwood bundle of a Pirate1 withdrawal itself.
+zcash_client_backend = { version = "=0.25.0", default-features = false, features = ["transparent-inputs", "zcash_proofs"] }
+zcash_client_sqlite = { version = "=0.23.0", default-features = false, features = ["multicore", "orchard", "transparent-inputs"] }
+sapling = { package = "sapling-crypto", version = "=0.9.0" }
+zcash_primitives = { version = "=0.31.1", features = ["non-standard-fees", "transparent-inputs"] }
+zcash_proofs = "=0.31.0"
 # secp256k1 0.20->0.29 migration unified this crate onto the same secp256k1
 # line the Zcash stack already used, so the `zcash_secp256k1` alias (used only
 # by z_htlc.rs, now imports plain `secp256k1` instead) is gone -- Cargo
 # rejects depending on the same resolved (name, version) twice under two
 # local names. See docs/plans/secp256k1-migration.md.
-
-# Solana stack — modular `solana-*` 2.x crates plus `spl-token` 8 and
-# the `spl-associated-token-account-client` helper. The legacy
-# `solana-client` 1.x and `solana-sdk` 1.x crates were removed in P14
-# because their transitive deps (`solana-remote-wallet` -> `hidapi` ->
-# `libudev`) only build on Linux desktop. The modular crates carry no
-# hardware-wallet code and rely on a hand-rolled async JSON-RPC client
-# (`solana::rpc_client`) that runs on every native target. WASM stays
-# excluded because `mm2_net::native_http` is tokio-native.
-solana-commitment-config = { version = "2", default-features = false, features = ["serde"] }
-solana-hash = { version = "2", default-features = false, features = ["serde"] }
-solana-keypair = { version = "2", default-features = false }
-solana-message = { version = "2", default-features = false, features = ["bincode"] }
-solana-native-token = { version = "2", default-features = false }
-solana-program-error = { version = "2", default-features = false }
-solana-pubkey = { version = "2", default-features = false, features = ["serde", "std"] }
-solana-signature = { version = "2", default-features = false, features = ["serde", "verify"] }
-solana-signer = { version = "2", default-features = false }
-solana-system-transaction = { version = "2", default-features = false }
-solana-transaction = { version = "2", default-features = false, features = ["bincode"] }
-spl-associated-token-account-client = { version = "2", default-features = false }
-spl-token = { version = "8", default-features = false }
 
 [build-dependencies]
 prost-build = { version = "0.12", default-features = false, features = ["format"] }

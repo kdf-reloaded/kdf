@@ -233,7 +233,7 @@ pub(crate) fn ironwood_bundle_verifies(tx: &ZTransaction, sighash: [u8; 32]) -> 
     let bundle = tx.ironwood_bundle().expect("an Ironwood bundle");
     let mut batch = BatchValidator::new(ironwood_verifying_key());
     batch.add_bundle(bundle, sighash).unwrap();
-    batch.validate(rand::rngs::OsRng)
+    batch.validate(crate::z_coin::os_rng())
 }
 
 /// T39.6.5a, the decisive check: the Ironwood bundle of each mainnet transaction verifies with this
@@ -260,7 +260,7 @@ fn t39_6_5a_the_ironwood_bundle_of_each_mainnet_transaction_verifies() {
         let mut batch = BatchValidator::new(key);
         batch.add_bundle(bundle, wrong).unwrap();
         assert!(
-            !batch.validate(rand::rngs::OsRng),
+            !batch.validate(crate::z_coin::os_rng()),
             "{}: a wrong signature hash must not verify",
             recorded.txid_display
         );
@@ -269,7 +269,7 @@ fn t39_6_5a_the_ironwood_bundle_of_each_mainnet_transaction_verifies() {
         let mut batch = BatchValidator::new(key);
         batch.add_bundle(bundle, sighash).unwrap();
         assert!(
-            batch.validate(rand::rngs::OsRng),
+            batch.validate(crate::z_coin::os_rng()),
             "{}: the chain's own Ironwood bundle must verify (proof, spend-authorization and binding signatures)",
             recorded.txid_display
         );
@@ -307,5 +307,8 @@ fn t39_6_5a_a_changed_proof_byte_does_not_verify() {
 
     let mut batch = BatchValidator::new(key);
     batch.add_bundle(after, sighash).unwrap();
-    assert!(!batch.validate(rand::rngs::OsRng), "a changed proof must not verify");
+    assert!(
+        !batch.validate(crate::z_coin::os_rng()),
+        "a changed proof must not verify"
+    );
 }

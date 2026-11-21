@@ -2,7 +2,7 @@
 //! Async JSON-RPC 2.0 client for the Solana HTTP API.
 //!
 //! # Public exports
-//! - [`SolanaRpcClient`] — async, cloneable client over `mm2_net::native_http`.
+//! - [`SolanaRpcClient`] — async, cloneable client over `mm2_net::transport` (the same code on native and WASM).
 //! - [`RpcError`], [`RpcErrorKind`] — `From`-convertible into `BalanceError`
 //!   and `WithdrawError`.
 //! - Response shapes for the seven endpoints we exercise:
@@ -35,10 +35,10 @@ use derive_more::Display;
 use futures::future::{select, Either};
 use futures::FutureExt;
 use mm2_err_handle::prelude::*;
-use mm2_net::native_http::slurp_post_json;
+use mm2_net::transport::slurp_post_json;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as Json};
+use serde_json::{json, Map, Value as Json};
 use solana_commitment_config::CommitmentConfig;
 use solana_hash::Hash;
 use solana_message::Message;
@@ -50,6 +50,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 const JSONRPC_VERSION: &str = "2.0";
+
+/// A request config object that holds the `encoding` member only.
+fn encoding_config(encoding: &str) -> Map<String, Json> {
+    let mut config = Map::new();
+    config.insert("encoding".to_owned(), json!(encoding));
+    config
+}
 
 /// Hard timeout for a single JSON-RPC round-trip. Matches the upstream
 /// `solana-client` default for non-block-subscribe calls and the
@@ -103,7 +110,9 @@ pub struct SolanaRpcClient {
 
 struct ClientInner {
     url: String,
-    commitment: CommitmentConfig,
+    /// The commitment level sent with every request, or `None`: no commitment member is sent and the node's default
+    /// applies (the compatibility activation surface, CRD ch.40 R40.6B.4).
+    commitment: Option<CommitmentConfig>,
     next_id: AtomicU64,
 }
 
@@ -122,9 +131,16 @@ impl SolanaRpcClient {
     pub fn new(url: impl Into<String>) -> Self { Self::with_commitment(url, CommitmentConfig::default()) }
 
     pub fn with_commitment(url: impl Into<String>, commitment: CommitmentConfig) -> Self {
+        Self::build(url.into(), Some(commitment))
+    }
+
+    /// A client that sends no commitment level with its requests, so the node's default applies.
+    pub fn without_commitment(url: impl Into<String>) -> Self { Self::build(url.into(), None) }
+
+    fn build(url: String, commitment: Option<CommitmentConfig>) -> Self {
         Self {
             inner: Arc::new(ClientInner {
-                url: url.into(),
+                url,
                 commitment,
                 next_id: AtomicU64::new(REQUEST_ID_BASE),
             }),
@@ -133,7 +149,7 @@ impl SolanaRpcClient {
 
     pub fn url(&self) -> &str { &self.inner.url }
 
-    pub fn commitment(&self) -> CommitmentConfig { self.inner.commitment }
+    pub fn commitment(&self) -> Option<CommitmentConfig> { self.inner.commitment }
 
     fn next_id(&self) -> u64 { self.inner.next_id.fetch_add(1, Ordering::Relaxed) }
 
@@ -150,8 +166,7 @@ impl SolanaRpcClient {
         // Bound every round-trip with a hard timeout so a single dead
         // endpoint cannot wedge an entire coin operation. Using
         // `common::executor::Timer` keeps the wait portable across
-        // native and WASM (we are native-only here, but the helper is
-        // already part of the workspace's runtime abstraction).
+        // native and WASM: the one code path serves both targets.
         let req_fut = Box::pin(slurp_post_json(&self.inner.url, body).fuse());
         let timeout = Timer::sleep(REQUEST_TIMEOUT_SECS);
         let (status, _headers, bytes) = match select(req_fut, timeout).await {
@@ -208,7 +223,7 @@ impl SolanaRpcClient {
     pub async fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64, RpcError> {
         self.call(
             "getMinimumBalanceForRentExemption",
-            json!([data_len, self.commitment_param()]),
+            self.params(vec![json!(data_len)], Map::new(), "commitment"),
         )
         .await
     }
@@ -216,20 +231,24 @@ impl SolanaRpcClient {
     /// `getBalance` — returns lamports.
     pub async fn get_balance(&self, address: &Pubkey) -> Result<u64, RpcError> {
         let resp: ContextResponse<u64> = self
-            .call("getBalance", json!([address.to_string(), self.commitment_param()]))
+            .call(
+                "getBalance",
+                self.params(vec![json!(address.to_string())], Map::new(), "commitment"),
+            )
             .await?;
         Ok(resp.value)
     }
 
     /// `getBlockHeight` — current block height.
     pub async fn get_block_height(&self) -> Result<u64, RpcError> {
-        self.call("getBlockHeight", json!([self.commitment_param()])).await
+        self.call("getBlockHeight", self.params(vec![], Map::new(), "commitment"))
+            .await
     }
 
     /// `getLatestBlockhash` — recent blockhash for transaction signing.
     pub async fn get_latest_blockhash(&self) -> Result<Hash, RpcError> {
         let resp: ContextResponse<LatestBlockhashValue> = self
-            .call("getLatestBlockhash", json!([self.commitment_param()]))
+            .call("getLatestBlockhash", self.params(vec![], Map::new(), "commitment"))
             .await?;
         Hash::from_str(&resp.value.blockhash).map_err(|e| RpcError::decode("getLatestBlockhash", e.to_string(), &[]))
     }
@@ -244,7 +263,7 @@ impl SolanaRpcClient {
         let resp: ContextResponse<Option<u64>> = self
             .call(
                 "getFeeForMessage",
-                json!([encoded, { "commitment": self.commitment_str(), "encoding": "base64" }]),
+                self.params(vec![json!(encoded)], encoding_config("base64"), "commitment"),
             )
             .await?;
         resp.value
@@ -259,7 +278,7 @@ impl SolanaRpcClient {
         let raw: String = self
             .call(
                 "sendTransaction",
-                json!([encoded, { "encoding": "base64", "preflightCommitment": self.commitment_str() }]),
+                self.params(vec![json!(encoded)], encoding_config("base64"), "preflightCommitment"),
             )
             .await?;
         Signature::from_str(&raw).map_err(|e| RpcError::decode("sendTransaction", e.to_string(), raw.as_bytes()))
@@ -275,11 +294,11 @@ impl SolanaRpcClient {
         let resp: ContextResponse<Vec<KeyedTokenAccount>> = self
             .call(
                 "getTokenAccountsByOwner",
-                json!([
-                    owner.to_string(),
-                    filter.into_json(),
-                    { "commitment": self.commitment_str(), "encoding": "jsonParsed" }
-                ]),
+                self.params(
+                    vec![json!(owner.to_string()), filter.into_json()],
+                    encoding_config("jsonParsed"),
+                    "commitment",
+                ),
             )
             .await?;
         Ok(resp.value)
@@ -291,7 +310,7 @@ impl SolanaRpcClient {
         let resp: ContextResponse<TokenAmount> = self
             .call(
                 "getTokenAccountBalance",
-                json!([account.to_string(), self.commitment_param()]),
+                self.params(vec![json!(account.to_string())], Map::new(), "commitment"),
             )
             .await?;
         Ok(resp.value)
@@ -303,27 +322,62 @@ impl SolanaRpcClient {
         let resp: ContextResponse<Option<Json>> = self
             .call(
                 "getAccountInfo",
-                json!([address.to_string(), { "commitment": self.commitment_str(), "encoding": "base64" }]),
+                self.params(
+                    vec![json!(address.to_string())],
+                    encoding_config("base64"),
+                    "commitment",
+                ),
             )
             .await?;
         Ok(resp.value.is_some())
     }
 
-    fn commitment_param(&self) -> Json { json!({ "commitment": self.commitment_str() }) }
+    /// `getAccountInfo` — the owner program of an account: `None` when the account does not exist. Used by the
+    /// mint-owner check of activation and by the recipient check of an SPL withdraw.
+    pub async fn get_account_owner(&self, address: &Pubkey) -> Result<Option<Pubkey>, RpcError> {
+        let resp: ContextResponse<Option<AccountOwnerValue>> = self
+            .call(
+                "getAccountInfo",
+                self.params(
+                    vec![json!(address.to_string())],
+                    encoding_config("base64"),
+                    "commitment",
+                ),
+            )
+            .await?;
+        match resp.value {
+            None => Ok(None),
+            Some(account) => Pubkey::from_str(&account.owner)
+                .map(Some)
+                .map_err(|e| RpcError::decode("getAccountInfo", format!("{e:?}"), account.owner.as_bytes())),
+        }
+    }
 
-    fn commitment_str(&self) -> &'static str {
+    /// The `params` array of a request: `head`, then the config object when it has any member. The commitment level
+    /// is added to the config under `commitment_key` when the client has one; a client without one sends no
+    /// commitment member at all.
+    fn params(&self, mut head: Vec<Json>, mut config: Map<String, Json>, commitment_key: &str) -> Json {
+        if let Some(level) = self.commitment_str() {
+            config.insert(commitment_key.to_owned(), json!(level));
+        }
+        if !config.is_empty() {
+            head.push(Json::Object(config));
+        }
+        Json::Array(head)
+    }
+
+    fn commitment_str(&self) -> Option<&'static str> {
         // CommitmentConfig in the modular crate exposes `commitment` as
         // a `CommitmentLevel` enum; format it once as the static string
         // the JSON-RPC API expects.
-        match format!("{:?}", self.inner.commitment.commitment)
-            .to_lowercase()
-            .as_str()
-        {
-            "finalized" => "finalized",
-            "confirmed" => "confirmed",
-            "processed" => "processed",
-            _ => "confirmed",
-        }
+        self.inner.commitment.map(
+            |commitment| match format!("{:?}", commitment.commitment).to_lowercase().as_str() {
+                "finalized" => "finalized",
+                "confirmed" => "confirmed",
+                "processed" => "processed",
+                _ => "confirmed",
+            },
+        )
     }
 }
 
@@ -357,6 +411,12 @@ struct ContextResponse<T> {
     value: T,
 }
 
+/// The one member of a `getAccountInfo` value that `get_account_owner` reads.
+#[derive(Debug, Deserialize)]
+struct AccountOwnerValue {
+    owner: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct LatestBlockhashValue {
     blockhash: String,
@@ -383,7 +443,8 @@ pub struct TokenAmount {
     pub decimals: u8,
     #[serde(default)]
     pub ui_amount: Option<f64>,
-    pub ui_amount_string: String,
+    #[serde(default)]
+    pub ui_amount_string: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -517,7 +578,7 @@ mod tests {
             Envelope::Ok { result, .. } => {
                 assert_eq!(result.value.amount, "100");
                 assert_eq!(result.value.decimals, 6);
-                assert_eq!(result.value.ui_amount_string, "0.0001");
+                assert_eq!(result.value.ui_amount_string.as_deref(), Some("0.0001"));
             },
             _ => panic!(),
         }
@@ -562,6 +623,7 @@ mod tests {
     }
 
     /// T40.10 (R40.5A.1): a request to a closed port and the debug forms name the node host-only.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_10_a_node_is_named_host_only_in_errors_and_debug_forms() {
         let url = "http://user:secret@127.0.0.1:1/v1/APIKEY?token=X";

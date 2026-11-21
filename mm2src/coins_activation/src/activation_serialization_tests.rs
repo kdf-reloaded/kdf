@@ -235,6 +235,10 @@ impl PlatformWithTokensActivationOps for TestCoin {
         Vec::new()
     }
 
+    fn record_token(&self, _token: &MmCoinEnum) {}
+
+    fn forget_token_record(&self, _ticker: &str) {}
+
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
         activation_request.tokens.clone()
     }
@@ -804,7 +808,8 @@ pub(crate) fn case_c_two_paths_wait_for_each_other<First: Family, Second: Family
     assert_eq!(builds(&ticker), 1, "{:?}", names);
 }
 
-/// T55.21 (d): activations of two different tickers do not wait for each other.
+/// T55.21 (d): activations of two different tickers do not wait for each other. A token or layer-two activation
+/// holds the lock of its platform shared (CRD ch.43 D43.1F.2 (b)), so tokens of one platform do not wait either.
 pub(crate) fn case_d_different_tickers_do_not_wait<F: Family>() {
     let (held, other) = (unique_ticker("SD"), unique_ticker("SD"));
     let ctx = serialization_ctx(&[&held, &other]);
@@ -817,6 +822,40 @@ pub(crate) fn case_d_different_tickers_do_not_wait<F: Family>() {
 
     open_gate(&held);
     assert_eq!(first.wait(), Outcome::Registered, "{}", F::NAME);
+}
+
+/// CRD ch.43 D43.1F.2 (b): a token or layer-two activation holds the lock of its platform shared, and the lock of the
+/// platform taken exclusively (what `disable_coin` and an activation of the platform take) waits for it, and the
+/// other way round: a token activation waits while the platform's lock is held exclusively.
+pub(crate) fn case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other<F: Family>() {
+    let (first_ticker, second_ticker) = (unique_ticker("SF"), unique_ticker("SF"));
+    let ctx = serialization_ctx(&[&first_ticker, &second_ticker]);
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+
+    // An activation in flight: the exclusive lock of the platform waits for it.
+    let first = F::start(&ctx, &first_ticker, "gate");
+    wait_until("the first build to start", || builds(&first_ticker) == 1);
+    let mut disable = Box::pin(coins_ctx.lock_activation(&[PLATFORM_TICKER]));
+    assert!(
+        disable.as_mut().now_or_never().is_none(),
+        "{}: the platform's exclusive lock waits for the activation",
+        F::NAME
+    );
+    open_gate(&first_ticker);
+    assert_eq!(first.wait(), Outcome::Registered, "{}", F::NAME);
+    let guard = common::block_on(disable).unwrap_or_else(|e| panic!("{}: {}", F::NAME, e));
+
+    // The platform's lock is held exclusively: an activation of a token of it waits.
+    let second = F::start(&ctx, &second_ticker, "ok");
+    settle();
+    assert_eq!(
+        second.poll(),
+        None,
+        "{}: the activation waits for the platform",
+        F::NAME
+    );
+    drop(guard);
+    assert_eq!(second.wait(), Outcome::Registered, "{}", F::NAME);
 }
 
 /// T55.21 (e): cancelling an activation that is still waiting registers nothing and deregisters nothing.
@@ -946,6 +985,15 @@ family_cases!(
     l2_one_shot => L2OneShot,
 );
 
+// (f): the platform's lock and the token and layer-two activations wait for each other.
+#[test]
+fn t43_1f_2_a_platform_lock_and_a_dependent_activation_wait_for_each_other() {
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<TokenTask>();
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<TokenOneShot>();
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<L2Task>();
+    case_f_a_platform_lock_and_a_dependent_activation_wait_for_each_other::<L2OneShot>();
+}
+
 // (c): a task and a one-shot call, and tasks of two families, of one ticker wait for each other.
 #[test]
 fn t55_21_c_a_task_and_a_one_shot_call_of_one_ticker_wait_for_each_other() {
@@ -962,4 +1010,87 @@ fn t55_21_c_paths_of_different_families_wait_for_each_other() {
     case_c_two_paths_wait_for_each_other::<PlatformTask, TokenOneShot>();
     case_c_two_paths_wait_for_each_other::<TokenTask, L2OneShot>();
     case_c_two_paths_wait_for_each_other::<L2Task, PlatformOneShot>();
+}
+
+// Re-activation of a passive platform (CRD ch.43 R43.1F.2, R43.1F.3): the generic routine builds no platform
+// instance, makes the registered entry active, keeps a registered dependent, and refuses what it must.
+fn passive_scripted_platform(ctx: &MmArc, ticker: &str, dependent: &str) -> Arc<CoinsContext> {
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    common::block_on(
+        coins_ctx.add_platform_with_tokens(TestCoin::new(ticker).into(), vec![TestCoin::new(dependent).into()]),
+    )
+    .unwrap();
+    assert!(common::block_on(coins_ctx.make_passive(ticker)));
+    coins_ctx
+}
+
+fn scripted_platform_request(ticker: &str, script: &str, tokens: &[&str]) -> Json {
+    json!({ "ticker": ticker, "script": script, "tokens": tokens })
+}
+
+#[test]
+fn a_passive_platform_is_re_activated_without_building_a_platform() {
+    let (ticker, dependent) = (unique_ticker("RP"), unique_ticker("RT"));
+    let ctx = serialization_ctx(&[&ticker, &dependent]);
+    let coins_ctx = passive_scripted_platform(&ctx, &ticker, &dependent);
+
+    let request = from_json(scripted_platform_request(&ticker, "ok", &[dependent.as_str()]));
+    common::block_on(enable_platform_coin_with_tokens::<TestCoin>(ctx.clone(), request))
+        .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+
+    assert_eq!(builds(&ticker), 0, "a platform instance was built");
+    assert!(!common::block_on(coins_ctx.is_passive(&ticker)));
+    assert!(is_registered(&ctx, &ticker));
+    assert_eq!(
+        common::block_on(coins_ctx.dependents_of(&ticker))
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![dependent]
+    );
+}
+
+#[test]
+fn a_refused_re_activation_leaves_the_platform_passive() {
+    let (ticker, dependent) = (unique_ticker("RP"), unique_ticker("RT"));
+    let ctx = serialization_ctx(&[&ticker, &dependent]);
+    let coins_ctx = passive_scripted_platform(&ctx, &ticker, &dependent);
+
+    // The scripted answer fails after the (skipped) build.
+    let request = from_json(scripted_platform_request(&ticker, "gate_fail", &[]));
+    let refused = common::block_on(enable_platform_coin_with_tokens::<TestCoin>(ctx.clone(), request));
+    assert!(refused.is_err());
+    assert!(
+        common::block_on(coins_ctx.is_passive(&ticker)),
+        "the refusal changes nothing"
+    );
+    assert!(
+        !is_registered(&ctx, &ticker),
+        "a passive platform is not an active coin"
+    );
+    assert_eq!(builds(&ticker), 0);
+
+    // A requested token that is registered and is no dependent of the platform is refused before anything else.
+    let legacy = unique_ticker("RL");
+    common::block_on(coins_ctx.add_coin(TestCoin::new(&legacy).into())).unwrap();
+    let request = from_json(scripted_platform_request(&ticker, "ok", &[legacy.as_str()]));
+    let refused = error_of_result(common::block_on(enable_platform_coin_with_tokens::<TestCoin>(
+        ctx.clone(),
+        request,
+    )));
+    match refused.get_inner() {
+        EnablePlatformCoinWithTokensError::TokenIsAlreadyActivated(refused_ticker) => {
+            assert_eq!(refused_ticker, &legacy)
+        },
+        other => panic!("unexpected error {:?}", other),
+    }
+    assert!(common::block_on(coins_ctx.is_passive(&ticker)));
+}
+
+fn error_of_result<T>(
+    result: Result<T, MmError<EnablePlatformCoinWithTokensError>>,
+) -> MmError<EnablePlatformCoinWithTokensError> {
+    match result {
+        Ok(_) => panic!("expected a refusal"),
+        Err(e) => e,
+    }
 }

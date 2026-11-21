@@ -50,6 +50,8 @@ pub trait CoinWithdrawInit {
 
 pub async fn init_withdraw(ctx: MmArc, request: WithdrawRequest) -> WithdrawInitResult<InitWithdrawResponse> {
     let coin = lp_coinfind_or_err(&ctx, &request.coin).await.mm_err(Into::into)?;
+    // CRD ch.63 R21: the fee-rail check comes before any other processing of the request, for every coin family.
+    crate::check_withdraw_fee_rail(&coin, &request)?;
     // CRD ch.38 R38.6.4o item 12: no withdrawal is built while the coin's Electrum servers disagree about the chain.
     if let Some(error) = coin.chain_disagreement() {
         return MmError::err(WithdrawError::ChainDisagreement(error));
@@ -115,6 +117,10 @@ pub enum WithdrawInProgressStatus {
     WaitingForTrezorToConnect,
     WaitingForUserToConfirmPubkey,
     WaitingForUserToConfirmSigning,
+    /// The gasless rail reads the provider's quote for the transfer (CRD ch.63 §63.3.6).
+    FetchingGaslessQuote,
+    /// The gasless rail signs the off-chain authorization (CRD ch.63 §63.3.6).
+    SigningGaslessAuthorization,
 }
 
 pub async fn withdraw_user_action(
@@ -176,9 +182,7 @@ impl RpcTask for WithdrawTask {
             // The WASM shielded coin cannot build transactions; its `withdraw` reports that as a typed error.
             #[cfg(target_arch = "wasm32")]
             MmCoinEnum::ZCoin(ref z_coin) => init_legacy_withdraw(z_coin, self.request, task_handle).await,
-            #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::SolanaCoin(ref solana) => init_legacy_withdraw(solana, self.request, task_handle).await,
-            #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::SplToken(ref spl) => init_legacy_withdraw(spl, self.request, task_handle).await,
             MmCoinEnum::SiaCoin(ref sia) => init_legacy_withdraw(sia, self.request, task_handle).await,
             MmCoinEnum::TendermintCoin(ref tendermint) => {

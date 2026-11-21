@@ -1,22 +1,22 @@
 use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens, EnablePlatformCoinWithTokensError,
-                                       EnablePlatformCoinWithTokensReq, GetPlatformBalance,
-                                       PlatformWithTokensActivationOps, RegisterTokenInfo, TokenActivationParams,
-                                       TokenActivationRequest, TokenAsMmCoinInitializer, TokenInitializer, TokenOf};
+                                       EnablePlatformCoinWithTokensReq, GetPlatformBalance, InitTokensAsMmCoinsError,
+                                       PlatformWithTokensActivationOps, RegisterTokenInfo, TokenActivationRequest,
+                                       TokenAsMmCoinInitializer, TokenOf};
 use crate::prelude::*;
 use crate::prelude::{CoinAddressInfo, TokenBalances, TryFromCoinProtocol, TxHistory};
-use crate::spl_token_activation::SplActivationRequest;
+use crate::spl_token_activation::{resolve_spl_protocol, SplActivationRequest};
 use async_trait::async_trait;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::node_url::scrub_urls_in_text;
 use coins::rpc_command::get_my_address::PathToAddress;
-use coins::solana::spl::SplProtocolConf;
+use coins::solana::rpc_pool::solana_node_order;
+use coins::solana::spl::{TOKEN_2022_NOT_SUPPORTED, TOKEN_2022_PROGRAM_ID};
 use coins::solana::{solana_hd_derivation_path, solana_hd_secret, SolanaHdLayout};
-use coins::{coin_conf, solana_coin_from_conf_and_params, CoinBalance, CoinProtocol, MarketCoinOps,
+use coins::{coin_conf, solana_coin_with_node_order, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum,
             PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE,
             SOLANA_NOT_AVAILABLE};
 use common::mm_number::BigDecimal;
-use common::Future01CompatExt;
 use crypto::{Bip44Chain, CryptoCtx, KeyPairPolicy};
 use futures::future::AbortHandle;
 use mm2_core::mm_ctx::MmArc;
@@ -54,39 +54,61 @@ impl TokenOf for SplToken {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl TokenInitializer for SplTokenInitializer {
-    type Token = SplToken;
-    type TokenActivationRequest = SplActivationRequest;
-    type TokenProtocol = SplProtocolConf;
-    /// Initialising a token reads no node and cannot fail: its key is parsed with its protocol.
-    type InitTokensError = std::convert::Infallible;
+impl TokenAsMmCoinInitializer for SplTokenInitializer {
+    type PlatformCoin = SolanaCoin;
+    type ActivationRequest = SolanaWithTokensActivationRequest;
 
-    fn tokens_requests_from_platform_request(
-        platform_params: &SolanaWithTokensActivationRequest,
-    ) -> Vec<TokenActivationRequest<Self::TokenActivationRequest>> {
-        platform_params.spl_tokens_requests.clone()
-    }
-
-    async fn enable_tokens(
+    /// Enables the requested tokens in passes, each covering every token in request order before the next starts,
+    /// so the error reported is that of the earliest failing pass (CRD ch.40 R40.2.2): the resolution of every
+    /// token's protocol, from its request-supplied `protocol` or the coins configuration; then the platform
+    /// consistency of every token (`PlatformCoinMismatch`); then the initialisation, which reads each mint account
+    /// from a node and checks its owner (`Transport` on a node failure or a foreign owner). Nothing is registered
+    /// here, so a failure leaves nothing behind.
+    async fn enable_tokens_as_mm_coins(
         &self,
-        activation_params: Vec<TokenActivationParams<SplActivationRequest, SplProtocolConf>>,
-    ) -> Result<Vec<SplToken>, MmError<Self::InitTokensError>> {
-        let tokens = activation_params
-            .into_iter()
-            .map(|param| {
-                SplToken::new(
-                    param.protocol.decimals,
-                    param.ticker,
-                    param.protocol.token_contract_address,
-                    param.protocol.program_id,
-                    self.platform_coin.clone(),
-                )
-            })
-            .collect();
-        Ok(tokens)
-    }
+        ctx: MmArc,
+        request: &Self::ActivationRequest,
+    ) -> Result<Vec<MmCoinEnum>, MmError<InitTokensAsMmCoinsError>> {
+        let requests = &request.spl_tokens_requests;
 
-    fn platform_coin(&self) -> &SolanaCoin { &self.platform_coin }
+        let mut protocols = Vec::with_capacity(requests.len());
+        for token_request in requests {
+            let protocol = resolve_spl_protocol(&ctx, &token_request.ticker, token_request.request.protocol.as_ref())
+                .map_to_mm(InitTokensAsMmCoinsError::from)?;
+            protocols.push(protocol);
+        }
+
+        if protocols
+            .iter()
+            .any(|protocol| protocol.platform_coin_ticker != self.platform_coin.ticker())
+        {
+            return MmError::err(InitTokensAsMmCoinsError::PlatformCoinMismatch);
+        }
+
+        // The mint accounts of all tokens are read from one node (CRD ch.40 R40.1.5).
+        let mints: Vec<_> = protocols
+            .iter()
+            .map(|protocol| (protocol.token_contract_address, protocol.program_id))
+            .collect();
+        self.platform_coin
+            .check_mint_owners(&mints)
+            .await
+            .mm_err(|e| InitTokensAsMmCoinsError::Transport(e.to_string()))?;
+        let mut tokens = Vec::with_capacity(requests.len());
+        for (token_request, protocol) in requests.iter().zip(protocols) {
+            tokens.push(SplToken::with_custom(
+                protocol.decimals,
+                token_request.ticker.clone(),
+                protocol.token_contract_address,
+                protocol.program_id,
+                self.platform_coin.clone(),
+                token_request.request.protocol.is_some(),
+            ));
+        }
+
+        // The platform's token record is written at registration, not here (CRD ch.43 D43.1F.2 (b)).
+        Ok(tokens.into_iter().map(Into::into).collect())
+    }
 }
 
 impl RegisterTokenInfo<SplToken> for SolanaCoin {
@@ -99,16 +121,16 @@ impl RegisterTokenInfo<SplToken> for SolanaCoin {
 #[derive(Clone, Debug, Deserialize)]
 pub struct SolanaWithTokensActivationRequest {
     #[serde(flatten)]
-    platform_request: SolanaActivationParams,
-    spl_tokens_requests: Vec<TokenActivationRequest<SplActivationRequest>>,
+    pub(crate) platform_request: SolanaActivationParams,
+    pub(crate) spl_tokens_requests: Vec<TokenActivationRequest<SplActivationRequest>>,
     #[serde(default)]
-    hd_path_layout: Option<SolanaHdLayout>,
+    pub(crate) hd_path_layout: Option<SolanaHdLayout>,
     // Kept raw: it matters under an HD login only, where a value that does not parse is a platform-coin creation
     // error (CRD ch.40 R40.1A.6); under a single-key login it is ignored whatever it holds.
     #[serde(default)]
-    path_to_address: Option<Json>,
+    pub(crate) path_to_address: Option<Json>,
     #[serde(default)]
-    priv_key_policy: Option<PrivKeyActivationPolicy>,
+    pub(crate) priv_key_policy: Option<PrivKeyActivationPolicy>,
 }
 
 fn creation_error(ticker: &str, error: impl Into<String>) -> MmError<SolanaWithTokensActivationError> {
@@ -197,9 +219,9 @@ pub(crate) fn derivation_method_of(
 
 #[derive(Debug, Serialize)]
 pub struct SolanaWithTokensActivationResult {
-    current_block: u64,
-    solana_addresses_infos: HashMap<String, CoinAddressInfo<CoinBalance>>,
-    spl_addresses_infos: HashMap<String, CoinAddressInfo<TokenBalances>>,
+    pub(crate) current_block: u64,
+    pub(crate) solana_addresses_infos: HashMap<String, CoinAddressInfo<CoinBalance>>,
+    pub(crate) spl_addresses_infos: HashMap<String, CoinAddressInfo<TokenBalances>>,
 }
 
 impl GetPlatformBalance for SolanaWithTokensActivationResult {
@@ -253,7 +275,8 @@ impl TryFromCoinProtocol for SolanaProtocolInfo {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl PlatformWithTokensActivationOps for SolanaCoin {
     type ActivationRequest = SolanaWithTokensActivationRequest;
     type PlatformProtocolInfo = SolanaProtocolInfo;
@@ -271,6 +294,19 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         let crypto_ctx =
             CryptoCtx::from_ctx(&ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
         reject_unsupported_policy(&ticker, &activation_request.priv_key_policy)?;
+        // D40.6B.4: a Token-2022 inline token is refused before any node is contacted and nothing is
+        // registered. A token whose protocol does not resolve, or that names another platform, is left to the
+        // later token initialisation, which answers the error of its own row.
+        for token in &activation_request.spl_tokens_requests {
+            if let Ok(protocol) = resolve_spl_protocol(&ctx, &token.ticker, token.request.protocol.as_ref()) {
+                if protocol.platform_coin_ticker == ticker && protocol.program_id == TOKEN_2022_PROGRAM_ID {
+                    return Err(creation_error(
+                        &ticker,
+                        format!("{}: {}", token.ticker, TOKEN_2022_NOT_SUPPORTED),
+                    ));
+                }
+            }
+        }
         // R40.1A.1: a single-key login uses the key passed in; a global-HD login derives its own key, or uses the
         // context's internal key when the request asks for `IguanaPrivKey` (`hd_path_layout` and `path_to_address`
         // are then ignored).
@@ -302,12 +338,26 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
             },
             KeyPairPolicy::Iguana => priv_key,
         };
-        let platform_coin =
-            solana_coin_from_conf_and_params(&ticker, &platform_conf, activation_request.platform_request, key)
-                .await
-                .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
+        let node_order = solana_node_order(&ctx);
+        let platform_coin = solana_coin_with_node_order(
+            &ticker,
+            &platform_conf,
+            activation_request.platform_request,
+            key,
+            node_order,
+        )
+        .await
+        .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
         Ok(platform_coin)
     }
+
+    fn record_token(&self, token: &MmCoinEnum) {
+        if let MmCoinEnum::SplToken(token) = token {
+            self.register_token_info(token);
+        }
+    }
+
+    fn forget_token_record(&self, ticker: &str) { self.remove_spl_token_info(ticker); }
 
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
         activation_request
@@ -344,21 +394,11 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
             ticker: self.ticker().to_owned(),
             error: scrub_urls_in_text(&error),
         };
-        let current_block = self.current_block().compat().await.map_to_mm(read_failure)?;
-        let solana_balance = self
-            .my_balance()
-            .compat()
-            .await
-            .map_err(|e| read_failure(e.into_inner().to_string()))?;
-        let mut token_balances = HashMap::new();
-        let token_infos = self.get_spl_tokens_infos();
-        for (token_ticker, info) in token_infos.into_iter() {
-            let balance = self
-                .my_balance_spl(&info.clone())
-                .await
-                .map_err(|e| read_failure(e.into_inner().to_string()))?;
-            token_balances.insert(token_ticker.to_owned(), balance);
-        }
+        // The block height, the SOL balance and the token balances are read from one node (CRD ch.40 R40.1.5).
+        let balances = self.activation_balances().await.map_err(read_failure)?;
+        let current_block = balances.current_block;
+        let solana_balance = balances.balance;
+        let token_balances = balances.token_balances;
         let mut result = SolanaWithTokensActivationResult {
             current_block,
             solana_addresses_infos: HashMap::new(),

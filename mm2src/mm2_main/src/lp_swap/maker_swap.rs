@@ -131,7 +131,7 @@ impl TakerNegotiationData {
 
 /// The swap-unique input of the maker's derived HTLC key (CRD ch.39 R39.5.7): the secret-hash bytes as saved,
 /// or for a swap that predates that member the hash of the saved secret under the default algorithm.
-fn maker_htlc_key_input(data: &MakerSwapData) -> Vec<u8> {
+pub(crate) fn maker_htlc_key_input(data: &MakerSwapData) -> Vec<u8> {
     data.secret_hash
         .clone()
         .map(|h| h.0)

@@ -143,6 +143,11 @@ pub enum PrivKeyNotAllowed {
     /// node signs with, so every path that would sign is refused with this error.
     #[display(fmt = "The coin is watch-only and holds no signing key")]
     WatchOnlyCoin,
+    /// The coin was activated with a WalletConnect session (CRD ch.36 R36.14.13 -- R36.14.15): the paired wallet
+    /// signs and this node holds no key, so every path that would sign with a node-held key is refused with this
+    /// error.
+    #[display(fmt = "The coin signs through a WalletConnect wallet and holds no signing key")]
+    WalletConnectCoin,
 }
 #[derive(Debug, Display, PartialEq, Serialize)]
 pub enum UnexpectedDerivationMethod {
@@ -404,6 +409,11 @@ pub enum DelegationError {
     InvalidPayload { reason: String },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// CRD ch.36 D36.15 (b): the external wallet that signs the transaction did not sign it (a refusal, no answer
+    /// within the request's time-to-live, a session that is gone or no longer grants the chain, an echoed document
+    /// that differs from the requested one). HTTP 500.
+    #[display(fmt = "Signing error: {}", _0)]
+    SigningError(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -476,7 +486,9 @@ impl From<ScriptHashTypeNotSupported> for DelegationError {
 impl HttpStatusCode for DelegationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            DelegationError::Transport(_) | DelegationError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DelegationError::Transport(_) | DelegationError::SigningError(_) | DelegationError::InternalError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             _ => StatusCode::BAD_REQUEST,
         }
     }
@@ -569,6 +581,19 @@ pub enum WithdrawError {
         available: BigDecimal,
         required: BigDecimal,
     },
+    /// CRD ch.40 R40.6B.10, ch.43 R43.1D.2: a token withdrawal whose fee (plus the rent of a created recipient
+    /// token account) exceeds the SOL balance. `coin` is the platform ticker, `required` is fee plus rent.
+    #[display(
+        fmt = "Not enough {} to pay the fee of the withdrawal: available {}, required at least {}",
+        coin,
+        available,
+        required
+    )]
+    NotSufficientPlatformBalanceForFee {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+    },
     /// CRD ch.39 D39.8.0e: the withdrawal is short only because notes it would spend are committed
     /// to an earlier transaction of this daemon that is not confirmed yet. Distinct from
     /// `NotSufficientBalance` so the cause reaches the user: with the balance showing, a bare
@@ -590,6 +615,27 @@ pub enum WithdrawError {
     /// The Electrum servers of the coin disagree about the chain (CRD ch.38 R38.6.4o item 12); the text is the error.
     #[display(fmt = "{}", _0)]
     ChainDisagreement(String),
+    /// CRD ch.63 §63.9.2, D63.3 (c): a gasless withdraw is short at the sender's GasFree custody address, the
+    /// account the provider debits. On the wire it is the shared `NotSufficientBalance` with its shared
+    /// `error_data` (`coin`, `available`, `required`, the custody account's figures in token units); only the
+    /// human-readable text differs, by naming the custody address, which is no member of `error_data`.
+    #[display(
+        fmt = "Not enough {} at the GasFree custody address {} for a gasless withdraw: available {}, required at \
+               least {} (the amount plus the provider's fee). The balance of the sending address is not used on \
+               this rail",
+        coin,
+        custody_address,
+        available,
+        required
+    )]
+    #[serde(rename(serialize = "NotSufficientBalance"))]
+    NotSufficientCustodyBalance {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+        #[serde(skip_serializing, default)]
+        custody_address: String,
+    },
     #[display(fmt = "Balance is zero")]
     ZeroBalanceToWithdrawMax,
     #[display(fmt = "The amount {} is too small, required at least {}", amount, threshold)]
@@ -616,6 +662,11 @@ pub enum WithdrawError {
     /// block base fee. Its `error_data` carries the amounts in wei as decimal strings.
     #[display(fmt = "{}", _0)]
     FeeCapBelowBaseFee(FeeCapBelowBaseFee),
+    /// CRD ch.36 D36.15 (b): the external wallet that signs the transaction did not sign it (a refusal, no answer
+    /// within the request's time-to-live, a session that is gone or no longer grants the chain, an echoed document
+    /// that differs from the requested one). HTTP 500.
+    #[display(fmt = "Signing error: {}", _0)]
+    SigningError(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
     /// CRD ch.49 R49.27a: the one shared arm of every "unsupported operation" refusal of a withdraw; there is no
@@ -642,6 +693,51 @@ pub enum WithdrawError {
     /// than 500, following `UnsupportedError` above.
     #[display(fmt = "Unsupported after a network upgrade: {}", _0)]
     UnsupportedAfterNetworkUpgrade(String),
+    /// CRD ch.63 §63.9.1: the error family of the gasless withdraw rail. On the wire the outer `error_type` is
+    /// `Gasless` and `error_data` is an object whose own `error_type` names the member.
+    #[display(fmt = "{}", _0)]
+    Gasless(GaslessWithdrawError),
+}
+/// The members of the gasless error family of a withdraw (CRD ch.63 §63.9.1). Each carries free human-readable
+/// text as its `error_data`; a client classifies by the two `error_type` values and the HTTP status alone.
+#[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum GaslessWithdrawError {
+    /// No gasless rail exists for the coin the request names, or the rail is refused for its network. HTTP 503.
+    #[display(fmt = "The gasless withdraw rail is unavailable: {}", _0)]
+    Unavailable(String),
+    /// The provider withholds submit permission while an earlier transfer of the account is unsettled. HTTP 409.
+    #[display(fmt = "A gasless transfer of this account is still pending: {}", _0)]
+    PendingTransfer(String),
+    /// The quoted provider fee exceeds the effective cap. HTTP 400.
+    #[display(fmt = "The gasless fee exceeds the accepted maximum: {}", _0)]
+    MaxFeeExceeded(String),
+    /// The deadline of the quote passed before use. HTTP 400.
+    #[display(fmt = "The gasless quote expired: {}", _0)]
+    QuoteExpired(String),
+    /// The provider refused the request. HTTP 502.
+    #[display(fmt = "The gasless provider rejected the request: {}", _0)]
+    ProviderRejected(String),
+    /// The provider's answer could not be trusted or decoded. HTTP 502.
+    #[display(fmt = "The gasless provider's answer cannot be used: {}", _0)]
+    InvalidProviderResponse(String),
+    /// A trace id the provider does not know. HTTP 404.
+    #[display(fmt = "The gasless provider does not know the trace: {}", _0)]
+    TraceNotFound(String),
+}
+impl GaslessWithdrawError {
+    /// The HTTP status of the member (CRD ch.63 §63.9.1; binding).
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            GaslessWithdrawError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            GaslessWithdrawError::PendingTransfer(_) => StatusCode::CONFLICT,
+            GaslessWithdrawError::MaxFeeExceeded(_) | GaslessWithdrawError::QuoteExpired(_) => StatusCode::BAD_REQUEST,
+            GaslessWithdrawError::ProviderRejected(_) | GaslessWithdrawError::InvalidProviderResponse(_) => {
+                StatusCode::BAD_GATEWAY
+            },
+            GaslessWithdrawError::TraceNotFound(_) => StatusCode::NOT_FOUND,
+        }
+    }
 }
 impl WithdrawError {
     /// The hardware-wallet condition `word`, as the string of the `HwError` token (CRD ch.55 R55.2.17).
@@ -655,6 +751,8 @@ impl HttpStatusCode for WithdrawError {
             WithdrawError::CoinDoesntSupportInitWithdraw { .. }
             | WithdrawError::UnexpectedUserAction { .. }
             | WithdrawError::NotSufficientBalance { .. }
+            | WithdrawError::NotSufficientCustodyBalance { .. }
+            | WithdrawError::NotSufficientPlatformBalanceForFee { .. }
             | WithdrawError::BalanceLockedByUnconfirmedTransaction { .. }
             | WithdrawError::ChainDisagreement(_)
             | WithdrawError::ZeroBalanceToWithdrawMax
@@ -671,12 +769,14 @@ impl HttpStatusCode for WithdrawError {
             // user's to resolve, not a server fault.
             | WithdrawError::UnsupportedAfterNetworkUpgrade(_) => StatusCode::BAD_REQUEST,
             WithdrawError::HwError(_) => StatusCode::GONE,
+            // CRD ch.63 §63.9.1: each member of the gasless family has its own status.
+            WithdrawError::Gasless(member) => member.status_code(),
             // CRD ch.43 R43.1D.2: a failure of the backend the coin talks to is a bad gateway.
             WithdrawError::Transport(_) => StatusCode::BAD_GATEWAY,
             // A node's verdict on a fee the daemon chose, transient by nature: not a fault of the request.
-            WithdrawError::FeeCapBelowBaseFee(_) | WithdrawError::InternalError(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
+            WithdrawError::FeeCapBelowBaseFee(_)
+            | WithdrawError::SigningError(_)
+            | WithdrawError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -975,6 +1075,26 @@ mod withdraw_error_wire_tests {
             WithdrawError::InternalError("x".to_owned()).status_code(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    /// CRD ch.36 D36.15 (b): the external wallet did not sign. `SigningError` answers HTTP 500 with `error_type`
+    /// `SigningError` and `error_data` a plain JSON string, for the `withdraw` set and the staking set alike. The
+    /// test compares the discriminant, the JSON type of `error_data` and the status only, never its text.
+    #[test]
+    fn signing_error_wire_form_is_an_internal_server_error() {
+        let withdraw = WithdrawError::SigningError("x".to_owned());
+        assert_eq!(withdraw.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = serde_json::to_value(&withdraw).unwrap();
+        assert_eq!(json["error_type"], "SigningError");
+        assert!(json["error_data"].is_string());
+        assert_eq!(json.as_object().unwrap().len(), 2);
+
+        let delegation = DelegationError::SigningError("x".to_owned());
+        assert_eq!(delegation.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = serde_json::to_value(&delegation).unwrap();
+        assert_eq!(json["error_type"], "SigningError");
+        assert!(json["error_data"].is_string());
+        assert_eq!(json.as_object().unwrap().len(), 2);
     }
 
     /// CRD ch.43 R43.1D.2: every hardware-wallet condition that has a name in the hardware RPC error vocabulary is the

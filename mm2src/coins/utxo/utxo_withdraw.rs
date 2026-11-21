@@ -25,7 +25,8 @@ use std::collections::HashSet;
 use std::iter::once;
 use std::time::Duration;
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
-use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, with_key_pair, UtxoSignTxError};
+use utxo_signer::{refuse_sighash_suffix_for_hardware_wallet, refuse_transaction_version_for_hardware_wallet,
+                  with_key_pair, UtxoSignTxError};
 use utxo_signer::{SignPolicy, UtxoSignerOps};
 
 const TREZOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -37,7 +38,8 @@ impl From<UtxoSignTxError> for WithdrawError {
             UtxoSignTxError::TrezorError(trezor) => WithdrawError::from(trezor),
             UtxoSignTxError::Transport(transport) => WithdrawError::Transport(transport),
             UtxoSignTxError::Internal(internal) => WithdrawError::InternalError(internal),
-            sign_err @ UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { .. } => {
+            sign_err @ (UtxoSignTxError::SighashSuffixNotSupportedByHardwareWallet { .. }
+            | UtxoSignTxError::TransactionVersionNotSupportedByHardwareWallet { .. }) => {
                 WithdrawError::UnsupportedError(sign_err.to_string())
             },
             sign_err => WithdrawError::InternalError(sign_err.to_string()),
@@ -170,11 +172,25 @@ where
 
         let script_pubkey = output_script(&to, script_type).to_bytes();
 
-        let _utxo_lock = UTXO_LOCK.lock().await;
-        let (unspents, _) = coin
+        // The coins of the QTUM family hold the guard of their shared recently-spent record from the listing through
+        // signing and the pending entry, in place of the process-wide lock (CRD ch.38 D38.6.4Q.4 status note,
+        // item 4). Every other coin keeps the process-wide lock and drops the guard after the listing.
+        let record_is_lock = coin.as_ref().spent_record_is_shared;
+        let _utxo_lock = if record_is_lock {
+            None
+        } else {
+            Some(UTXO_LOCK.lock().await)
+        };
+        let (unspents, listing_guard) = coin
             .get_unspent_ordered_list(&self.sender_address())
             .await
             .mm_err(Into::into)?;
+        let mut held_guard = if record_is_lock {
+            Some(listing_guard)
+        } else {
+            drop(listing_guard);
+            None
+        };
         let p2pk_outpoints = crate::utxo::electrum_p2pk_outpoints_for_address(coin.as_ref(), &self.sender_address())
             .await
             .mm_err(Into::into)?;
@@ -248,11 +264,17 @@ where
                     .any(|input| input.previous_output == unspent.outpoint)
             })
             .collect();
-        coin.as_ref()
-            .recently_spent_outpoints
-            .lock()
-            .await
-            .note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone());
+        match held_guard.take() {
+            Some(mut guard) => {
+                guard.note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone())
+            },
+            None => coin
+                .as_ref()
+                .recently_spent_outpoints
+                .lock()
+                .await
+                .note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone()),
+        }
         let tx_hex = tx_bytes.into();
         Ok(TransactionDetails {
             unsigned: None,
@@ -417,6 +439,7 @@ where
             .mm_err(Into::into)?;
 
         let sighash_suffix = unsigned_tx.sighash_suffix;
+        let (overwintered, tx_version) = (unsigned_tx.overwintered, unsigned_tx.version);
         let mut sign_params = UtxoSignTxParamsBuilder::new();
 
         // TODO refactor [`UtxoTxBuilder::build`] to return `SpendingInputInfo` and `SendingOutputInfo` within `AdditionalTxData`.
@@ -460,6 +483,7 @@ where
             PrivKeyPolicy::Trezor => {
                 // CRD ch.61 R61.4.4: refuse before the device is contacted.
                 refuse_sighash_suffix_for_hardware_wallet(sighash_suffix).mm_err(WithdrawError::from)?;
+                refuse_transaction_version_for_hardware_wallet(overwintered, tx_version).mm_err(WithdrawError::from)?;
                 let trezor_client = self.trezor_client(self.coin.as_ref().hw_ctx.as_ref()).await?;
                 SignPolicy::WithTrezor(trezor_client)
             },

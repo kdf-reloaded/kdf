@@ -112,6 +112,36 @@ fn kerrigan_with_header_verification_is_a_coin_creation_error_naming_the_key() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// CRD ch.39 R39.11.4V.2: an overwintered entry whose transaction version this software cannot build is refused
+/// at activation as a coin creation error, like an invalid branch id, and the error text names the field.
+#[test]
+fn a_refused_overwintered_transaction_version_is_a_coin_creation_error_naming_the_field() {
+    for (conf_error, field) in [
+        (
+            UtxoConfError::UnsupportedOverwinteredTxVersion { found: 3 },
+            "'txversion' 3",
+        ),
+        (
+            UtxoConfError::MissingConsensusBranchId { txversion: 5 },
+            "'consensus_branch_id'",
+        ),
+        (
+            UtxoConfError::InvalidConsensusBranchId("invalid length".to_owned()),
+            "invalid length",
+        ),
+    ] {
+        let (wire, status) = wire_of(InitUtxoStandardError::from_build_err(
+            UtxoCoinBuildError::ConfError(conf_error),
+            "ZEC".to_owned(),
+        ));
+        assert_eq!(wire["error_type"], json!("CoinCreationError"));
+        assert_eq!(wire["error_data"]["ticker"], json!("ZEC"));
+        let text = wire["error_data"]["error"].as_str().expect("an error string");
+        assert!(text.contains(field), "{text}");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
 #[test]
 fn block_height_failure_after_build_is_transport() {
     let (wire, status) = wire_of(InitUtxoStandardError::from_block_height_err(
@@ -280,6 +310,7 @@ fn success_object_hd_form_keys_every_balance_by_the_ticker() {
             total_balance: coin_balance_map_for_ticker("RIN", balance("2", "1")),
             addresses: vec![HDAddressBalance {
                 address: "Raddress".to_owned(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(address_path),
                 chain: Bip44Chain::External,
                 balance: coin_balance_map_for_ticker("RIN", balance("2", "1")),

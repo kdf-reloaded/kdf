@@ -15,7 +15,6 @@ use incrementalmerkletree::Hashable;
 use kdf_crypto::dhash256;
 use sapling::value::NoteValue;
 use sapling::Rseed;
-use std::convert::Infallible;
 use zcash_primitives::transaction::TxVersion;
 use zcash_transparent::address::TransparentAddress;
 use zcash_transparent::bundle::OutPoint;
@@ -47,42 +46,49 @@ pub(super) fn params(ironwood_height: Option<u32>) -> ZcoinConsensusParams {
     serde_json::from_value(cfg).unwrap()
 }
 
-pub(super) fn standard_config(sapling_anchor: Option<sapling::Anchor>) -> BuildConfig {
-    BuildConfig::Standard {
-        sapling_anchor,
-        orchard_anchor: None,
-        ironwood_anchor: None,
-        orchard_padding: BundlePadding::DEFAULT,
-        ironwood_padding: BundlePadding::DEFAULT,
-    }
-}
-
-/// A transparent-only transaction built at `height`: one P2PKH input, one output, a fixed fee.
+/// A transparent-only transaction built at `height`: one input spending a pay-to-script-hash output
+/// whose redeem script is a single public-key check, one output, a fixed fee.
 fn build_transparent_only(params: &ZcoinConsensusParams, height: u32) -> ZTransaction {
+    use super::z_tx_assembler::{KdfP2shInput, TransparentSignature, TransparentSigner, TxAssembler};
+
     let secp = secp256k1::Secp256k1::new();
     let secret = secp256k1::SecretKey::from_slice(&[0x11; 32]).unwrap();
     let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret);
-    let script = TransparentAddress::from_pubkey(&pubkey).script();
-    let coin = TxOut::new(Amount::const_from_u64(100_000), script.clone().into());
-    let mut builder = ZTxBuilder::new(params.clone(), height.into(), standard_config(None));
-    builder
-        .add_transparent_p2pkh_input(pubkey, OutPoint::new([7; 32], 0), coin)
-        .unwrap();
-    builder.add_transparent_output_raw(TxOut::new(Amount::const_from_u64(90_000), script.into()));
-    let mut signing = TransparentSigningSet::new();
-    signing.add_key(secret);
-    builder
+    let redeem = [&[33u8][..], &pubkey.serialize()[..], &[0xac][..]].concat();
+    let p2sh = TransparentAddress::ScriptHash(kdf_crypto::dhash160(&redeem).take()).script();
+    let coin = TxOut::new(Amount::const_from_u64(100_000), p2sh.into());
+    let signer: TransparentSigner = Box::new(move |sighash: &[u8; 32]| {
+        let secp = secp256k1::Secp256k1::signing_only();
+        let message = secp256k1::Message::from_digest(*sighash);
+        Ok(TransparentSignature {
+            der: secp.sign_ecdsa(&message, &secret).serialize_der().to_vec(),
+            public_key: secp256k1::PublicKey::from_secret_key(&secp, &secret)
+                .serialize()
+                .to_vec(),
+        })
+    });
+    let mut assembler = TxAssembler::new(params.clone(), height.into(), sapling::Anchor::empty_tree());
+    assembler.add_kdf_p2sh_input(KdfP2shInput {
+        outpoint: OutPoint::new([7; 32], 0),
+        coin,
+        redeem_script: redeem,
+        script_data: Vec::new(),
+        sequence: u32::MAX,
+        signer,
+    });
+    assembler.add_transparent_output_raw(TxOut::new(
+        Amount::const_from_u64(90_000),
+        TransparentAddress::PublicKeyHash([4; 20]).script().into(),
+    ));
+    assembler
         .build(
-            &signing,
+            super::os_rng(),
             &[],
-            &[],
-            rand::rngs::OsRng,
             &NoProver,
             &NoProver,
             &FixedFeeRule::non_standard(Amount::const_from_u64(10_000)),
         )
         .unwrap()
-        .into_transaction()
 }
 
 /// A prover for builds that contain no Sapling bundle, which must never be asked for a proof.
@@ -104,7 +110,7 @@ impl sapling::prover::SpendProver for NoProver {
         None
     }
 
-    fn create_proof<R: rand_core::RngCore>(&self, _circuit: sapling::circuit::Spend, _rng: &mut R) -> Self::Proof {
+    fn create_proof<R: rand_core::Rng>(&self, _circuit: sapling::circuit::Spend, _rng: &mut R) -> Self::Proof {
         panic!("a transparent-only build asked for a spend proof")
     }
 
@@ -124,7 +130,7 @@ impl sapling::prover::OutputProver for NoProver {
         panic!("a transparent-only build asked for an output circuit")
     }
 
-    fn create_proof<R: rand_core::RngCore>(&self, _circuit: sapling::circuit::Output, _rng: &mut R) -> Self::Proof {
+    fn create_proof<R: rand_core::Rng>(&self, _circuit: sapling::circuit::Output, _rng: &mut R) -> Self::Proof {
         panic!("a transparent-only build asked for an output proof")
     }
 
@@ -349,7 +355,7 @@ fn sapling_bundle_verifies(tx: &ZTransaction, prover: &LocalTxProver) -> bool {
     };
     let (spend_vk, output_vk) = prover.verifying_keys();
     let mut batch = sapling::BatchValidator::new();
-    batch.check_bundle(bundle.clone(), shielded_sighash(tx)) && batch.validate(&spend_vk, &output_vk, rand::rngs::OsRng)
+    batch.check_bundle(bundle.clone(), shielded_sighash(tx)) && batch.validate(&spend_vk, &output_vk, super::os_rng())
 }
 
 /// The conformance test with the highest value: a real post-Ironwood transaction mined by the chain,
@@ -400,7 +406,7 @@ fn synthetic_note(extsk: &ExtendedSpendingKey, value: u64) -> (Note, sapling::Me
 #[test]
 fn a_shielded_htlc_funding_builds_as_version_6_and_verifies() {
     let Some(prover) = sapling_prover() else { return };
-    let extsk = ExtendedSpendingKey::master(&[3; 32]);
+    let extsk = ExtendedSpendingKey::master(&[3; 32]).expect("a valid master key");
     let (_, my_address) = extsk.default_address();
     let (note, path, anchor) = synthetic_note(&extsk, 200_000);
     let fee = 10_000u64;
@@ -415,35 +421,26 @@ fn a_shielded_htlc_funding_builds_as_version_6_and_verifies() {
     ));
 
     let height = IRONWOOD_HEIGHT + 10;
-    let mut builder = ZTxBuilder::new(
-        params(Some(IRONWOOD_HEIGHT)),
-        height.into(),
-        standard_config(Some(anchor)),
+    let mut assembler = super::z_tx_assembler::TxAssembler::new(params(Some(IRONWOOD_HEIGHT)), height.into(), anchor);
+    let fvk = FullViewingKey::from_expanded_spending_key(&extsk.expsk());
+    assembler.add_sapling_spend(fvk, note, path);
+    assembler.add_transparent_output_raw(TxOut::new(Amount::const_from_u64(htlc_value), p2sh));
+    assembler.add_transparent_output_raw(TxOut::new(Amount::const_from_u64(0), reveal));
+    assembler.add_sapling_output(
+        None,
+        my_address,
+        Amount::const_from_u64(200_000 - htlc_value - fee),
+        MemoBytes::empty(),
     );
-    let fvk = FullViewingKey::from_expanded_spending_key(&extsk.expsk);
-    builder.add_sapling_spend::<Infallible>(fvk, note, path).unwrap();
-    builder.add_transparent_output_raw(TxOut::new(Amount::const_from_u64(htlc_value), p2sh));
-    builder.add_transparent_output_raw(TxOut::new(Amount::const_from_u64(0), reveal));
-    builder
-        .add_sapling_output::<Infallible>(
-            None,
-            my_address,
-            Amount::const_from_u64(200_000 - htlc_value - fee),
-            MemoBytes::empty(),
-        )
-        .unwrap();
-    let tx = builder
+    let tx = assembler
         .build(
-            &TransparentSigningSet::new(),
+            super::os_rng(),
             std::slice::from_ref(&extsk),
-            &[],
-            rand::rngs::OsRng,
             &prover,
             &prover,
             &FixedFeeRule::non_standard(Amount::const_from_u64(fee)),
         )
-        .unwrap()
-        .into_transaction();
+        .unwrap();
     let bytes = serialize(&tx);
 
     // Wrapper: header, empty Orchard slot, empty Ironwood bundle.
@@ -461,7 +458,7 @@ fn a_shielded_htlc_funding_builds_as_version_6_and_verifies() {
     );
     assert_eq!(
         tx.expiry_height(),
-        BlockHeight::from_u32(height + zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA)
+        BlockHeight::from_u32(height + crate::z_coin::z_lightwalletd::BUILDER_EXPIRY_DELTA)
     );
 
     // The real transaction has the same wrapper: same version, group, branch and the same empty tail.
@@ -484,4 +481,19 @@ fn a_shielded_htlc_funding_builds_as_version_6_and_verifies() {
         u64::from(read.transparent_bundle().unwrap().vout[0].value()),
         htlc_value
     );
+}
+
+/// The transparent coin's read entry point reads what the ZHTLC builder emits at the activation height: the same
+/// bytes back, the library's transaction id, the builder's input and output (CRD ch.39 D39.11.4V.3).
+#[test]
+fn the_transparent_coins_reader_reads_the_builders_version_6_transaction() {
+    let tx = build_transparent_only(&params(Some(IRONWOOD_HEIGHT)), IRONWOOD_HEIGHT);
+    let bytes = serialize(&tx);
+    let read = crate::utxo::utxo_common::read_utxo_tx(&bytes).expect("a version 6 transaction is read");
+    assert_eq!(read.version, 6);
+    assert_eq!(read.hash(), txid_internal(&tx));
+    assert_eq!(::serialization::serialize(&read).take(), bytes);
+    assert_eq!((read.inputs.len(), read.outputs.len()), (1, 1));
+    assert_eq!(read.inputs[0].previous_output.hash.take(), [7u8; 32]);
+    assert_eq!(read.outputs[0].value, 90_000);
 }

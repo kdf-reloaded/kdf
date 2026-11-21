@@ -1009,6 +1009,12 @@ exposes is the set its key source produced; mixing sources inside one
 coin's account set would store extended public keys that the coin's signer
 cannot spend from.
 
+> *Status note (2026-11-20), EVM address form and scan (as built).* An EVM
+> coin's `get_new_address` answers the full EIP-55 checksummed address (chapter
+> 35 R35.1.3); it used to write an abbreviated form. `task::scan_for_new_addresses::init`
+> serves EVM coins under an HD wallet, for the platform ticker and for an ERC-20
+> token ticker (chapter 49 R49.32, last paragraph).
+
 **R55.** *Storage identity of a hardware-policy coin.* The per-coin HD
 account storage (the HD-account table of the wallet database) MUST namespace a `Trezor`-policy coin by the
 **device digest of R51** and a `ContextPrivKey` global-HD coin by the
@@ -2492,3 +2498,12 @@ surface.
   any network access, with the task-level coin-creation error of the
   unsupported key policy, on the task and the legacy routes; it never activates
   a software-key coin.
+- *Status note added 2026-11-18 (under the key-policy rows of the activation request).* Reloaded-original,
+  clean side: it records this repository's behavior of the shielded (ZHTLC) activation request
+  `priv_key_policy`; no forbidden-class input, chapter 01 R38 not engaged. The reference's behavior for this
+  member is not recorded in this chapter, so the note claims no parity. Cleared sentences above are
+  unchanged. A shielded coin now reads `priv_key_policy` (the same spellings as the UTXO request). Under a
+  global-HD login `IguanaPrivKey` selects the node's internal key for both the shielded key (the ZIP32 master
+  of that secret) and the transparent key; an absent value and `ContextPrivKey` keep the HD derivation;
+  under a single-key login every value selects the single key. A hardware value is refused, an unknown
+  value fails the request. The wallet database of each key is kept apart (chapter 39 R39.8.0bd).

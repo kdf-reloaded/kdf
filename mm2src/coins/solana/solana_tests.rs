@@ -1,4 +1,5 @@
 use super::*;
+use crate::solana::rpc_client::TokenAccountsFilter;
 use crate::solana::solana_common_tests::{generate_key_pair_from_iguana_seed, generate_key_pair_from_seed,
                                          solana_coin_for_test, SolanaNet};
 use crate::MarketCoinOps;
@@ -61,7 +62,7 @@ fn solana_prerequisites() {
         println!("{:?}", token_accounts);
         let actual_token_pubkey = Pubkey::from_str(token_accounts[0].pubkey.as_str()).unwrap();
         let amount = block_on(client.get_token_account_balance(&actual_token_pubkey)).unwrap();
-        assert_ne!(amount.ui_amount_string.as_str(), "0");
+        assert_ne!(amount.ui_amount_string.as_deref(), Some("0"));
     }
 }
 
@@ -158,6 +159,9 @@ fn solana_transaction_simulations() {
         sol_coin
             .withdraw(WithdrawRequest {
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -173,7 +177,7 @@ fn solana_transaction_simulations() {
     let expected_spent_by_me = &request_amount + &sol_required;
     assert_eq!(valid_tx_details.spent_by_me, expected_spent_by_me);
     assert_eq!(valid_tx_details.received_by_me, request_amount);
-    assert_eq!(valid_tx_details.total_amount, expected_spent_by_me);
+    assert_eq!(valid_tx_details.total_amount, request_amount);
     assert_eq!(valid_tx_details.my_balance_change, sol_required.neg());
 }
 
@@ -187,6 +191,9 @@ fn solana_transaction_zero_balance() {
         sol_coin
             .withdraw(WithdrawRequest {
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -201,7 +208,7 @@ fn solana_transaction_zero_balance() {
     let sol_required = lamports_to_sol(fees);
     match error.into_inner() {
         WithdrawError::NotSufficientBalance { required, .. } => {
-            assert_eq!(required, sol_required);
+            assert_eq!(required, BigDecimal::from_str("0.000001").unwrap() + sol_required);
         },
         e @ _ => panic!("Unexpected err {:?}", e),
     };
@@ -217,6 +224,9 @@ fn solana_transaction_simulations_not_enough_for_fees() {
         sol_coin
             .withdraw(WithdrawRequest {
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -236,7 +246,7 @@ fn solana_transaction_simulations_not_enough_for_fees() {
             required,
         } => {
             assert_eq!(available, 0.into());
-            assert_eq!(required, sol_required);
+            assert_eq!(required, BigDecimal::from(1) + sol_required);
         },
         e @ _ => panic!("Unexpected err {:?}", e),
     };
@@ -252,6 +262,9 @@ fn solana_transaction_simulations_max() {
         sol_coin
             .withdraw(WithdrawRequest {
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -266,7 +279,7 @@ fn solana_transaction_simulations_max() {
     let (_, fees) = block_on(sol_coin.estimate_withdraw_fees()).unwrap();
     let sol_required = lamports_to_sol(fees);
     assert_eq!(valid_tx_details.my_balance_change, sol_required.clone().neg());
-    assert_eq!(valid_tx_details.total_amount, balance);
+    assert_eq!(valid_tx_details.total_amount, &balance - &sol_required);
     assert_eq!(valid_tx_details.spent_by_me, balance);
     assert_eq!(valid_tx_details.received_by_me, &balance - &sol_required);
     println!("{:?}", valid_tx_details);
@@ -282,6 +295,9 @@ fn solana_test_transactions() {
         sol_coin
             .withdraw(WithdrawRequest {
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),

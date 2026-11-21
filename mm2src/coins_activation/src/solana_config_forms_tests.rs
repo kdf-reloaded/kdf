@@ -443,27 +443,29 @@ fn platform_method_without_a_node_has_the_platform_coin_creation_error_wire_shap
     );
 }
 
-/// §40.2.4: a node failure while reading a token balance (inline token, node refuses) is also a
-/// `PlatformCoinCreationError` naming the platform ticker, not `Transport` and not `Internal`.
+/// §40.2.4 and R40.2.2: with an inline token, the request fails during token initialisation, at the mint-account
+/// read, with `Transport` (a string, HTTP 502); the node is named host-only and nothing is registered.
 #[test]
-fn platform_method_token_balance_failure_is_a_platform_coin_creation_error() {
+fn platform_method_inline_token_node_failure_is_a_transport_error() {
     let ctx = ctx_with(vec![
         platform_entry(),
         json!({ "coin": "OK-SOL", "mm2": 1, "protocol": solanatoken(MINT, SPL_TOKEN_PROGRAM) }),
     ]);
     let req = platform_request(Some(CLOSED_NODE), &["OK-SOL"], json!({}));
-    let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();
+    let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx.clone(), req)).unwrap_err();
     let (wire, status) = platform_wire(err.get_inner());
-    assert!(
-        wire["error_type"] == "PlatformCoinCreationError",
-        "unexpected error wire shape"
-    );
-    assert!(wire["error_data"]["ticker"] == "SOL", "unexpected error wire shape");
-    assert!(
-        status == StatusCode::INTERNAL_SERVER_ERROR,
-        "unexpected error wire shape"
-    );
+    assert!(wire["error_type"] == "Transport", "unexpected error wire shape");
+    assert!(wire["error_data"].is_string(), "unexpected error wire shape");
+    assert!(status == StatusCode::BAD_GATEWAY, "unexpected error wire shape");
     assert_no_node_secrets(&wire.to_string());
+    assert!(
+        block_on(coins::lp_coinfind(&ctx, "SOL")).is_ok_and(|coin| coin.is_none()),
+        "a failed activation registered the platform"
+    );
+    assert!(
+        block_on(coins::lp_coinfind(&ctx, "OK-SOL")).is_ok_and(|coin| coin.is_none()),
+        "a failed activation registered the token"
+    );
 }
 
 /// §40.3.4: a balance read that fails on the token method is `Transport` (HTTP 500), the node named host-only.
@@ -987,4 +989,48 @@ fn t40_1a_5_token_under_hd_uses_the_hd_platform_address() {
         token.my_address().expect("an address") == BIP44_ACCOUNT_0,
         "the token address is not the HD one"
     );
+}
+
+/// The single-token activation records the token on its platform once it is registered, so the platform reports it
+/// and the unregister hook of `disable_coin` has a record to drop (CRD ch.40 T40.6B.20, ch.43 R43.1E.5). It also
+/// joins the platform's dependent set, and `disable_coin` takes it out of both.
+#[test]
+fn enable_spl_registration_records_the_token_and_disable_coin_removes_it_everywhere() {
+    use crate::token::TokenActivationOps;
+
+    let ctx = ctx_with(vec![platform_entry()]);
+    let platform = platform_with_closed_node(&ctx, &platform_entry());
+    block_on(lp_register_coin(
+        &ctx,
+        MmCoinEnum::SolanaCoin(platform.clone()),
+        RegisterCoinParams {
+            ticker: "SOL".to_owned(),
+            tx_history: false,
+        },
+    ))
+    .expect("the platform coin is registered");
+    let proto = CoinProtocol::from_conf_json(solanatoken(MINT, SPL_TOKEN_PROGRAM)).expect("a parsable protocol");
+    let conf = SplProtocolConf::try_from_coin_protocol(proto).expect("a Solana token protocol");
+    let token = SplToken::new(
+        conf.decimals,
+        "TOK-SOL".to_owned(),
+        conf.token_contract_address,
+        conf.program_id,
+        platform.clone(),
+    );
+
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+    block_on(coins_ctx.add_token("SOL", token.clone().into())).expect("the token is registered");
+    <SplToken as TokenActivationOps>::on_token_registered(&platform, &token);
+
+    assert!(platform.get_spl_tokens_infos().contains_key("TOK-SOL"));
+    assert_eq!(
+        block_on(coins_ctx.dependents_of("SOL")).into_iter().collect::<Vec<_>>(),
+        vec!["TOK-SOL".to_owned()]
+    );
+
+    block_on(coins::disable_coin(&ctx, "TOK-SOL")).expect("the token is disabled");
+
+    assert!(platform.get_spl_tokens_infos().is_empty());
+    assert!(block_on(coins_ctx.dependents_of("SOL")).is_empty());
 }

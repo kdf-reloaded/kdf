@@ -206,6 +206,7 @@ where
 
                     balances.push(HDAddressBalance {
                         address: empty_address.address.to_string(),
+                        gasfree_address: None,
                         derivation_path: RpcDerivationPath(empty_address.derivation_path),
                         chain,
                         balance: coin_balance_map_for_ticker(coin.ticker(), CoinBalance::default()),
@@ -214,6 +215,7 @@ where
 
                 balances.push(HDAddressBalance {
                     address: checking_address.to_string(),
+                    gasfree_address: None,
                     derivation_path: RpcDerivationPath(checking_address_der_path),
                     chain,
                     balance: coin_balance_map_for_ticker(coin.ticker(), non_empty_balance),
@@ -273,7 +275,7 @@ where
 pub async fn load_hd_accounts_from_storage(
     hd_wallet_storage: &HDWalletCoinStorage,
     derivation_path: &HDPathToCoin,
-    software_master: Option<&bip32::ExtendedPrivateKey<secp256k1::SecretKey>>,
+    software_master: Option<&crypto::Secp256k1ExtendedPrivateKey>,
 ) -> HDWalletStorageResult<HDAccountsMap<UtxoHDAccount>> {
     let accounts = match software_master {
         Some(master) => {

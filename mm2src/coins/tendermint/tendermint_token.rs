@@ -7,6 +7,7 @@
 use super::tendermint_helpers::TendermintCommons;
 use super::tendermint_swap_ops::PAYMENT_SENT_NEEDS_AMOUNT;
 use super::tendermint_types::*;
+use super::wc_integration::signed_fee_of;
 use crate::utxo::sat_from_big_decimal;
 use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsigned};
 use crate::{BalanceFut, CoinBalance, DexFee, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, MarketCoinOps,
@@ -538,9 +539,10 @@ impl MmCoin for TendermintToken {
                 AccountId::from_str(&req.to).map_to_mm(|e| WithdrawError::InvalidAddress(e.to_string()))?;
 
             let account_id = token.platform_coin.account_id.clone();
-            // A token follows its platform coin: on a watch-only platform it answers the unsigned document, with the
-            // fixed assumed fee (CRD ch.36 R36.14.17).
-            let watch_only = token.platform_coin.activation_policy.watch_only_ledger_flag();
+            // A token follows its platform coin: on a watch-only platform it answers the unsigned document, on a
+            // WalletConnect platform the wallet signs; the fee is the fixed assumed one on the first and the
+            // simulated one on the second (CRD ch.36 R36.14.17, R36.14.15).
+            let watch_only = token.platform_coin.activation_policy.ledger_flag();
             let priv_key = match watch_only {
                 Some(_) => None,
                 None => Some(
@@ -610,9 +612,9 @@ impl MmCoin for TendermintToken {
 
             // A token is priced with its platform coin's prices (CRD ch.36 R36.3.6, CRD ch.18 R18.6B.1).
             let fee_intent = FeeIntent::request(req.fee, GAS_LIMIT_DEFAULT);
-            let (_, gas_limit) = token.platform_coin.selected_gas_price_and_limit(&fee_intent);
+            let (_, mut gas_limit) = token.platform_coin.selected_gas_price_and_limit(&fee_intent);
 
-            let fee_amount_u64 = token
+            let mut fee_amount_u64 = token
                 .platform_coin
                 .calculate_account_fee_amount_as_u64(
                     &account_id,
@@ -624,6 +626,21 @@ impl MmCoin for TendermintToken {
                 )
                 .await
                 .map_mm_err()?;
+            // CRD ch.36 R36.14.15, as-built note of 2026-11-17: a transaction the wallet signs is priced from the
+            // node's gas simulation, and the gas limit is the simulated gas with the margin of the local-key fee.
+            if priv_key.is_none() && token.platform_coin.activation_policy.wallet_connect_session().is_some() {
+                let wc_fee = token
+                    .platform_coin
+                    .wc_request_fee(&msg_payload, timeout_height, &memo, &fee_intent)
+                    .await
+                    .map_mm_err()?;
+                gas_limit = wc_fee.gas_limit;
+                fee_amount_u64 = wc_fee
+                    .amount
+                    .first()
+                    .and_then(|c| u64::try_from(c.amount).ok())
+                    .or_mm_err(|| WithdrawError::InternalError("The simulated fee has no amount".to_owned()))?;
+            }
             // CRD ch.36 R36.14.31 item 5: the Ledger factor of R36.14.18 item 4 applies to the platform coin only;
             // a token's document and `fee_details` carry the computed amount once.
 
@@ -649,6 +666,9 @@ impl MmCoin for TendermintToken {
                 }
             }
 
+            // The fee of the transaction a wallet signed, read from the answered transaction (CRD ch.36 R36.14.15,
+            // as-built note of 2026-11-17); `None` for every other result, which reports the computed fee.
+            let mut signed_fee: Option<(u64, u64)> = None;
             // The signed transaction, or the unsigned document of a watch-only platform (nothing signed, no hash).
             let (tx_bytes, tx_hash, unsigned, internal_id) = match priv_key {
                 Some(priv_key) => {
@@ -660,6 +680,21 @@ impl MmCoin for TendermintToken {
                     let tx_bytes = tx_raw
                         .to_bytes()
                         .map_to_mm(|e| WithdrawError::InternalError(format!("Failed to encode tx: {}", e)))?;
+                    let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
+                    let internal_id: BytesJson = tx_hash.as_bytes().to_vec().into();
+                    (tx_bytes, tx_hash, None, internal_id)
+                },
+                // CRD ch.36 R36.14.15: the wallet signs; nothing is broadcast, the signed transaction is the answer.
+                None if token.platform_coin.activation_policy.wallet_connect_session().is_some() => {
+                    let tx_bytes = token
+                        .platform_coin
+                        .wc_sign_message(msg_payload, fee, timeout_height, &memo)
+                        .await
+                        .map_to_mm(WithdrawError::from)?;
+                    signed_fee = Some(
+                        signed_fee_of(&tx_bytes, &token.platform_coin.protocol_info.denom.to_string())
+                            .map_to_mm(WithdrawError::InternalError)?,
+                    );
                     let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
                     let internal_id: BytesJson = tx_hash.as_bytes().to_vec().into();
                     (tx_bytes, tx_hash, None, internal_id)
@@ -700,9 +735,14 @@ impl MmCoin for TendermintToken {
                 timestamp: 0,
                 fee_details: Some(TxFeeDetails::Tendermint(TendermintFeeDetails {
                     coin: token.platform_coin.ticker.clone(),
-                    amount: fee_amount_dec,
-                    uamount: fee_amount_u64,
-                    gas_limit,
+                    amount: match signed_fee {
+                        Some((signed_amount, _)) => {
+                            big_decimal_from_sat_unsigned(signed_amount, token.platform_coin.decimals())
+                        },
+                        None => fee_amount_dec,
+                    },
+                    uamount: signed_fee.map_or(fee_amount_u64, |(signed_amount, _)| signed_amount),
+                    gas_limit: signed_fee.map_or(gas_limit, |(_, signed_gas_limit)| signed_gas_limit),
                 })),
                 coin: token.ticker.to_string(),
                 internal_id,

@@ -12,7 +12,7 @@
 //! - [`connection_handler`] / [`inbound_message`] — relay event loop plumbing.
 //! - [`storage`] — session persistence (SQLite native, IndexedDB wasm).
 
-use connection_handler::WcConnectionHandler;
+use connection_handler::{RelayEvent, WcConnectionHandler};
 use error::WalletConnectError;
 use inbound_message::PendingRequests;
 use mm2_core::mm_ctx::MmArc;
@@ -27,10 +27,10 @@ use relay_rpc::domain::MessageId;
 /// name it without depending on `relay_rpc` directly.
 pub use relay_rpc::domain::Topic;
 use relay_rpc::rpc::params::session::{Namespace, ProposeNamespaces, SettleNamespaces};
-use relay_rpc::rpc::params::Relay;
+use relay_rpc::rpc::params::{Metadata, Relay};
 use session::rpc::{propose, settle};
 use session::{EncodingAlgo, Session, SessionManager};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -38,6 +38,7 @@ use wc_common::{EnvelopeType, SymKey};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 pub mod chain;
+mod client_key;
 pub mod connection_handler;
 pub mod error;
 pub mod inbound_message;
@@ -64,22 +65,80 @@ const SESSION_REQUEST_METHOD: &str = "wc_sessionRequest";
 /// IRN relay tag for an outbound `wc_sessionRequest`.
 const SESSION_REQUEST_TAG: u32 = 1108;
 
+/// First wait before a relay reconnect attempt; it doubles after every failed attempt.
+const RECONNECT_BACKOFF_START_SECS: u64 = 1;
+/// Longest wait between two relay reconnect attempts.
+const RECONNECT_BACKOFF_MAX_SECS: u64 = 60;
+
+/// The wait before reconnect attempt number `attempt` (counted from zero): 1 s, 2 s, 4 s, ... capped at
+/// [`RECONNECT_BACKOFF_MAX_SECS`].
+fn reconnect_backoff(attempt: u32) -> Duration {
+    let secs = RECONNECT_BACKOFF_START_SECS
+        .checked_shl(attempt)
+        .unwrap_or(RECONNECT_BACKOFF_MAX_SECS)
+        .min(RECONNECT_BACKOFF_MAX_SECS);
+    Duration::from_secs(secs)
+}
+
+/// What is needed to open the relay connection again after it was lost.
+struct RelayConnectParams {
+    project_id: String,
+    relay_address: String,
+    /// The one relay client signing key of this node's WalletConnect context (secret; never logged or returned).
+    signing_key: SigningKey,
+    /// Whether `signing_key` was loaded from the storage or created at start.
+    key_source: client_key::ClientKeySource,
+}
+
+impl RelayConnectParams {
+    /// Connection options with a freshly signed auth token (the token of an earlier connection may have expired).
+    /// `attempt` is the number of this connect attempt (1 for the first connect), used only for the debug log.
+    fn options(&self, attempt: u32) -> Result<ConnectionOptions, WalletConnectError> {
+        let auth = relay_auth_token(&self.relay_address, &self.signing_key)?;
+        let opts = ConnectionOptions::new(self.project_id.clone(), auth).with_address(self.relay_address.as_str());
+        let has_token =
+            matches!(&opts.auth, relay_client::Authorization::Query(token) if !token.to_string().is_empty());
+        common::log::debug!(
+            "walletconnect: relay connect attempt={attempt} host={} project_id_present={} auth_token_present={} \
+             auth_token_fresh=true client_key={} client_key_source={}",
+            relay_host(&opts.address),
+            !self.project_id.is_empty(),
+            has_token,
+            client_key::fingerprint(&self.signing_key),
+            self.key_source.as_str()
+        );
+        Ok(opts)
+    }
+}
+
+/// The host of a relay address, without scheme, port, path or query string.
+fn relay_host(address: &str) -> &str {
+    let rest = address.split_once("://").map_or(address, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    authority.split(':').next().unwrap_or("")
+}
+
 /// Configuration the subsystem pulls from `MmCtx::conf`.
 ///
 /// Expected JSON shape:
 /// ```jsonc
 /// {
-///   "walletconnect": { "project_id": "<id>", "relay_address": "wss://..." },
+///   "walletconnect": { "project_id": "<id>", "relay_address": "wss://...", "app_name": "<name>" },
 ///   "wc_session_persistence": "open"
 /// }
 /// ```
 /// `project_id` is required (issued by WalletConnect Cloud); `relay_address`
-/// is optional and defaults to [`metadata::RELAY_ADDRESS`]; the top-level
+/// is optional and defaults to [`metadata::RELAY_ADDRESS`]; `app_name` is
+/// optional: when present and not empty it is the application name wallets
+/// list for this node, in place of `KDF Reloaded <client key fingerprint>`; the top-level
 /// `wc_session_persistence` toggle is optional and defaults to
 /// [`WcSessionPersistence::Open`].
 struct WalletConnectConfig {
     project_id: String,
     relay_address: String,
+    /// The operator's own application name (`walletconnect.app_name`), when set and not empty.
+    app_name: Option<String>,
     persistence: WcSessionPersistence,
 }
 
@@ -96,10 +155,15 @@ impl WalletConnectConfig {
             .filter(|addr| !addr.is_empty())
             .unwrap_or(metadata::RELAY_ADDRESS)
             .to_string();
+        let app_name = section["app_name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
         let persistence = WcSessionPersistence::from_conf(&ctx.conf)?;
         Ok(WalletConnectConfig {
             project_id,
             relay_address,
+            app_name,
             persistence,
         })
     }
@@ -223,6 +287,10 @@ pub struct WalletConnectCtx {
     establishing: Mutex<HashMap<Topic, PendingSettle>>,
     storage: Arc<dyn storage::WcStorageOps>,
     persistence: WcSessionPersistence,
+    /// Used to reopen the relay connection after the relay closed it.
+    connect_params: RelayConnectParams,
+    /// The app metadata advertised to wallets; built once the relay client key is known.
+    app_metadata: Metadata,
 }
 
 /// In-progress proposal state retained between publishing a `wc_sessionPropose`
@@ -263,8 +331,16 @@ impl WalletConnectCtx {
         let storage = open_storage(ctx).await?;
         storage.init().await?;
 
-        let auth = relay_auth_token(&config.relay_address)?;
-        let opts = ConnectionOptions::new(config.project_id, auth).with_address(config.relay_address.as_str());
+        let (signing_key, key_source) = client_key::load_or_create(storage.as_ref()).await?;
+        let app_metadata =
+            metadata::generate_metadata(config.app_name.as_deref(), &client_key::fingerprint(&signing_key));
+        let connect_params = RelayConnectParams {
+            project_id: config.project_id,
+            relay_address: config.relay_address,
+            signing_key,
+            key_source,
+        };
+        let opts = connect_params.options(1)?;
 
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
         let client = Client::new(WcConnectionHandler::new(inbound_tx));
@@ -280,12 +356,42 @@ impl WalletConnectCtx {
             establishing: Mutex::new(HashMap::new()),
             storage,
             persistence: config.persistence,
+            connect_params,
+            app_metadata,
         });
 
         handle.restore_sessions().await?;
 
         common::executor::spawn(run_inbound_loop(Arc::downgrade(&handle), inbound_rx));
 
+        Ok(handle)
+    }
+
+    /// The per-context handle: the one cached on the context when there is one, else a freshly initialised one
+    /// that is cached for later callers (chapter 22 §22.2). A coin activation that needs a wallet session uses this,
+    /// so that it does not depend on a `wc_*` request having initialised the subsystem first.
+    ///
+    /// # Errors
+    ///
+    /// The failures of [`WalletConnectCtx::init`], and [`WalletConnectError::Internal`] when the value cached on the
+    /// context is not a [`WalletConnectCtx`].
+    pub async fn get_or_init(ctx: &MmArc) -> Result<Arc<Self>, WalletConnectError> {
+        fn downcast(any: Arc<dyn std::any::Any + Send + Sync>) -> Result<Arc<WalletConnectCtx>, WalletConnectError> {
+            any.downcast::<WalletConnectCtx>()
+                .map_err(|_| WalletConnectError::Internal("unexpected WalletConnect context type".to_string()))
+        }
+
+        if let Some(existing) = ctx.wallet_connect.lock().unwrap().clone() {
+            return downcast(existing);
+        }
+        let handle = Self::init(ctx).await?;
+        let mut guard = ctx.wallet_connect.lock().unwrap();
+        // Another caller may have initialised the handle while this one was connecting: keep the stored one.
+        if let Some(existing) = guard.clone() {
+            return downcast(existing);
+        }
+        let any: Arc<dyn std::any::Any + Send + Sync> = handle.clone();
+        *guard = Some(any);
         Ok(handle)
     }
 
@@ -340,6 +446,7 @@ impl WalletConnectCtx {
             &our_public,
             &pairing.required_namespaces,
             pairing.optional_namespaces.as_ref(),
+            &self.app_metadata,
         );
         let propose_namespaces = propose_namespaces_from_value(&pairing.required_namespaces);
 
@@ -347,10 +454,9 @@ impl WalletConnectCtx {
         self.pairings.lock().insert(topic.clone(), pairing);
 
         // Subscribe before publishing so the responder's reply is delivered.
-        self.client
-            .subscribe(topic.clone())
-            .await
-            .map_err(|e| WalletConnectError::Relay(e.to_string()))?;
+        let subscribed = self.client.subscribe(topic.clone()).await;
+        log_subscribe("subscribe to a pairing topic", &topic, &subscribed);
+        subscribed.map_err(WalletConnectError::from)?;
 
         let id = self.next_message_id();
         let payload = serde_json::json!({
@@ -360,17 +466,8 @@ impl WalletConnectCtx {
             "params": request,
         });
         let encoded = self.encode_payload(&sym_key, &payload)?;
-        self.client
-            .publish(
-                topic.clone(),
-                encoded,
-                no_attestation(),
-                propose::TAG.request,
-                REQUEST_RESPONSE_TTL,
-                true,
-            )
-            .await
-            .map_err(|e| WalletConnectError::Relay(e.to_string()))?;
+        self.publish_frame(&topic, encoded, propose::METHOD, id, propose::TAG.request, true)
+            .await?;
 
         // Retain our ephemeral secret + requirements until the response arrives.
         self.proposals.lock().insert(topic.clone(), PendingProposal {
@@ -425,19 +522,10 @@ impl WalletConnectCtx {
 
         let response_rx = self.pending.register(id);
 
-        self.client
-            .publish(
-                topic.clone(),
-                encoded,
-                no_attestation(),
-                SESSION_REQUEST_TAG,
-                REQUEST_RESPONSE_TTL,
-                true,
-            )
+        self.publish_frame(topic, encoded, SESSION_REQUEST_METHOD, id, SESSION_REQUEST_TAG, true)
             .await
-            .map_err(|e| {
+            .inspect_err(|_| {
                 self.pending.cancel(id);
-                WalletConnectError::Relay(e.to_string())
             })?;
 
         let deadline = common::executor::Timer::sleep(REQUEST_RESPONSE_TTL.as_secs_f64());
@@ -474,20 +562,18 @@ impl WalletConnectCtx {
 
         let response_rx = self.pending.register(id);
 
-        self.client
-            .publish(
-                topic.clone(),
-                encoded,
-                no_attestation(),
-                session::rpc::ping::TAG.request,
-                REQUEST_RESPONSE_TTL,
-                true,
-            )
-            .await
-            .map_err(|e| {
-                self.pending.cancel(id);
-                WalletConnectError::Relay(e.to_string())
-            })?;
+        self.publish_frame(
+            topic,
+            encoded,
+            session::rpc::ping::METHOD,
+            id,
+            session::rpc::ping::TAG.request,
+            true,
+        )
+        .await
+        .inspect_err(|_| {
+            self.pending.cancel(id);
+        })?;
 
         let deadline = common::executor::Timer::sleep(REQUEST_RESPONSE_TTL.as_secs_f64());
         match futures::future::select(response_rx, deadline).await {
@@ -517,13 +603,12 @@ impl WalletConnectCtx {
             });
             if let Ok(encoded) = self.encode_payload(&sym_key, &request) {
                 let _ = self
-                    .client
-                    .publish(
-                        topic.clone(),
+                    .publish_frame(
+                        topic,
                         encoded,
-                        no_attestation(),
+                        session::rpc::delete::METHOD,
+                        id,
                         session::rpc::delete::TAG.request,
-                        REQUEST_RESPONSE_TTL,
                         false,
                     )
                     .await;
@@ -531,6 +616,59 @@ impl WalletConnectCtx {
         }
 
         self.forget_session(topic).await
+    }
+
+    /// Every topic the node must be subscribed to: settled sessions, unexpired pairings and in-flight establishments.
+    fn topics_to_subscribe(&self) -> Vec<Topic> {
+        let establishing: Vec<Topic> = self.establishing.lock().keys().cloned().collect();
+        collect_resubscribe_topics(self.sessions.topics(), &self.pairings.lock(), establishing, unix_now())
+    }
+
+    /// Subscribes to every topic of [`Self::topics_to_subscribe`] again. The relay forgets subscriptions together
+    /// with the connection that held them. A failure of one topic is logged and does not stop the others.
+    async fn resubscribe_all(&self) {
+        for topic in self.topics_to_subscribe() {
+            let result = self.client.subscribe(topic.clone()).await;
+            log_subscribe("re-subscribe after reconnect", &topic, &result);
+        }
+    }
+
+    /// Publishes an already encrypted message on the relay and logs the frame at debug level: the JSON-RPC method,
+    /// the first 8 characters of the topic, the relay tag and the request id. The payload, keys and the full topic
+    /// are never logged.
+    async fn publish_frame(
+        &self,
+        topic: &Topic,
+        encoded: String,
+        method: &str,
+        request_id: impl std::fmt::Display,
+        tag: u32,
+        prompt: bool,
+    ) -> Result<(), WalletConnectError> {
+        log_relay_frame("publish", topic, tag, method, &request_id);
+        let result = self
+            .client
+            .publish(
+                topic.clone(),
+                encoded,
+                no_attestation(),
+                tag,
+                REQUEST_RESPONSE_TTL,
+                prompt,
+            )
+            .await;
+        match &result {
+            Ok(()) => common::log::debug!(
+                "walletconnect: relay publish accepted method={method} topic={}.. id={request_id}",
+                topic_prefix(topic)
+            ),
+            Err(e) => common::log::warn!(
+                "walletconnect: relay publish failed method={method} topic={}.. tag={tag} id={request_id}: {}",
+                topic_prefix(topic),
+                error::relay_call_error_kind(e)
+            ),
+        }
+        result.map_err(WalletConnectError::from)
     }
 
     /// Loads persisted sessions on connect (chapter 22 \u00a722.5.2). Loading is
@@ -555,10 +693,10 @@ impl WalletConnectCtx {
             };
             let topic = session.topic.clone();
             self.sessions.insert(session);
-            self.client
-                .subscribe(topic)
-                .await
-                .map_err(|e| WalletConnectError::Relay(e.to_string()))?;
+            // A failed subscription does not stop the start-up: the loop that reopens a lost relay connection
+            // subscribes to every session topic again.
+            let result = self.client.subscribe(topic.clone()).await;
+            log_subscribe("re-subscribe of a restored session", &topic, &result);
         }
         Ok(())
     }
@@ -592,6 +730,7 @@ impl WalletConnectCtx {
         let Some((sym_key, kind)) = self.inbound_transport(&topic) else {
             // Traffic on a topic with no settled session, pairing or in-flight
             // establishment; nothing to route.
+            log_relay_frame("receive (unknown topic)", &topic, message.tag, "-", &"-");
             common::log::debug!("walletconnect: dropping inbound message on unknown topic");
             return;
         };
@@ -599,12 +738,23 @@ impl WalletConnectCtx {
         let payload = match self.decode_payload(&sym_key, &message.message) {
             Ok(payload) => payload,
             Err(e) => {
+                log_relay_frame("receive (undecryptable)", &topic, message.tag, "-", &"-");
                 common::log::error!("walletconnect: failed to decrypt inbound message: {e}");
                 return;
             },
         };
 
         let id = payload.get("id").and_then(serde_json::Value::as_u64);
+        log_relay_frame(
+            "receive",
+            &topic,
+            message.tag,
+            payload
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("response"),
+            &id.map_or_else(|| "-".to_string(), |id| id.to_string()),
+        );
 
         // A response carries `result`/`error` and no `method`; correlate it. On
         // a pairing topic the only response we expect is the `wc_sessionPropose`
@@ -683,17 +833,7 @@ impl WalletConnectCtx {
             "result": true,
         });
         if let Ok(encoded) = self.encode_payload(sym_key, &response) {
-            let _ = self
-                .client
-                .publish(
-                    topic.clone(),
-                    encoded,
-                    no_attestation(),
-                    tag,
-                    REQUEST_RESPONSE_TTL,
-                    false,
-                )
-                .await;
+            let _ = self.publish_frame(topic, encoded, "response", id, tag, false).await;
         }
     }
 
@@ -764,8 +904,9 @@ impl WalletConnectCtx {
         }
         let session_topic = Topic::from(session_key.generate_topic());
 
-        if let Err(e) = self.client.subscribe(session_topic.clone()).await {
-            common::log::error!("walletconnect: failed to subscribe to session topic: {e}");
+        let subscribed = self.client.subscribe(session_topic.clone()).await;
+        log_subscribe("subscribe to a session topic", &session_topic, &subscribed);
+        if subscribed.is_err() {
             return;
         }
 
@@ -812,7 +953,7 @@ impl WalletConnectCtx {
             },
         };
 
-        let session = build_session(session_topic.clone(), pending, settle);
+        let session = build_session(session_topic.clone(), pending, settle, &self.app_metadata);
         if let Err(e) = self.persist_session(&session).await {
             common::log::error!("walletconnect: failed to persist settled session: {e}");
         }
@@ -850,6 +991,7 @@ fn build_propose_request(
     our_public: &PublicKey,
     required_namespaces: &serde_json::Value,
     optional_namespaces: Option<&serde_json::Value>,
+    app_metadata: &Metadata,
 ) -> propose::ProposeRequest {
     let required = serde_json::from_value(required_namespaces.clone()).unwrap_or_default();
     let optional = optional_namespaces.and_then(|value| serde_json::from_value(value.clone()).ok());
@@ -860,7 +1002,7 @@ fn build_propose_request(
         }],
         proposer: propose::Proposer {
             public_key: hex::encode(our_public.to_bytes()),
-            metadata: metadata::generate_metadata(),
+            metadata: app_metadata.clone(),
         },
         required_namespaces: required,
         optional_namespaces: optional,
@@ -876,7 +1018,12 @@ fn propose_namespaces_from_value(value: &serde_json::Value) -> ProposeNamespaces
 
 /// Builds the settled [`Session`] from the in-flight establishment state and the
 /// parsed `wc_sessionSettle` payload (chapter 22 §22.8.1.5).
-fn build_session(session_topic: Topic, pending: PendingSettle, settle: settle::SettleRequest) -> Session {
+fn build_session(
+    session_topic: Topic,
+    pending: PendingSettle,
+    settle: settle::SettleRequest,
+    app_metadata: &Metadata,
+) -> Session {
     let encoding = session_encoding_for_wallet_name(&settle.controller.metadata.name);
     Session {
         topic: session_topic,
@@ -888,7 +1035,7 @@ fn build_session(session_topic: Topic, pending: PendingSettle, settle: settle::S
         encoding,
         properties: settle.session_properties,
         subscription_id: None,
-        proposer: metadata::generate_metadata(),
+        proposer: app_metadata.clone(),
         relay: settle.relay,
         namespaces: settle_to_relay_namespaces(settle.namespaces),
         propose_namespaces: pending.propose_namespaces,
@@ -928,13 +1075,16 @@ fn settle_to_relay_namespaces(namespaces: BTreeMap<String, settle::SettleNamespa
 /// attaches one.
 fn no_attestation() -> Option<std::sync::Arc<str>> { None }
 
-/// Builds the short-lived ed25519 JWT the relay requires for the connection.
-fn relay_auth_token(relay_address: &str) -> Result<relay_rpc::auth::SerializedAuthToken, WalletConnectError> {
-    let signing_key = SigningKey::generate(&mut rand::thread_rng());
+/// Builds the short-lived ed25519 JWT the relay requires for the connection, freshly signed (new issue and expiry
+/// time) with the node's stable client key.
+fn relay_auth_token(
+    relay_address: &str,
+    signing_key: &SigningKey,
+) -> Result<relay_rpc::auth::SerializedAuthToken, WalletConnectError> {
     AuthToken::new(metadata::APP_URL)
         .aud(relay_address)
         .ttl(Duration::from_secs(RELAY_AUTH_TTL_SECS))
-        .as_jwt(&signing_key)
+        .as_jwt(signing_key)
         .map_err(|e| WalletConnectError::Config(e.to_string()))
 }
 
@@ -957,13 +1107,113 @@ async fn open_storage(ctx: &MmArc) -> Result<Arc<dyn storage::WcStorageOps>, Wal
 
 /// Drains the inbound relay channel, dispatching each message until the handle
 /// is dropped or the relay closes the channel.
-async fn run_inbound_loop(handle: Weak<WalletConnectCtx>, mut inbound_rx: UnboundedReceiver<PublishedMessage>) {
-    while let Some(message) = inbound_rx.recv().await {
-        match handle.upgrade() {
-            Some(ctx) => ctx.dispatch_inbound(message).await,
+async fn run_inbound_loop(handle: Weak<WalletConnectCtx>, mut inbound_rx: UnboundedReceiver<RelayEvent>) {
+    // Messages that arrived while a reconnect was running; they are routed before the channel is read again.
+    let mut backlog: VecDeque<PublishedMessage> = VecDeque::new();
+    loop {
+        if let Some(message) = backlog.pop_front() {
+            match handle.upgrade() {
+                Some(ctx) => ctx.dispatch_inbound(message).await,
+                None => break,
+            }
+            continue;
+        }
+        match inbound_rx.recv().await {
+            Some(RelayEvent::Message(message)) => match handle.upgrade() {
+                Some(ctx) => ctx.dispatch_inbound(message).await,
+                None => break,
+            },
+            Some(RelayEvent::Lost(reason)) => {
+                common::log::warn!("walletconnect: relay connection lost ({reason}), reconnecting");
+                if !reconnect_relay(&handle).await {
+                    break;
+                }
+                // Loss events raised by the connection that was just replaced are stale; keep only the messages.
+                while let Ok(event) = inbound_rx.try_recv() {
+                    if let RelayEvent::Message(message) = event {
+                        backlog.push_back(message);
+                    }
+                }
+            },
             None => break,
         }
     }
+}
+
+/// Opens the relay connection again, retrying with a growing wait (see [`reconnect_backoff`]) until it succeeds, and
+/// subscribes to the topics of the pairings and sessions again. Returns `false` when the handle was dropped meanwhile.
+/// The handle is held only for the duration of one attempt, so dropping it stops the retries.
+async fn reconnect_relay(handle: &Weak<WalletConnectCtx>) -> bool {
+    let mut attempt: u32 = 0;
+    loop {
+        common::executor::Timer::sleep(reconnect_backoff(attempt).as_secs_f64()).await;
+        let Some(ctx) = handle.upgrade() else {
+            return false;
+        };
+        let outcome = match ctx.connect_params.options(attempt + 1) {
+            Ok(opts) => ctx.client.connect(&opts).await.map_err(WalletConnectError::from),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => {
+                ctx.resubscribe_all().await;
+                common::log::info!("walletconnect: relay connection restored (attempt {})", attempt + 1);
+                return true;
+            },
+            Err(e) => {
+                common::log::warn!("walletconnect: relay reconnect attempt {} failed: {e}", attempt + 1);
+                attempt = attempt.saturating_add(1);
+            },
+        }
+    }
+}
+
+/// The topics to subscribe to after a reconnect: the given session topics and in-flight establishment topics, plus
+/// every pairing that has not expired at `now`. Each topic appears once.
+fn collect_resubscribe_topics(
+    session_topics: Vec<Topic>,
+    pairings: &HashMap<Topic, Pairing>,
+    establishing_topics: Vec<Topic>,
+    now: u64,
+) -> Vec<Topic> {
+    let mut seen: HashSet<Topic> = HashSet::new();
+    let mut topics = Vec::new();
+    let live_pairings = pairings
+        .values()
+        .filter(|pairing| pairing.expiry > now)
+        .map(|pairing| pairing.topic.clone());
+    for topic in session_topics
+        .into_iter()
+        .chain(establishing_topics)
+        .chain(live_pairings)
+    {
+        if seen.insert(topic.clone()) {
+            topics.push(topic);
+        }
+    }
+    topics
+}
+
+/// Debug log of one relay frame. Only the direction, the JSON-RPC method, the first 8 characters of the topic, the
+/// relay tag and the request id are written; never a payload, a key or a full topic.
+fn topic_prefix(topic: &Topic) -> String { topic.as_ref().chars().take(8).collect() }
+
+/// Logs the outcome of a relay subscribe: the topic prefix and "ok" at debug level, or the error kind at warn level.
+fn log_subscribe<R, T>(what: &str, topic: &Topic, result: &Result<R, relay_client::error::Error<T>>) {
+    match result {
+        Ok(_) => common::log::debug!("walletconnect: {what} topic={}.. ok", topic_prefix(topic)),
+        Err(e) => common::log::warn!(
+            "walletconnect: {what} topic={}.. failed: {}",
+            topic_prefix(topic),
+            error::relay_call_error_kind(e)
+        ),
+    }
+}
+
+fn log_relay_frame(direction: &str, topic: &Topic, tag: u32, method: &str, request_id: &dyn std::fmt::Display) {
+    let topic: &str = topic.as_ref();
+    let prefix: String = topic.chars().take(8).collect();
+    common::log::debug!("walletconnect: relay {direction} method={method} topic={prefix}.. tag={tag} id={request_id}");
 }
 
 /// Current unix timestamp in seconds.
@@ -1293,6 +1543,8 @@ mod establishment_tests {
     /// The WC2 ECDH (chapter 22 §22.6): the proposer side (which retains its
     /// ephemeral secret) and the responder side must converge on the same
     /// 32-byte symmetric key and therefore the same session topic.
+    fn test_app_metadata() -> Metadata { metadata::generate_metadata(None, "00000000") }
+
     #[test]
     fn ecdh_round_trip_derives_matching_key_and_topic() {
         let our_secret = StaticSecret::from([7u8; 32]);
@@ -1339,7 +1591,7 @@ mod establishment_tests {
             }
         });
 
-        let request = build_propose_request(&public, &required, None);
+        let request = build_propose_request(&public, &required, None, &test_app_metadata());
 
         assert_eq!(propose::METHOD, "wc_sessionPropose");
         assert_eq!(propose::TAG.request, 1100);
@@ -1412,7 +1664,7 @@ mod establishment_tests {
         });
 
         let settle: settle::SettleRequest = serde_json::from_value(params).expect("parse settle request");
-        let session = build_session(session_topic.clone(), pending, settle);
+        let session = build_session(session_topic.clone(), pending, settle, &test_app_metadata());
 
         assert_eq!(session.topic, session_topic);
         assert_eq!(session.pairing_topic, pairing_topic);
@@ -1482,7 +1734,7 @@ mod establishment_tests {
         });
 
         let settle: settle::SettleRequest = serde_json::from_value(params).expect("parse settle request");
-        let session = build_session(session_topic, pending, settle);
+        let session = build_session(session_topic, pending, settle, &test_app_metadata());
         let bytes = [0x01u8, 0x02, 0x03, 0xff];
 
         assert_eq!(session.pairing_topic, pairing_topic);
@@ -1501,5 +1753,194 @@ mod establishment_tests {
                 .contains("\"encoding_algo\":\"Hex\""),
             "non-Keplr cosmos sessions must persist Hex encoding_algo"
         );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod reconnect_tests {
+    use super::storage::sqlite::SqliteSessionStorage;
+    use super::storage::WcStorageOps;
+    use common::block_on;
+    use db_common::async_sql_conn::AsyncConnection;
+
+    #[test]
+    fn the_relay_host_has_no_port_path_or_query() {
+        assert_eq!(
+            super::relay_host("wss://relay.example.com/?projectId=P&auth=J"),
+            "relay.example.com"
+        );
+        assert_eq!(super::relay_host("wss://relay.example.com:443/x"), "relay.example.com");
+        assert_eq!(super::relay_host("relay.example.com"), "relay.example.com");
+    }
+
+    use super::*;
+
+    #[test]
+    fn reconnect_backoff_doubles_and_is_capped() {
+        let secs: Vec<u64> = (0..9).map(|attempt| reconnect_backoff(attempt).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(reconnect_backoff(200).as_secs(), RECONNECT_BACKOFF_MAX_SECS);
+        assert_eq!(reconnect_backoff(u32::MAX).as_secs(), RECONNECT_BACKOFF_MAX_SECS);
+    }
+
+    #[test]
+    fn resubscribe_covers_sessions_establishments_and_live_pairings_once() {
+        let now = 1_000_000;
+        let mut live = Pairing::generate(300);
+        live.expiry = now + 300;
+        let mut expired = Pairing::generate(300);
+        expired.expiry = now - 1;
+        let pairings: HashMap<Topic, Pairing> = [live.clone(), expired.clone()]
+            .into_iter()
+            .map(|pairing| (pairing.topic.clone(), pairing))
+            .collect();
+
+        let session = Topic::generate();
+        let establishing = Topic::generate();
+        let topics = collect_resubscribe_topics(
+            // The same session topic twice and a live pairing that is also listed as a session topic.
+            vec![session.clone(), session.clone(), live.topic.clone()],
+            &pairings,
+            vec![establishing.clone()],
+            now,
+        );
+
+        assert_eq!(topics.len(), 3, "each topic once");
+        assert!(topics.contains(&session));
+        assert!(topics.contains(&establishing));
+        assert!(topics.contains(&live.topic));
+        assert!(
+            !topics.contains(&expired.topic),
+            "an expired pairing is not subscribed again"
+        );
+    }
+
+    #[test]
+    fn relay_frame_log_helper_does_not_panic_on_short_topics() {
+        log_relay_frame(
+            "publish",
+            &Topic::from("abc".to_string()),
+            1108,
+            "wc_sessionRequest",
+            &7,
+        );
+    }
+
+    /// The `iss` (`did:key`) claim of a relay auth token.
+    fn token_issuer(opts: &ConnectionOptions) -> String {
+        use base64::Engine;
+        let relay_client::Authorization::Query(token) = &opts.auth else {
+            panic!("the relay auth is a query token");
+        };
+        let token = token.to_string();
+        let payload = token.split('.').nth(1).expect("JWT payload segment");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url payload");
+        let claims: serde_json::Value = serde_json::from_slice(&payload).expect("JSON claims");
+        claims["iss"].as_str().expect("iss claim").to_string()
+    }
+
+    #[test]
+    fn app_name_is_the_project_and_the_fingerprint_of_the_key_in_use() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let fp = client_key::fingerprint(&key);
+        assert_eq!(
+            metadata::generate_metadata(None, &fp).name,
+            format!("KDF Reloaded {fp}")
+        );
+        assert_eq!(metadata::generate_metadata(Some("My Node"), &fp).name, "My Node");
+        assert_eq!(
+            metadata::generate_metadata(Some(""), &fp).name,
+            format!("KDF Reloaded {fp}")
+        );
+    }
+
+    fn params_with(signing_key: SigningKey) -> RelayConnectParams {
+        RelayConnectParams {
+            project_id: "test-project".to_string(),
+            relay_address: metadata::RELAY_ADDRESS.to_string(),
+            signing_key,
+            key_source: client_key::ClientKeySource::Created,
+        }
+    }
+
+    #[test]
+    fn relay_client_key_is_created_once_and_reused_across_connects() {
+        block_on(async {
+            let conn = AsyncConnection::open_in_memory().await.expect("open in-memory db");
+            let storage = SqliteSessionStorage::new(conn);
+            storage.init().await.expect("init schema");
+            assert_eq!(storage.load_client_key().await.unwrap(), None);
+
+            let (key, source) = client_key::load_or_create(&storage).await.expect("create key");
+            assert_eq!(source, client_key::ClientKeySource::Created);
+            let params = params_with(key);
+            let first = token_issuer(&params.options(1).expect("first connect"));
+            let second = token_issuer(&params.options(2).expect("reconnect"));
+            assert_eq!(first, second, "every connect is signed with the same client key");
+
+            // Another key is another client identity.
+            let other = params_with(SigningKey::generate(&mut rand::thread_rng()));
+            assert_ne!(first, token_issuer(&other.options(1).expect("other connect")));
+        });
+    }
+
+    #[test]
+    fn relay_client_key_survives_a_storage_round_trip() {
+        block_on(async {
+            let path = std::env::temp_dir().join(format!("kdf-wc-client-key-test-{}.db", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let created = {
+                let conn = AsyncConnection::open(path.clone()).await.expect("open db");
+                let storage = SqliteSessionStorage::new(conn);
+                storage.init().await.expect("init schema");
+                let (key, source) = client_key::load_or_create(&storage).await.expect("create key");
+                assert_eq!(source, client_key::ClientKeySource::Created);
+                key
+            };
+            // A new connection to the same file is the restarted node.
+            let conn = AsyncConnection::open(path.clone()).await.expect("reopen db");
+            let storage = SqliteSessionStorage::new(conn);
+            storage.init().await.expect("init schema again");
+            let (loaded, source) = client_key::load_or_create(&storage).await.expect("load key");
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(source, client_key::ClientKeySource::Loaded);
+            assert_eq!(loaded.to_bytes(), created.to_bytes());
+            assert_eq!(
+                token_issuer(&params_with(loaded).options(1).unwrap()),
+                token_issuer(&params_with(created).options(1).unwrap()),
+            );
+        });
+    }
+
+    #[test]
+    fn corrupt_stored_relay_client_key_is_replaced_by_a_new_one() {
+        block_on(async {
+            for corrupt in ["not hex at all", "abcd", ""] {
+                let conn = AsyncConnection::open_in_memory().await.expect("open in-memory db");
+                let storage = SqliteSessionStorage::new(conn);
+                storage.init().await.expect("init schema");
+                storage.save_client_key(corrupt.to_string()).await.unwrap();
+
+                let (key, source) = client_key::load_or_create(&storage).await.expect("replace key");
+                assert_eq!(
+                    source,
+                    client_key::ClientKeySource::Created,
+                    "corrupt value {corrupt:?}"
+                );
+                let (again, source) = client_key::load_or_create(&storage).await.expect("load new key");
+                assert_eq!(source, client_key::ClientKeySource::Loaded);
+                assert_eq!(again.to_bytes(), key.to_bytes());
+            }
+        });
+    }
+
+    #[test]
+    fn relay_client_key_fingerprint_is_the_public_key_prefix_only() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let fp = client_key::fingerprint(&key);
+        assert_eq!(fp.len(), 8);
+        assert!(hex::encode(key.verifying_key().as_bytes()).starts_with(&fp));
     }
 }

@@ -71,7 +71,7 @@ pub(crate) use utxo_signer::with_key_pair::{sign_tx, UtxoSignWithKeyPairError};
 // ─── Existing sub-modules ───────────────────────────────────────────────────
 
 mod history;
-#[cfg(test)] mod qrc20_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod qrc20_tests;
 pub mod rpc_clients;
 pub mod script_pubkey;
 mod swap;

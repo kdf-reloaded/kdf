@@ -708,6 +708,12 @@ script-mismatch outcome of R39.5.11(d)) and vice versa. Either R39.6.4 §2 is ex
 HD-derive the transparent key as the reference does, or the divergence is recorded as a
 deliberate Reloaded exception in §39.0 and in the operator-facing compatibility document.
 
+> **Status note (2026-11-18, Reloaded-original).** The transparent key of D39.5.a is the HD key for an
+> absent `priv_key_policy` and for `ContextPrivKey`; with `IguanaPrivKey` under a global-HD login it is
+> the node's internal key (R39.8.0bd). The base key of R39.5.9, and with it the HTLC key of every swap
+> started after the switch, follows. A swap keeps the key it was started with (R39.5.11), which is why
+> R39.8.0bd refuses an activation that would leave an unfinished swap unable to use it.
+
 D39.5.b **A dedicated build error for the transparent key under HD** *(after the beta;
 cosmetic; 2026-10-29).* Since D39.5.a, a failure to derive the shielded coin's transparent
 key under the HD-wallet policy (the crypto context unavailable, or the coins-file
@@ -1415,6 +1421,16 @@ mainnet constants.
 >   Zcash-mainnet parameters; bare `{"type":"ZHTLC"}` is now non-conformant per
 >   R39.1.2.
 
+> **Status note (2026-11-18, Reloaded-original).** The activation request gains `priv_key_policy`
+> (R39.8.0bd), in the shape the other coin families use. Under a global-HD login the HD-derivation and
+> transparent-key bullets above describe the absent value and `ContextPrivKey`; with `IguanaPrivKey`
+> both the shielded key and the transparent key are the node's internal key
+> (`mm2_internal_privkey_secret`): the shielded spending key is the ZIP32 master of that secret, as under a
+> single-key login, `account` has no effect, and `z_derivation_path` and `derivation_path` are not
+> consulted. Under a single-key login every value selects the single key, as before. A hardware wallet
+> value is refused and an unknown value fails the request. The reference's behavior for this member is not
+> recorded in this chapter, so the note claims no parity. The cleared sentences above are unchanged.
+
 ### 39.6.5 Pirate1 withdrawal destination (v0.4.0)
 
 > **Scope (maintainer decision, 2026-11-04).** The wallet stays Sapling-only. It holds no
@@ -1560,6 +1576,20 @@ values the bytes do not carry.
 > the bundle's spent notes; a wallet built that way holds no Ironwood notes, so no such
 > spend can be its own. The patch skips that step and changes nothing else.
 
+> **Status note (2026-11-18, Reloaded-original; wallet-library upgrade).** The patched copy of the
+> wallet-database crate named above is removed. The wallet-database crate is now the published
+> `zcash_client_sqlite 0.23.0`, built with its `orchard` feature, with which recording a sent
+> transaction that carries an Ironwood bundle does not stop the process (checked on the real Pirate1
+> withdrawal of the probe). The vendored copies of `zcash_primitives` and `zcash_transparent` are
+> removed as well (chapter 34, entry of 2026-11-18); the transaction hooks they provided are replaced
+> by this project's own assembler over the published interface. The stack since this upgrade is
+> `zcash_primitives 0.31.1`, `zcash_transparent 0.11.1`, `zcash_client_backend 0.25.0`,
+> `zcash_client_sqlite 0.23.0`, `zcash_proofs 0.31.0`, `zcash_protocol 0.11.0`,
+> `sapling-crypto 0.9.0` and `orchard 0.16.0`, all unmodified. The transaction expiry delta of a
+> shielded coin is set explicitly to 40 blocks, the value the builder used before, and no longer
+> follows the library's per-branch default; the NU7 network upgrade reports no activation height for
+> a shielded coin, as every other upgrade after Sapling except Ironwood does (R39.6.4d).
+
 R39.6.5h **The Ironwood proving key.** The proving key for Ironwood actions shall be
 derived in the process from the circuit, on the first build that needs it, and kept for
 the life of the process. Nothing is downloaded, shipped or checked by hash: the proving
@@ -1619,6 +1649,11 @@ of T39.6.5a that pays from Sapling into Ironwood has the same flags and the same
 > T39.6.5d (the flags and anchor of a built bundle, `z_pirate1_tests.rs`) and T39.6.5c (the built
 > withdrawal, `z_note_lock_tests/pirate1_withdraw.rs`), which pass before and after.
 
+> **Status note (2026-11-18, Reloaded-original).** The dedicated builder constructor named in the
+> note above no longer exists: the patched builder is removed, and the output-only Ironwood bundle is
+> built by this project's own assembler (§39.6.5B, R39.6.5j--R39.6.5n) with the same flags, anchor and
+> padding.
+
 T39.6.5e *The broadcast record.* A submitted Pirate1 withdrawal is recorded: its fee is
 derived from the bytes, its notes are excluded from the next selection until its block
 is scanned or it expires, its unmined history row carries the final amounts, and its
@@ -1665,6 +1700,82 @@ change counts as non-spendable balance.
 > offered, as the maintainer decided on 2026-11-04: GLEEC KDF cannot build any transaction
 > for the post-Ironwood chain (R39.6.4a, its compatibility note), so refusing the address
 > would restore nothing that works. The row is in `docs/GLEEC_COMPATIBILITY.md`.
+
+### 39.6.5B The transaction assembler (wallet-library upgrade)
+
+The published transaction builder of the Zcash libraries cannot express four things a shielded
+coin needs: a transparent input that spends a swap contract output with this project's script
+signature and a chosen sequence number, an explicit legacy lock time, transparent outputs kept
+exactly as given, and an output-only Ironwood bundle. Earlier builds obtained them from patched,
+vendored copies of the builder (R39.6.5d, the status note of 2026-11-15). Since the library upgrade
+of 2026-11-18 the transaction is assembled by this project's own code over the libraries' public
+lower-level interfaces, and no library is vendored or patched.
+
+R39.6.5j **One assembler for every shielded transaction.** A transaction of a shielded coin that
+carries a swap contract spend, a raw transparent output, an Ironwood output or a Sapling spend or
+output shall be assembled by one module (the assembler). It shall use the published Sapling builder
+for the Sapling bundle, the published Orchard builder for the Ironwood bundle, and the published
+transaction data and signature-hash types for the rest; it shall not depend on any patched
+library. The Sapling proofs are made before the signatures, as the format requires.
+
+R39.6.5k **The contract spend.** A transparent input of the assembler spends a swap contract output.
+Its script signature is the signature over the transparent signature hash with the redeem script as
+script code and `SIGHASH_ALL`, then the selector or the secret (push-only data supplied by the
+caller), then the redeem script as one push. The input carries the sequence number the caller
+chooses. The signature is accepted only when the public key of the signing key occurs in the redeem
+script, so a key that is not the contract's cannot produce a spend. A redeem script of more than 520
+bytes, the consensus limit of one script push, is refused with a typed error before anything is
+built. Transparent outputs given as they are keep their count, order, value and script. The legacy
+lock time is the one the caller sets (zero by default).
+
+R39.6.5l **The output-only Ironwood bundle.** An Ironwood output is added to a bundle built with
+spends disabled, outputs enabled, cross-address transfers as the Ironwood version defines, the
+empty-tree anchor and the default padding to two actions, exactly as R39.6.5d and R39.6.5e require.
+No Ironwood spend can be added. A transaction version without an Ironwood bundle refuses an
+Ironwood output with a typed error.
+
+R39.6.5m **Version, expiry and fee.** The transaction version and consensus branch are those the
+published builder selects for the target height, so a coin without an Ironwood height keeps building
+version 4. The expiry height is the target height plus the single explicit delta of 40 blocks
+(R39.11.8(e)), never a library default. The assembler asks the caller's fee rule for the fee of
+exactly the parts added and requires the transaction to balance to it: a shortfall and a surplus
+are different typed errors that name the amount. For the ZIP 317 rule a contract input is priced as
+a known size: the outpoint, the CompactSize and bytes of a signature of the largest size, the
+selector or secret and the pushed redeem script, and the sequence number. The shielded coins
+configure a fixed fee, as before, so the fees they pay are unchanged.
+
+R39.6.5n **Typed failure.** Every failure of the assembler is a typed error (the transparent,
+Sapling, Ironwood, signing, fee, balance and finishing classes). The assembler does not panic on
+caller data.
+
+T39.6.5f *Contract spends.* A refund (selector `OP_1`, non-final sequence, lock time) and a claim
+(the secret pushed, final sequence, lock time zero), each as a version-4 and a version-6
+transaction, read back from their bytes with the script signature `<signature> <selector or secret>
+<redeem script>`, the sequence and lock time asked for, and the outputs in the order given; the
+signature verifies against a signature hash recomputed from the bytes independently of the
+assembler. A key that is not in the redeem script is refused. A deficit and a surplus are refused
+with their amounts. The fee of the ZIP 317 rule for the contract-spending shape is the expected
+figure. The four contract spends (refund and claim, as version 4 and as version 6) are
+byte-identical to the transactions the previous vendored builder produced for the same inputs, keys
+and heights, recorded once from the base commit of the upgrade; they have no shielded part and their
+signatures are deterministic, so the comparison is exact.
+
+T39.6.5g *The recorded shapes.* With the Sapling parameters present: a contract spend with two raw
+outputs and a Sapling output, and a Sapling spend paying into an output-only Ironwood bundle with
+Sapling change, have the fields recorded when the vendored builder was compared with the assembler
+(version, branch, lock time, expiry, sequences, script-signature layout, outputs, Sapling and
+Ironwood action counts, flags, anchors, value balances, fee), and every proof and signature verifies
+with the public verifying keys. The transactions that the vendored builder produced before the
+upgrade are the reference for the fixed fields.
+
+> **Status note (2026-11-18, Reloaded-original; wallet-library upgrade).** Added with the removal of
+> the vendored builder crates. The wording of R39.6.5d and R39.6.5e is unchanged; where earlier
+> status notes name the builder constructor that only this repository's code called, the assembler
+> now provides the same bundle. Evidence for the equality of the two: the field comparison of the
+> probe of November 2026 (the same keys, inputs and seeded randomness through both) found every
+> deterministic field equal and every proof and signature valid on both sides, with one difference
+> that is not in the assembler's output: the published builder's default expiry delta, which the
+> assembler replaces with the explicit value of R39.6.5m.
 
 ### 39.6.6 Reference behavior: Sapling parameter provisioning and shielded coins in the browser build
 
@@ -2968,6 +3079,15 @@ never-migrated rule of R39.8.0x.
 > are unchanged. The `.pre-upgrade` backup named in T39.8.0f is likewise the consistent copy; the
 > test of R39.8.0bc (T39.8.0j) checks its content instead of its bytes.
 
+> **Status note (2026-11-18, Reloaded-original; wallet-library upgrade).** The recognized previous
+> generations of this rule are now two: the schema of `zcash_client_sqlite 0.21.1` (467 records) and
+> the schema of `0.22.0` built without `orchard` (`user_version` 8, 727 canonical records, 71
+> migrations), which was the selected current generation until this upgrade. The current generation
+> is the schema of `zcash_client_sqlite 0.23.0` built with its `orchard` feature (75 migrations). A
+> wallet database of the `0.22.0` generation is therefore backed up, verified and migrated on its
+> first open by the steps above, and the migration is not reversible by the library: the
+> `.pre-upgrade.<ms>.bak` backup is the way back to an older build.
+
 R39.8.0bc **Consistent, verified backup before a schema upgrade.** The upgrade of
 R39.8.0ba runs these steps before its working copy is made, all inside the
 wallet-database serialization of R39.8.0ad. The same steps apply to every
@@ -3038,6 +3158,80 @@ other `.bak` kinds are untouched; the key is read as specified; (e) a wallet
 database that is already current is opened without a backup and without asking
 for free space; (f) the tests of R39.8.0ba (T39.8.0f) stay green, their backup
 check being the content check described in the status note above.
+
+R39.8.0bd **Key policy under a global-HD login, and one wallet database per key.**
+*(Reloaded-original.)*
+
+1. **Request member.** The shielded activation request accepts `priv_key_policy` in the shape of the
+   other coin families: a bare name or `{"type": name}`. Absent or `ContextPrivKey` selects the key the
+   login selects. Under a global-HD login `IguanaPrivKey` selects the node's internal key for the
+   shielded key (the ZIP32 master of that secret, as under a single-key login; `account` has no effect)
+   and for the transparent key (R39.6.4 status note of 2026-11-18). Under a single-key login every value
+   selects the same key as before. A hardware wallet value is refused with the unsupported-key-policy
+   activation error before anything is built; an unknown value fails the request. The method that selects
+   the keys receives the policy, and so does the live probe that calls it.
+2. **The login's default key.** The default key is the single key under a single-key login, and under a
+   global-HD login the HD derivation of `account` 0. `IguanaPrivKey` under a global-HD login and any other
+   HD account are not the default key.
+3. **Wallet files.** The three files `<TICKER>_RELOADED_WALLET.db`, `<TICKER>_RELOADED_COMPACT_BLOCKS.db`
+   and `<TICKER>_RELOADED_TX_ADDRESSES.db` belong to the key whose account the wallet file holds, and
+   nothing is renamed. At activation: (a) if `<TICKER>_RELOADED_WALLET.db` holds this key's account, it is
+   used; (b) if it is absent, empty or holds no account, it is used and created only when the key is the
+   default key; (c) in every other case the key uses its own files, the same three names with
+   `.<fingerprint>` before `.db`, where the fingerprint is the first 8 bytes, in 16 lowercase hex
+   characters, of the SHA-256 of the Bech32 encoding of the key's Sapling extended full viewing key (a
+   hash; the viewing key is not in the name). They are created on first use. Switching the policy or the
+   account therefore opens the other wallet instead of failing, and switching back reopens the first one
+   with its scan state; an older build still finds `<TICKER>_RELOADED_WALLET.db` with the key it holds.
+   The default wallet file is brought to the current schema, with the backup of R39.8.0bc, whichever key
+   is activated, and each per-key file follows the same rules as it is opened. The refusal "belongs to a
+   different viewing key" remains for a selected file that holds another key's account; the selection
+   above makes it unreachable in the normal flow.
+4. **What the user sees.** One shielded coin instance per ticker is active at a time. The shielded
+   balance and history are per account: `get_my_address`, `my_balance` and `z_coin_tx_history` report the
+   active key's wallet only, and amounts a swap step pays or receives appear in the account that was
+   active when that step ran. Activating that account shows them.
+5. **Swaps started with another key.** At activation of a shielded coin, the node reads the saved swaps
+   that are not finished and have a leg in this coin. For each that recorded its HTLC public key for this
+   coin and saved no private key, the HTLC key is derived again from the key being activated, exactly as
+   the resume check of R39.5.11 does; a saved private key exempts a swap only when it is the recorded key, as the resume treats it, and any other saved key counts as none. The saved swaps are read through a reader that the swap layer
+   registers at start, so the check sees swaps that are waiting for their coin as well as running ones. It runs
+   before any wallet file is opened, so a refusal opens and creates none. If the saved swaps cannot be
+   read, the activation is refused with a typed error that gives the reason. If any key differs, the activation
+   is refused with a typed error that says: what is blocked (activation of the coin with this key); why (these swaps were started with another
+   key, and with this key they could not be completed or refunded); the swap UUIDs; and what to do
+   (activate the coin with the key they were started with, let them finish or refund, then switch). A
+   change of the HD `account` alone does not change the HTLC key (it does not depend on `account`) and is
+   allowed.
+6. **Account change with a swap step not yet paid.** The already-sent lookup of R39.11.26 reads every
+   wallet database of the ticker (status note there). If any of those databases cannot be opened or read
+   (locked, being migrated, corrupt), an activation is refused while an unfinished swap of this coin has
+   not recorded its own payment or fee as sent: for a maker, the payment in the coin it pays; for a taker, the
+   fee and the payment in the coin it pays; a swap is not asked for anything in the coin it only receives.
+   The check runs together with item 5, before the files of the activation are chosen, so the file the
+   activation would use is among those read; it does not ask whether the account differs from the one a
+   swap's earlier step used, because no record says which that was. The typed error names the database that
+   cannot be read, the swap UUIDs and what to do (make the database readable, or activate the coin with the
+   key the swap was started with until the step has run). With every database readable, or with no such
+   swap, the activation proceeds.
+
+T39.8.0k *Key policy and per-key wallet files (R39.8.0bd).* Unit tests shall prove: the request member
+parses as a bare name and as the tagged form, rejects an unknown value and leaves an absent value absent;
+under a global-HD login `IguanaPrivKey` selects the internal key for both the shielded and the transparent
+key, independent of `account`, while the absent value keeps the HD derivation; under a single-key login
+every value selects the iguana key and a hardware value is refused; the default key is named as item 2; the
+default key uses the default files; a non-default key with no wallet uses the per-key files and creates
+no default file; switching back and forth reopens each wallet without creating a file; a default file that
+holds a key keeps it when that key is no longer the default key, and the login's default key then gets its
+own files; a previous-generation default file is backed up when another key is activated; the fingerprint
+is 16 lowercase hex characters and differs per key; the send-record lookup returns records from the other
+wallet databases, skips a sibling that cannot be read and fails on an unreadable active database; only the
+two file-name shapes count as wallets of a ticker. The refusals of items 5 and 6 shall be tested with a
+scripted source of the unfinished swaps: a mismatching saved HTLC key refuses with the listed UUIDs; a
+matching one, a swap with a saved private key, a swap of another coin and a finished swap allow; an
+account change allows; an unreadable sibling database with an unpaid unfinished swap refuses, and with every
+database readable, allows; a payment recorded in another account's database answers "sent" for the
+restarted swap, so no second payment is made.
 
 R39.8.0y The public modern candidates form two coherent, non-interchangeable
 dependency generations as of the reference date:
@@ -6463,6 +6657,15 @@ R39.11.15 **Version coverage of the two parsers (public facts, for planning).**
 > published `zcash_protocol` 0.11.0 maps `Nu7` to `0x77190AD9` with the mainnet
 > height 3,543,405 (per that crate's source and changelog). The coin wiring for ZEC follows in
 > the plan's next pull request.
+>
+> *Status (2026-11-18, this repository; clean side):* the library family is
+> upgraded (`zcash_primitives` 0.31.1, `zcash_protocol` 0.11.0, which maps `Nu7`
+> to `0x77190AD9`), so the Zcash library reader now reads versions 5 and 6 under
+> the NU7 branch id. The shared UTXO parser keeps version 5 and still refuses an
+> overwintered version above 5; the read entry point of the UTXO coins gives
+> version 6 and later to the library reader (D39.11.4V.3, PR #422). The sentence
+> above that says whether incoming version-6 transactions are read was open on
+> 2026-11-17 and is answered: they are.
 
 R39.11.16 **Requirement for Ironwood-era support.** Before a shielded coin may
 transact on a network whose standardness rule requires a transaction version the
@@ -6834,6 +7037,15 @@ read with wrong contents. What each surface does with the refusal:
   reader of plan `zec-v5-transactions`, completing R39.11.15 -- with version 6
   decided by D39.11.4V.3.
 
+> *Reloaded status (clean side, 2026-11-18):* Reloaded reads version 5 (shared
+> parser) and version 6 and later (Zcash library reader, D39.11.4V.3, PR #422)
+> on every surface listed above: history and the history of a transaction's
+> input transactions, validation of a counterparty's DEX fee and payments,
+> the spend search over the node and the Electrum backends, secret extraction
+> and the confirmation and spend waits. A transaction that neither reader can
+> read still fails as described, with the history reporting of D39.11.4V.1.
+> The bullets above describe the reference and are unchanged.
+
 **R39.11.4V.9** *`avg_blocktime` (completes R39.11.15).* For a transparent UTXO
 coin the reference reads `avg_blocktime` as a non-negative JSON integer
 (seconds) and uses it in two places only: a Lightning activation requires it on
@@ -6881,6 +7093,57 @@ outputs, not in bytes, so whether a per-kilobyte rate meets it depends on the
 rate and on the transaction's shape. Remedy: the open point on ZIP 317 fees in
 plan `zec-v5-transactions` settles the rate Reloaded uses.
 
+> *Reloaded status (clean side, 2026-11-17):* for a version-5 transaction
+> Reloaded computes the per-kilobyte fee over the size of the version-5 bytes it
+> sends, not over a version-4 layout: a transparent version-5 transaction is
+> about 4 bytes shorter (a four-byte branch id field in the header, a 3-byte
+> empty tail instead of 11 bytes), so the fee is marginally lower than the same
+> rate over the version-4 layout. The policy of chapter 38 R38.6.6a --
+> R38.6.6b is otherwise unchanged. With the ZEC rate of the coins file (70000
+> per kilobyte) the fee stays above ZIP 317's conventional fee for the transparent
+> shapes this software builds (at most three outputs per transaction); a
+> transaction with five or more outputs per input would fall below it, because
+> ZIP 317 counts 5000 zatoshi per logical action while an output costs about
+> 2380 zatoshi by size. The earlier note after the compatibility note of
+> §39.11.4V ("a transparent transaction pays more than ZIP 317's conventional
+> fee") holds for these shapes only.
+
+> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; passed the KDF Dirty
+> Gate with §39.11.4W):* a fee below the per-kilobyte estimate also meets the
+> counterparty checks of §39.11.4W. At the rows of R39.11.4V.1 a reference peer
+> refuses it only in a version-two swap with the coin as the taker coin: in
+> the funding-spend preimage this software builds as maker (a band of 0.9 to
+> 1.1 on the ratio of the peer's estimate to the fee paid, every DEX-fee arm),
+> and in the taker-payment-spend preimage it builds as taker under `NoFee`
+> (exact equality). A refusal ends the swap in refunds on both sides; no peer
+> is banned and no order is marked. Legacy swaps, their DEX fee transaction
+> and the watchers check no network fee. The remedy point of R39.11.4V.10 is
+> unchanged; its choice now has these two version-two cases to account for.
+
+> *Reloaded status (clean side, 2026-11-18):* by the maintainer's decision of
+> 2026-11-18 Reloaded computes ZIP 317's conventional fee directly for ZEC, so the
+> per-kilobyte rate no longer has to approximate it. The rule applies to an
+> entry that is `overwintered`, has `txversion` 5 and names a Zcash branch id from
+> NU7 on (today `0x77190AD9`); every other entry, including an overwintered
+> version-5 entry with an unknown branch id, keeps the policy of chapter 38
+> R38.6.6a -- R38.6.6b, and no coins key is added. The branch id alone would not
+> do: a version-4 entry of another network carries Zcash's Sapling id. Under the
+> rule the fee is 5000 zatoshi times the larger of 2 and the logical actions,
+> `max(ceil(input bytes / 150), ceil(output bytes / 34))`, with the builder's
+> estimate of 148 bytes per signed P2PKH input and the real script sizes of an
+> HTLC spend; a change output adds its action if it adds one, and a forced
+> minimum relay fee stays a floor. The entry's `txfee` is not used to build. The
+> claim and the refund of a version-1 swap pay 10000 (two actions), not the
+> 496-byte estimate; the DEX-fee estimate counts a burn output, so it is never
+> below the transaction it stands for; `trade_preimage` and `max_taker_vol` use
+> the same fees; `get_trade_fee` reports 10000, the conventional fee of a
+> standard transaction. A `fee` given in a withdraw request is used as given.
+> The spends and refunds of a resumed version-2 swap keep the estimate over 496
+> bytes at the entry's `txfee` (34720 at 70000 per kilobyte): a counterparty
+> checks the fee of the funding-spend and the taker-payment-spend preimages
+> against that estimate (§39.11.4W), and the conventional fee would fall
+> outside its band.
+
 D39.11.4V.1 *(Open.)* *A transaction of a version the history cannot read.*
 Reproducing the reference (R39.11.4V.8) leaves such a transaction out of the
 legacy history without a signal, and keeps the version-two history in progress
@@ -6890,6 +7153,32 @@ the reference; (b) skip such a transaction so that the rest of the history is
 complete, and report its identifier through the history's sync status or error
 channel; (c) add a row from the backend's listing alone (identifier and height,
 amounts unknown). Recommendation: (b).
+
+> *Reloaded status (clean side, 2026-11-18):* resolved by the maintainer's
+> decision as option (b), for every UTXO coin. Both history collectors of this
+> repository skip a transaction they cannot read and go on with the rest of
+> the pass, as R38.5A.9 already required for the cases it names. The version-two
+> collector of BCH and SLP now also skips a transaction, or a transaction whose
+> input transaction, does not parse, where it used to pause and start again. The
+> skip is now reported: while a pass runs and when it ends, `sync_status`
+> carries `additional_info.unreadable_transactions`, a list of the skipped
+> transactions with `tx_hash` and a short `error`, for example
+> `{"state": "Finished", "additional_info": {"unreadable_transactions":
+> [{"tx_hash": "...", "error": "the transaction cannot be parsed: ..."}]}}`.
+> A transaction skipped because one of its input transactions cannot be read,
+> or because an input spends an output that does not exist, is reported with
+> that reason. The list is rebuilt on every pass, so a transaction that reads
+> later leaves it. A pass that skips nothing answers exactly as before
+> (`{"state": "Finished"}`). A backend or transport failure is not reported as
+> unreadable; its handling is unchanged. Until the Zcash library upgrade of
+> D39.11.4V.3, a version-6 ZEC transaction is reported this way.
+>
+> *Reloaded status (clean side, 2026-11-18; later note, the text above is
+> unchanged):* since the version-6 reader of D39.11.4V.3 (PR #422), a
+> version-6 ZEC transaction is no longer reported: it is read and gets a row.
+> What stays reported is a transaction the readers cannot read, for example a
+> version-6 transaction cut off in its header (`error` then names the Zcash
+> reader: "the transaction cannot be parsed: Zcash reader: ...").
 
 D39.11.4V.2 *(Open.)* *An entry whose version this software cannot build.*
 Reproducing the reference (R39.11.4V.5) accepts any `txversion`, gives version 5
@@ -6903,12 +7192,55 @@ a version that has no default; (c) as (b), and also refuse an `overwintered`
 value other than the integers `0` and `1`. Recommendation: (b), which is the
 plan's configuration step; (c) only after a check of the coins files in use.
 
+> *Reloaded status (clean side, 2026-11-17):* resolved by the maintainer's
+> decision as option (b). Activation refuses, with a typed error naming the
+> field and the value, an overwintered entry whose `txversion` is not 4 or 5
+> (version 3 included, and an absent `txversion`, which reads as 1), and an
+> overwintered entry with `txversion` 5 that names no `consensus_branch_id`.
+> For version 5 the `version_group_id` defaults to `0x26A7270A`. The
+> task-managed activation answers `CoinCreationError` with the ticker and the
+> error text, as for an invalid branch id. Entries that are not overwintered
+> and the `overwintered` selector are unchanged; option (c) was not taken.
+
 D39.11.4V.3 *(Open.)* *Version 6 on the transparent coin's read path.* The
 network accepts versions 5 and 6 (the status note under R39.11.15); the plan's
 reading step names version 5. Options: (a) read version 5 only, and treat a
 version-6 transaction as unreadable under D39.11.4V.1 and in the swap steps of
 R39.11.4V.8; (b) read versions 5 and 6 through the Zcash library reader, whose
 version coverage R39.11.15 records. Recommendation: (b).
+
+> *Reloaded status (clean side, 2026-11-17):* resolved by the maintainer's
+> decision as a staged form of (b): the shared UTXO parser reads version 5
+> (status note of 2026-11-17 under R39.11.15); a version-6 transaction stays
+> unreadable, under D39.11.4V.1 and in the swap steps of R39.11.4V.8, until the
+> Zcash library family is upgraded to a release that knows the NU7 branch id;
+> from then on versions 5 and 6 are read through that library's reader. The
+> pinned library cannot read an NU7 transaction of either version (status note
+> under R39.11.15). The upgrade is a condition of the 0.5.0 release.
+>
+> *Reloaded status (clean side, 2026-11-18; later note, the text above is
+> unchanged):* the maintainer's decision of 2026-11-18 stages the wording of
+> 2026-11-17 as follows: version 5 stays on the shared UTXO parser, and the
+> Zcash library reader reads version 6 and later. Built (PR #422): the read
+> entry point of the UTXO coins, `read_utxo_tx` in `coins`, looks at the header
+> of the bytes. An overwintered transaction of version 6 or above goes to the
+> library reader (`Transaction::read`, with one fixed branch id, which the
+> library uses only for versions below 5); every other transaction goes to the
+> shared parser, and a transaction the shared parser refuses stays refused with the
+> shared parser's error. The threshold is one named
+> constant. The library result becomes the shared transaction type: inputs,
+> outputs, lock time and expiry height are filled in for the call sites, and the
+> transaction carries the bytes as received and the library's transaction
+> identifier (ZIP 229 for version 6; ZIP 244 if the threshold moves to
+> version 5); serialization
+> writes those bytes and the identifier is the library's, so the byte comparison
+> of the payment validation and the identifier lookup at the backend work
+> unchanged. Bytes after the transaction are refused, as the shared parser does.
+> The sites that sign or modify a transaction (`sign_raw_utxo_tx`, the V2 swap
+> preimage, the hardware-wallet previous transaction) keep the shared parser,
+> which refuses version 6; the signer refuses a version above 5 in any case. A
+> test reads the ZIP 244 vectors and a library-built version-5 transaction with
+> both readers and requires the same identifier and the same bytes.
 
 *Not established.* (1) Nothing was run against a reference binary or a live
 Zcash node; no node's refusal text is recorded. (2) Whether the WalletConnect
@@ -6987,6 +7319,179 @@ chapter states.
 T39.11.4V.12 *Fee.* With `txfee` `r` and no `dingo_fee`, a withdraw's fee is
 `floor(r × s / 1000)` for the size `s` of the answered bytes, with no adjustment
 toward ZIP 317 (parity; the plan's fee point sets Reloaded's result).
+
+### 39.11.4W Counterparty fee checks on transparent UTXO transactions (reference)
+
+> **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-18,
+> measure 0.03 (attestation in §39.9).**
+> This section was written on 2026-11-18 by the KDF Spec Reader (Spec Reader
+> round 0.5.0-14) under the two-team procedure of chapter 01 §1.4A, from the
+> reference lineage at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A, with the row `main (as of 2026-10-07)` compared against
+> `v3.0.0-beta` (only the read-me differs), and from this repository's own
+> tree. It edits no sentence of this chapter. It answers, for R39.11.4V.10 and
+> the fee point of plan `zec-v5-transactions`, one question: does a reference
+> peer refuse or penalize a swap, ban the peer or mark an order, when the
+> network fee its counterparty chose for a transparent UTXO transaction is
+> below the reference's own per-kilobyte estimate? Numbering: R39.11.4W.1 --
+> R39.11.4W.7 and T39.11.4W.1 -- T39.11.4W.6.
+
+*Scope and terms.* The section covers every transparent UTXO coin, the
+transparent Zcash-family coins of §39.11.4V included; it does not cover the
+shielded coin of this chapter. `S` is the spend-fee estimate of chapter 16
+R14A: the coin's fee policy applied to the 496-byte reference spend size. For
+ZEC at the coins-file `txfee` of 70000 per kilobyte, `S` is 34,720 zatoshi.
+*Maker* and *taker* are the swap roles; the *taker coin* is the coin the taker
+pays in.
+
+**R39.11.4W.1** *Reference states.* The rows `v2.6.0-beta` and `v3.0.0-beta`
+agree on every point of R39.11.4W.2 -- R39.11.4W.7 except the watcher-reward
+band of R39.11.4W.6, which differs as stated there. The row `main (as of
+2026-10-07)` does not differ from `v3.0.0-beta` in any source file.
+
+**R39.11.4W.2** *Two checks, both in the version-two protocol, both on the
+taker coin.* At both rows, a node compares a network fee chosen by its
+counterparty for a transparent UTXO transaction with its own estimate in
+exactly two places, the two preimage validations of the version-two protocol:
+
+| Preimage | Fee chosen by | Checked by | Applies under | Rule | On refusal |
+| --- | --- | --- | --- | --- | --- |
+| Funding spend (chapter 15 R21 -- R23) | the maker, as its own `S` at the time it builds the preimage | the taker, against its own `S` | every DEX-fee arm (`Standard`, `WithBurn`, `NoFee`) | the ratio of the taker's `S` to the preimage's fee (the funding output's value minus the preimage's single output value) must lie in [0.9, 1.1], both ends included; the preimage is then rebuilt with that fee and must match exactly | the taker moves to `TakerFundingRefundRequired` with the reason *funding-spend preimage validation failure* (chapter 52 R29, R36) |
+| Taker-payment spend (chapter 16 R14A, R17) | the taker, as its own `S`, through the maker's payout output | the maker, against its own `S` | `WithBurn` and `NoFee` only | the rebuilt preimage must equal the received one exactly; a fee that differs in either direction changes the maker's payout and is refused | the maker moves to `MakerPaymentRefundRequired` with the reason *taker payment-spend preimage invalid* (chapter 52 R19, R22) |
+
+For the funding spend, the band is a band on the counterparty's fee, not on
+the output value: with the taker's `S` at 34,720 zatoshi, the accepted fees
+are 31,564 to 38,577 zatoshi inclusive. Under the `Standard` arm the
+taker-payment-spend preimage holds no maker output, the maker sets the fee of
+the final spend itself, and nothing is compared.
+
+**R39.11.4W.3** *What follows a refusal.* Neither check bans the peer, marks
+or cancels an order, or records anything outside the swap's own state; the
+version-two machines carry no penalty (chapter 52 R45). A refused funding
+spend leaves the taker refunding its funding and the maker, whose payment is
+already broadcast, refunding its payment once the funding is not spent in
+time (chapter 52 R18, R21). A refused taker-payment spend leaves the maker
+refunding its payment and the taker, which then sees no spend of its payment,
+refunding its payment after the payment's lock time (chapter 52 R31). No
+funds are lost; both sides wait for their lock times.
+
+**R39.11.4W.4** *Version two has no other fee check.* The maker payment and
+the funding transaction are validated by output script and exact output value
+only (chapter 15 R17; chapter 52 R29 step 1). The spend of the maker payment
+and every refund are built and broadcast by one party alone and are not
+validated by the other. No version-two swap message carries a fee or a fee
+rate.
+
+**R39.11.4W.5** *The legacy protocol (version one) has no fee check.* At both
+rows, no node running a legacy swap compares a network fee chosen by its
+counterparty with its own estimate:
+
+- *DEX fee transaction.* The maker checks who signed it, that it was not
+  confirmed before the swap's start bound, that the bytes it received match
+  the transaction its node returns, and the script and minimum value of the
+  DEX-fee output (and of the burn output where the arm has one, chapter 08).
+  The transaction's network fee is not examined.
+- *Payments.* Each side checks the counterparty's payment by comparing the
+  bytes it received with its node's copy, by HTLC script and by exact output
+  value (plus a watcher reward where one is carried, R39.11.4W.6). The network
+  fee is not examined.
+- *Spends and refunds.* Each is built and broadcast by one party alone; the
+  other only searches for it on chain, to learn the secret or the outcome.
+- *Penalty.* The one-hour penalty of chapter 51 R40 fires only on the events
+  listed there. The validations behind `TakerFeeValidateFailed`,
+  `TakerPaymentValidateFailed` and `MakerPaymentValidateFailed` do not look at
+  a network fee, and the other two events concern negotiation and a missing
+  spend, not a fee value; a lower fee therefore does not trigger the penalty by
+  itself.
+- No legacy swap message carries a fee or a fee rate; the DEX-fee message
+  carries the DEX fee transaction itself.
+
+**R39.11.4W.6** *Watchers.* A legacy watcher of a UTXO swap checks the DEX fee
+transaction (signer, start bound, age, the DEX-fee output's script) and the
+taker payment (signer, HTLC script, and that the refund preimage it was given
+carries the same redeem script). It does not examine the network fee of the
+payment or of the spend and refund preimages it was handed, and broadcasts
+those as given. A *watcher reward* is a separate amount, not a network fee: a
+UTXO payment carries one only when the other coin of the swap is an
+Ethereum-family coin and the node runs with a process-environment switch,
+off by default, that enables rewards; its expected amount is derived from the
+Ethereum coin's gas price and the trade's price, never from the UTXO coin's
+fee rate. Where one is carried, the receiving node accepts it within a band
+around its own expectation: at `v2.6.0-beta` from 0.9 to 1.1 times the
+expectation (each bound rounded down), at `v3.0.0-beta` at least 0.9 times the
+expectation, with no upper bound. A lower UTXO network fee does not reach
+this check.
+
+**R39.11.4W.7** *Orders and volume floors.* `S` also enters the coin's minimum
+trading volume (chapter 60 row U1: ten times `S` for a fixed-rate coin, at
+least ten times the dust amount). The reference applies that floor to the
+node's own orders and requests and uses it as the default `min_volume` of its
+own orders; it does not check a received order or request against its own
+floor, and orders carry no fee information.
+
+> *Consequence for a ZEC fee below `S` (informative).* Against a reference
+> peer, a ZEC network fee lower than the peer's `S` is refused in exactly two
+> cases, both in version-two swaps with ZEC as the taker coin: (1) whenever
+> this software is the **maker**, because it builds the funding-spend preimage
+> and a reference taker applies the band of R39.11.4W.2, under every DEX-fee
+> arm and on either network; (2) when this software is the **taker** under the
+> `NoFee` arm, because a reference maker requires its own `S` exactly. ZEC as a
+> version-two taker coin takes `NoFee` when the other coin is KMD on netid 8762
+> (chapter 16 R12B) or under the burn-key waiver (chapter 16 R7), and
+> `Standard` otherwise; at neither row does a UTXO coin other than KMD take
+> `WithBurn`. ZIP 317's conventional fee for a one-input, one-output spend of
+> this kind is 10,000 or 15,000 zatoshi (ZIP 317 counts a transparent input by
+> its byte size in units of 150 bytes, with a minimum of two actions), well
+> below the band's lower end of 31,564. The exact-equality rule of chapter 16
+> R17 binds this software's maker too, so a changed `S` for ZEC would also make
+> this software refuse a reference taker's `NoFee` preimage. Legacy swaps
+> (R39.11.4W.5) and watchers (R39.11.4W.6) accept any fee the network relays.
+
+> **Compatibility (this repository on dev, 2026-11-18; its own code, not the
+> reference).** Reloaded's version-two machines have the same division of
+> roles: the maker builds and signs the funding-spend preimage and the taker
+> validates it; the taker builds the taker-payment-spend preimage and the
+> maker validates it. Reloaded's taker applies the value-relative band of
+> chapter 15 R22 (the preimage's output value within one tenth of the expected
+> output value), which accepts a reference maker's fee whenever the swap amount
+> is large against the fee. Reloaded's maker applies the exact rebuild of
+> chapter 16 R17. Both builders and both validators take `S` from the 496-byte
+> estimate of chapter 16 R14A. Nothing else of Reloaded's behavior was checked
+> for this section.
+
+*Not established.* (1) Nothing was run against a reference binary. (2) Fee
+checks of non-UTXO coin families were not traced. (3) Whether a node operator
+can change `S` for a coin without changing `txfee` was not examined beyond the
+fee policy of chapter 16 R14A.
+
+*Acceptance rows.* Each row runs a version-two or legacy swap between this
+software and a reference-behaving peer on a mock UTXO backend, with ZEC (or a
+UTXO test coin with a fixed per-kilobyte `txfee`) as the coin named. *Parity*
+is the reference behavior of R39.11.4W.2 -- R39.11.4W.7.
+
+T39.11.4W.1 *Funding-spend band.* With the taker's `S` at 34,720, a
+funding-spend preimage whose fee is 31,564 or 38,577 is accepted and one whose
+fee is 31,563, 38,578, 15,000 or 10,000 is refused, the taker recording
+`TakerFundingRefundRequired` with the funding-spend preimage validation reason.
+
+T39.11.4W.2 *Funding-spend band under every arm.* T39.11.4W.1 gives the same
+results under `Standard`, `WithBurn` and `NoFee`.
+
+T39.11.4W.3 *Taker-payment spend, `NoFee`.* A taker-payment-spend preimage
+whose maker output is one zatoshi higher or lower than the maker's rebuild is
+refused, the maker recording `MakerPaymentRefundRequired` with the reason
+*taker payment-spend preimage invalid*; both sides end refunded.
+
+T39.11.4W.4 *Taker-payment spend, `Standard`.* The maker finalizes with its own
+fee whatever the taker's `S` was; nothing is refused.
+
+T39.11.4W.5 *Legacy swap.* A legacy swap in which the DEX fee transaction, the
+payments, the spends and the refunds pay 10,000 zatoshi each runs to
+completion against a reference peer whose `S` is 34,720, and no penalty is
+listed by `list_banned_pubkeys` afterwards.
+
+T39.11.4W.6 *No penalty in version two.* After a refusal of either kind in
+T39.11.4W.1 or T39.11.4W.3, `list_banned_pubkeys` on both nodes is empty.
 
 ### 39.11.5 Swap-path transparent queries: reference contract and the Light-mode failure policy
 
@@ -7286,6 +7791,16 @@ R39.5.6--R39.5.8, and a fresh secret hash), so only this
 wallet's own payment can carry it. A mined record is trusted as the wallet
 database records it; a reorganization that the database's rewind handles clears
 its mined height.
+
+> **Status note (2026-11-18, Reloaded-original).** The send record of R39.11.26 is read from every wallet
+> database of the ticker in the login's database directory, not only the active one: the default file and
+> every per-key file of R39.8.0bd, the active one first. A recorded send that counts (the rule above) in
+> any of them answers "sent", so a swap step whose payment was recorded while another account or key was
+> active is not paid a second time. A file other than the active one that cannot be read is skipped with a
+> log line; an unreadable active file keeps the behavior above. The refusal of R39.8.0bd item 6 covers the
+> case in which that could matter. A per-key file that is not active is not scanned, so the mined heights
+> it holds are not rewound when the chain reorganizes; an unmined record in it still falls back to the
+> servers after its expiry (the rule above), so no second payment results.
 
 R39.11.27 **A fresh swap skips the already-sent question for a shielded coin's own
 payment.** *(binding; Reloaded-original, maintainer Decision AK of 2026-10-28;
@@ -8659,7 +9174,75 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   code differs from and agrees with R39.11.4V.2 -- R39.11.4V.10; no
   forbidden-class input beyond the cleared section it cites, chapter 01 R38 not
   engaged.
+- *Status notes added 2026-11-17 -- after D39.11.4V.2 and D39.11.4V.3.*
+  Reloaded-original, clean side: they record the maintainer's resolutions of
+  2026-11-17 and what this repository builds for them; no forbidden-class
+  input, chapter 01 R38 not engaged.
+- *Status note added 2026-11-17 -- under R39.11.4V.10.* Reloaded-original,
+  clean side: it records that Reloaded computes the fee over the version-5 size;
+  no forbidden-class input, chapter 01 R38 not engaged.
+- *Status notes added 2026-11-18 -- a later note after D39.11.4V.1, and notes
+  after D39.11.4V.3, after R39.11.4V.8 and after the status note under
+  R39.11.15.* Reloaded-original,
+  clean side: they record the maintainer's resolution of 2026-11-18 for version 6
+  and what this repository builds for it, from this repository's own code and the
+  published `zcash_primitives` 0.31.1 sources; no forbidden-class input, chapter
+  01 R38 not engaged.
+- *Status note added 2026-11-18 -- after D39.11.4V.1.* Reloaded-original,
+  clean side: it records the maintainer's resolution of 2026-11-18 and what this
+  repository builds for it; no forbidden-class input, chapter 01 R38 not
+  engaged.
+- *Status note added 2026-11-18 -- under R39.11.4V.10.* Reloaded-original,
+  clean side: it records the maintainer's decision of 2026-11-18 on the ZIP 317
+  fee for ZEC and what this repository builds for it, written from this
+  repository's code and the public ZIP 317; no forbidden-class input, chapter 01
+  R38 not engaged.
 - *Clean-context addition (2026-11-17), §39.8.0.3:* R39.8.0bc, T39.8.0j and the status
   note after R39.8.0ba are Reloaded-original, clean side, written from this repository's
   own code and the public SQLite documentation of `VACUUM INTO`; no forbidden-class input,
   chapter 01 R38 not engaged.
+- *Clean-context addition (2026-11-18), §39.8.0.3:* R39.8.0bd, T39.8.0k and the status notes after R39.6.4,
+  D39.5.a and R39.11.26 are Reloaded-original, clean side, written from this repository's own code; no
+  forbidden-class input, chapter 01 R38 not engaged.
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-14) -- §39.11.4W
+  (R39.11.4W.1 -- R39.11.4W.7, the consequence note, the compatibility note,
+  the not-established paragraph and T39.11.4W.1 -- T39.11.4W.6), the status
+  note of 2026-11-18 under R39.11.4V.10, and the status notes of the same date
+  after chapter 15 R22 and chapter 16 D5; no other text of this chapter or of
+  those chapters was changed.* **KDF Dirty Gate: PASS on 2026-11-18, measure
+  0.03, no findings** (chapter 01 R40; the attestation closes this item).
+  *Inputs:*
+  (1) the forbidden corpus at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  chapter 02 §2.15A, read read-only from the tags themselves, with the row
+  `main (as of 2026-10-07)` compared against `v3.0.0-beta` by tree difference
+  (only the read-me differs), consulted **only** to establish: which
+  validations of the version-one and version-two swap protocols, of the
+  watcher and of order handling compare a network fee chosen by the
+  counterparty for a transparent UTXO transaction with the node's own
+  estimate; which role builds and which validates each version-two preimage;
+  the threshold of each comparison; the state each refusal leads to; whether
+  any refusal bans a peer or marks an order; how a watcher reward on a UTXO
+  payment is enabled, priced and bounded at each row; and which DEX-fee arms a
+  UTXO taker coin takes in version two. Behavior, public state and event
+  names, coins-file field names and RPC names only; no private identifier,
+  function body, helper decomposition, error, log, comment or test text was
+  reproduced, and no value was taken from the reference's tests. (2) The
+  public ZIP 317, for the conventional-fee arithmetic of the consequence
+  note. (3) This repository's tree on the dev branch as of 2026-11-18, for
+  the compatibility note. The acceptance rows and the consequence note are
+  original to this subsection. No row was added to chapter 02 §2.15A: every
+  state read already had one, and each row's identifier was confirmed, by
+  read-only inspection of the historical record's reference metadata, to be
+  the commit compared. *Scope of the edit:* additions only; no sentence that
+  the Dirty Gate cleared is edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-18, measure
+  0.03, no leak findings. *Extent:* the building and validation of
+  transparent UTXO swap transactions in the version-one and version-two
+  protocols, including the watcher validations and the bound on a watcher
+  reward; the version-two maker and taker state machines, for the roles of
+  the preimages; and the order volume floor. About six files were read at
+  each of the rows `v2.6.0-beta` and `v3.0.0-beta`; `main (as of
+  2026-10-07)` was compared by tree difference (only the read-me differs).
+  *Method:* reading, plus token searches for identifiers, numeric values
+  and band constants across both tag trees; the figures of the acceptance
+  rows do not occur in the corpus. *Measure:* 0.03.

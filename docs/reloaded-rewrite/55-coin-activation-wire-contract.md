@@ -225,6 +225,16 @@ risk.
 > KDF Dirty Gate on 2026-11-08), which also records that a versioned request for a
 > legacy-only method answers `NoSuchMethod` in the reference as it does here.
 
+> **Status note (2026-11-18, Reloaded-original; informative).** By the
+> maintainer's decision of 2026-11-18, Reloaded no longer HTML-escapes answer
+> bodies: every answer is written as the handler produced it, so `<`, `>` and
+> `&` in answer strings (URLs with query strings, memos, error texts, labels)
+> reach the client unchanged. The cross-cutting difference that the "Reloaded
+> status" note above names is closed. The request-side refusal of a request body
+> that contains `<`, `>` or `&` remains, unchanged and not decided.
+> Every answer now carries `X-Content-Type-Options: nosniff`, and
+> `Content-Type: application/json` where the method set no content type.
+
 ---
 
 ## 55.2 Task-framework methods (shared by every `task::` activation family)
@@ -642,6 +652,10 @@ text is "TRON support is not available in this build" (TRX, TRC20; build
 constant `TRON_ACTIVATION_AVAILABLE`) or "Solana support is not available in
 this build" (Solana, Solana tokens; `SOLANA_ACTIVATION_AVAILABLE`), and nothing
 is registered.
+
+*Status note (2026-11-20).* TRX and TRC20 are activated on this path again
+(D55.5 and its status note of this date); the TRON rejection text above no
+longer exists.
 
 **R55.4.8** *Sia on the legacy path.* A coin whose configured protocol is the
 Sia protocol is activated synchronously by the legacy path, with the request
@@ -1418,12 +1432,34 @@ and the legacy `enable` / `electrum` route stays as the documented extension
 `TRON_ACTIVATION_AVAILABLE` (`false`), so the beta-availability suspension above
 still holds on every route until the constant is set.
 
+*Status note (2026-11-20), the suspension ends.* `TRON_ACTIVATION_AVAILABLE` is
+`true` from this date. Legacy `enable` and `electrum` activate TRX and TRC20
+again, as the documented extension this item decides, and the mmrpc 2.0 methods
+of the note above activate them too; no route answers "TRON support is not
+available in this build" any more. A TRON coin is activated as a wallet-only
+coin on every route: Reloaded has no TRON swap, and while the build constant
+`TRON_SWAPS_AVAILABLE` is `false` the coin reports wallet-only whatever its
+coins-config entry says (chapter 21 R-D1, R21.10B.9, R21.B3 and their status
+notes of 2026-11-20). The sentences of R55.4.7 and of the "Reloaded status" box
+after R55.4.9 that say TRX and TRC20 are refused in this beta describe the tree
+until this date; the Solana part of R55.4.7 is unchanged.
+
 **D55.6** *Re-activation of a passive platform coin.* The reference release
 treats a platform coin that was disabled while dependent tokens stayed active
 (a passive coin) as re-activatable by the platform activation methods
 instead of answering `PlatformIsAlreadyActivated`. Whether Reloaded has passive
 coins at all is a [Chapter 43](43-daemon-rpc-dispatcher-and-misc-maintenance.md)
 question (`disable_coin`); the activation side is deferred to it.
+
+*Status note (2026-11-18), decided and pointed.* The maintainer decided that
+Reloaded builds the passive state in 0.5.0. The activation side this item
+defers -- re-activation by the platform-with-tokens methods in both forms,
+requested tokens that are already registered, token and layer-two
+activations while the platform is passive, and what the standalone and
+legacy activations do for a passive ticker -- is stated in chapter 43
+§43.1F (R43.1F.2 -- R43.1F.9, with D43.1F.1, D43.1F.2, D43.1F.4 and
+D43.1F.5 open), which passed the KDF Dirty Gate on 2026-11-18. This note binds
+nothing of its own.
 
 **D55.7** *Inline NFT activation and the activation lock (deferred past the
 beta, 2026-10-29).* An `enable_eth_with_tokens` request with `nft_req`
@@ -1441,6 +1477,23 @@ it stops when none is. If its first check runs before the registration, the
 platform's history collection never starts. This was found by reading this
 repository's code, and has not been reproduced. Starting the loop after the
 registration is deferred.
+
+*Status note (2026-11-18), passive state.* Once the passive state of D55.6 is
+built, a passive platform stays registered, and chapter 43 R43.1F.10 item 2
+(passed the KDF Dirty Gate on 2026-11-18) keeps its history collection running while it
+is passive. The per-pass check this item describes has to count a passive
+platform as registered, or the platform's history stops when it becomes
+passive. Whether a re-activation starts a collector is chapter 43 R43.1F.3
+and D43.1F.5. The note adds no reference content: the consequence it draws
+for this repository's loop follows from R43.1F.10 item 2.
+
+*Reloaded status note (2026-11-20), history start.* The history collector of a
+first activation with `tx_history` now starts after the registry has accepted
+the platform, so the loop's first registration check finds it and a failure
+before the registration leaves no loop behind. A re-activation starts none
+(chapter 43 D43.1F.5 (a)). The per-pass check counts a passive platform as
+registered, as the note above requires. The note states this repository's
+own behavior and adds no reference content.
 
 ## 55.14 Baseline Verifications
 
@@ -1654,3 +1707,16 @@ R55.4.5 and the error body of R55.1.10.
   *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
   0.00, no findings; the pointer was judged with its target, whose clearance
   is recorded in chapter 21's provenance footer of the same date.
+- *Status notes added 2026-11-18 (Spec Reader round 0.5.0-13) -- after D55.6
+  and after D55.8.* The first records the maintainer's decision to build the
+  passive state in 0.5.0 and points to chapter 43 §43.1F; the second draws
+  the consequence of chapter 43 R43.1F.10 item 2 for this repository's EVM
+  history loop. Neither states reference behavior of its own; both are
+  written by the Spec Reader and travel with chapter 43 §43.1F for the KDF
+  Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
+  43's provenance footer.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status notes of this date after R55.4.7 and under D55.5 (the TRON suspension
+  ends; TRON activates as a wallet-only coin family) are Reloaded-original.
+  They add no reference content, so chapter 01 R38 is not engaged and no
+  clearance above is widened. No cleared sentence was edited.

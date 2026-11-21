@@ -17,7 +17,8 @@ use crate::utxo::qtum::{QtumBasedCoin, QtumCoin, QtumDelegationOps, QtumDelegati
 use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
 use crate::utxo::rpc_clients::with_call_budget;
 use crate::utxo::UtxoCoinFields;
-use crate::{disable_coin, lp_coinfind, lp_coininit, MmCoinEnum, StakingInfosDetails, WithdrawRequest};
+use crate::{disable_coin, disable_platform_with_dependents, lp_coinfind, lp_coininit, CoinsContext, MmCoinEnum,
+            StakingInfosDetails, WithdrawRequest};
 use chain::{OutPoint, TransactionInput};
 use common::block_on;
 use crypto::CryptoCtx;
@@ -174,7 +175,47 @@ async fn wait_until(what: &str, secs: f64, cond: impl Fn() -> bool) {
     }
 }
 
+/// The number of strong holders of a client once it has settled: the count stayed the same for 2 s. The maintenance
+/// loop of the client holds a strong handle for the length of a pass (activation pass, resubscription), a transient
+/// that comes and goes; a handle kept by a failed activation never goes. Both the baseline and the final count are
+/// taken settled and compared for equality, so a transient is waited out in either direction and a kept clone shows
+/// as one more holder at the end.
+async fn settled_strong_count<T>(weak: &std::sync::Weak<T>) -> usize {
+    let started = std::time::Instant::now();
+    let (mut last, mut since) = (weak.strong_count(), std::time::Instant::now());
+    while since.elapsed().as_secs_f64() < 2. {
+        assert!(
+            started.elapsed().as_secs_f64() < 60.,
+            "the holders of the client did not settle"
+        );
+        Timer::sleep(0.2).await;
+        let now = weak.strong_count();
+        if now != last {
+            (last, since) = (now, std::time::Instant::now());
+        }
+    }
+    last
+}
+
 fn balance_of(units: u64) -> BigDecimal { big_decimal_from_sat(units as i64, 8) }
+
+fn electrum_client_of(coin: &Qrc20Coin) -> ElectrumClient {
+    let UtxoRpcClientEnum::Electrum(client) = coin.utxo.rpc_client.clone() else {
+        panic!("an Electrum activation builds an Electrum client")
+    };
+    client
+}
+
+/// Waits until `count` sessions of the token's client are maintained, so that a test that counts the sessions or the
+/// requests of a request that goes over them starts from the maintained set.
+async fn wait_maintained(coin: &Qrc20Coin, count: usize) {
+    let client = electrum_client_of(coin);
+    let started = std::time::Instant::now();
+    while client.count_connected().await != count {
+        assert!(started.elapsed().as_secs() < 10, "{count} sessions must be maintained");
+        Timer::sleep(0.02).await;
+    }
+}
 
 // ---- T38.6.4Q.2: methods at activation ----
 
@@ -230,6 +271,9 @@ fn t38_6_4q_2_activation_without_decimals_asks_for_decimals_before_the_balance()
 
 // ---- T38.6.4Q.3: an error answer at activation ----
 
+/// D38.6.4Q.2 status note, item 1: the error answer moves the request on, but a server that answered a request with an
+/// error is not asked again within it, the retry included, so the one listed server is asked once per attempt, and the
+/// failure is R38.6.4i's. (Before the decision the error answer ended the request, also asked once.)
 #[test]
 fn t38_6_4q_3_error_answer_to_the_activation_balance_read_fails_it_and_a_retry_fails_the_same_way() {
     block_on(async {
@@ -240,12 +284,15 @@ fn t38_6_4q_3_error_answer_to_the_activation_balance_read_fails_it_and_a_retry_f
         let (first, coin) = activate_like_electrum(&env, &[&server], false).await;
         let first = first.unwrap_err();
         assert!(first.contains("stub contract error"), "{first}");
+        // The failure names the server and its error (R38.6.4i).
+        assert!(first.contains(&server.addr()), "{first}");
         // The token is not active (deregistered again), and the stub's session is still open: the error answer
         // did not close the session of the client that is still held here.
         assert!(!is_registered(&env).await);
         let coin = coin.unwrap();
         assert!(server.open_connections() >= 1);
-        assert_eq!(server.requests(CALL), 1, "nothing is repeated inside the activation");
+        let after_first = server.requests(CALL);
+        assert_eq!(after_first, 1);
 
         // A second attempt fails the same way: not as "already initialized".
         let (second, _coin) = activate_like_electrum(&env, &[&server], false).await;
@@ -253,11 +300,13 @@ fn t38_6_4q_3_error_answer_to_the_activation_balance_read_fails_it_and_a_retry_f
         assert!(second.contains("stub contract error"), "{second}");
         assert!(!second.contains("already"), "{second}");
         assert!(!is_registered(&env).await);
-        assert_eq!(server.requests(CALL), 2);
+        let asked_second = server.requests(CALL) - after_first;
+        assert_eq!(asked_second, 1);
         drop(coin);
     });
 }
 
+/// As above for the `decimals()` read of the build: the build fails with the failure of R38.6.4i and registers nothing.
 #[test]
 fn t38_6_4q_3_error_answer_to_the_decimals_read_fails_the_build_and_registers_nothing() {
     block_on(async {
@@ -271,13 +320,13 @@ fn t38_6_4q_3_error_answer_to_the_decimals_read_fails_the_build_and_registers_no
             .expect("the build fails");
         assert!(first.contains("stub contract error"), "{first}");
         assert!(!is_registered(&env).await);
-        assert_eq!(server.requests(CALL), 1, "nothing is repeated");
-        // Only the `decimals()` call was asked.
-        assert_eq!(server.request_params(CALL), [json!([
-            TOKEN_CONTRACT,
-            DECIMALS_CALL_DATA,
-            ""
-        ])]);
+        // Asked once (see above), and only the `decimals()` call.
+        let after_first = server.requests(CALL);
+        assert_eq!(after_first, 1);
+        assert!(server
+            .request_params(CALL)
+            .iter()
+            .all(|params| params == &json!([TOKEN_CONTRACT, DECIMALS_CALL_DATA, ""])));
 
         // A second attempt fails the same way, not as "already initialized".
         let second = init_token(&env, &[&server], false)
@@ -286,12 +335,15 @@ fn t38_6_4q_3_error_answer_to_the_decimals_read_fails_the_build_and_registers_no
             .expect("the build fails again");
         assert!(second.contains("stub contract error"), "{second}");
         assert!(!second.contains("already"), "{second}");
-        assert_eq!(server.requests(CALL), 2);
+        assert_eq!(server.requests(CALL) - after_first, 1);
     });
 }
 
+/// D38.6.4Q.2 status note, item 1: the first server answers the contract call with an error, the second answers it
+/// correctly, later. The activation succeeds from the second server, the token is registered, and the first server's
+/// session is not closed. (Before the decision the error answer ended the activation.)
 #[test]
-fn t38_6_4q_3_first_error_answer_ends_the_activation_although_another_server_answers_correctly() {
+fn t38_6_4q_2_error_answer_of_the_first_server_moves_the_activation_on_to_the_second() {
     block_on(async {
         let env = token_env(Some(8));
         // Listed first: answers the contract call with an error at once. Listed second: answers it correctly, later.
@@ -300,60 +352,99 @@ fn t38_6_4q_3_first_error_answer_ends_the_activation_although_another_server_ans
         let correct = token_stub(5).await;
         correct.set_reply_delay(CALL, Duration::from_millis(400));
 
-        let (outcome, _coin) = activate_like_electrum(&env, &[&erring, &correct], false).await;
+        let (outcome, coin) = activate_like_electrum(&env, &[&erring, &correct], false).await;
+        assert_eq!(outcome.unwrap().spendable, balance_of(5));
+        assert!(is_registered(&env).await);
+        let _coin = coin.unwrap();
+        assert_eq!(erring.requests(CALL), 1, "not asked again within the request");
+        assert_eq!(correct.requests(CALL), 1);
+        // That the error answer closes no session is tested where the sessions are maintained before the request
+        // (`t38_6_4q_4_error_answer_to_a_balance_read_moves_on_and_only_every_server_failing_fails_the_read`): during an
+        // activation the first request may be the one that connects the servers, and a connection that request opened
+        // to a server that is not maintained is released afterwards (R38.6.4f item 2).
+    });
+}
+
+/// Every listed server answers an error: the activation fails with the failure of R38.6.4i, naming each server.
+#[test]
+fn t38_6_4q_2_every_server_answering_an_error_fails_the_activation_naming_each_server() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let first = token_stub(1).await;
+        first.set_error(CALL, "first stub error");
+        let second = token_stub(2).await;
+        second.set_error(CALL, "second stub error");
+
+        let (outcome, _coin) = activate_like_electrum(&env, &[&first, &second], false).await;
         let error = outcome.unwrap_err();
-        assert!(error.contains("stub contract error"), "{error}");
+        let (first_addr, second_addr) = (first.addr(), second.addr());
+        for expected in [
+            "first stub error",
+            "second stub error",
+            first_addr.as_str(),
+            second_addr.as_str(),
+        ] {
+            assert!(error.contains(expected), "{error}");
+        }
         assert!(!is_registered(&env).await);
-        assert_eq!(erring.requests(CALL), 1);
-        // The request is one request: the error answer ended it. Observed: the second server was not asked at all
-        // (the request went to the highest-ranked session). Were it asked, it would be once and its answer unused.
-        assert!(correct.requests(CALL) <= 1);
     });
 }
 
 // ---- T38.6.4Q.4: an error answer to a balance read ----
 
+/// D38.6.4Q.2 status note, item 1 (before it, one server's error answer failed the read although the other answered).
+/// The read goes on to the second server and succeeds; only when every server answers an error does it fail, and the
+/// next read asks again.
 #[test]
-fn t38_6_4q_4_error_answer_to_a_balance_read_fails_the_read_and_the_next_read_asks_again() {
+fn t38_6_4q_4_error_answer_to_a_balance_read_moves_on_and_only_every_server_failing_fails_the_read() {
     block_on(async {
         let env = token_env(Some(8));
         let first = token_stub(100).await;
         let second = token_stub(200).await;
         let coin = init_token(&env, &[&first, &second], false).await.unwrap();
-        let UtxoRpcClientEnum::Electrum(client) = coin.utxo.rpc_client.clone() else {
-            panic!("an Electrum activation builds an Electrum client")
-        };
-        let started = std::time::Instant::now();
-        while client.count_connected().await != 2 {
-            assert!(started.elapsed().as_secs() < 10, "both sessions must be maintained");
-            Timer::sleep(0.02).await;
-        }
+        wait_maintained(&coin, 2).await;
 
         // The higher-ranked (first listed) server takes the read.
         assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(100));
         assert_eq!((first.requests(CALL), second.requests(CALL)), (1, 0));
 
-        // It starts answering with an error: the read fails, no other server is asked, no earlier value is served.
+        // It starts answering with an error: the read goes on to the second server and succeeds with its value.
         first.set_error(CALL, "stub contract error");
         let sessions = first.open_connections();
-        let error = coin.my_balance().compat().await.unwrap_err().to_string();
-        assert!(error.contains("stub contract error"), "{error}");
-        assert_eq!((first.requests(CALL), second.requests(CALL)), (2, 0));
-        // The session stays open and the token stays enabled.
+        assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(200));
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (2, 1));
+        // The session stays open, the server stays maintained and the token stays enabled.
         assert_eq!(first.open_connections(), sessions);
-        assert!(sessions >= 1);
+        assert_eq!(sessions, 1);
+        assert_eq!(first.accepted(), 1);
         assert!(is_registered(&env).await);
 
-        // Still failing: asked again, fails again (no value kept from the first read).
+        // Every server answers an error: the read fails with the failure of R38.6.4i, and no earlier value is served.
+        second.set_error(CALL, "second stub error");
+        let error = coin.my_balance().compat().await.unwrap_err().to_string();
+        let (first_addr, second_addr) = (first.addr(), second.addr());
+        for expected in [
+            "stub contract error",
+            "second stub error",
+            first_addr.as_str(),
+            second_addr.as_str(),
+        ] {
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(is_registered(&env).await);
+        // Each server is asked once per read: an error answer is not asked again within the request.
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (3, 2));
         let error = coin.my_balance().compat().await.unwrap_err().to_string();
         assert!(error.contains("stub contract error"), "{error}");
-        assert_eq!((first.requests(CALL), second.requests(CALL)), (3, 0));
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (4, 3));
+        assert_eq!((first.open_connections(), second.open_connections()), (1, 1));
 
         // After the recovery the next read asks again and succeeds with the new value.
         first.clear_error(CALL);
+        second.clear_error(CALL);
         serve_balance(&first, 300);
         assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(300));
-        assert_eq!((first.requests(CALL), second.requests(CALL)), (4, 0));
+        assert_eq!((first.requests(CALL), second.requests(CALL)), (5, 3));
     });
 }
 
@@ -592,7 +683,7 @@ fn t38_6_4q_6_history_request_error_is_a_retry_and_only_the_exact_history_too_la
                 {"tx_hash": "bb".repeat(32), "height": 6, "log_index": 0},
             ]),
         );
-        let RequestTxHistoryResult::Ok(ids) = coin.request_tx_history(env.ctx.metrics.clone()).await else {
+        let RequestTxHistoryResult::Ok(ids, _) = coin.request_tx_history(env.ctx.metrics.clone()).await else {
             panic!("a list is a history")
         };
         assert_eq!(ids.len(), 2);
@@ -610,26 +701,263 @@ fn t38_6_4q_6_history_request_error_is_a_retry_and_only_the_exact_history_too_la
     });
 }
 
+/// A pass whose history request failed is repeated after the backoff, and the state is not an error while fewer than
+/// three passes in a row failed. Each failed pass asks the one listed server once.
 #[test]
 fn t38_6_4q_6_history_request_error_is_asked_again_after_the_backoff_and_the_state_is_not_an_error() {
     block_on(async {
         let env = token_env(Some(8));
         let server = token_stub(1).await;
         server.set_error(GET_HISTORY, "stub history error");
-        // `tx_history` true: the collector of the token runs (the real activation path).
-        let coin = init_token(&env, &[&server], true).await.unwrap();
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        // The collector of the token runs (the real activation path starts it with `tx_history`; here by hand, on the
+        // coin whose session is maintained, so that the asks are counted exactly).
+        let collector = coin.clone();
+        let ctx = env.ctx.clone();
+        common::executor::spawn(async move { collector.history_loop(ctx).await });
 
         wait_until("the first history request", 10., || server.requests(GET_HISTORY) == 1).await;
         // The collector backs off 10 s (this tree's first retry delay); it does not ask again at once.
         Timer::sleep(4.).await;
         assert_eq!(server.requests(GET_HISTORY), 1);
-        // The history state is not an error: the failed request leaves it where it was.
-        assert!(matches!(coin.history_sync_status(), HistorySyncState::NotStarted));
+        // The history state is not an error (the coin was built without `tx_history`, so its state is not `NotStarted`):
+        // the failed request leaves it where it was.
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
 
         wait_until("the second history request", 12., || server.requests(GET_HISTORY) == 2).await;
-        assert!(matches!(coin.history_sync_status(), HistorySyncState::NotStarted));
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
         // Every pass began with its own balance read.
         assert_eq!(server.requests(CALL), 2);
+    });
+}
+
+/// The classification the collector counts by (amendment after R38.6.4Q.6, "Counting"): a call on which every server
+/// tried answered with an error answer is `EveryServerAnsweredAnError`; a call on which a server failed by transport is
+/// `TransportFailure`; an answer, an unreadable answer and `history too large` are `Other`.
+#[test]
+fn t38_6_4q_6_the_history_request_is_classified_by_what_the_servers_did() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let metrics = || env.ctx.metrics.clone();
+
+        server.set_error(GET_HISTORY, "stub history error");
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::EveryServerAnsweredAnError);
+
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!("not a list"));
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::Other, "an unreadable answer is an answer");
+
+        server.set_error_object(GET_HISTORY, json!({"code": 1, "message": "history too large"}));
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::HistoryTooLarge));
+        assert_eq!(kind, HistoryPassKind::Other);
+
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!([]));
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Ok(..)));
+        assert_eq!(kind, HistoryPassKind::Other);
+
+        // The only server is down: a transport failure, which neither counts nor resets.
+        server
+            .set_behavior(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Down)
+            .await;
+        let (outcome, kind) = coin.request_tx_history_counted(metrics()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::TransportFailure);
+    });
+}
+
+/// A mix of one server that answers with an error and one that is down is a transport failure too: the pass neither
+/// counts nor resets. The erroring server is asked once, not again in the retry.
+#[test]
+fn t38_6_4q_6_one_erroring_and_one_down_server_neither_count_nor_reset() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let erring = token_stub(1).await;
+        let down = token_stub(1).await;
+        let coin = init_token(&env, &[&erring, &down], false).await.unwrap();
+        wait_maintained(&coin, 2).await;
+        erring.set_error(GET_HISTORY, "stub history error");
+        down.set_behavior(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Down)
+            .await;
+
+        let (outcome, kind) = coin.request_tx_history_counted(env.ctx.metrics.clone()).await;
+        assert!(matches!(outcome, RequestTxHistoryResult::Retry { .. }));
+        assert_eq!(kind, HistoryPassKind::TransportFailure);
+        assert_eq!(erring.requests(GET_HISTORY), 1);
+    });
+}
+
+/// The counter: three passes in a row whose every server answered with an error end the collector; a pass that gets
+/// any other outcome resets the count; a pass with a transport failure neither counts nor resets it.
+#[test]
+fn t38_6_4q_6_three_all_error_passes_in_a_row_end_the_collector_a_transport_pass_changes_nothing() {
+    use HistoryPassKind::*;
+    let mut passes = AllErrorPasses::default();
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(Other), "an answer resets the count");
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(EveryServerAnsweredAnError));
+    assert!(!passes.pass(TransportFailure), "a transport pass does not count");
+    assert!(!passes.pass(TransportFailure), "and does not reset");
+    assert!(
+        passes.pass(EveryServerAnsweredAnError),
+        "the third counted pass in a row ends the collector"
+    );
+    // An offline node: transport failures alone never end it.
+    let mut offline = AllErrorPasses::default();
+    for _ in 0..100 {
+        assert!(!offline.pass(TransportFailure));
+    }
+    assert_eq!(ALL_ERROR_PASSES_LIMIT, 3);
+}
+
+/// With the server down (transport failures only) the collector goes on: it is still running after the time in which
+/// three error-answer passes would have ended it, and the history state is not an error.
+#[test]
+fn t38_6_4q_6_passes_with_the_server_down_do_not_end_the_collector() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        server
+            .set_behavior(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Down)
+            .await;
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = coin.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+        // The balance read fails too while the server is down, so these are passes that fail before the history
+        // request; what is observed is that nothing ends the collector or sets an error.
+        Timer::sleep(25.).await;
+        assert!(!ended.load(AtomicOrdering::SeqCst));
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
+    });
+}
+
+/// CRD ch.38 amendment of 2026-11-17 after R38.6.4Q.6: three passes in a row whose history request failed on every
+/// server tried end the collector. The token's history state is an error that names the cause, `history too large`
+/// keeps its own code, no further history request follows, and activating the token again starts a fresh collector.
+#[test]
+fn t38_6_4q_6_three_all_error_passes_end_the_collector_with_the_named_sync_status_error_and_a_new_activation_starts_again(
+) {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(42).await;
+        server.set_error(GET_HISTORY, "stub history error");
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = coin.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+
+        // Pass one, a 10 s backoff, pass two, a 20 s backoff, pass three.
+        wait_until("the collector to end", 45., || ended.load(AtomicOrdering::SeqCst)).await;
+        let HistorySyncState::Error(error) = coin.history_sync_status() else {
+            panic!("the history state is an error")
+        };
+        // Its own message (the cause), not the one of `history too large` and not its code.
+        assert_eq!(error["code"], json!(HISTORY_NO_SERVER_ANSWERS_ERR_CODE));
+        assert_ne!(error["code"], json!(HISTORY_TOO_LARGE_ERR_CODE));
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("No listed Electrum server answers"), "{message}");
+        assert!(!message.contains("history too large"), "{message}");
+        // Three passes, one ask each; no further history request, and no further pass.
+        assert_eq!(server.requests(GET_HISTORY), 3);
+        assert_eq!(server.requests(CALL), 3);
+        Timer::sleep(2.).await;
+        assert_eq!((server.requests(GET_HISTORY), server.requests(CALL)), (3, 3));
+
+        // The balance still answers, and activating the token again starts a fresh collector.
+        assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(42));
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!([]));
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        let again = init_token(&env, &[&server], true).await.unwrap();
+        wait_until("the new collector's history", 10., || {
+            matches!(again.history_sync_status(), HistorySyncState::Finished)
+        })
+        .await;
+    });
+}
+
+/// A pass that gets a history answer resets the count: two failed passes, a pass that gets an answer, then a failed
+/// pass do not end the collector (without the reset the failed pass after the answer would be the third in a row).
+#[test]
+fn t38_6_4q_6_a_pass_that_gets_a_history_answer_resets_the_count_of_all_error_passes() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1_200).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let (a, b) = two_served_txs(&coin);
+        serve_tx(&server, &a);
+        serve_tx(&server, &b);
+        // Pass three lists A and B, and A's details fail, so that pass four follows pass three after the retry delay.
+        server.set_params_error(
+            GET_RECEIPT,
+            json!([txid_of(&a.tx)]),
+            json!({"code": 3, "message": "no receipt"}),
+        );
+        wait_maintained(&coin, 1).await;
+        server.set_error(GET_HISTORY, "stub history error");
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = coin.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+
+        // Passes one and two fail (one ask each); the third pass, after the 20 s backoff, gets an answer.
+        wait_until("two failed passes", 20., || server.requests(GET_HISTORY) == 2).await;
+        // The stub has answered the last ask with its error by now; the next pass is 20 s away.
+        Timer::sleep(0.5).await;
+        server.clear_error(GET_HISTORY);
+        server.set_result(
+            GET_HISTORY,
+            json!([history_item(&a, 0), history_item(&b, 0), history_item(&b, 1)]),
+        );
+        wait_until("the pass that gets the answer", 30., || {
+            server.requests(GET_HISTORY) == 3
+        })
+        .await;
+        // Back to an error; pass four follows after the retry delay of the incomplete pass.
+        Timer::sleep(0.5).await;
+        server.set_error(GET_HISTORY, "stub history error");
+        wait_until("the failed pass after the answer", 20., || {
+            server.requests(GET_HISTORY) == 4
+        })
+        .await;
+        Timer::sleep(1.).await;
+        // Not the third failed pass in a row: the collector goes on and the state is not an error.
+        assert!(!ended.load(AtomicOrdering::SeqCst));
+        assert!(!matches!(coin.history_sync_status(), HistorySyncState::Error(_)));
     });
 }
 
@@ -668,6 +996,7 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
         let env = token_env(Some(8));
         let server = token_stub(1).await;
         let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
         let (a, b) = two_served_txs(&coin);
         serve_tx(&server, &a);
         serve_tx(&server, &b);
@@ -690,24 +1019,106 @@ fn t38_6_4q_6_failed_receipt_of_one_listed_transaction_leaves_it_out_and_stores_
         let stored: Vec<_> = history_map.values().flat_map(|rows| rows.values().cloned()).collect();
         assert_eq!(row_ids(&stored), [(txid_of(&b.tx), 0, 0), (txid_of(&b.tx), 0, 1),]);
         assert!(matches!(coin.history_sync_status(), HistorySyncState::Finished));
+        // A's receipt is asked once (the error answer moves the request on, and the one server is not asked again,
+        // D38.6.4Q.2 status note), B's once.
         assert_eq!(server.requests(GET_RECEIPT), 2);
         // A's verbose transaction was never asked: the receipt comes first and its failure leaves the transaction out.
         assert!(!server.request_params(GET_TX).contains(&json!([txid_of(&a.tx), true])));
 
-        // It stays absent while the balance is unchanged: the pass is not repeated (R38.6.4Q.6 item 1 and the
-        // code-quality finding after item 5). The same balance and no row without timestamp or height: no update.
+        // The balance and the stored rows alone do not ask for the history again (R38.6.4Q.6 item 1): the same balance
+        // and no row without timestamp or height: no update. The collector asks again for another reason, the
+        // incomplete pass (`must_ask`, the status note after the code-quality finding of R38.6.4Q.6), tested in
+        // `t38_6_4q_6_a_pass_that_left_a_transaction_out_asks_for_the_history_again_after_the_retry_delay`.
         let balance = CoinBalance {
             spendable: balance_of(1),
             unspendable: BigDecimal::from(0),
         };
-        assert!(!coin.check_if_history_update_is_needed(&history_map, &Some(balance.clone()), &balance));
+        assert!(!coin.check_if_history_update_is_needed(
+            &history_map,
+            &Some(balance.clone()),
+            &balance,
+            &AbsenceMarks::default(),
+            false
+        ));
         // A changed balance asks for the history again, and so does the first pass.
         let other = CoinBalance {
             spendable: balance_of(2),
             unspendable: BigDecimal::from(0),
         };
-        assert!(coin.check_if_history_update_is_needed(&history_map, &Some(balance.clone()), &other));
-        assert!(coin.check_if_history_update_is_needed(&history_map, &None, &balance));
+        assert!(coin.check_if_history_update_is_needed(
+            &history_map,
+            &Some(balance.clone()),
+            &other,
+            &AbsenceMarks::default(),
+            false
+        ));
+        assert!(coin.check_if_history_update_is_needed(&history_map, &None, &balance, &AbsenceMarks::default(), false));
+        // An incomplete pass asks for it whatever the balance.
+        assert!(coin.check_if_history_update_is_needed(
+            &history_map,
+            &Some(balance.clone()),
+            &balance,
+            &AbsenceMarks::default(),
+            true
+        ));
+    });
+}
+
+/// Status note after the code-quality finding of R38.6.4Q.6: a pass that left a listed transaction out, because a
+/// detail request failed, is incomplete, and the next pass asks for the history again after the retry delay, whatever
+/// the balance. Once the details succeed the collector goes back to balance-only passes. (Before the decision the
+/// transaction stayed out until the balance changed.)
+#[test]
+fn t38_6_4q_6_a_pass_that_left_a_transaction_out_asks_for_the_history_again_after_the_retry_delay() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1_200).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        wait_maintained(&coin, 1).await;
+        let (a, b) = two_served_txs(&coin);
+        serve_tx(&server, &a);
+        serve_tx(&server, &b);
+        server.set_result(
+            GET_HISTORY,
+            json!([history_item(&a, 0), history_item(&b, 0), history_item(&b, 1)]),
+        );
+        // A's receipt fails (an error object); B's is fine.
+        server.set_params_error(
+            GET_RECEIPT,
+            json!([txid_of(&a.tx)]),
+            json!({"code": 3, "message": "no receipt"}),
+        );
+        let collector = coin.clone();
+        let ctx = env.ctx.clone();
+        common::executor::spawn(async move { collector.history_loop(ctx).await });
+
+        // Pass one: the balance, the history, A's receipt (an error answer) and B's.
+        wait_until("pass one", 10., || server.requests(GET_RECEIPT) == 2).await;
+        let pass_one_done = std::time::Instant::now();
+        assert_eq!(server.requests(GET_HISTORY), 1);
+        // The balance is unchanged all along. A's details succeed from now on.
+        serve_tx(&server, &a);
+
+        // The next pass comes after the retry delay (10 s) and asks for the history again: its balance read, its
+        // history request, A's receipt (now succeeding), and not B's (stored).
+        wait_until("pass two", 15., || server.requests(GET_HISTORY) == 2).await;
+        assert!(
+            pass_one_done.elapsed().as_secs_f64() >= 8.0,
+            "{:?}",
+            pass_one_done.elapsed()
+        );
+        wait_until("pass three's balance read", 10., || server.requests(CALL) == 3).await;
+        assert_eq!(server.requests(GET_RECEIPT), 3);
+
+        // Pass three is balance-only: nothing is left out and the balance is unchanged, so it waits.
+        Timer::sleep(1.).await;
+        assert_eq!((server.requests(GET_HISTORY), server.requests(CALL)), (2, 3));
+        let rows = coin.load_history_from_file(&env.ctx).compat().await.unwrap();
+        assert_eq!(row_ids(&rows), [
+            (txid_of(&a.tx), 0, 0),
+            (txid_of(&b.tx), 0, 0),
+            (txid_of(&b.tx), 0, 1),
+        ]);
     });
 }
 
@@ -800,12 +1211,15 @@ fn t38_6_4q_5_collector_pass_asks_receipt_then_transaction_per_transaction_and_t
 
 const QTUM_TICKER: &str = "QTUM";
 const TOKEN_B_TICKER: &str = "QRC20B";
+const TOKEN_C_TICKER: &str = "QRC20C";
 const TOKEN_B_CONTRACT: &str = "fe59cbc1704e89a698571413a81f0de9d8f00c69";
 const DOC_TICKER: &str = "DOC";
 const LIST_UNSPENT: &str = "blockchain.scripthash.listunspent";
 const BROADCAST: &str = "blockchain.transaction.broadcast";
 const EVENT_SUBSCRIBE: &str = "blockchain.contract.event.subscribe";
 const SERVER_VERSION: &str = "server.version";
+const SERVER_PING: &str = "server.ping";
+const SCRIPTHASH_SUBSCRIBE: &str = "blockchain.scripthash.subscribe";
 /// The answer of every accepted broadcast: a transaction id (the client does not compare it with the transaction).
 const ACCEPTED_TXID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
@@ -813,17 +1227,24 @@ const ACCEPTED_TXID: &str = "000000000000000000000000000000000000000000000000000
 /// another so that no other test of this part lengthens the wait of the one that measures.
 static LOCK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn family_env() -> TokenEnv {
+fn family_env() -> TokenEnv { family_env_with_decimals(Some(8)) }
+
+/// The family of [`family_env`], with the tokens' `decimals` as given (`None`: the build asks the contract for them).
+/// Token C differs from the others by its coin entry's `avg_blocktime` alone: a different block interval.
+fn family_env_with_decimals(decimals: Option<u8>) -> TokenEnv {
     let root = std::env::temp_dir().join(format!(
         "kdf-qrc20-stub-{}-{}",
         std::process::id(),
         ENV_COUNTER.fetch_add(1, AtomicOrdering::SeqCst)
     ));
-    let mut token_a = token_conf(Some(8));
+    let mut token_a = token_conf(decimals);
     token_a["txfee"] = json!(1000);
     let mut token_b = token_a.clone();
     token_b["coin"] = json!(TOKEN_B_TICKER);
     token_b["protocol"]["protocol_data"]["contract_address"] = json!(format!("0x{TOKEN_B_CONTRACT}"));
+    let mut token_c = token_b.clone();
+    token_c["coin"] = json!(TOKEN_C_TICKER);
+    token_c["avg_blocktime"] = json!(60);
     let qtum = json!({
         "coin": QTUM_TICKER,
         "required_confirmations": 0,
@@ -850,7 +1271,7 @@ fn family_env() -> TokenEnv {
     });
     let ctx = MmCtxBuilder::new()
         .with_conf(json!({
-            "coins": [qtum, token_a, token_b, doc],
+            "coins": [qtum, token_a, token_b, token_c, doc],
             "dbdir": root.to_str().unwrap(),
             "electrum_server_order": "listed",
             "electrum_spread_reads": false,
@@ -959,71 +1380,530 @@ fn inputs_of(tx: &UtxoTx) -> Vec<(String, u32)> {
 
 fn outpoint(tx: &UtxoTx, index: u32) -> (String, u32) { (txid_of(tx), index) }
 
+/// The Electrum client of the QTUM instance.
+fn qtum_client_of(coin: &QtumCoin) -> ElectrumClient {
+    let UtxoRpcClientEnum::Electrum(client) = AsRef::<UtxoCoinFields>::as_ref(coin).rpc_client.clone() else {
+        panic!("an Electrum activation builds an Electrum client")
+    };
+    client
+}
+
+/// The tip height, asked over the client: a request an instance makes of its servers.
+async fn height_over(client: &ElectrumClient) -> u64 {
+    crate::utxo::rpc_clients::UtxoRpcClientOps::get_block_count(client)
+        .compat()
+        .await
+        .unwrap()
+}
+
+fn same_client(first: &ElectrumClient, second: &ElectrumClient) -> bool { std::sync::Arc::ptr_eq(&first.0, &second.0) }
+
+/// A reconnect of every session: the stub drops them, and the client opens a new one.
+async fn reconnect_all(server: &StubServer) {
+    let accepted = server.accepted();
+    server.kill_connections();
+    wait_until("the client to reconnect", 60., || {
+        server.accepted() > accepted && server.open_connections() == 1
+    })
+    .await;
+}
+
 // ---- T38.6.4Q.1: sessions per family ----
 
+/// D38.6.4Q.1 status note, items 1 and 2. Before the decision each instance had a client of its own: three sessions,
+/// three `server.version` and three tips for QTUM and two tokens, and the disable of a token closed one of them. Now
+/// instances whose client inputs are all equal share one client, one session, one ping loop.
 #[test]
-fn t38_6_4q_1_one_session_per_instance_each_with_its_own_version_and_a_disabled_token_closes_one() {
+fn t38_6_4q_1_qtum_and_two_tokens_with_the_same_servers_share_one_client_one_session_and_one_ping_loop() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
         let qtum = init_qtum(&env, &[&server]).await;
         let token_a = init_token_named(&env, TICKER, &[&server], false).await;
         let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
-        wait_until("three sessions", 10., || server.open_connections() == 3).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
         // Let any further session show up.
         Timer::sleep(1.).await;
 
-        // Parity (R38.6.4Q.1 item 4): three sessions to the one server, each with its own `server.version`.
-        assert_eq!(server.open_connections(), 3);
-        assert_eq!(server.accepted(), 3);
-        assert_eq!(server.requests(SERVER_VERSION), 3);
-        // Each instance asked its own tip over its own session.
-        assert_eq!(server.requests(TIP_METHOD), 3);
-        assert_eq!(server.header_subscriptions(), 3);
+        // One session to the one server, with one `server.version` and one tip.
+        assert_eq!(server.open_connections(), 1);
+        assert_eq!(server.accepted(), 1);
+        assert_eq!(server.requests(SERVER_VERSION), 1);
+        assert_eq!(server.requests(TIP_METHOD), 1);
+        assert_eq!(server.header_subscriptions(), 1);
+        let client = qtum_client_of(&qtum);
+        assert!(same_client(&client, &electrum_client_of(&token_a)));
+        assert!(same_client(&client, &electrum_client_of(&token_b)));
 
-        // The node's handles are the registry entries. Drop the ones of this test, then disable token A.
-        drop((qtum, token_a, token_b));
-        disable_coin(&env.ctx, TICKER).await.unwrap();
-        wait_until("two sessions", 10., || server.open_connections() == 2).await;
-        Timer::sleep(1.).await;
-        // Exactly one session closed; the other two stay and nothing reconnected.
-        assert_eq!(server.open_connections(), 2);
-        assert_eq!(server.accepted(), 3);
-
-        // The token that is left still answers over its session.
-        let Some(MmCoinEnum::Qrc20Coin(token_b)) = lp_coinfind(&env.ctx, TOKEN_B_TICKER).await.unwrap() else {
-            panic!("token B is still enabled")
-        };
+        // A request from each instance is served, over that session.
+        assert_eq!(height_over(&client).await, 777);
+        assert_eq!(
+            token_a.my_balance().compat().await.unwrap().spendable,
+            balance_of(1_000)
+        );
         assert_eq!(
             token_b.my_balance().compat().await.unwrap().spendable,
             balance_of(2_000)
         );
-        assert_eq!(server.accepted(), 3);
+        assert_eq!(server.accepted(), 1);
+
+        // One ping loop: a 30-s cadence over one session sends one ping by now; three loops would have sent three.
+        Timer::sleep(31.).await;
+        assert_eq!(server.requests(SERVER_PING), 1);
+
+        // Disabling an instance closes no session while another instance is active; the last one closes it.
+        drop((qtum, token_a, token_b, client));
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        disable_coin(&env.ctx, TOKEN_B_TICKER).await.unwrap();
+        Timer::sleep(1.).await;
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        let Some(MmCoinEnum::QtumCoin(qtum)) = lp_coinfind(&env.ctx, QTUM_TICKER).await.unwrap() else {
+            panic!("QTUM is still enabled")
+        };
+        assert_eq!(height_over(&qtum_client_of(&qtum)).await, 777);
+        drop(qtum);
+        disable_coin(&env.ctx, QTUM_TICKER).await.unwrap();
+        wait_until("every session to close", 10., || server.open_connections() == 0).await;
+        assert_eq!(server.accepted(), 1);
     });
 }
 
+/// D38.6.4Q.1 status note, item 1: an instance whose inputs differ in any of the platform, the servers, `min_connected`
+/// and `max_connected`, `block_interval` or the builder arguments builds a client of its own, so the servers it names
+/// are always honored. (The key itself is covered by the registry's unit tests.) Here: another `max_connected`, a
+/// different list, another `avg_blocktime`, each with its own sessions; the instance that asks the same shares.
 #[test]
-fn t38_6_4q_10_disabling_qtum_leaves_a_token_and_its_session_working() {
+fn t38_6_4q_1_a_token_with_another_max_connected_servers_or_block_interval_has_a_client_and_sessions_of_its_own() {
+    block_on(async {
+        let env = family_env();
+        let (a, b) = (family_stub().await, family_stub().await);
+        let qtum = init_qtum(&env, &[&a]).await;
+
+        // Another `max_connected`.
+        let mut request = electrum_request(&[&a], false);
+        request["coin"] = json!(TICKER);
+        request["max_connected"] = json!(1);
+        let MmCoinEnum::Qrc20Coin(token_a) = lp_coininit(&env.ctx, TICKER, &request).await.unwrap() else {
+            panic!("a QRC20 coins-file entry must build a QRC20 coin")
+        };
+        wait_until("two sessions to the first server", 10., || a.open_connections() == 2).await;
+
+        // Another list of servers.
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&b], false).await;
+        wait_until("a session to the second server", 10., || b.open_connections() == 1).await;
+
+        // Another block interval (the coin entry of token C has an `avg_blocktime`).
+        let token_c = init_token_named(&env, TOKEN_C_TICKER, &[&a], false).await;
+        wait_until("three sessions to the first server", 10., || a.open_connections() == 3).await;
+        Timer::sleep(1.).await;
+
+        assert_eq!((a.open_connections(), a.accepted()), (3, 3));
+        assert_eq!((b.open_connections(), b.accepted()), (1, 1));
+        let clients = [
+            qtum_client_of(&qtum),
+            electrum_client_of(&token_a),
+            electrum_client_of(&token_b),
+            electrum_client_of(&token_c),
+        ];
+        for (index, first) in clients.iter().enumerate() {
+            for second in &clients[index + 1..] {
+                assert!(!same_client(first, second), "every instance has a client of its own");
+            }
+        }
+        // Each serves its instance over its own servers.
+        assert_eq!(
+            token_a.my_balance().compat().await.unwrap().spendable,
+            balance_of(1_000)
+        );
+        assert_eq!(
+            token_b.my_balance().compat().await.unwrap().spendable,
+            balance_of(2_000)
+        );
+        assert_eq!(
+            token_c.my_balance().compat().await.unwrap().spendable,
+            balance_of(2_000)
+        );
+        assert_eq!(b.requests(CALL), 1);
+        assert_eq!(a.accepted(), 3);
+    });
+}
+
+/// D38.6.4Q.1 status note, items 2 and 4 (R38.6.4Q.1 item 2, R38.6.4Q.10 item 2): a token activates without QTUM and
+/// works; with QTUM and a token active, the disable of QTUM leaves the token's balance and history working over the
+/// session, which stays open; disabling the last instance closes it.
+#[test]
+fn t38_6_4q_10_a_token_works_without_qtum_and_after_qtum_is_disabled_over_the_session_that_stays_open() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+
+        // A token without QTUM.
+        let alone = init_token_named(&env, TICKER, &[&server], false).await;
+        assert_eq!(alone.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+        drop(alone);
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        wait_until("the session to close", 10., || server.open_connections() == 0).await;
+
+        // QTUM and the token.
         let qtum = init_qtum(&env, &[&server]).await;
-        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
-        wait_until("two sessions", 10., || server.open_connections() == 2).await;
-        drop((qtum, token_a));
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let accepted = server.accepted();
+        drop((qtum, token));
 
         disable_coin(&env.ctx, QTUM_TICKER).await.unwrap();
-        wait_until("one session", 10., || server.open_connections() == 1).await;
         Timer::sleep(1.).await;
-        // QTUM's session closed, the token's stays, and the token's balance read goes over it.
-        assert_eq!(server.open_connections(), 1);
-        assert_eq!(server.accepted(), 2);
+        // QTUM's disable closed nothing: the token's session stays and nothing reconnected.
+        assert_eq!((server.open_connections(), server.accepted()), (1, accepted));
         let Some(MmCoinEnum::Qrc20Coin(token)) = lp_coinfind(&env.ctx, TICKER).await.unwrap() else {
             panic!("the token is still enabled")
         };
         assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
-        assert_eq!(server.open_connections(), 1);
-        assert_eq!(server.accepted(), 2);
+        assert!(matches!(
+            token.request_tx_history(env.ctx.metrics.clone()).await,
+            RequestTxHistoryResult::Ok(..)
+        ));
+        assert_eq!((server.open_connections(), server.accepted()), (1, accepted));
+
+        // The last instance's disable closes the session.
+        drop(token);
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        wait_until("the session to close", 10., || server.open_connections() == 0).await;
+    });
+}
+
+/// QTUM and a token activated concurrently, over the same servers: one client, one session.
+#[test]
+fn t38_6_4q_1_qtum_and_a_token_activated_concurrently_share_one_client() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let servers = [&server];
+        let (qtum, token) = futures::join!(
+            init_qtum(&env, &servers),
+            init_token_named(&env, TICKER, &servers, false)
+        );
+        assert!(same_client(&qtum_client_of(&qtum), &electrum_client_of(&token)));
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        Timer::sleep(1.).await;
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.requests(SERVER_VERSION), 1);
+    });
+}
+
+/// A token activation that fails closes no session that QTUM uses: here the build fails at the `decimals` read (an
+/// error answer from the contract), after the token took the client of QTUM.
+#[test]
+fn t38_6_4q_1_a_token_activation_that_fails_in_its_build_leaves_the_client_to_qtum() {
+    block_on(async {
+        let env = family_env_with_decimals(None);
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = qtum_client_of(&qtum);
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+        let holders = settled_strong_count(&weak).await;
+
+        server.set_error(CALL, "stub contract error");
+        let mut request = electrum_request(&[&server], false);
+        request["coin"] = json!(TICKER);
+        assert!(lp_coininit(&env.ctx, TICKER, &request).await.is_err());
+        assert!(!is_registered(&env).await);
+        Timer::sleep(1.).await;
+
+        // The failed activation holds no part of the client, and the session QTUM uses is open and answers.
+        assert_eq!(settled_strong_count(&weak).await, holders);
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(height_over(&qtum_client_of(&qtum)).await, 777);
+    });
+}
+
+/// The same when the activation fails after the build: the balance read of the legacy `electrum` method fails and the
+/// token is deregistered.
+#[test]
+fn t38_6_4q_1_a_token_activation_that_fails_at_its_balance_read_leaves_the_client_to_qtum() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        // QTUM sends no contract call, so the error answer reaches the token's balance read alone.
+        server.set_error(CALL, "stub contract error");
+
+        let (balance, coin) = activate_like_electrum(&env, &[&server], false).await;
+        assert!(balance.is_err());
+        drop(coin);
+        assert!(!is_registered(&env).await);
+        Timer::sleep(1.).await;
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(height_over(&qtum_client_of(&qtum)).await, 777);
+    });
+}
+
+/// D38.6.4Q.1 status note, item 3: while the servers of a shared client disagree about the chain, a token that would
+/// reuse it is refused as a fresh build would be (R38.6.4o item 12) and holds no part of the client afterwards.
+#[test]
+fn t38_6_4q_1_a_token_reusing_a_client_whose_servers_disagree_is_refused_and_leaves_it_to_qtum() {
+    block_on(async {
+        let env = family_env();
+        let servers = [family_stub().await, family_stub().await, family_stub().await];
+        let list = [&servers[0], &servers[1], &servers[2]];
+        let qtum = init_qtum(&env, &list).await;
+        let client = qtum_client_of(&qtum);
+        wait_until("three maintained sessions", 10., || {
+            servers.iter().all(|server| server.header_subscriptions() == 1)
+        })
+        .await;
+        assert!(client.chain_disagreement().is_none());
+
+        // One server far ahead of the others puts the coin into the disagreement state once it has been seen far ahead
+        // for the confirmation period (60 s at least, D38.6.4o.15).
+        servers[0].set_tip(777 + 1_000);
+        wait_until("the disagreement state", 100., || client.chain_disagreement().is_some()).await;
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+        let holders = settled_strong_count(&weak).await;
+
+        let mut request = electrum_request(&list, false);
+        request["coin"] = json!(TICKER);
+        let error = lp_coininit(&env.ctx, TICKER, &request).await.err().expect("refused");
+        // The error of a fresh build, naming the shared client by the platform.
+        assert!(
+            error.contains(&format!(
+                "{QTUM_TICKER}: the Electrum servers disagree about the chain ("
+            )),
+            "{error}"
+        );
+        assert!(!is_registered(&env).await);
+        Timer::sleep(1.).await;
+
+        // The refused activation holds no handle, and no session of QTUM's changed.
+        assert_eq!(settled_strong_count(&weak).await, holders);
+        for server in &servers {
+            assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        }
+        assert!(qtum_client_of(&qtum).chain_disagreement().is_some());
+    });
+}
+
+/// What the legacy `electrum` method does around `lp_coininit` (`mm2_main`, `electrum`): it takes the ticker's
+/// activation lock (CRD ch.55 R55.1.12), then `lp_coininit` checks again whether the ticker is registered.
+async fn legacy_electrum_like(
+    env: &TokenEnv,
+    ticker: &str,
+    servers: &[&StubServer],
+    tx_history: bool,
+) -> Result<MmCoinEnum, String> {
+    let _guard = crate::CoinsContext::from_ctx(&env.ctx)?
+        .lock_activation(&[ticker])
+        .await?;
+    let mut request = electrum_request(servers, tx_history);
+    request["coin"] = json!(ticker);
+    request["check_utxo_maturity"] = json!(false);
+    lp_coininit(&env.ctx, ticker, &request).await
+}
+
+/// R55.1.12 and R55.4: the answer of a repeated legacy activation of an active ticker is the legacy error
+/// "already initialized".
+fn assert_already_initialized(result: Result<MmCoinEnum, String>, ticker: &str) {
+    match result {
+        Ok(_) => panic!("a repeated activation of {ticker} succeeded"),
+        Err(e) => assert!(e.ends_with(&format!("Coin {ticker} already initialized")), "{e}"),
+    }
+}
+
+/// R55.1.12, R55.4 and the D38.6.4Q.1 status note: a second legacy `electrum` activation of an active QTUM, one
+/// after the other, answers the legacy "already initialized" error and builds nothing: no session, no second tip
+/// subscription, no further holder of the shared client, and QTUM still answers.
+#[test]
+fn t38_6_4q_1_a_repeated_activation_of_qtum_answers_already_initialized_and_starts_nothing() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = qtum_client_of(&qtum);
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+        let holders = settled_strong_count(&weak).await;
+        let (versions, tips, calls) = (
+            server.requests(SERVER_VERSION),
+            server.requests(TIP_METHOD),
+            server.requests(CALL),
+        );
+
+        assert_already_initialized(
+            legacy_electrum_like(&env, QTUM_TICKER, &[&server], false).await,
+            QTUM_TICKER,
+        );
+        Timer::sleep(1.).await;
+
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.header_subscriptions(), 1);
+        assert_eq!(
+            (
+                server.requests(SERVER_VERSION),
+                server.requests(TIP_METHOD),
+                server.requests(CALL)
+            ),
+            (versions, tips, calls)
+        );
+        assert_eq!(settled_strong_count(&weak).await, holders);
+        assert_eq!(height_over(&qtum_client_of(&qtum)).await, 777);
+        assert!(matches!(
+            lp_coinfind(&env.ctx, QTUM_TICKER).await.unwrap(),
+            Some(MmCoinEnum::QtumCoin(_))
+        ));
+    });
+}
+
+/// The same for a token that is active on QTUM with its history collector running: no second session, no second
+/// holder, no second collector (observed as the requests of the 30-s idle interval: one balance read for one
+/// collector, as in the disable-then-enable test), and no contract-event subscription.
+#[test]
+fn t38_6_4q_1_a_repeated_activation_of_a_token_answers_already_initialized_and_starts_no_second_collector() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], true).await;
+        wait_until("the second balance read of the collector", 10., || {
+            server.requests(CALL) == 2
+        })
+        .await;
+        Timer::sleep(0.5).await;
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (2, 1));
+        let client = qtum_client_of(&qtum);
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+        let holders = settled_strong_count(&weak).await;
+        let versions = server.requests(SERVER_VERSION);
+
+        assert_already_initialized(legacy_electrum_like(&env, TICKER, &[&server], true).await, TICKER);
+        Timer::sleep(1.).await;
+
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.header_subscriptions(), 1);
+        assert_eq!(server.requests(SERVER_VERSION), versions);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (2, 1));
+        assert_eq!(settled_strong_count(&weak).await, holders);
+
+        // One collector: over an idle interval the token reads its balance once, and asks no history.
+        let calls_now = server.requests(CALL);
+        Timer::sleep(33.).await;
+        assert_eq!(server.requests(CALL), calls_now + 1);
+        assert_eq!(server.requests(GET_HISTORY), 1);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+        drop(qtum);
+    });
+}
+
+/// R55.1.12: two activations of the same ticker started together are serialized: one succeeds, the other waits and
+/// answers "already initialized", and nothing is doubled. Run for QTUM and then for a token with history on.
+#[test]
+fn t38_6_4q_1_two_activations_of_one_ticker_started_together_build_it_once() {
+    block_on(async {
+        // QTUM.
+        let env = family_env();
+        let server = family_stub().await;
+        let servers = [&server];
+        let (first, second) = futures::join!(
+            legacy_electrum_like(&env, QTUM_TICKER, &servers, false),
+            legacy_electrum_like(&env, QTUM_TICKER, &servers, false)
+        );
+        let (qtum, loser) = match (first, second) {
+            (Ok(coin), Err(e)) | (Err(e), Ok(coin)) => (coin, e),
+            _ => panic!("exactly one of two activations of QTUM must succeed"),
+        };
+        assert!(
+            loser.ends_with(&format!("Coin {QTUM_TICKER} already initialized")),
+            "{loser}"
+        );
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        Timer::sleep(1.).await;
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.requests(SERVER_VERSION), 1);
+        assert_eq!(server.header_subscriptions(), 1);
+        let MmCoinEnum::QtumCoin(qtum) = qtum else {
+            panic!("a QTUM coin")
+        };
+        let client = qtum_client_of(&qtum);
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+
+        // The token, over the client QTUM holds.
+        server.set_result(GET_HISTORY, json!([]));
+        let holders = settled_strong_count(&weak).await;
+        let (first, second) = futures::join!(
+            legacy_electrum_like(&env, TICKER, &servers, true),
+            legacy_electrum_like(&env, TICKER, &servers, true)
+        );
+        let (token, loser) = match (first, second) {
+            (Ok(coin), Err(e)) | (Err(e), Ok(coin)) => (coin, e),
+            _ => panic!("exactly one of two activations of the token must succeed"),
+        };
+        assert!(
+            loser.ends_with(&format!("Coin {TICKER} already initialized")),
+            "{loser}"
+        );
+        wait_until("the second balance read of the collector", 10., || {
+            server.requests(CALL) == 2
+        })
+        .await;
+        Timer::sleep(0.5).await;
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (2, 1));
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.requests(SERVER_VERSION), 1);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
+        // The token holds the client once more; the loser held nothing.
+        assert_eq!(settled_strong_count(&weak).await, holders + 1);
+        let calls_now = server.requests(CALL);
+        Timer::sleep(33.).await;
+        assert_eq!(server.requests(CALL), calls_now + 1);
+        assert_eq!(server.requests(GET_HISTORY), 1);
+        drop((token, qtum));
+    });
+}
+
+/// D38.6.4Q.1 status note, item 5 and D38.6.4Q.5 status note, item 3: after a disable and an enable of a token on a
+/// client QTUM holds, exactly one collector serves the token and no session is added.
+#[test]
+fn t38_6_4q_10_disable_then_enable_of_a_token_on_a_shared_client_leaves_one_collector_and_no_new_session() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        drop(init_token_named(&env, TICKER, &[&server], true).await);
+        wait_until("the second balance read of the collector", 10., || {
+            server.requests(CALL) == 2
+        })
+        .await;
+        Timer::sleep(0.5).await;
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (2, 1));
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        // Enable again at once: a new collector (`tx_history` true) with its two passes, over the same session.
+        let again = init_token_named(&env, TICKER, &[&server], true).await;
+        wait_until("the new collector's passes", 10., || server.requests(CALL) == 4).await;
+        assert_eq!(server.requests(GET_HISTORY), 2);
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+
+        // Over an idle interval of the new collector, past the moment the old collector's wait would have ended, the
+        // token reads its balance once: one collector.
+        let calls_now = server.requests(CALL);
+        Timer::sleep(33.).await;
+        assert_eq!(server.requests(CALL), calls_now + 1);
+        assert_eq!(server.requests(GET_HISTORY), 2);
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        drop((again, qtum));
     });
 }
 
@@ -1044,76 +1924,128 @@ async fn token_with_collector_in_the_idle_wait(env: &TokenEnv, server: &StubServ
     std::time::Instant::now() - Duration::from_millis(500)
 }
 
+/// D38.6.4Q.5 status note, items 1 and 3 (R38.6.4Q.10 item 1). Before the decision the disable stopped nothing: the
+/// collector held the client and its session until its next registry check, 30 s after its last read.
+/// Now the collector ends at the disable, wherever it is, and the client closes with it; the stub receives no further
+/// request from the token.
 #[test]
-fn t38_6_4q_10_disable_keeps_the_collectors_session_until_its_next_registry_check_and_sends_nothing() {
+fn t38_6_4q_10_disable_ends_the_collector_and_closes_the_session_at_once_and_sends_nothing() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
-        let idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
+        let _idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
         assert_eq!(server.open_connections(), 1);
         let requests_before = server.ordinary_requests();
 
         disable_coin(&env.ctx, TICKER).await.unwrap();
-        let disabled_at = std::time::Instant::now();
-        // This tree stops nothing at the disable (differs from R38.6.4Q.10 item 1): the collector holds the client, so
-        // the session is still open, and it stays open while the collector waits.
-        assert_eq!(server.open_connections(), 1);
-        Timer::sleep(10.).await;
-        assert_eq!(server.open_connections(), 1);
-        assert_eq!(server.ordinary_requests(), requests_before);
-
-        // The wait ends 30 s after the second balance read; the registry check finds no ticker and the collector ends.
-        // The session closes with it (the collector held the last handle of the client).
-        wait_until("the session to close", 40., || server.open_connections() == 0).await;
-        let closed_after_idle = idle_since.elapsed().as_secs_f64();
-        eprintln!(
-            "Q10 observed: session closed {:.1} s after the disable, {closed_after_idle:.1} s after the wait began",
-            disabled_at.elapsed().as_secs_f64()
-        );
-        assert!((29.0..40.0).contains(&closed_after_idle), "{closed_after_idle}");
-        // The stub received nothing from the disabled token, before or after the check: no request at all.
-        Timer::sleep(1.).await;
+        // The session closes at the disable, not 30 s later.
+        wait_until("the session to close", 5., || server.open_connections() == 0).await;
+        // The stub receives nothing from the disabled token, now or after the old registry check would have come.
+        Timer::sleep(2.).await;
         assert_eq!(server.ordinary_requests(), requests_before);
         assert_eq!(server.requests(CALL), 2);
         assert_eq!(server.accepted(), 1);
     });
 }
 
+/// The disable ends the collector in the middle of a pass too: here while its history request waits for an answer that
+/// does not come (a reply delay of an hour). Nothing waits for the pass to finish.
 #[test]
-fn t38_6_4q_10_enable_again_inside_the_wait_leaves_two_collectors_and_two_sessions() {
+fn t38_6_4q_10_disable_ends_a_collector_that_waits_for_an_answer() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
-        let idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
+        server.set_result(GET_HISTORY, json!([]));
+        server.set_reply_delay(GET_HISTORY, Duration::from_secs(3_600));
+        drop(init_token_named(&env, TICKER, &[&server], true).await);
+        wait_until("the history request of the collector", 10., || {
+            server.requests(GET_HISTORY) == 1
+        })
+        .await;
+        assert_eq!(server.open_connections(), 1);
+
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        wait_until("the session to close", 5., || server.open_connections() == 0).await;
+        Timer::sleep(1.).await;
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (1, 1));
+    });
+}
+
+/// D38.6.4Q.5 status note, item 3 (R38.6.4Q.10 item 3): after a disable and an enable exactly one collector and one
+/// client serve the token. (Before the decision two collectors and two sessions did, both writing the stored history.)
+#[test]
+fn t38_6_4q_10_disable_then_enable_leaves_one_collector_and_one_session() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let _idle_since = token_with_collector_in_the_idle_wait(&env, &server).await;
 
         disable_coin(&env.ctx, TICKER).await.unwrap();
         // Enable again at once: a new client, and a new collector (`tx_history` true) with its two passes.
-        drop(init_token_named(&env, TICKER, &[&server], true).await);
+        let again = init_token_named(&env, TICKER, &[&server], true).await;
         wait_until("the new collector's passes", 10., || server.requests(CALL) == 4).await;
         assert_eq!(server.requests(GET_HISTORY), 2);
-        // Two clients now serve the token: the new one and the one the first collector still holds.
-        assert_eq!(server.open_connections(), 2);
-        assert_eq!(server.accepted(), 2);
+        // One session serves the token. (The new instance takes either a client of its own or the old one, which the
+        // collector that is being aborted may still hold at that moment; both leave one session.)
+        wait_until("one session", 5., || server.open_connections() == 1).await;
 
-        // The first collector's wait ends 30 s after its second read: its check finds the ticker registered (by the new
-        // instance) and it goes on, beside the new collector, whose own wait ends a moment later.
-        let until_waits_end = 28.0 - idle_since.elapsed().as_secs_f64();
-        Timer::sleep(until_waits_end.max(0.)).await;
-        wait_until("both collectors' reads", 6., || server.requests(CALL) == 6).await;
-        Timer::sleep(2.).await;
-        // Both collectors read the balance once in this interval, over two sessions: two reads, not one (R38.6.4Q.10
-        // item 3 says exactly one collector and one client serve the token after an enable again).
-        assert_eq!(server.requests(CALL), 6);
-        assert_eq!(server.open_connections(), 2);
-        assert_eq!(server.accepted(), 2);
-        // No history request: the balance is unchanged for both.
-        assert_eq!(server.requests(GET_HISTORY), 2);
-
-        // The next idle interval repeats it: two more reads, one per collector.
+        // Over an idle interval of the new collector, past the moment the old collector's wait would have ended, the
+        // token reads its balance once: one collector.
         let calls_now = server.requests(CALL);
-        Timer::sleep(32.).await;
-        assert_eq!(server.requests(CALL), calls_now + 2);
-        assert_eq!(server.open_connections(), 2);
+        Timer::sleep(33.).await;
+        assert_eq!(server.requests(CALL), calls_now + 1);
+        assert_eq!(server.requests(GET_HISTORY), 2);
+        assert_eq!(server.open_connections(), 1);
+        drop(again);
+    });
+}
+
+/// D38.6.4Q.5 status note, item 2: the collector's registry check compares the coin instance, not only the ticker. The
+/// old instance is taken out of the registry without `disable_coin` (so nothing aborts its collector) and the token
+/// is activated again; at its next check the old collector finds the ticker registered as another instance and ends,
+/// and its client closes. With the ticker alone it would find the ticker registered and go on beside the new one.
+#[test]
+fn t38_6_4q_10_a_collector_ends_at_its_registry_check_when_the_ticker_is_registered_as_another_instance() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let old = init_token_named(&env, TICKER, &[&server], false).await;
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = old.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+        wait_until("the second balance read of the collector", 10., || {
+            server.requests(CALL) == 2
+        })
+        .await;
+        drop(old);
+
+        // The old instance leaves the registry, not through `disable_coin`; a new instance takes the ticker.
+        let coins_ctx = CoinsContext::from_ctx(&env.ctx).unwrap();
+        assert!(coins_ctx.coins.lock().await.remove(TICKER).is_some());
+        drop(init_token_named(&env, TICKER, &[&server], false).await);
+        assert!(is_registered(&env).await);
+        // The old collector still holds the client, so the new instance reuses it (D38.6.4Q.1 status note): one session.
+        assert_eq!(server.open_connections(), 1);
+
+        // The old collector's wait ends about 30 s after its second read; its check finds another instance under the
+        // ticker, and it ends without another request. The session stays: the new instance holds the client.
+        wait_until("the old collector to end", 40., || ended.load(AtomicOrdering::SeqCst)).await;
+        Timer::sleep(1.).await;
+        assert_eq!(server.open_connections(), 1);
+        assert_eq!(
+            server.requests(CALL),
+            2,
+            "the old collector asked nothing after its check"
+        );
+        assert_eq!(server.accepted(), 1);
     });
 }
 
@@ -1126,23 +2058,20 @@ fn t38_6_4q_7_no_contract_event_subscription_at_activation_or_after_a_reconnect(
         let server = family_stub().await;
         let qtum = init_qtum(&env, &[&server]).await;
         let token = init_token_named(&env, TICKER, &[&server], false).await;
-        wait_until("two sessions", 10., || server.open_connections() == 2).await;
+        // QTUM and the token share one client, so one session (D38.6.4Q.1 status note).
+        wait_until("the session", 10., || server.open_connections() == 1).await;
         assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
-        assert_eq!(server.accepted(), 2);
+        assert_eq!(server.accepted(), 1);
 
-        // Every session is dropped; the clients reconnect.
-        server.kill_connections();
-        wait_until("both clients to reconnect", 60., || {
-            server.accepted() >= 4 && server.open_connections() == 2
-        })
-        .await;
+        // Every session is dropped; the client reconnects.
+        reconnect_all(&server).await;
         // Give a subscription a moment to arrive, were any going to.
         Timer::sleep(2.).await;
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
-        // What a reconnect does place again: the tip subscription of each client (R38.6.4h).
-        assert_eq!(server.header_subscriptions(), 2);
-        // Activation, balance and the rest keep working over the new sessions.
+        // What a reconnect does place again: the tip subscription of the client (R38.6.4h).
+        assert_eq!(server.header_subscriptions(), 1);
+        // Activation, balance and the rest keep working over the new session.
         assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
         eprintln!("Q7 observed: methods {:?}", server.request_methods_in_order());
@@ -1200,50 +2129,75 @@ async fn run_spend_pair(first: Spend, second: Spend) -> (UtxoTx, Vec<UtxoTx>) {
     (funding, txs)
 }
 
-/// Asserts what the pair is expected to show in this tree: two broadcasts, both spending the one funding output (the
-/// second does not avoid the first one's input).
-async fn assert_second_spends_the_input_of_the_first(first: Spend, second: Spend) {
+/// The outpoints the listing of `coin` offers for the one address, as the spend paths read it (the shared record
+/// replaces what it knows was spent).
+async fn listed_outpoints<T>(coin: &T) -> Vec<(String, u32)>
+where
+    T: crate::utxo::GetUtxoListOps + AsRef<UtxoCoinFields>,
+{
+    let address = coin.as_ref().derivation_method.iguana_or_err().unwrap().clone();
+    let (unspents, _guard) = coin.get_unspent_ordered_list(&address).await.unwrap();
+    unspents
+        .iter()
+        .map(|unspent| {
+            let hash = json::to_value(H256Json::from(unspent.outpoint.hash.reversed())).unwrap();
+            (hash.as_str().unwrap().to_owned(), unspent.outpoint.index)
+        })
+        .collect()
+}
+
+/// Runs `future`, and fails the test if it has not finished after `secs`.
+async fn completes_within<T>(what: &str, secs: f64, future: impl std::future::Future<Output = T>) -> T {
+    use futures::future::{select, Either};
+    futures::pin_mut!(future);
+    match select(future, Box::pin(Timer::sleep(secs))).await {
+        Either::Left((value, _)) => value,
+        Either::Right(_) => panic!("{what} did not finish in {secs} s"),
+    }
+}
+
+/// Asserts what D38.6.4Q.4 (b) requires of the pair: two broadcasts; the first spends the one funding output; the
+/// second does not select it, it spends the first's change.
+async fn assert_second_avoids_the_input_of_the_first(first: Spend, second: Spend) {
     let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let (funding, txs) = run_spend_pair(first, second).await;
     assert_eq!(txs.len(), 2, "{first:?} then {second:?}");
-    eprintln!(
-        "Q8 observed {first:?} then {second:?}: inputs {:?} then {:?}; funding {:?}",
-        inputs_of(&txs[0]),
-        inputs_of(&txs[1]),
-        outpoint(&funding, 0)
-    );
     assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
-    // Differs from R38.6.4Q.7 item 6 only if the second selects another input; here it is the same one.
-    assert_eq!(inputs_of(&txs[1]), [outpoint(&funding, 0)], "{first:?} then {second:?}");
+    // R38.6.4Q.7 item 6 (the reference) has the second select the same output; here it spends the first's change.
+    assert!(
+        inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])) && !inputs_of(&txs[1]).is_empty(),
+        "{first:?} then {second:?}: the second spent {:?}",
+        inputs_of(&txs[1])
+    );
 }
 
 #[test]
-fn t38_6_4q_8_token_broadcast_then_qtum_swap_send_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_token_broadcast_then_qtum_swap_send_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::Token(TICKER),
         Spend::QtumSwapSend,
     ));
 }
 
 #[test]
-fn t38_6_4q_8_qtum_swap_send_then_token_broadcast_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_qtum_swap_send_then_token_broadcast_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::QtumSwapSend,
         Spend::Token(TICKER),
     ));
 }
 
 #[test]
-fn t38_6_4q_8_token_a_broadcast_then_token_b_broadcast_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_token_a_broadcast_then_token_b_broadcast_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::Token(TICKER),
         Spend::Token(TOKEN_B_TICKER),
     ));
 }
 
 #[test]
-fn t38_6_4q_8_the_same_token_twice_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_the_same_token_twice_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::Token(TICKER),
         Spend::Token(TICKER),
     ));
@@ -1255,12 +2209,6 @@ fn t38_6_4q_8_control_two_qtum_swap_sends_in_a_row_avoid_the_input_and_spend_the
         let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let (funding, txs) = run_spend_pair(Spend::QtumSwapSend, Spend::QtumSwapSend).await;
         assert_eq!(txs.len(), 2);
-        eprintln!(
-            "Q8 control observed: inputs {:?} then {:?}; first tx {}",
-            inputs_of(&txs[0]),
-            inputs_of(&txs[1]),
-            txid_of(&txs[0])
-        );
         assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
         // The QTUM record of the first send replaced the spent output with the first send's outputs: the second send
         // spends one of them (T38.5B.1), not the funding output.
@@ -1269,7 +2217,7 @@ fn t38_6_4q_8_control_two_qtum_swap_sends_in_a_row_avoid_the_input_and_spend_the
 }
 
 #[test]
-fn t38_6_4q_8_token_broadcast_and_qtum_swap_send_started_together_list_at_the_same_time_and_select_one_input() {
+fn t38_6_4q_8_token_broadcast_and_qtum_swap_send_started_together_do_not_share_an_input() {
     block_on(async {
         let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let env = family_env();
@@ -1301,29 +2249,439 @@ fn t38_6_4q_8_token_broadcast_and_qtum_swap_send_started_together_list_at_the_sa
                 .map(|_| ())
                 .map_err(|e| format!("{e:?}"))
         };
-        let watch = async {
-            Timer::sleep(0.75).await;
-            server.request_messages().iter().filter(|m| is_listing(m)).count()
-        };
-        let ((token_result, qtum_result), listings_halfway) =
-            futures::join!(futures::future::join(token_send, qtum_send), watch);
+        let (token_result, qtum_result) = futures::join!(token_send, qtum_send);
         token_result.unwrap();
         qtum_result.unwrap();
-        eprintln!("Q8 together observed: {listings_halfway} listing message(s) at 0.75 s");
-        // Different locks (R38.6.4Q.7 items 1 and 3): the token's build holds the process-wide lock, the QTUM send the
-        // lock of QTUM's own record. Both list while the delayed listings are pending, and both spend the one output.
-        assert_eq!(listings_halfway, 2);
+        // Both answers were delayed, so both builds were under way at once. One record and one lock: the one that
+        // took the guard second filtered its listing through the entry of the first (D38.6.4Q.4 status note, item 4).
         let txs = broadcast_txs(&server);
         assert_eq!(txs.len(), 2);
         assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
-        assert_eq!(inputs_of(&txs[1]), [outpoint(&funding, 0)]);
+        assert!(
+            inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])) && !inputs_of(&txs[1]).is_empty(),
+            "the second spent {:?}",
+            inputs_of(&txs[1])
+        );
+    });
+}
+
+// ---- D38.6.4Q.4 status note: the shared record and the lock of the address ----
+
+/// Item 1: under an iguana login QTUM and its tokens use one record; a coin that is not of the family keeps its own.
+#[test]
+fn t38_6_4q_4_qtum_and_its_tokens_share_one_record_under_an_iguana_login() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let doc_server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        let doc = init_doc(&env, &[&doc_server]).await;
+        let record = |coin: &UtxoCoinFields| coin.recently_spent_outpoints.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            &record(qtum.as_ref()),
+            &record(token_a.as_ref())
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &record(qtum.as_ref()),
+            &record(token_b.as_ref())
+        ));
+        assert!(!std::sync::Arc::ptr_eq(&record(qtum.as_ref()), &record(doc.as_ref())));
+        let qtum_fields: &UtxoCoinFields = qtum.as_ref();
+        let doc_fields: &UtxoCoinFields = doc.as_ref();
+        assert!(qtum_fields.spent_record_is_shared && !doc_fields.spent_record_is_shared);
+        // One record is kept by the registry; the standard coin's private one is not.
+        assert_eq!(
+            CoinsContext::from_ctx(&env.ctx).unwrap().spent_records.live_records(),
+            1
+        );
+    });
+}
+
+/// Item 3 (D38.6.4Q.4 status note) and item 4: a QTUM-family build does not wait for the process-wide lock.
+#[test]
+fn t38_6_4q_4_builds_of_the_family_do_not_wait_for_the_process_wide_lock() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let _funding = fund(&server, &script_of(qtum.as_ref()), 93, &[1_000_000_000]);
+
+        // The lock is held, as a withdraw of another UTXO coin would hold it.
+        let _held = crate::utxo::UTXO_LOCK.lock().await;
+        let call = token
+            .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+            .unwrap();
+        completes_within("the token's send", 20., token.send_contract_calls(vec![call]))
+            .await
+            .unwrap();
+        let output = TransactionOutput {
+            value: 100_000_000,
+            script_pubkey: script_of(qtum.as_ref()),
+        };
+        completes_within(
+            "QTUM's swap send",
+            20.,
+            utxo_common::send_outputs_from_my_address(qtum.clone(), vec![output]).compat(),
+        )
+        .await
+        .unwrap();
+        let request = |coin: &str, to: String| WithdrawRequest {
+            coin: coin.to_owned(),
+            from: None,
+            to,
+            amount: BigDecimal::from_str("0.000001").unwrap(),
+            max: false,
+            fee: None,
+            memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
+        };
+        let qtum_request = |to: String| WithdrawRequest {
+            amount: BigDecimal::from_str("0.1").unwrap(),
+            ..request(QTUM_TICKER, to)
+        };
+        completes_within(
+            "QTUM's withdraw",
+            20.,
+            qtum.withdraw(qtum_request(qtum.my_address().unwrap())).compat(),
+        )
+        .await
+        .unwrap();
+        completes_within(
+            "the token's withdraw",
+            20.,
+            token.withdraw(request(TICKER, token.my_address().unwrap())).compat(),
+        )
+        .await
+        .unwrap();
+        let delegation = QtumDelegationRequest {
+            address: "qcyBHeSct7Wr4mAw18iuQ1zW5mMFYmtmBE".to_owned(),
+            fee: Some(10),
+        };
+        completes_within("the delegation", 20., qtum.add_delegation(delegation).compat())
+            .await
+            .unwrap();
+        completes_within("the removal of a delegation", 20., qtum.remove_delegation().compat())
+            .await
+            .unwrap();
+    });
+}
+
+/// Item 4: the guard of the shared record is the lock of the address. While it is held, a token's send does not list
+/// into a build or broadcast, and neither does QTUM's swap send; each goes on once it is released.
+#[test]
+fn t38_6_4q_4_the_guard_of_the_shared_record_serializes_qtum_and_a_token() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 92, &[1_000_000_000]);
+
+        // A build of QTUM holds the guard (as its swap send does from the listing to the entry): the token waits.
+        let guard = qtum.as_ref().recently_spent_outpoints.lock().await;
+        let token_send = async {
+            let call = token
+                .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+                .unwrap();
+            token.send_contract_calls(vec![call]).await.map(|_| ())
+        };
+        let qtum_send = async {
+            let output = TransactionOutput {
+                value: 100_000_000,
+                script_pubkey: script_of(qtum.as_ref()),
+            };
+            utxo_common::send_outputs_from_my_address(qtum.clone(), vec![output])
+                .compat()
+                .await
+                .map(|_| ())
+        };
+        let both = futures::future::join(token_send, qtum_send);
+        futures::pin_mut!(both);
+        let held_for = async {
+            Timer::sleep(1.5).await;
+            server.requests(BROADCAST)
+        };
+        futures::pin_mut!(held_for);
+        let broadcasts_while_held = match futures::future::select(both.as_mut(), held_for).await {
+            futures::future::Either::Right((broadcasts, _)) => broadcasts,
+            futures::future::Either::Left(_) => panic!("a build finished while the guard of the address was held"),
+        };
+        assert_eq!(broadcasts_while_held, 0);
+        drop(guard);
+        let (token_result, qtum_result) = completes_within("the two builds", 20., both).await;
+        token_result.unwrap();
+        qtum_result.unwrap();
+        let txs = broadcast_txs(&server);
+        assert_eq!(txs.len(), 2);
+        // One after the other: the second spent the first's change, not the funding output.
+        assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
+        assert!(inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])));
+    });
+}
+
+/// Follow-up of the decision (2026-11-20): the maturity check, which a token always runs, does not fetch the parent of
+/// an output the record supplied, the change of a transaction this node built and the backend accepted. The stub knows
+/// no transaction it was sent: it answers `blockchain.transaction.get` only for the funding transaction, as a server
+/// that has not indexed the broadcast. An output the server listed keeps the fetch.
+#[test]
+fn t38_6_4q_4_the_maturity_check_does_not_fetch_the_parent_of_an_output_the_record_supplied() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 86, &[1_000_000_000]);
+        let call = |token: &Qrc20Coin| {
+            token
+                .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+                .unwrap()
+        };
+        token_a.send_contract_calls(vec![call(&token_a)]).await.unwrap();
+        token_b.send_contract_calls(vec![call(&token_b)]).await.unwrap();
+        token_a.send_contract_calls(vec![call(&token_a)]).await.unwrap();
+
+        let txs = broadcast_txs(&server);
+        assert_eq!(txs.len(), 3);
+        // The second and third spent the change of the one before.
+        assert!(inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])));
+        assert!(inputs_of(&txs[2]).iter().all(|(hash, _)| *hash == txid_of(&txs[1])));
+        let fetched: Vec<String> = server
+            .request_params(GET_TX)
+            .iter()
+            .map(|params| params[0].as_str().unwrap().to_owned())
+            .collect();
+        // The listed funding output was fetched; nothing the node built was.
+        assert!(fetched.contains(&txid_of(&funding)), "{fetched:?}");
+        assert!(fetched.iter().all(|txid| *txid == txid_of(&funding)), "{fetched:?}");
+    });
+}
+
+/// Item 3 and the decision's observable requirement, `send_contract_calls`: the spend is entered before the guard is
+/// released; a broadcast the backend refused enters nothing.
+#[test]
+fn t38_6_4q_4_send_contract_calls_enters_its_spend_before_it_releases_the_guard_and_a_refusal_enters_nothing() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 91, &[1_000_000_000]);
+        let call = || {
+            token
+                .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+                .unwrap()
+        };
+
+        // A refused broadcast: the send fails and the next listing still offers the funding output.
+        server.set_error(BROADCAST, "stub refuses the broadcast");
+        assert!(token.send_contract_calls(vec![call()]).await.is_err());
+        assert_eq!(listed_outpoints(&qtum).await, [outpoint(&funding, 0)]);
+
+        // An accepted one: by the time the send has returned, whoever lists next (the next to take the guard) sees
+        // the spend entered, through QTUM's own handle as well.
+        server.clear_error(BROADCAST);
+        token.send_contract_calls(vec![call()]).await.unwrap();
+        let sent = broadcast_txs(&server).pop().unwrap();
+        let listed = listed_outpoints(&qtum).await;
+        assert!(!listed.is_empty());
+        assert!(listed.iter().all(|(hash, _)| *hash == txid_of(&sent)), "{listed:?}");
+        assert_eq!(listed_outpoints(&token).await, listed);
+    });
+}
+
+/// Items 3 and 4: the withdraw of a token and a delegation of QTUM note a pending entry; the broadcast of exactly
+/// their bytes through `send_raw_tx` of either coin is promoted into the one record. A refused broadcast promotes
+/// nothing. Two withdraws built before either is broadcast select the same input; the second one's broadcast is
+/// refused by the backend and enters nothing (pinned).
+#[test]
+fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx_and_a_refusal_enters_nothing() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 90, &[1_000_000_000]);
+        let token_withdraw = || async {
+            let request = WithdrawRequest {
+                coin: TICKER.to_owned(),
+                from: None,
+                to: token.my_address().unwrap(),
+                amount: BigDecimal::from_str("0.000001").unwrap(),
+                max: false,
+                fee: None,
+                memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
+            };
+            token.withdraw(request).compat().await.unwrap()
+        };
+        let spends_only_the_funding_output = |details: &crate::TransactionDetails| {
+            let tx: UtxoTx = deserialize(details.tx_hex.0.as_slice()).unwrap();
+            assert_eq!(inputs_of(&tx), [outpoint(&funding, 0)]);
+            tx
+        };
+        let only_outputs_of = |listed: &[(String, u32)], tx: &UtxoTx| {
+            assert!(!listed.is_empty());
+            assert!(listed.iter().all(|(hash, _)| *hash == txid_of(tx)), "{listed:?}");
+        };
+
+        // A token withdraw: pending, hides nothing; promoted by the token's own `send_raw_tx`.
+        let details = token_withdraw().await;
+        let tx = spends_only_the_funding_output(&details);
+        assert_eq!(listed_outpoints(&qtum).await, [outpoint(&funding, 0)]);
+        token
+            .send_raw_tx(&hex::encode(&details.tx_hex.0))
+            .compat()
+            .await
+            .unwrap();
+        only_outputs_of(&listed_outpoints(&qtum).await, &tx);
+        drop((tx, details));
+
+        // A delegation (a QTUM build): its bytes broadcast through the token's `send_raw_tx` are promoted too. Every
+        // earlier entry is gone: a new environment of the same shape.
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 89, &[1_000_000_000]);
+        let details = {
+            let request = QtumDelegationRequest {
+                address: "qcyBHeSct7Wr4mAw18iuQ1zW5mMFYmtmBE".to_owned(),
+                fee: Some(10),
+            };
+            qtum.add_delegation(request).compat().await.unwrap()
+        };
+        let tx: UtxoTx = deserialize(details.tx_hex.0.as_slice()).unwrap();
+        assert_eq!(inputs_of(&tx), [outpoint(&funding, 0)]);
+        assert_eq!(listed_outpoints(&token).await, [outpoint(&funding, 0)]);
+        // A refused broadcast promotes nothing.
+        server.set_error(BROADCAST, "stub refuses the broadcast");
+        assert!(token
+            .send_raw_tx(&hex::encode(&details.tx_hex.0))
+            .compat()
+            .await
+            .is_err());
+        assert_eq!(listed_outpoints(&token).await, [outpoint(&funding, 0)]);
+        server.clear_error(BROADCAST);
+        token
+            .send_raw_tx(&hex::encode(&details.tx_hex.0))
+            .compat()
+            .await
+            .unwrap();
+        only_outputs_of(&listed_outpoints(&qtum).await, &tx);
+
+        // Two withdraws built before either is broadcast select the same input.
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 88, &[1_000_000_000]);
+        let first = {
+            let request = WithdrawRequest {
+                coin: TICKER.to_owned(),
+                from: None,
+                to: token.my_address().unwrap(),
+                amount: BigDecimal::from_str("0.000001").unwrap(),
+                max: false,
+                fee: None,
+                memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
+            };
+            token.withdraw(request).compat().await.unwrap()
+        };
+        let second = {
+            let request = WithdrawRequest {
+                coin: QTUM_TICKER.to_owned(),
+                from: None,
+                to: qtum.my_address().unwrap(),
+                amount: BigDecimal::from_str("0.1").unwrap(),
+                max: false,
+                fee: None,
+                memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
+            };
+            qtum.withdraw(request).compat().await.unwrap()
+        };
+        let first_tx: UtxoTx = deserialize(first.tx_hex.0.as_slice()).unwrap();
+        let second_tx: UtxoTx = deserialize(second.tx_hex.0.as_slice()).unwrap();
+        assert_eq!(inputs_of(&first_tx), [outpoint(&funding, 0)]);
+        assert_eq!(inputs_of(&second_tx), [outpoint(&funding, 0)]);
+        // The first is accepted; the backend refuses the second, which spends the same input, and nothing is entered
+        // for it: the listing still offers the first's outputs only.
+        qtum.send_raw_tx(&hex::encode(&first.tx_hex.0)).compat().await.unwrap();
+        server.set_error(BROADCAST, "stub: input already spent");
+        assert!(token
+            .send_raw_tx(&hex::encode(&second.tx_hex.0))
+            .compat()
+            .await
+            .is_err());
+        only_outputs_of(&listed_outpoints(&qtum).await, &first_tx);
+    });
+}
+
+/// Item 2 (D38.6.4Q.4 status note), lifetime: the record ends with its last holder and starts empty again; disabling
+/// one instance leaves the record to the others.
+#[test]
+fn t38_6_4q_4_the_record_lives_until_the_last_instance_is_disabled_and_starts_empty_again() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 87, &[1_000_000_000]);
+        let live = || CoinsContext::from_ctx(&env.ctx).unwrap().spent_records.live_records();
+        assert_eq!(live(), 1);
+
+        // A spend of token A enters the one record.
+        let call = token_a
+            .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+            .unwrap();
+        token_a.send_contract_calls(vec![call]).await.unwrap();
+        let sent = broadcast_txs(&server).pop().unwrap();
+        drop((token_a, qtum));
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        disable_coin(&env.ctx, QTUM_TICKER).await.unwrap();
+        // Token B is left holding it: still one record, with the entry.
+        assert_eq!(live(), 1);
+        let listed = listed_outpoints(&token_b).await;
+        assert!(listed.iter().all(|(hash, _)| *hash == txid_of(&sent)) && !listed.is_empty());
+
+        // The last instance's disable ends the record; enabling again starts one that knows nothing.
+        drop(token_b);
+        disable_coin(&env.ctx, TOKEN_B_TICKER).await.unwrap();
+        wait_until("the record to end", 10., || live() == 0).await;
+        let again = init_qtum(&env, &[&server]).await;
+        assert_eq!(live(), 1);
+        assert_eq!(listed_outpoints(&again).await, [outpoint(&funding, 0)]);
     });
 }
 
 // ---- T38.6.4Q.11: the process-wide lock ----
 
 #[test]
-fn t38_6_4q_11_a_withdraw_of_another_coin_waits_for_the_pending_broadcast_of_a_token() {
+fn t38_6_4q_11_a_withdraw_of_another_coin_does_not_wait_for_the_pending_broadcast_of_a_token() {
     block_on(async {
         let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let env = family_env();
@@ -1355,22 +2713,20 @@ fn t38_6_4q_11_a_withdraw_of_another_coin_waits_for_the_pending_broadcast_of_a_t
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
             };
             let outcome = doc.withdraw(request).compat().await;
             (outcome.is_ok(), started, std::time::Instant::now())
         };
         let ((token_ok, token_done), (withdraw_ok, withdraw_started, withdraw_done)) =
             futures::join!(token_send, doc_withdraw);
-        eprintln!(
-            "Q11 observed: withdraw returned {:.2} s after it started, {:.2} s after the token's answer",
-            withdraw_done.duration_since(withdraw_started).as_secs_f64(),
-            withdraw_done.saturating_duration_since(token_done).as_secs_f64()
-        );
         assert!(token_ok && withdraw_ok);
-        // The withdraw of another coin, served by another stub, does not return before the token's broadcast has been
-        // answered (R38.6.4Q.7 item 6, last point): it waits for the process-wide build lock.
-        assert!(withdraw_done >= token_done);
-        assert!(withdraw_done.duration_since(withdraw_started) >= delay - Duration::from_millis(600));
+        // The token no longer takes the process-wide lock (D38.6.4Q.4 status note, item 4): the withdraw of another
+        // coin, served by another stub, returns while the token's broadcast is still unanswered.
+        assert!(withdraw_done < token_done);
+        assert!(withdraw_done.duration_since(withdraw_started) < delay - Duration::from_millis(600));
         // The withdraw did not broadcast anything, and the second stub saw its listing.
         assert_eq!(doc_server.requests(BROADCAST), 0);
         assert!(doc_server.requests(LIST_UNSPENT) >= 1);
@@ -1492,6 +2848,9 @@ fn t38_6_4q_9_delegation_and_withdraw_from_one_address_list_one_after_the_other(
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
             };
             qtum.withdraw(request).compat().await.map_err(|e| e.to_string())
         };
@@ -1530,15 +2889,15 @@ fn t38_6_4q_9_delegation_and_withdraw_from_one_address_list_one_after_the_other(
             "Q9b observed: together, {listings_halfway} listing(s) at 0.75 s, {listings_in_all} in all, {elapsed:.1} s"
         );
         let (delegation, withdraw) = (delegation.unwrap(), withdraw.unwrap());
-        // With the lock (PR #354) the second build lists only after the first has signed: one listing at 0.75 s, all of
-        // them one after the other (differs from the reference text of T38.6.4Q.9 (b), where both list at the same time).
-        assert_eq!(listings_halfway, 1);
+        // Both builds send their listing request at once: the guard of the one shared record of the address
+        // (D38.6.4Q.4 status note, item 4) is taken when the answer arrives, as it always was (the listing is read
+        // first and then filtered through the record under the guard). From there the builds are one after the other:
+        // the second filters, signs and notes its pending entry after the first has done so. A pending entry hides no
+        // input, so both still spend the one funding output.
+        assert_eq!(listings_halfway, 2);
         assert_eq!(listings_in_all, withdraw_listings + delegation_listings);
-        assert!(
-            elapsed >= (withdraw_listings + delegation_listings) as f64 * 1.5 * 0.9,
-            "{elapsed}"
-        );
-        // Neither build broadcasts, neither enters a record: both spend the one funding output.
+        let _ = elapsed;
+        // Neither build broadcasts: both spend the one funding output.
         assert_eq!(server.requests(BROADCAST), 0);
         let delegation_tx: UtxoTx = deserialize(delegation.tx_hex.0.as_slice()).unwrap();
         let withdraw_tx: UtxoTx = deserialize(withdraw.tx_hex.0.as_slice()).unwrap();
@@ -1559,15 +2918,17 @@ fn is_listing(message: &Json) -> bool {
 /// The call the balance stream of `mm2_main` makes for a token (`qrc20_subscription_target` and
 /// `blockchain_contract_event_subscribe`), made here on the token's client: the wallet's contract-format address, the
 /// token contract and the `Transfer` topic. The stream itself (the enabling of it) is not covered here.
+///
+/// D38.6.4Q.3 status note: an answered subscription is remembered and placed again, once, over the newly maintained
+/// session after a disconnect (before the decision nothing was placed again). An error answer to it, or no answer,
+/// leaves activation, balance and history working and is not repeated.
 #[test]
-fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_working_and_is_not_placed_again() {
+fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_working_and_is_placed_again_once() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
         let token = init_token_named(&env, TICKER, &[&server], false).await;
-        let UtxoRpcClientEnum::Electrum(client) = token.utxo.rpc_client.clone() else {
-            panic!("an Electrum activation builds an Electrum client")
-        };
+        let client = electrum_client_of(&token);
         let address = contract_addr_into_rpc_format(&token.my_addr_as_contract_addr().unwrap());
         let contract = contract_addr_into_rpc_format(&token.contract_address);
         let wanted = json!([
@@ -1577,11 +2938,17 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
         ]);
         let subscribe = || {
             client
-                .blockchain_contract_event_subscribe(&address, &contract, QRC20_TRANSFER_TOPIC)
+                .blockchain_contract_event_subscribe(
+                    token.utxo.electrum_owner,
+                    &address,
+                    &contract,
+                    QRC20_TRANSFER_TOPIC,
+                )
                 .compat()
         };
 
-        // An error answer: the request fails, and balance and history keep working.
+        // An error answer: the request fails (an error answer to this method is final, as before), and balance and
+        // history keep working. A failed subscription is not remembered.
         server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
         let error = subscribe().await.unwrap_err().to_string();
         assert!(error.contains("stub subscribe error"), "{error}");
@@ -1590,8 +2957,19 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
         server.set_result(GET_HISTORY, json!([]));
         assert!(matches!(
             token.request_tx_history(env.ctx.metrics.clone()).await,
-            RequestTxHistoryResult::Ok(_)
+            RequestTxHistoryResult::Ok(..)
         ));
+        server.kill_connections();
+        wait_until("the client to reconnect", 60., || {
+            server.accepted() >= 2 && server.open_connections() == 1
+        })
+        .await;
+        Timer::sleep(2.).await;
+        assert_eq!(
+            server.requests(EVENT_SUBSCRIBE),
+            1,
+            "nothing was remembered, nothing is placed again"
+        );
 
         // No answer at all: the request stays pending, and balance and history keep working meanwhile.
         server.clear_error(EVENT_SUBSCRIBE);
@@ -1602,24 +2980,476 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
             assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
             assert!(matches!(
                 token.request_tx_history(env.ctx.metrics.clone()).await,
-                RequestTxHistoryResult::Ok(_)
+                RequestTxHistoryResult::Ok(..)
             ));
         };
         let (outcome, ()) = futures::join!(pending, rest);
         assert!(matches!(outcome, futures::future::Either::Right(_)), "no answer came");
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
 
-        // An answer: the request succeeds. After a reconnect the client places nothing again.
+        // An answer: the request succeeds and the subscription is remembered.
         server.set_reply_delay(EVENT_SUBSCRIBE, Duration::ZERO);
         subscribe().await.unwrap();
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+
+        // After a disconnect the newly maintained session gets it again, exactly once, with the same parameters.
+        let accepted = server.accepted();
         server.kill_connections();
         wait_until("the client to reconnect", 60., || {
-            server.accepted() >= 2 && server.open_connections() == 1
+            server.accepted() > accepted && server.open_connections() == 1
+        })
+        .await;
+        wait_until("the subscription to arrive again", 10., || {
+            server.requests(EVENT_SUBSCRIBE) == 4
+        })
+        .await;
+        assert_eq!(server.request_params(EVENT_SUBSCRIBE).last().unwrap(), &wanted);
+        assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 4, "placed again once, not in a loop");
+
+        // The server now refuses it: after the next disconnect it is asked once more, the error changes nothing else
+        // (activation, balance and history work) and it is not asked again in a loop.
+        server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+        let accepted = server.accepted();
+        server.kill_connections();
+        wait_until("the client to reconnect again", 60., || {
+            server.accepted() > accepted && server.open_connections() == 1
+        })
+        .await;
+        wait_until("the refused subscription to be asked", 10., || {
+            server.requests(EVENT_SUBSCRIBE) == 5
         })
         .await;
         assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+        assert!(matches!(
+            token.request_tx_history(env.ctx.metrics.clone()).await,
+            RequestTxHistoryResult::Ok(..)
+        ));
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 5, "an error answer is not repeated");
+        assert!(is_registered(&env).await);
+    });
+}
+
+// ---- D38.6.4Q.1 status note: the shared client, the history collector's classification, the subscriptions ----
+
+/// D38.6.4Q.1 status note, item 5: the shared client goes by the platform ticker, and the all-error classification of the
+/// history collector (the amendment after R38.6.4Q.6, "Counting") follows the client's name, so that a token on a
+/// shared client ends its collector after three all-error passes with the named sync-status error, as before.
+#[test]
+fn t38_6_4q_6_three_all_error_passes_end_the_collector_on_a_shared_client_named_after_the_platform() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_error(GET_HISTORY, "stub history error");
+        let qtum = init_qtum(&env, &[&server]).await;
+        let coin = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&coin);
+        assert!(same_client(&client, &qtum_client_of(&qtum)));
+        assert_eq!(
+            crate::utxo::rpc_clients::UtxoJsonRpcClientInfo::coin_name(&client),
+            QTUM_TICKER
+        );
+        wait_maintained(&coin, 1).await;
+
+        // The pool's failure names the platform, and the classification follows it.
+        let (outcome, kind) = coin.request_tx_history_counted(env.ctx.metrics.clone()).await;
+        let RequestTxHistoryResult::Retry { error } = outcome else {
+            panic!("an error answer is a retry")
+        };
+        assert!(
+            error.contains(&format!("{QTUM_TICKER}: every Electrum server tried")),
+            "{error}"
+        );
+        assert_eq!(kind, HistoryPassKind::EveryServerAnsweredAnError);
+        let asked = server.requests(GET_HISTORY);
+
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let collector = coin.clone();
+            let ctx = env.ctx.clone();
+            let ended = ended.clone();
+            common::executor::spawn(async move {
+                collector.history_loop(ctx).await;
+                ended.store(true, AtomicOrdering::SeqCst);
+            });
+        }
+        // Pass one, a 10 s backoff, pass two, a 20 s backoff, pass three.
+        wait_until("the collector to end", 45., || ended.load(AtomicOrdering::SeqCst)).await;
+        let HistorySyncState::Error(error) = coin.history_sync_status() else {
+            panic!("the history state is an error")
+        };
+        assert_eq!(error["code"], json!(HISTORY_NO_SERVER_ANSWERS_ERR_CODE));
+        assert_eq!(server.requests(GET_HISTORY), asked + 3);
+        // The balance still answers over the shared session.
+        assert_eq!(coin.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+    });
+}
+
+/// D38.6.4Q.1 status note, item 6: on the disable of QTUM its script-hash subscriptions leave the shared client, unless
+/// another instance remembers the same one; the others are placed again after a reconnect, QTUM's own are not. A
+/// subscription that an instance placed already is not placed twice.
+#[test]
+fn t38_6_4q_1_after_qtum_is_disabled_its_script_hash_subscription_is_not_placed_again_while_a_token_keeps_the_client() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = electrum_client_of(&token);
+        let (qtum_owner, token_owner) = (
+            AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner,
+            token.utxo.electrum_owner,
+        );
+        assert_ne!(qtum_owner, token_owner);
+
+        // QTUM alone remembers the first hash; QTUM and the token remember the second.
+        client
+            .subscribe_scripthash(qtum_owner, "aa11".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(qtum_owner, "bb22".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(token_owner, "bb22".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+        // Placed by the same instance again: nothing is sent.
+        client
+            .subscribe_scripthash(qtum_owner, "aa11".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+
+        // With both instances active a reconnect places both hashes again.
+        let placed_before = server.request_params(SCRIPTHASH_SUBSCRIBE).len();
+        reconnect_all(&server).await;
+        wait_until("both hashes placed again", 10., || {
+            server.request_params(SCRIPTHASH_SUBSCRIBE).len() >= placed_before + 2
+        })
+        .await;
+        let placed_again = server.request_params(SCRIPTHASH_SUBSCRIBE)[placed_before..].to_vec();
+        assert!(placed_again.contains(&json!(["aa11"])), "{placed_again:?}");
+        assert!(placed_again.contains(&json!(["bb22"])), "{placed_again:?}");
+
+        // QTUM is disabled; the token keeps the client. The next reconnect places the shared hash alone.
+        drop(qtum);
+        disable_coin(&env.ctx, QTUM_TICKER).await.unwrap();
+        assert_eq!(client.script_hash_owners("aa11"), None);
+        assert_eq!(
+            client.script_hash_owners("bb22"),
+            Some(std::collections::HashSet::from([token_owner]))
+        );
+        Timer::sleep(1.).await;
+        let placed_before = server.request_params(SCRIPTHASH_SUBSCRIBE).len();
+        reconnect_all(&server).await;
+        wait_until("the shared hash placed again", 10., || {
+            server.request_params(SCRIPTHASH_SUBSCRIBE).len() > placed_before
+        })
+        .await;
+        Timer::sleep(2.).await;
+        let placed_again = server.request_params(SCRIPTHASH_SUBSCRIBE)[placed_before..].to_vec();
+        assert!(!placed_again.is_empty());
+        assert!(
+            placed_again.iter().all(|params| params == &json!(["bb22"])),
+            "{placed_again:?}"
+        );
+        assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+    });
+}
+
+/// D38.6.4Q.1 status note, item 6, on the forced removal of CRD ch.43 R43.1E.5 item 4: QTUM and its QRC20 dependent,
+/// removed in one step, both forget their Electrum subscriptions, as each does through a single `disable_coin`.
+#[test]
+fn t38_6_4q_1_the_forced_removal_of_qtum_with_a_token_makes_both_forget_their_subscriptions() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = electrum_client_of(&token);
+        let (qtum_owner, token_owner) = (
+            AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner,
+            token.utxo.electrum_owner,
+        );
+        let address = contract_addr_into_rpc_format(&token.my_addr_as_contract_addr().unwrap());
+        let contract = contract_addr_into_rpc_format(&token.contract_address);
+
+        // QTUM alone remembers the first hash, the token alone the third; both remember the second, and the token a
+        // contract event.
+        client
+            .subscribe_scripthash(qtum_owner, "aa11".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(qtum_owner, "bb22".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(token_owner, "bb22".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(token_owner, "cc33".to_owned())
+            .await
+            .unwrap();
+        client
+            .blockchain_contract_event_subscribe(token_owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await
+            .unwrap();
+        assert_eq!(client.contract_event_subscriptions(), 1);
+
+        // The token is a dependent of QTUM, as a token of the platform-with-tokens activation is.
+        let coins_ctx = CoinsContext::from_ctx(&env.ctx).unwrap();
+        {
+            let mut coins = coins_ctx.coins.lock().await;
+            let registered = coins.remove(TICKER).expect("the token is registered");
+            coins.insert_dependent(QTUM_TICKER, TICKER.to_owned(), registered);
+        }
+        drop((qtum, token));
+
+        let removed = disable_platform_with_dependents(&env.ctx, QTUM_TICKER).await.unwrap();
+        assert_eq!(removed, vec![TICKER.to_owned(), QTUM_TICKER.to_owned()]);
+        for hash in ["aa11", "bb22", "cc33"] {
+            assert_eq!(client.script_hash_owners(hash), None, "{hash}");
+        }
+        assert_eq!(client.contract_event_subscriptions(), 0);
+    });
+}
+
+/// D38.6.4Q.1 status note, item 6, for the contract-event subscriptions: one that two token instances remember
+/// survives the disable of one of them, and is forgotten with the last one's. A subscription that an instance placed
+/// already is not placed twice.
+#[test]
+fn t38_6_4q_1_a_contract_event_subscription_remembered_by_two_tokens_survives_the_disable_of_one() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        // QTUM keeps the client while the tokens come and go.
+        let _qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = electrum_client_of(&token_a);
+        let address = contract_addr_into_rpc_format(&token_a.my_addr_as_contract_addr().unwrap());
+        let contract = contract_addr_into_rpc_format(&token_a.contract_address);
+        let (owner_a, owner_b) = (token_a.utxo.electrum_owner, token_b.utxo.electrum_owner);
+        drop((token_a, token_b));
+        let subscribe = |owner| {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+
+        subscribe(owner_a).await.unwrap();
+        subscribe(owner_b).await.unwrap();
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        // Placed by the same instance again: nothing is sent.
+        subscribe(owner_a).await.unwrap();
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        assert_eq!(client.contract_event_subscriptions(), 1);
+
+        // Token A is disabled: token B still remembers the subscription, so a reconnect places it again.
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        reconnect_all(&server).await;
+        wait_until("the subscription placed again", 10., || {
+            server.requests(EVENT_SUBSCRIBE) == 3
+        })
+        .await;
         Timer::sleep(2.).await;
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+        assert_eq!(client.contract_event_subscriptions(), 1);
+
+        // Token B is disabled too: nothing remembers it, and a reconnect does not place it again.
+        disable_coin(&env.ctx, TOKEN_B_TICKER).await.unwrap();
+        assert_eq!(client.contract_event_subscriptions(), 0);
+        reconnect_all(&server).await;
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+    });
+}
+
+// ---- CRD ch.38 §38.5C (D38.5C.1 and D38.5C.2 status notes): rows the listing no longer holds, changed heights ----
+
+/// One stored transfer row of the transaction `hash_byte`.
+fn stored_row(hash_byte: u8, log_index: u64, block_height: u64) -> (H256Json, TxInternalId, crate::TransactionDetails) {
+    let tx_hash = H256Json::from([hash_byte; 32]);
+    let id = TxInternalId::new(tx_hash, 0, log_index);
+    let row = utxo_common::history_row_for_test(block_height, BytesJson::from(id.clone()).0);
+    (tx_hash, id, row)
+}
+
+fn history_map_of(rows: Vec<(H256Json, TxInternalId, crate::TransactionDetails)>) -> HistoryMapByHash {
+    let mut map = HistoryMapByHash::new();
+    for (hash, id, row) in rows {
+        map.entry(hash).or_default().insert(id, row);
+    }
+    map
+}
+
+fn listing(entries: &[(u8, u64)]) -> TxIds {
+    entries
+        .iter()
+        .map(|(byte, height)| (H256Json::from([*byte; 32]), *height))
+        .collect()
+}
+
+fn rows_in(map: &HistoryMapByHash) -> usize { map.values().map(|rows| rows.len()).sum() }
+
+#[test]
+fn t38_5c_a_confirmed_transaction_absent_from_two_listings_one_block_apart_is_removed_with_all_its_rows() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        // A has one row; B is a transaction with two transfer rows.
+        let mut map = history_map_of(vec![
+            stored_row(0xa1, 0, 100),
+            stored_row(0xb2, 0, 90),
+            stored_row(0xb2, 1, 90),
+        ]);
+        let mut absence = AbsenceMarks::default();
+        let only_a = listing(&[(0xa1, 100)]);
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &only_a));
+        assert_eq!(rows_in(&map), 3);
+        assert!(coin.remove_unlisted_rows(&mut absence, &mut map, 801, &only_a));
+        assert_eq!(rows_in(&map), 1, "both rows of B went together");
+        assert!(map.contains_key(&H256Json::from([0xa1; 32])));
+        assert!(!absence.any());
+    });
+}
+
+#[test]
+fn t38_5c_an_unconfirmed_transaction_follows_the_same_rule() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let mut map = history_map_of(vec![stored_row(0xe5, 0, 0)]);
+        let mut absence = AbsenceMarks::default();
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert!(coin.remove_unlisted_rows(&mut absence, &mut map, 801, &listing(&[])));
+        assert_eq!(rows_in(&map), 0);
+    });
+}
+
+#[test]
+fn t38_5c_one_absence_or_two_at_the_same_tip_keep_the_row_and_the_mark_keeps_the_need_to_run_test_true() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let mut map = history_map_of(vec![stored_row(0xb2, 0, 90)]);
+        let mut absence = AbsenceMarks::default();
+        let balance = CoinBalance {
+            spendable: balance_of(1),
+            unspendable: BigDecimal::from(0),
+        };
+        // No mark, an unchanged balance and a settled row: no pass.
+        assert!(!coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, false));
+        // A chain-changed event (CRD ch.38 §38.5C amendment of 2026-11-18, item 3) forces the pass whatever the rest says.
+        assert!(coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, true));
+
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert_eq!(rows_in(&map), 1);
+        // The mark: the pass runs although the balance is unchanged.
+        assert!(coin.check_if_history_update_is_needed(&map, &Some(balance.clone()), &balance, &absence, false));
+    });
+}
+
+#[test]
+fn t38_5c_a_listing_that_contains_the_transaction_again_clears_the_mark() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let mut map = history_map_of(vec![stored_row(0xb2, 0, 90)]);
+        let mut absence = AbsenceMarks::default();
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 800, &listing(&[])));
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, 801, &listing(&[(0xb2, 90)])));
+        assert!(!absence.any());
+        assert_eq!(rows_in(&map), 1);
+    });
+}
+
+/// A failed, cut-off or `history too large` listing gives no tip, so it never reaches the rule.
+#[test]
+fn t38_5c_a_listing_that_failed_or_was_too_large_carries_no_tip_and_a_good_one_carries_the_tip_of_its_server() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+
+        server.set_error(GET_HISTORY, "stub history error");
+        assert!(matches!(
+            coin.request_tx_history(env.ctx.metrics.clone()).await,
+            RequestTxHistoryResult::Retry { .. }
+        ));
+        server.clear_error(GET_HISTORY);
+        server.set_error_object(GET_HISTORY, json!({"code": 1, "message": "history too large"}));
+        assert!(matches!(
+            coin.request_tx_history(env.ctx.metrics.clone()).await,
+            RequestTxHistoryResult::HistoryTooLarge
+        ));
+
+        // One connected server: its tip with each listing, and a new block moves it.
+        server.clear_error(GET_HISTORY);
+        server.set_result(GET_HISTORY, json!([]));
+        let RequestTxHistoryResult::Ok(_, first) = coin.request_tx_history(env.ctx.metrics.clone()).await else {
+            panic!("a list is a history")
+        };
+        assert_eq!(first, Some(777));
+        // That a new block moves the tip of the single server is tested on the pool
+        // (`t38_5c_one_connected_server_gives_its_tip_for_each_listing`); here the next tip is taken as given.
+        let second = first.map(|tip| tip + 1);
+        // Two listings from the single server, one block apart, remove the row.
+        let mut map = history_map_of(vec![stored_row(0xb2, 0, 90)]);
+        let mut absence = AbsenceMarks::default();
+        assert!(!coin.remove_unlisted_rows(&mut absence, &mut map, first.unwrap(), &listing(&[])));
+        assert!(coin.remove_unlisted_rows(&mut absence, &mut map, second.unwrap(), &listing(&[])));
+        assert_eq!(rows_in(&map), 0);
+    });
+}
+
+#[test]
+fn t38_5c_a_changed_height_is_taken_over_with_the_new_time_and_an_unconfirmed_listing_resets_all_rows() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let (mut a, b) = two_served_txs(&coin);
+        serve_tx(&server, &a);
+        serve_tx(&server, &b);
+        let id = |served: &ServedTx| json::from_value::<H256Json>(json!(txid_of(&served.tx))).unwrap();
+        let mut history_map = HistoryMapByHash::new();
+        let tx_ids = vec![(id(&a), a.block), (id(&b), b.block)];
+        assert!(coin.process_tx_ids(&env.ctx, &mut history_map, tx_ids).await);
+        assert_eq!(rows_in(&history_map), 3);
+
+        // The block of A changed, and its block has another time; B (two rows) is listed as unconfirmed.
+        a.block = 710;
+        a.time = 1_700_000_999;
+        serve_tx(&server, &a);
+        let tx_ids = vec![(id(&a), 710), (id(&b), 0)];
+        assert!(coin.process_tx_ids(&env.ctx, &mut history_map, tx_ids).await);
+
+        let rows_of = |served: &ServedTx| -> Vec<crate::TransactionDetails> {
+            history_map[&id(served)].values().cloned().collect()
+        };
+        let a_rows = rows_of(&a);
+        assert_eq!(a_rows.len(), 1);
+        assert_eq!((a_rows[0].block_height, a_rows[0].timestamp), (710, 1_700_000_999));
+        let b_rows = rows_of(&b);
+        assert_eq!(b_rows.len(), 2);
+        assert!(b_rows.iter().all(|row| row.block_height == 0), "{b_rows:?}");
     });
 }

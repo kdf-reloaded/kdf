@@ -27,6 +27,24 @@
 > describe TRON as activatable or functional describe the code with
 > the constant set to `true`.
 
+*Status note (2026-11-20), TRON is switched on as a wallet-only coin
+family.* The availability note above describes the tree until this
+date. `TRON_ACTIVATION_AVAILABLE` is now `true`: every activation route
+of §21.4 activates TRX and TRC20 (the mmrpc 2.0 methods, and the legacy
+`enable` and `electrum` of Chapter 55 D55.5), and the "TRON support is
+not available in this build" refusal no longer exists on any route. The
+wallet surface of §21.4 -- §21.10C is reachable: activation, balances,
+addresses, the HD wallet, withdraw, and the transaction history with a
+TronGrid API key. Swaps stay off: a second build constant,
+`TRON_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`), is `false`, and while
+it is `false` every TRX and TRC20 coin is wallet-only whatever its
+coins-config entry says, declines every match, and an order saved
+earlier that names one is cancelled at startup (the status notes at
+R21.10B.9, D6 and R21.B3). Where a sentence of this chapter says that a
+statement holds "when switched on", "behind the availability constant"
+or "while the constant is `false`", read it with the constant `true`
+from this date.
+
 ## 21.0 Executive Summary
 
 Tron support is a coin-support capability inside the workspace's
@@ -190,6 +208,10 @@ public method strings are part of the external API contract
 > available in this build". The flow below is the target for when
 > TRON returns, planned for the next beta.
 
+*Status note (2026-11-20).* The box above no longer holds: TRON
+activation is switched on, and the flow below is what the tree does (the
+status note of 2026-11-20 at the top of this chapter).
+
 > **Reference behavior and as-built route (Spec Reader 2026-11-07, rows
 > `v3.0.0-beta` and `feat/tron-swap-support (as of 2026-04-23)` of
 > chapter 02 §2.15A, identical on this point; passed the KDF Dirty
@@ -238,6 +260,11 @@ history (`tx_history` is ignored), `convertaddress`, `get_my_address` and
 `show_priv_key`, and swaps. On `task::enable_erc20::init` a token of the other
 family than its active platform is `PlatformCoinMismatch` inside the task
 status, not at `init`.
+
+*Status note (2026-11-20), transaction history.* The item "transaction
+history (`tx_history` is ignored)" of the note above no longer holds: on both
+routes `tx_history: true` starts the TRON history when the node list has a
+keyed TronGrid node, and is without effect otherwise (§21.10C).
 
 > **Binding scope (R36).** The method strings above are dictated
 > public API (R33). The Tron coin is activated by supplying
@@ -298,6 +325,14 @@ derived under the **SLIP-44 registered Tron coin type 195** (the
 derivation path is `m/44'/195'/...`). The coin-type value 195 is
 dictated by the public SLIP-44 registry (R29/R33); the derivation
 plumbing is discretionary.
+
+*Status note (2026-11-19), R-A2 built on the mmrpc 2.0 route.* Under a
+global-HD login, `enable_eth_with_tokens` and `task::enable_eth::init` build
+the TRON HD wallet for an absent `priv_key_policy` and for `ContextPrivKey`:
+the address is the one at the coin config's `derivation_path` extended by
+`path_to_address` (`m/44'/195'/0'/0/0` by default), the wallet is the one an
+EVM platform has, and TRC20 tokens use it. A config without `derivation_path`
+answers `InvalidPayload` (HTTP 400) before any node is contacted.
 
 ## 21.5 Address Encoding (dictated interop)
 
@@ -694,6 +729,12 @@ carries a `fee` descriptor of any form is refused with
 gives for a fee descriptor of a type the coin does not take. The
 fee is the R-W3 estimate. A request without `fee` is unchanged.
 
+*2026-11-20 (clean-side note): the shared fee descriptor now has a
+`Tron` form, so a request whose `fee` is `{"type":"Tron"}` (for
+example a TRON result's `fee_details` sent back) parses and is
+refused with `InvalidFeePolicy` like any other form; before, it
+failed request parsing.*
+
 **T-WP (tests).** Unit tests against a loopback stub node
 (`coins/eth/tron/wallet_path_tests.rs`, `tron/balance.rs`,
 `tron/broadcast.rs`, `tron/address.rs`) cover each rule: the
@@ -863,6 +904,35 @@ governs Reloaded.
   in base58check, while withdraw (chapter 47 R47.5.6a) and message signing
   refuse it. D21.10B.3.
 
+*Status note (2026-11-19), the HD methods for a TRC20 ticker (Spec Reader
+round 0.5.0-15; passed the KDF Dirty Gate).* The "HD methods" item of
+R21.10B.4 describes a TRX ticker. For a TRC20 ticker the reference answers
+from the platform's HD wallet, which the token shares, and each balance map
+holds that token's ticker only. The scan then counts an address as used
+when the chain has created its account, and no token balance is
+consulted. The shared wallet and the token-only ticker set match what
+chapter 49 §49.2.1 (R49.32) records for an ERC-20 ticker on an EVM
+platform; the used-address criterion does not. The sentences of
+R21.10B.4 above are unchanged.
+
+*Reloaded note (2026-11-19), the HD methods for a TRC20 ticker in this
+repository (its own code, not the reference; PR #428).* Asked for a TRC20
+ticker, `get_new_address`, `account_balance`,
+`task::account_balance::init` and `task::scan_for_new_addresses::init`
+answer from the HD wallet of the platform, and each balance map holds that
+token's ticker only, as chapter 49 §49.2.1 (R49.32) records for an ERC-20
+ticker on an EVM platform. Asked for the TRX ticker, each balance map
+covers TRX and the enabled TRC20 tokens. The activation result is the same
+as before. The used-address criterion is deliberately not the reference's:
+for a TRC20 ticker, as for the TRX ticker, an address counts as used when
+the chain has created its account or when any enabled TRC20 token has a
+non-zero balance at it. Receiving a TRC20 token does not create the
+account, so a scan that consulted no token balance would miss an address
+that holds only a token. The addresses found this way are a superset of
+those the account-only criterion finds, so no funds are found by the
+reference's criterion and missed by this one; the difference is not
+visible to peers and has no switch.
+
 **R21.10B.5** *Activation result (completes the §21.4 note and R-WP5).* The
 result has the EVM family's shape with no TRON-specific member. Single
 key: `current_block` is the TRON head block number from
@@ -877,6 +947,13 @@ and `unspendable` (0) decimal strings; `nfts_infos` is empty. Global HD:
 addresses and their derivation paths) and an empty `nfts_infos`.
 `enable_erc20` reports the token contract in base58check as
 `token_contract_address`.
+
+*Status note (2026-11-20), `gasfree_address`.* R21.10B.5 describes the rows it
+names, which have no GasFree. When the platform was activated with a GasFree
+provider, the address entries of the result also carry `gasfree_address`
+([Chapter 63](63-tron-gasfree-fee-delegation.md) §63.3.3 and its status note of
+2026-11-20); without one the result is as R21.10B.5 states. The sentences of
+R21.10B.5 above are unchanged.
 
 **R21.10B.6** *Transaction history (completes R-T4).* No TRON history source
 exists at either row: the reference reads none of the full-node API, a
@@ -893,6 +970,11 @@ and `to` in base58check, `tx_hash` as 64 lowercase hex digits without
 `internal_id` empty, `timestamp` the local time of building,
 `transaction_type` `StandardTransfer`, `memo` null and `fee_details` of
 R21.10B.7.
+
+*Status note (2026-11-20), Reloaded has a TRON history.* R21.10B.6 describes
+the reference. Reloaded keeps these answers for a TRON coin without a TronGrid
+API key or without `tx_history: true`, and otherwise serves a history from a
+provider's account listings through both methods: §21.10C.
 
 **R21.10B.7** *Withdraw fee estimate and amounts (completes R-F1, R-F2,
 R-W2, R-W3 and R-W6).*
@@ -955,6 +1037,324 @@ otherwise burns TRX for the whole size; the reference charges only the
 shortfall of the two pools summed. Remedy: Reloaded's estimate follows the
 node's rule, so that it is never below what the node charges.
 
+*Status note (2026-11-19), what Reloaded does for R21.10B.7.* Reloaded's TRON
+withdraw follows R21.10B.7 with the remedy above.
+
+- *No fallback figures.* The estimate is part of the withdraw and no longer
+  best-effort. A failed read of the current block, of the sender's
+  `getaccountresource`, of `getchainparameters`, of the recipient's account
+  (TRX) or of the energy dry run (TRC20, a missing or non-positive
+  `energy_used` included) fails the withdraw with `Transport`; so does a
+  resource answer that does not decode and a parameter answer without a
+  positive `getTransactionFee` or `getEnergyFee`. Every balance and resource
+  read is for the sender: the activated address, or the HD address a `from`
+  member selects.
+- *Bandwidth.* The size is the serialized size of the transaction with its one
+  65-byte signature, plus 64 for its contract. It costs nothing when the
+  sender's remaining staked bandwidth covers the whole size, nothing when the
+  remaining free bandwidth covers the whole size, and otherwise the whole size
+  is burned at `getTransactionFee`. The two quotas are never summed, so an
+  account whose quotas only together reach the size is estimated the full
+  burn, as the node charges it.
+- *New account (TRX only).* As the rule states. The account-creating case also
+  needs `getCreateAccountFee` when the staked bandwidth does not cover the
+  transfer; a node that does not report it makes that withdraw fail with
+  `InternalError`, like a node without a positive
+  `getCreateNewAccountFeeInSystemContract`. A reported
+  `getCreateNewAccountBandwidthRate` that is not positive is an unusable
+  parameter answer (`Transport`). A TRC20 transfer counts no account-creation
+  cost and does not read the recipient's account.
+- *Energy.* As the rule states; the `fee_limit` is the one of the note at
+  D21.10B.1.
+- *Amounts.* As the rule states. For TRX `max` the amount is recomputed from
+  the fee of the transaction that carries it until that fee no longer changes.
+  Where the amount lies next to a length boundary of its encoding, so that the
+  two neighboring fees would alternate, the amount is the largest one found
+  that fits the balance together with its own fee; at most the price of the
+  alternating bytes stays unsent, and the amount plus the fee is never above
+  the balance. An amount of zero without `max` is still not refused before
+  building.
+- *Other request members.* `fee` (`InvalidFeePolicy`, R-WP6) and `memo`
+  (`UnsupportedError`) are refused before any node request.
+  `expiration_seconds` is an optional member of the shared withdraw request
+  (chapter 49), read for a TRON coin only and ignored by every other family;
+  absent is 60. A value whose expiry does not fit the protocol's 64-bit
+  millisecond field answers `UnsupportedError`. The transaction's own
+  `timestamp` stays the local time of building.
+- *Fee details.* The members of the rule. Before this date the object carried
+  integer members in SUN under other names; nothing stored them. `total_fee`
+  is the expected charge; no `fee_limit` member is added. `spent_by_me` is the
+  amount plus `total_fee` for TRX and the amount for a token.
+
+Tests: `coins/eth/tron/withdraw_fee_tests.rs` (T21.10B.11 -- T21.10B.13 and
+each point above, against a stub node, with hand-computed figures),
+`tron/fee.rs`, `tron/withdraw.rs` and, for the HD sender,
+`tron/hd_tests.rs`.
+
+*Status note (2026-11-20), TRC20 amounts.* A TRC20 amount is encoded as a
+256-bit value, in the balance comparison, the energy dry run and the
+transaction's call data, so a token's whole balance can be sent whatever its
+decimals. Before this date the amount was narrowed to 64 bits and a larger one
+answered `InternalError`. Call data of an amount that fits 64 bits is
+unchanged; TRX amounts in SUN stay 64-bit values. Tests:
+`tron/tx_builder.rs` and `tron/withdraw_fee_tests.rs`, against hand-computed
+call data.
+
+*Status note (2026-11-20), origin-energy share.* What the reference does
+about the energy a TRC20 contract pays itself is stated in R21.10B.10 --
+R21.10B.12 below, and what it does when the dry run reverts in R21.10B.13
+(Spec Reader round 0.5.0-17). The sentences of R21.10B.7 are unchanged.
+
+> **Clearance (chapter 01 R40) -- passed the KDF Dirty Gate on
+> 2026-11-20, measure 0.02, for R21.10B.10 -- R21.10B.13, T21.10B.16 --
+> T21.10B.18 and the notes between them (Spec Reader round 0.5.0-17;
+> attestation in §21.13).**
+
+**Origin-energy share of a TRC20 transfer (added 2026-11-20).** *Public
+rule (TRON Developer Hub, Resource Model and smart-contract energy
+pages; not corpus-derived).* A contract's public settings
+`consume_user_resource_percent` and `origin_energy_limit`, returned by
+`POST /wallet/getcontract`, let the contract's deployer pay part or all of
+a call's energy: the caller is charged that percentage of the energy used,
+and the rest is drawn from the deployer's staked energy, bounded per call
+by `origin_energy_limit` and by what the deployer has available; what the
+deployer cannot cover falls back on the caller. A receipt shows the split
+as `origin_energy_usage` within `energy_usage_total`. The rules below
+state the rows `v3.0.0-beta`, `v2.6.0-beta`, `feat/tron-swap-support (as of
+2026-04-23)` and `feat/tron-gasfree (as of 2026-05-04)` of chapter 02
+§2.15A.
+
+**R21.10B.10** *The reference does not model the origin share (completes
+the "Energy (TRC20)" bullet of R21.10B.7).* At `v3.0.0-beta` the only
+energy input of a TRC20 fee is the `energy_used` member of the dry run
+through `POST /wallet/triggerconstantcontract`; that figure is the whole
+energy of the call, whoever pays it. The contract's percentage, its origin
+limit and the deployer's available energy are not inputs of any fee figure.
+Per method:
+
+- *`withdraw` and `task::withdraw::init` (TRC20).* `energy_used` of the
+  fee details is the whole dry-run energy; `energy_fee` is the part of it
+  the sender's own unused staked energy does not cover, times
+  `getEnergyFee`; `total_fee` adds the bandwidth fee. All of the energy
+  is treated as the caller's. For a contract whose deployer pays the
+  energy, the reported `energy_fee` and `total_fee` are therefore above
+  what the chain charges, by up to the whole energy fee.
+- *The TRX-for-fee check of a TRC20 withdraw.* The sender's TRX balance
+  is compared with that same `total_fee`. A sender whose TRX covers the
+  bandwidth and the caller's real share, but not the whole-energy figure,
+  is refused with `NotSufficientPlatformBalanceForFee` (HTTP 400) and
+  no transaction is returned.
+- *Trade-fee and swap-fee methods.* There is no TRON fee estimate in any
+  of them, so the question does not arise. `trade_preimage` refuses a
+  wallet-only ticker with `CoinIsWalletOnly` before any fee work, and
+  `setprice`, `buy` and `sell` behave as R21.10B.9 states. The legacy
+  `get_trade_fee`, `max_taker_vol` and `max_maker_vol`, and the swap-fee
+  estimates behind order placement for a trading-capable TRON coin, have
+  no TRON case: their fee figures come from the EVM gas path, which a
+  TRON coin has no node for (R21.10B.9). No TRON swap exists (F21.B1), so
+  there is no payment, spend, refund or DEX-fee estimate for a TRC20
+  contract call.
+- *Balance and activation results.* No balance, activation or address
+  method reports or reserves a TRON fee.
+
+Per state: `feat/tron-swap-support (as of 2026-04-23)` and the native
+(non-delegated) TRC20 withdraw of `feat/tron-gasfree (as of 2026-05-04)`
+have the same energy rule, the same `fee_limit` rule and the same TRX
+check as `v3.0.0-beta`; they differ from it only as R21.10B.1 and chapter
+63 state. On the fee-delegated route of chapter 63 the sender pays the
+provider's fee in the token and no energy figure is computed. `v2.6.0-beta`
+has no TRON fee estimate, dry run or `fee_limit` at all (R21.10B.1).
+
+**R21.10B.11** *`fee_limit` and the balance check use different figures
+(completes D21.10B.1).* At the three rows that build a TRC20 transfer,
+`fee_limit` is the whole dry-run energy times `getEnergyFee`: it is not
+reduced by the sender's staked energy, by the contract's percentage or by
+the origin limit, and it carries no margin. The TRX check uses `total_fee`
+of R21.10B.10, in which the energy part **is** reduced by the sender's
+unused staked energy and to which the bandwidth fee is added. The check
+is therefore against the full estimate of what the sender would burn if
+it paid all the energy, never against a figure reduced for the origin
+share, and the sender's TRX balance is not compared with `fee_limit`
+itself. Under the public rule above, the caller's share never exceeds the
+whole energy of the call, so a `fee_limit` set this way is not made too
+low by the origin share; it has no room for a call that uses more energy
+at inclusion than in the dry run (D21.10B.1).
+
+**R21.10B.12** *No contract metadata is read.* No path of the reference at
+any of the four rows requests `POST /wallet/getcontract`,
+`POST /wallet/getcontractinfo` or an equivalent, and no response member
+carrying the percentage, the origin limit or a per-contract energy factor
+is decoded. The deployer's account resources are not requested either:
+`POST /wallet/getaccountresource` is sent for the sender only. The node
+endpoints the reference uses are those of §21.9 and R21.10B.7 and nothing
+more. The row `feat/tron-swap-support (as of 2026-04-23)` adds documents
+only (F21.B4); a research document there lists the contract-information
+endpoint among public node endpoints, and no source file at that row uses
+it.
+
+*Code-quality finding (informative).* The reference's TRC20 fee is an
+upper bound, not an estimate, for a contract with an origin share: the fee
+details overstate the cost, and a withdraw the chain would accept can be
+refused for lack of TRX (R21.10B.10). A possible remedy, in this chapter's
+own terms: read the contract's two settings and the deployer's available
+energy once per withdraw; report the caller's expected share as the fee;
+keep `fee_limit` at a figure that still covers the whole energy, because
+the deployer's energy can be used up between the estimate and inclusion,
+in which case the caller pays the remainder; and decide explicitly which
+of the two figures the TRX check uses. Whether Reloaded adopts this is the
+lane's decision; the reference gives no precedent for either choice.
+
+*Not established (this block).* Nothing was run against a reference
+binary or a live node; the receipt members and the charging rule are
+taken from the public documentation, not from a measurement of this
+round. Whether a node's dry run reports a different `energy_used` when
+the deployer's energy is exhausted was not checked. The trade-fee
+outcomes of R21.10B.10 were read, not executed.
+
+T21.10B.16 *No contract read (parity).* Against a stub whose token
+contract would report a caller percentage of 0 and an ample origin limit,
+a TRC20 withdraw at parity sends no contract-metadata request; its
+`energy_fee` equals the stub's dry-run `energy_used`, less the sender's
+unused staked energy, times the stub's `getEnergyFee`, and the built
+transaction's `fee_limit` equals the dry-run `energy_used` times
+`getEnergyFee`. Reloaded: the row is restated when the lane decides
+whether the origin share is modeled.
+
+T21.10B.17 *TRX check on the full figure (parity).* With the same stub and
+a sender whose TRX balance covers the bandwidth fee but is below
+`total_fee` of T21.10B.16, the withdraw answers
+`NotSufficientPlatformBalanceForFee` with the platform ticker, the TRX
+balance and that `total_fee`. Reloaded: as T21.10B.16.
+
+**R21.10B.13** *A reverting dry run is not detected (completes the "Energy
+(TRC20)" bullet of R21.10B.7).* At `v3.0.0-beta` the withdraw's dry run of
+`transfer(address,uint256)` is judged by two things only: the node-answer
+classification of R21.10B.3, and whether `energy_used` is present and
+above zero. The revert message, the returned data in `constant_result`
+and the execution result of the simulated transaction are not examined
+for this call.
+
+- *Revert with the inner success flag true and a positive `energy_used`.*
+  Not detected. The withdraw goes on exactly as for a successful dry run:
+  the fee details and `fee_limit` are computed from that `energy_used`
+  (R21.10B.7, R21.10B.11), the TRX check runs, and the result carries a
+  signed transaction and its `tx_hash`. No error is answered. The
+  withdraw itself sends nothing to the chain at any row; if the client
+  then broadcasts the transaction and the call reverts at inclusion, the
+  sender pays for the energy used.
+- *Inner success flag false, or absent together with an error code.* The
+  answer is an error object and follows R21.10B.3: a transient code moves
+  the request to the next node, any other code ends it. The withdraw
+  answers `Transport` (HTTP 502) and nothing is signed.
+- *`energy_used` missing or zero.* Treated as an unusable answer: the
+  request moves to the next node, and when every node answers so the
+  withdraw answers `Transport` (HTTP 502) and nothing is signed.
+- *Order of checks.* The token balance is read, and an amount above it is
+  refused with `NotSufficientBalance`, before the dry run is sent, so the
+  commonest cause of a revert does not reach the dry run. Other causes
+  (a contract that refuses the sender or the recipient, a paused
+  contract) do.
+- *Routes and states.* `withdraw` and `task::withdraw::init` take the same
+  path; the task reports the same result or error token in its status.
+  `feat/tron-swap-support (as of 2026-04-23)` and the native TRC20
+  withdraw of `feat/tron-gasfree (as of 2026-05-04)` behave the same.
+  `v2.6.0-beta` has no dry run (R21.10B.1).
+- *Balance reads.* The reference's `balanceOf` read does not look at the
+  revert indication either; it differs only in what it requires of the
+  returned data. It takes the first `constant_result` entry of up to 32
+  bytes as the number; an empty list or a non-hex entry moves the read to
+  the next node, and an entry longer than 32 bytes ends the read as
+  failed without trying another node. Revert data of the usual
+  error-string form is longer than 32 bytes and so fails the read; a
+  shorter returned value would be read as a balance. Reloaded's stricter
+  rule for balance reads is R-WP3 and is not changed by this rule.
+
+*Code-quality finding (informative).* The reference can hand the client a
+signed TRC20 transfer that its own dry run has already shown to revert,
+with a fee estimate presented as if the transfer would succeed
+(R21.10B.13). A possible remedy, in this chapter's own terms: treat a dry
+run that carries a revert indication -- a revert message beside a true
+success flag, or a simulated execution result other than success -- as a
+refusal of the withdraw before anything is signed, with a typed error
+that names the contract's refusal, and do not move such an answer to
+another node, since the outcome belongs to the contract and not to the
+node. Which error token Reloaded uses is the lane's decision; the
+reference gives no precedent.
+
+*Not established (R21.10B.13).* Which members a TRON node fills for a
+reverting constant call (the success flag, the message, the simulated
+result, `energy_used`) was taken from the question put to this round and
+from public TRON documentation, not measured here.
+
+T21.10B.18 *Reverting dry run (parity).* Against a stub whose
+`triggerconstantcontract` answer for `transfer(address,uint256)` has the
+inner success flag true, a revert message, error-string data in
+`constant_result` and a positive `energy_used`, a TRC20 withdraw at
+parity answers a result with `tx_hex`, with `energy_used` equal to the
+stub's figure, and the stub receives no broadcast request. With the same
+stub answering `energy_used` zero on every node, the withdraw answers
+`Transport`, HTTP 502. Reloaded: the first half is restated when the lane
+decides the refusal of the finding above.
+
+*Status note (2026-11-20), what Reloaded does for R21.10B.10 -- R21.10B.13.*
+The sentences of the block above are unchanged; this note restates its three
+acceptance rows for Reloaded.
+
+- *A reverting dry run is refused (T21.10B.18 restated; the remedy of the
+  finding after R21.10B.13).* Reloaded reads the dry-run answer of a TRC20
+  withdraw for a revert indication, and either of two markers is one: the
+  status object has the success flag true **and** a non-empty `message`; or an
+  entry of `transaction.ret` names an execution result (`ret`, or
+  `contractRet`) other than `SUCCESS`. An empty `constant_result` is no marker
+  on its own. A withdraw whose dry run carries the indication answers
+  `UnsupportedError`, HTTP 400 on the direct method and in `details` of an
+  `Error` status on the task route (chapter 49 R49.27a: the request is the
+  client's to change). Its text is "the token contract refused this transfer
+  (its dry run reverted): " followed by the node's `message`, or by "simulated
+  result " and the result's name when there is no message. The node's text has
+  the node's URL removed, as every node text has (R-N1), and is cut to 200
+  characters, marked with "...". Nothing is signed, no `tx_hex` is returned,
+  and the answer is not moved to another node: the outcome belongs to the
+  contract and not to the node, so the node order does not change either. The
+  revert is judged before `energy_used`. Against the stub of T21.10B.18
+  (success flag true, a revert message, error-string data in
+  `constant_result`, a positive `energy_used`) Reloaded therefore answers that
+  `UnsupportedError`, the stub receives no broadcast request, and with two
+  such nodes one node is asked for the dry run. The second half of the row
+  holds as written: `energy_used` zero or missing answers `Transport`, HTTP
+  502, and so does an answer whose success flag is not true and that carries
+  no usable energy figure. A `message` beside a success flag that is not true
+  is no revert marker; such an answer is judged by R21.10B.3 and by its
+  `transaction.ret` entries. Token balance reads are not changed (R-WP3).
+- *Answer forms (public chain data, chapter 01 R6).* On 2026-11-20 a public
+  mainnet node answered the dry run of a USDT `transfer(address,uint256)`
+  that succeeds with the status object `{"result": true}` and no `message`,
+  one 32-byte word in `constant_result`, `transaction.ret` equal to `[{}]`,
+  a `logs` list and integer `energy_used` and `energy_penalty`. For a
+  transfer the token refuses (a sender without a token balance; an amount
+  above the balance) it answered with the status object `{"result": true,
+  "message": "REVERT opcode executed"}`, the message as plain text,
+  `constant_result` equal to `[""]`, `transaction.ret` equal to
+  `[{"ret": "FAILED"}]`, no `logs`, and positive figures: `energy_used`
+  8,624 and `energy_penalty` 6,640. This settles, for that node, the
+  members the paragraph "Not established (R21.10B.13)" leaves open.
+- *The origin share is not modeled (T21.10B.16 and T21.10B.17 restated as
+  parity; the maintainer's decision of 2026-11-20).* Reloaded keeps R21.10B.10
+  -- R21.10B.12: no contract metadata and no resources of the deployer are
+  read, the whole dry-run energy counts as the sender's, and the TRX check is
+  against the full `total_fee`. The estimate and the amount the check asks for
+  can therefore be above what the chain charges when the contract's deployer
+  pays part of the energy. For mainnet USDT the effect was zero on 2026-11-20:
+  a public node reported the deployer's energy as fully used (9,335 of 9,335),
+  and ordinary transfers that day showed no origin share in their receipts.
+  T21.10B.16 holds for Reloaded with one difference that predates this note:
+  the `fee_limit` is the dry-run energy times `getEnergyFee` plus the margin
+  of D21.10B.1. T21.10B.17 holds as written.
+- *Tests.* `tron/withdraw_fee_tests.rs` (the refusal with each marker, one
+  node asked, an unchanged fee for a successful dry run in the node's full
+  form, zero energy, and the two parity rows), `tron/node_client_tests.rs`
+  and the unit tests of `tron/api.rs` and `tron/withdraw.rs`.
+
 **R21.10B.8** *Address methods (completes R-WP5 and R-AD1).*
 
 - `validateaddress` accepts the base58check form (34 characters starting
@@ -974,6 +1374,22 @@ node's rule, so that it is never below what the node charges.
 - The withdraw destination and `my_balance` follow R-WP5: both address
   forms in, base58check out.
 
+*Status note (2026-11-17), what Reloaded does for each method of
+R21.10B.8.* `validateaddress` is as the bullet states: base58check, `41...` (42)
+and `0x41...` (44) are valid, the EVM `0x` 20-byte form is
+`is_valid: false` with a `reason`. `convertaddress` differs from the first
+bullet as decided in D21.10B.2: it converts between the TRON forms and
+refuses the EVM form (see the note at D21.10B.2); for an EVM coin it is
+unchanged. `get_my_address` refuses TRX and TRC20 with `CoinIsNotSupported`
+(HTTP 400); the general check of the coin config runs first, and a missing
+coin or a protocol that does not parse answers `CoinsConfCheckError`
+(HTTP 400); the extra "no `mm2` member" case of the bullet is not checked by
+this method for any coin. `show_priv_key` answers the local key as `0x` and
+64 hex digits for a TRON coin as for an EVM coin; a key the node does not
+hold (Trezor, MetaMask) is refused with the legacy error body, and a
+WalletConnect key cannot occur because activation refuses that policy
+(R21.10B.4).
+
 **R21.10B.9** *Orders (completes R-D1 and the order-placement bullet of
 F21.B3).* `setprice`, `buy` and `sell` have no TRON-specific check. With
 the coin configured `"wallet_only": true` -- every TRON config of the
@@ -986,6 +1402,31 @@ gas path and the coin has no EVM node; the answer is the same legacy
 error body and no order is created. The row `v2.6.0-beta` has the same
 wallet-only check.
 
+*Status note (2026-11-20), how Reloaded keeps a TRON coin wallet-only
+(clean-side, not corpus-sourced).* Reloaded has no TRON swap (R-D1), so
+while the build constant `TRON_SWAPS_AVAILABLE` is `false` a TRX or
+TRC20 coin reports itself wallet-only whatever its coins-config entry
+says. For a coin configured `"wallet_only": true` the answer of
+`setprice`, `buy` and `sell` is the one R21.10B.9 states: the legacy
+error body, HTTP 500, from the wallet-only check, naming the ticker, and
+no order is created (T21.10B.15); this is parity. For a TRON coin whose
+config is trading-capable Reloaded diverges in the check that refuses:
+the order is refused by the wallet-only check, where the reference
+passes that check and refuses at the balance-and-fee check. The answer
+has the same form (the legacy error body, HTTP 500, no order created);
+its text names the wallet-only ticker. No compatibility switch is
+offered: the reference's path ends in a refusal too, and a switch could
+only let a later, less clear check refuse the same order. The v2
+`start_swap` front of the three methods refuses the same way. A TRON
+coin also declines every match (its answer to the protocol-support
+question of order matching is no), and an order saved earlier that names
+a coin whose coins-config protocol is `TRX` or `TRC20` is cancelled at
+startup with a log line, as a saved Tendermint order is (Chapter 18,
+availability note). The read-only views (`orderbook`, `best_orders`,
+`trade_preimage`) read the coins-config `wallet_only` flag alone and are
+unchanged, and so are `max_taker_vol`, `max_maker_vol` and the legacy
+`get_trade_fee`, which do not ask whether a coin is wallet-only.
+
 **D21.10B.1** *TRC20 `fee_limit` policy.* The reference sets `fee_limit` to
 the dry-run energy times the energy price with no margin; Reloaded today
 sets a fixed cap (compatibility note). The cap is not visible to a peer.
@@ -994,10 +1435,39 @@ bounded by a stated maximum; (c) a fixed cap. The choice also fixes what
 the fee details report as the most the transfer can cost (D21.B5 of
 §21.11B.4 states the charging semantics).
 
+*Status note (2026-11-19), D21.10B.1 decided: (b):* the estimate plus 20%,
+rounded up to whole SUN, at most 100 TRX; an estimate above the maximum is
+refused before broadcast. The estimate is the dry-run energy times
+`getEnergyFee`, counting the whole energy whether the sender's staked energy
+covers it or not, because the limit bounds both (D21.B5). The `fee_limit` of
+a TRC20 transfer is that estimate plus a fifth of it, rounded up to whole
+SUN, and never above 100 000 000 SUN (100 TRX). When the estimate itself is
+above that maximum the withdraw is refused with `UnsupportedError` (HTTP
+400), whose text names the estimate and the maximum; nothing is signed, so
+nothing can be broadcast. A limit below the need is never set: by the
+charging semantics of D21.B5 such a call would fail on chain and still be
+charged. The `fee_limit` is the most the contract call of a TRC20 transfer
+can cost the sender; bandwidth, when it is burned, is charged beside it. The
+fee details keep `total_fee` as the expected charge (the energy shortfall and
+the bandwidth of R21.10B.7) and carry no `fee_limit` member. The margin and
+the maximum are Reloaded's figures: the reference sets no margin, and
+neither figure is visible to a peer.
+
 **D21.10B.2** *`convertaddress` for a TRON coin.* The reference answers an
 EVM `0x` form for a TRON coin. Options: (a) parity; (b) refuse the method
 for TRX and TRC20; (c) convert between the base58check and the `41…` hex
 form under a TRON-specific format value.
+
+*Status note (2026-11-17), D21.10B.2 decided: (c).* For a TRX or TRC20 coin,
+`convertaddress` converts between the base58check form and the `41...` hex
+form. `to_address_format` takes `{"format": "base58"}` (the base58check form,
+34 characters starting with `T`) or `{"format": "hex"}` (42 hex digits, the
+prefix `41` and the 20-byte payload, lowercase, no `0x`). `from` is any input
+form of R-AD1: base58check, `41...` hex, or `0x41...` hex. The EVM `0x`
+20-byte form as `from`, and the EVM format values (`mixedcase`, `singlecase`)
+or any other format value, are refused with the legacy error body (HTTP 400,
+`InvalidParam`). The two TRON format values are accepted for TRON coins only:
+an EVM coin keeps `mixedcase` and `singlecase` and refuses `base58` and `hex`.
 
 **D21.10B.3** *Key policies that activate but cannot send.* At the
 reference a browser build activates TRON under MetaMask and shows an
@@ -1026,6 +1496,41 @@ policy, `ContextPrivKey` and any HD-wallet policy under a global-HD login stay
 refused with `PrivKeyPolicyNotAllowed` until the TRON HD wallet (R21.10B.4,
 R-A2) is built. Under an iguana login nothing changes.
 
+*Status note (2026-11-19), HD interim rule retired.* The interim refusal of
+the note above is gone: under a global-HD login an absent policy,
+`ContextPrivKey` and the HD-wallet forms build the TRON HD wallet (R21.10B.4,
+R-A2) instead of answering `PrivKeyPolicyNotAllowed`. `IguanaPrivKey` is
+unchanged: it still uses the node's internal key
+(`mm2_internal_privkey_secret`) and is a single-address coin, on both routes.
+The Trezor, WalletConnect and MetaMask refusals are unchanged under a
+global-HD login. The HD methods (`get_new_address`, `account_balance` and the
+task forms of `scan_for_new_addresses` and `account_balance`) answer for a TRX
+or TRC20 ticker with base58check addresses
+and a balance map: over TRX and the enabled TRC20 tokens for the TRX ticker,
+over that token only for a TRC20 ticker, which is served by the HD wallet of
+its platform. For either ticker an address counts as used when the chain has
+created its account or when any enabled TRC20 token has a non-zero balance at
+it (the Reloaded note of 2026-11-19 after R21.10B.4, which records how this
+differs for a TRC20 ticker). This repository has no
+`task::get_new_address::init` for any coin, so that task form of R21.10B.4 is
+not served for TRON either. `task::create_new_account::init` ends with
+`Internal` in the task status for every TRON coin, before any account is
+created. `withdraw` and
+`task::withdraw::init` of a TRX or TRC20 coin take the HD `from` forms of the
+EVM withdraw (an address id or a derivation path, resolved in the HD wallet of
+the platform) and sign with the key of that path. For a TRC20 coin this is a
+Reloaded extension: any activated address of the platform's HD wallet can be
+named, whereas an EVM ERC-20 coin in Reloaded refuses `from`; without `from` the sender is
+the activated address; a single-key TRON coin refuses `from` with
+`UnexpectedFromAddress`. `show_priv_key` answers the key of the activated
+address (R21.10B.8).
+
+*Status note (2026-11-20), ERC-20 `from`.* The clause above that an EVM ERC-20
+coin in Reloaded refuses `from` describes the code before PR #438. Since then an
+ERC-20 withdraw under a global-HD login resolves `from` in the platform's HD
+wallet as well (chapter 49 R49.34 and its as-built status note); the TRC20 rule
+above is unchanged.
+
 > **Compatibility (this repository on dev, 2026-11-17; its own code, not
 > the reference).** TRX and TRC20 activate only through legacy `enable`
 > and `electrum`, behind the availability constant (D55.5); the request
@@ -1045,12 +1550,42 @@ R-A2) is built. Under an iguana login nothing changes.
 > deducting the fee, and a TRX amount plus fee above the balance is not
 > refused before building; the TRC20 `fee_limit` is a fixed cap.
 
+*Status note (2026-11-19), compatibility block.* On the mmrpc 2.0 route R-A2
+is now met: under a global-HD login the TRON address is derived under the
+coin's `derivation_path`, as R-A2 and R21.10B.4 require.
+The legacy `enable` and `electrum` routes keep the node's internal key under a
+global-HD login, as the EVM and UTXO legacy routes do in Reloaded (decided
+2026-11-19), so their TRON address differs from the address of the mmrpc 2.0
+route for the same seed; the reference does not serve TRON on those routes.
+
+*Status note (2026-11-19), withdraw fees of the compatibility block.* The
+withdraw defects the block lists are fixed. The estimate uses the real size
+of the transaction, counts an account-creation cost for a TRX recipient
+only, and is no longer best-effort: a failed node read fails the withdraw.
+`max: true` for TRX deducts the fee, and a TRX amount plus fee above the
+balance is refused before building. The TRC20 `fee_limit` follows D21.10B.1
+and is no longer a fixed cap. The status notes after R21.10B.7 and at
+D21.10B.1 state the rules.
+
+*Status note (2026-11-20), compatibility block.* The sentence "Reloaded has no
+TRON history source either" of the block no longer holds for a coin with a
+TronGrid API key and `tx_history: true`: §21.10C. Without them the answers are
+those of R21.10B.6.
+
 *Not established.* (1) Nothing was measured against a running reference
 binary or a live node. (2) The exact text the legacy error body carries in
 R21.10B.8 and R21.10B.9 is deliberately not recorded. (3) Whether the TRON
 node's energy dry run includes the dynamic-energy penalty in
 `energy_used` was not checked. (4) The swap-fee failure of R21.10B.9 for a
 trading-capable coin was read, not executed.
+
+*Lab note (2026-11-20), on item (3).* On 2026-11-20 a public mainnet node's
+dry run of a USDT `transfer(address,uint256)` to an address that holds the
+token reported `energy_used` 64,285 with `energy_penalty` 49,635, equal to
+the receipts of real transfers of that kind: the dry run includes the
+dynamic-energy penalty. To an address without a token balance it reported
+130,285; no real receipt of that kind was compared. Public chain data
+(chapter 01 R6); the sentence of item (3) is unchanged.
 
 *Acceptance rows.* Each row runs against a stub TRON node that answers the
 public endpoints of §21.9 with the forms the row names. *Parity* is the
@@ -1123,6 +1658,180 @@ T21.10B.15 *Orders.* With TRX configured wallet-only, `setprice`, `buy`
 and `sell` against any active coin each answer the legacy error body and
 `my_orders` stays empty.
 
+## 21.10C Transaction history (Reloaded-original, added 2026-11-20)
+
+Reloaded-original rules for the transaction history of TRX and TRC20 coins. The
+reference has no TRON history (R21.10B.6); nothing in this section was taken
+from it. The request and answer shapes of the two account endpoints are those
+of TronGrid's public API documentation (TRON Developer Hub,
+developers.tron.network, the pages *Get transaction info by account address*
+and *Get TRC20 transaction info by account address*, read on 2026-11-20): the
+parameters `only_confirmed`, `limit` (at most 200), `fingerprint` and, on the
+TRC20 endpoint only, `contract_address`, and the answer members `data`,
+`success` and `meta.fingerprint`, which is present only when a further page
+exists. The receipt and
+chain-parameter shapes are those of the public TRON full-node HTTP API (§21.9).
+The figures the tests check are public Nile test-network data captured on
+2026-11-20 (chapter 01 R6).
+
+**R21.10C.1 (when the history runs).** The history of a TRON coin is enabled
+only when both hold: the activation request asks `tx_history: true`, and the
+coin's node list has a *keyed TronGrid node*, that is, a node whose URL is
+`https` on one of the TronGrid hosts of R-N9 (exact host match) and whose
+requests carry the `TRON-PRO-API-KEY` header. The header comes from the node's
+own `headers` entry or, failing that, from the `MM2.json` key `tron_api_key`,
+in the order R-N9 states. This holds on both activation routes (the mmrpc 2.0
+route and the legacy `enable` / `electrum` route). Honoring `tx_history` is a
+divergence from R21.10B.2, where the reference ignores the member for TRON; it
+is additive, not visible to a peer, and has no switch.
+
+**R21.10C.2 (without a key).** A coin whose history is not enabled keeps the
+reference behavior of R21.10B.6: the versioned `my_tx_history` answers
+`NotSupportedFor` (HTTP 400), the legacy `my_tx_history` answers an empty
+`transactions` list (unless rows were stored earlier), `current_block` from the
+TRON node and `sync_status` `{"state":"NotEnabled"}`, and no account listing is
+ever asked. A key header on a host that is not a TronGrid host, and a TronGrid
+host given as `http`, do not enable the history.
+
+**R21.10C.3 (source and hosts).** The rows come from two listings per address,
+asked by GET of keyed TronGrid nodes only, never of another node of the list:
+
+| Request | Use |
+| --- | --- |
+| `GET /v1/accounts/{address}/transactions?only_confirmed=true&limit=200` | TRX rows |
+| `GET /v1/accounts/{address}/transactions/trc20?only_confirmed=true&limit=200` (with `contract_address` when one token is served) | TRC20 rows |
+| `POST /wallet/gettransactioninfobyid` (any configured node) | block height and fee of a TRC20 row, once per new transaction |
+| `POST /wallet/getchainparameters` (any configured node) | the bandwidth price, once per pass |
+
+`{address}` is the base58check form. The GET requests follow R-N3 to R-N8 as
+the POST requests do: the per-attempt cutoff, failover on every node failure of
+R-N4 (a listing not marked `success: true` or without a `data` array is a bad
+answer), the order rotation of R-N5, no redirect, and the one all-failed error
+of R-N8. A rate-limit answer (HTTP 429) and a refusal of the key (HTTP 403) are
+non-2xx node failures like any other: the next keyed node is asked, and when
+none answers the pass fails and is tried again after the pause of R21.10C.9,
+not sooner. The next page is asked with the same parameters and the
+`meta.fingerprint` value as the `fingerprint` parameter; a page without
+`meta.fingerprint` is the last one. The link the provider sends beside it is
+not followed,
+and a cursor that is not made of letters, digits, `-` and `_` ends the walk
+with an error. The API key is a secret under R-N9: no log line, error text,
+RPC answer or history state shows it or any part of a node URL beyond the host.
+
+**R21.10C.4 (addresses).** Every address a row names is in base58check. The
+history covers every *known* address of the wallet: the enabled address of a
+single-key coin, and for an HD wallet the known (activated) external addresses
+of every account, read again on each pass, so an address added by
+`get_new_address` or a scan is covered from the next pass. The rows of all
+addresses form one history. A transaction that two own addresses list is one
+row. When the wallet comes to know a further address (and at the first pass
+after a start), `spent_by_me`, `received_by_me` and `my_balance_change` of the
+stored transfer rows are recomputed from the rows' own members by the rules of
+R21.10C.5 and R21.10C.7, so a send to an address that became known later reads
+as a transfer between own addresses; fee-only rows are left as they are. A TRC20 ticker enabled on a TRX platform is served by the platform's
+wallet and its addresses.
+
+**R21.10C.5 (TRX rows).** For each row of the transaction listing whose first
+contract is a successful `TransferContract` from or to an own address:
+`from` is `owner_address`, `to` is `to_address`, `total_amount` is `amount` in
+TRX, `received_by_me` is the amount when the receiver is an own address, and
+`spent_by_me` is the amount plus the fee when the sender is an own address
+(as R21.10B.7 states for a withdraw). `block_height` is `blockNumber`,
+`timestamp` is `block_timestamp` in seconds, `tx_hash` is `txID` (64 lowercase
+hex digits), `internal_id` is the transaction id, `transaction_type` is
+`StandardTransfer`, and `tx_hex` is the signed protobuf transaction assembled
+from `raw_data_hex` and `signature`. A row without a member named here is left
+out and logged; no member is ever filled with a stand-in value.
+
+**R21.10C.6 (fee-only rows).** Any other transaction of the listing that an
+own address sent and paid a fee for is a row of the TRX coin that carries the
+fee only: `total_amount` 0, `spent_by_me` the fee, `to` the contract called
+(when the transaction names one). Its `transaction_type` is `FeeForTokenTx`
+when it is a TRC20 `transfer(address,uint256)` call and `StandardTransfer`
+otherwise. The token amount of such a call is a row of the token's own history
+(R21.10C.7), so nothing is counted twice. A transaction that changes no TRX
+balance of the wallet (no fee paid by an own address, no transfer to or from
+one) is not a row.
+
+**R21.10C.7 (TRC20 rows).** Each `Transfer` event of the token listing whose
+token is an enabled TRC20 coin is a row of that coin: `from`, `to`,
+`total_amount` (`value` scaled by the coin's decimals), `spent_by_me` the
+amount when the sender is an own address, `received_by_me` the amount when the
+receiver is one; the fee is paid in TRX and is never part of `spent_by_me`.
+`timestamp` is the event's `block_timestamp` in seconds. The listing carries
+neither a block number nor a fee: both come from `gettransactioninfobyid`,
+read once for a new transaction and stored with the row. A row whose receipt no
+node has yet is not stored and is asked again on a later pass. `tx_hex` is
+empty, because neither source carries the raw transaction. `internal_id` is a
+hash over the transaction id, the token contract, the two addresses, the value
+and the position among equal events of that token in the transaction, since one
+transaction can carry several transfer events, of one token or of several. The
+id of an event is therefore the same whether the listing was filtered by the
+token contract or not. `transaction_type` is `StandardTransfer`.
+
+**R21.10C.8 (fee details).** `fee_details` has the shape of the withdraw result
+(R21.10B.7), with `coin` the platform ticker, from the chain's own figures (the
+listing row for TRX, the receipt for TRC20): `total_fee` is the fee the owner
+paid, `bandwidth_fee` is `net_fee`, `energy_fee` is `energy_fee`,
+`energy_used` is `energy_usage_total`, and `bandwidth_used` is the bytes the
+transaction consumed, whatever paid for them:
+`net_usage + net_fee / getTransactionFee`, with the chain parameter read once
+per pass (a pass that cannot read it fails; no price is assumed). On a TRX
+transfer row, the part of the fee beyond bandwidth and energy
+(`fee - net_fee - energy_fee`), when it is positive, is reported as
+`account_creation_fee`; on a transfer to an address the chain had not created
+this is the creation fee. For such a row `net_fee` is the chain's fixed
+create-account charge and not a price per byte, so `bandwidth_fee` is
+`net_fee` and `bandwidth_used` is `net_usage` alone (0 when the owner's staked
+bandwidth did not cover the transaction), as in a withdraw result. Other rows
+carry no `account_creation_fee`.
+
+**R21.10C.9 (the process).** One process per platform coin writes the history
+of the platform and of every TRC20 token enabled on it (a token enabled later
+is picked up on the next pass); a TRC20 coin activated on its own through the
+legacy route has a process of its own. A pass walks each known address, stores
+new rows page by page, and is followed by a pause of 60 seconds. The first walk
+of an address in a process reads its whole listing; a later walk stops at the
+first page with nothing new. A stored row is never asked for again. The
+process ends when the node stops or the coin is disabled. The rows go to the
+coin's history store, which both `my_tx_history` methods read, newest first.
+
+**R21.10C.10 (history state).** `sync_status` is `NotEnabled` without an
+enabled history, `NotStarted` before the first pass, `InProgress` with
+`{"transactions_left": n}` while the first pass works (the rows of the page in
+hand, or the token rows still waiting for a receipt), and `Finished` after a
+pass that left nothing open. A pass that fails before the first `Finished`
+shows `Error` with `{"message": "..."}`, a text under the secrecy rule of
+R21.10C.3; a pass that fails after it keeps `Finished` and is logged.
+
+**R21.10C.11 (limits).** Confirmed rows only; a reorganization of the chain is
+not followed, and a stored row is not removed. Amounts moved by staking, by
+TRC10 assets, by a contract call's own value and by internal transactions are
+not shown as amounts (an own transaction of these kinds shows its fee). A
+TRC20 row has an empty `tx_hex`. The bandwidth price is the current chain
+parameter, so `bandwidth_used` of a row older than a price change is derived
+with the newer price. On a browser build the same rules hold for the legacy
+`my_tx_history`; the versioned method answers `NotSupportedInWasm` there, as
+for every coin family, and the keyed history has not been verified in a
+browser.
+
+**T21.10C (tests).** Unit tests against loopback stub nodes
+(`coins/eth/tron/history_tests.rs`, `node_client_tests.rs`, `nodes.rs`, with
+the captured listings and receipts under
+`coins/eth/tron/test_fixtures/history/`): the key rule of R21.10C.1 and
+R21.10C.2 (no key, a key on another host, a TronGrid host over `http`), and
+that only keyed nodes are asked; failover, cutoff and the request forms of
+R21.10C.3, and that no error or state text carries a key or a URL part; the
+record mapping of R21.10C.5 to R21.10C.8 for a TRX transfer out and in, a
+transfer to a new account, a TRC20 transfer out and in, a fee-only row and the
+rows that are left out; the bandwidth derivation (bandwidth of the owner only,
+burned only, mixed); the receipt read once and the row left out without one;
+paging; the merge over several own addresses, and a stored row recomputed when
+its receiver becomes a known address; the id of a token row being the same in
+a filtered and an unfiltered listing; the states of R21.10C.10; and
+the answers of both methods with `current_block` from the TRON node, including
+T21.10B.10 for a coin without a key.
+
 ## 21.11 Deferred Work
 
 The following are explicit gaps, documented as deferred work
@@ -1156,6 +1865,16 @@ a single flag.
   beta by `TRON_ACTIVATION_AVAILABLE` (see the availability note at
   the top of this chapter). Setting it to `true` and retiring the
   refusal tests that go with it is planned for the next beta.
+
+  *Status note (2026-11-20), D6 done: switched on as wallet-only.*
+  `TRON_ACTIVATION_AVAILABLE` is `true` from this date and the refusal
+  tests are retired; each route they covered has a test that activates a
+  TRX coin and a TRC20 token against a loopback node. The refusal text
+  and its test-only override are removed, and no route reads the
+  constant any more. Swaps stay off behind a second constant,
+  `TRON_SWAPS_AVAILABLE` (`false`): D1 -- D4 are unchanged, and that
+  constant is set to `true` only together with a TRON swap
+  implementation (§21.11B).
 
 **R-D1 (gate invariant).** Because the coin activates with no
 swap-contract binding, no production code path may reach a
@@ -1365,6 +2084,25 @@ operators are told to write is D21.B7.
 R-D1 continues to hold for a TRON coin activated with `wallet_only:
 true` or without a swap-contract binding; the refusal MUST remain typed
 and MUST occur before any transaction is built.
+
+*Status note (2026-11-20), R21.B3 as built.* Every TRON coin activates
+without a swap-contract binding (R-A1 step 5), so R21.B3 covers every
+TRON coin Reloaded can activate. From this date it is enforced before
+the deferral sites of §21.11 are reached: while `TRON_SWAPS_AVAILABLE`
+is `false` a TRX or TRC20 coin is wallet-only whatever its config says,
+so order placement refuses it before any balance or fee work, it
+declines every match, a saved order naming it is cancelled at
+startup (the status note at R21.10B.9), and an unfinished saved swap
+whose maker or taker coin is a TRON coin, by the coins-config protocol
+`TRX` or `TRC20`, is not resumed at startup, in the legacy swap files
+and in both v2 swap storages. Such a swap is skipped with one log line
+that names its uuid and the reason; its record is neither deleted nor
+marked failed, so it can resume in a build that has TRON swaps, and its
+coins are not among those the kick-start asks to be enabled. The typed
+refusals of §21.11 stay in place behind that; a `recover_funds_of_swap`
+asked for by hand for such a record is not stopped by this switch and meets
+them. The swap-contract members of an activation request are still validated
+by the rule of F21.B3 and still not bound.
 
 **R21.B4 (orderbook address).** When TRON swaps are enabled, the
 orderbook address derived from an order's public key for a `TRX` or
@@ -1696,6 +2434,19 @@ V3. The address encoding, protobuf transaction/contract formats,
   configured node order (R-N5); it was not asked and nothing was taken from
   the reference. Their tests are in the Tron node-client test module
   (T-N1 to T-N8 and the header tests of R-N9).
+- *Clean-context addition (2026-11-19, forbidden corpus not consulted):* the
+  status notes of this date after R21.10B.7, at D21.10B.1 and after the
+  compatibility block of §21.10B are Reloaded-original. They rest on the
+  cleared text of R21.10B.7 and D21.10B.1, on D21.B5, on this repository's
+  own code and on the public TRON protobuf transaction format (§21.6) for the
+  sizes. The whole-draw bandwidth rule, the margin and maximum of the
+  `fee_limit`, the refusal above the maximum and the settling of a TRX `max`
+  amount are Reloaded's own. No cleared sentence was edited.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status note of this date on TRC20 amounts after R21.10B.7 is
+  Reloaded-original. It rests on this repository's own code and on the public
+  token standard's `transfer(address,uint256)` interface. No cleared sentence
+  was edited.
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
   with its status remark, is Reloaded-original. It rests on the maintainer
@@ -1782,3 +2533,83 @@ V3. The address encoding, protobuf transaction/contract formats,
   and `v2.6.0-beta` compared on the points attributed to them. Method:
   reading, combined with a mechanical word n-gram comparison (6-gram and
   4-gram) and a per-token inventory; the additions embed no code blocks.
+- *Status note added 2026-11-19 (Spec Reader round 0.5.0-15) -- after
+  R21.10B.4.* **KDF Dirty Gate: PASS on 2026-11-19, measure 0.02, no
+  findings** (with chapter 49 §49.2.1; the attestation is in chapter 49
+  §49.7). *Inputs:* the forbidden corpus at
+  the row `v3.0.0-beta` of chapter 02 §2.15A, consulted **only** to establish
+  which tickers the HD address methods carry, and what makes an address
+  used for the scan, when the request names a TRC20 ticker. The reading was
+  done together with chapter 49 §49.2.1, whose scoped record covers the
+  shared EVM-family surface. Behavior only; no private identifier, body,
+  error, log or comment text was reproduced. The sentences of R21.10B.4 are
+  unchanged.
+- *§21.10C added 2026-11-20 (transaction history; clean-side,
+  Reloaded-original).* R21.10C.1 -- R21.10C.11, T21.10C, the status note
+  after R21.10B.6 and the dated notes of 2026-11-20 in §21.4 and after the
+  compatibility block of §21.10B. *Inputs:* TronGrid's public API
+  documentation for the two account listings (paths, parameters and answer
+  members); the public TRON full-node HTTP API for the receipt and the
+  chain parameters (§21.9); public Nile test-network data captured on
+  2026-11-20 (chapter 01 R6); and this repository's own code. *Forbidden
+  corpus:* not consulted for this section; R21.10B.6 already records that
+  the reference has no TRON history. No sentence of §21.0 -- §21.10B was
+  edited.
+- *Scoped addition (2026-11-20, Spec Reader round 0.5.0-17) -- the status
+  note after R21.10B.7 and the block that follows it (the public-rule
+  paragraph, R21.10B.10 -- R21.10B.13, the two code-quality findings, the
+  two not-established paragraphs, T21.10B.16 -- T21.10B.18); no other text
+  of this chapter was changed.* **KDF Dirty Gate: PASS on 2026-11-20,
+  measure 0.02, no findings** (chapter 01 R40; the attestation closes
+  this item).
+  *Inputs:* (1) the forbidden corpus at the rows `v3.0.0-beta` (read from
+  a checkout at the row `dev (as of 2026-03-27)`, whose source tree was
+  confirmed identical by mechanical difference), `v2.6.0-beta`,
+  `feat/tron-swap-support (as of 2026-04-23)` and `feat/tron-gasfree (as
+  of 2026-05-04)` of chapter 02 §2.15A, read read-only and consulted
+  **only** to establish: which energy figure the TRC20 withdraw fee, its
+  `fee_limit` and its TRX check use; whether any trade-fee or swap-fee
+  method has a TRON fee estimate; whether any path requests contract
+  metadata or the deployer's resources; which members of the dry-run
+  answer decide whether a TRC20 withdraw or a token balance read goes on,
+  and with which error token and status it ends otherwise; and the
+  agreement of the rows on these points. Behavior, public wire names, error tokens, statuses and
+  public TRON endpoint paths and member names only; no private
+  identifier, body, helper decomposition, error, log, comment or test
+  text was reproduced. (2) Public TRON documentation (TRON Developer Hub,
+  *Resource Model* and the smart-contract energy pages; the HTTP API
+  reference for `wallet/getcontract` and for the transaction receipt) for
+  the origin-energy rule. (3) This repository's tree at the base of this
+  round (the dev branch as of 2026-11-20) for the cross-references. No
+  row was added to chapter 02 §2.15A: every state read already had one.
+  The remedies sketched in the two code-quality findings and the three
+  acceptance rows are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-20, measure
+  0.02, no findings. *Extent:* the TRON wallet surface the block reaches:
+  the TRC20 withdraw fee estimate and its energy input, the `fee_limit`,
+  the check that the sender holds the TRX for the fee, the node client's
+  handling of a dry-run answer and of a token balance read, and the
+  endpoints requested; at the rows `dev (as of 2026-03-27)` and
+  `v3.0.0-beta` (identical trees), `v2.6.0-beta`, `feat/tron-swap-support
+  (as of 2026-04-23)` and `feat/tron-gasfree (as of 2026-05-04)`.
+  *Method:* reading plus mechanical comparison (word n-gram overlap at
+  lengths 6, 5, 4 and 3, and a per-token forced-versus-free inventory);
+  the repository's clean-room gate tool was not applicable because the
+  additions embed no code blocks. *Measure:* 0.02, on the
+  discretionary-expression basis.
+- *Status and lab notes added 2026-11-20 (clean-side, Reloaded-original)
+  -- the status note after T21.10B.18 and the lab note after the "Not
+  established" paragraph of the compatibility block.* *Inputs:* the cleared
+  text of R21.10B.10 -- R21.10B.13 and T21.10B.16 -- T21.10B.18 above; the
+  public TRON full-node HTTP API (§21.9); answers of a public mainnet node
+  and public mainnet receipts captured on 2026-11-20 (chapter 01 R6); and
+  this repository's own code. *Forbidden corpus:* not consulted for these
+  notes. No cleared sentence was edited.
+- *Status notes added 2026-11-20 (clean-side, Reloaded-original) -- TRON
+  switched on as a wallet-only coin family: the notes after the
+  availability note at the top, after the "In this beta" box of §21.4,
+  after R21.10B.9, at D6 and after R21.B3.* *Inputs:* the cleared text of
+  R-D1, R21.10B.9, T21.10B.15, R21.B3 and F21.B3 above; the availability
+  note of chapter 18 for the form of the swap switch; and this
+  repository's own code. *Forbidden corpus:* not consulted for these
+  notes. No cleared sentence was edited.

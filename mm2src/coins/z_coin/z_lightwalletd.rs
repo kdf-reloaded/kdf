@@ -51,7 +51,7 @@ use mm2_err_handle::prelude::*;
 use parking_lot::Mutex;
 use prost_14::Message as _;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
-use serialization::{deserialize, serialize, CoinVariant};
+use serialization::{serialize, CoinVariant};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -61,7 +61,6 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tonic::Code;
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_primitives::transaction::Transaction as ZTransaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkType, NetworkUpgrade, Parameters};
 
@@ -79,9 +78,11 @@ pub(crate) const TADDR_HISTORY_WINDOW_BLOCKS: u64 = 1_000;
 /// Upper bound on a median-time-past window (R39.11.4f): each height is a separate request.
 pub(crate) const MEDIAN_TIME_WINDOW_MAX: u64 = 64;
 
-/// The builder's transaction expiry delta, re-exported so the staleness bound below cannot drift
-/// from the dependency it describes (R39.11.8(e)).
-pub(crate) const BUILDER_EXPIRY_DELTA: u32 = DEFAULT_TX_EXPIRY_DELTA;
+/// The transaction expiry delta the wallet sets explicitly on every transaction it builds (R39.11.8(e)). The
+/// value is the one the transaction builder used up to the library upgrade (40 blocks); it is fixed here, not
+/// taken from the library's per-branch default, so that a later upgrade of the library or of the consensus
+/// branch cannot move the expiry or the staleness bound derived from it.
+pub(crate) const BUILDER_EXPIRY_DELTA: u32 = 40;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -2311,15 +2312,17 @@ impl UtxoRpcClientOps for LightwalletdClient {
             match this.0.detect_output_spend(&output, from, &log).await {
                 Ok(SpendOutcome::NotSpent(_)) => Ok(None),
                 Ok(SpendOutcome::Spent(spend)) => {
-                    // The shared UTXO transaction type cannot read version 6, so a ZHTLC coin's
-                    // swap path does not come through here (z_tx_read); this trait form is for the
-                    // shared callers and fails loudly rather than guessing at a transaction it cannot read.
-                    let spending_tx: UtxoTx = deserialize(spend.tx.as_slice()).map_err(|e| {
-                        format!(
-                            "the spend of the HTLC output was found, but the shared UTXO parser cannot read it ({:?})",
-                            e
-                        )
-                    })?;
+                    // This trait form is for the shared callers, which read the spend's inputs only: it reads
+                    // through the UTXO coins' entry point (version 6 included) and fails loudly rather than
+                    // guessing at a transaction it cannot read. A ZHTLC coin's own swap path does not come
+                    // through here (z_tx_read).
+                    let spending_tx: UtxoTx =
+                        crate::utxo::utxo_common::read_utxo_tx(spend.tx.as_slice()).map_err(|e| {
+                            format!(
+                                "the spend of the HTLC output was found, but it cannot be read ({:?})",
+                                e
+                            )
+                        })?;
                     let height = spend
                         .height
                         .ok_or_else(|| "the spending transaction has no mined height".to_owned())?;

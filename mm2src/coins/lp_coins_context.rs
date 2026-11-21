@@ -2,6 +2,9 @@ use super::*;
 use crate::activation_locks::{ActivationGuard, ActivationLocks};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 use crate::rpc_command::get_my_address::PathToAddress;
+use crate::utxo::rpc_clients::electrum_client_registry::ElectrumClientRegistry;
+use crate::utxo::spent_record_registry::SpentRecordRegistry;
+use std::collections::{BTreeSet, HashSet};
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -13,9 +16,7 @@ pub enum MmCoinEnum {
     ZCoin(ZCoin),
     Bch(BchCoin),
     SlpToken(SlpToken),
-    #[cfg(not(target_arch = "wasm32"))]
     SolanaCoin(SolanaCoin),
-    #[cfg(not(target_arch = "wasm32"))]
     SplToken(SplToken),
     #[cfg(not(target_arch = "wasm32"))]
     LightningCoin(LightningCoin),
@@ -33,11 +34,9 @@ impl From<EthCoin> for MmCoinEnum {
 impl From<TestCoin> for MmCoinEnum {
     fn from(c: TestCoin) -> MmCoinEnum { MmCoinEnum::Test(c) }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<SolanaCoin> for MmCoinEnum {
     fn from(c: SolanaCoin) -> MmCoinEnum { MmCoinEnum::SolanaCoin(c) }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<SplToken> for MmCoinEnum {
     fn from(c: SplToken) -> MmCoinEnum { MmCoinEnum::SplToken(c) }
 }
@@ -83,9 +82,7 @@ impl Deref for MmCoinEnum {
             MmCoinEnum::LightningCoin(ref c) => c,
             MmCoinEnum::ZCoin(ref c) => c,
             MmCoinEnum::Test(ref c) => c,
-            #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::SolanaCoin(ref c) => c,
-            #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::SplToken(ref c) => c,
             MmCoinEnum::SiaCoin(ref c) => c,
             MmCoinEnum::TendermintCoin(ref c) => c,
@@ -136,13 +133,111 @@ impl MmCoinEnum {
         }
     }
 }
+/// The registry of the activated coins: the coins by ticker, the passive platform coins, and for each platform coin
+/// the tickers of its dependent tokens and layer-two coins (CRD ch.43 R43.1E.5 and R43.1E.6).
+///
+/// A coin is *registered* when it is in the registry, and *active* when it is registered and not passive. The
+/// registry has no `Deref` to its map: a reader asks for the [`active`](Self::active) view or the
+/// [`registered`](Self::registered) view, so each site states which of the two it means. Every change goes through
+/// the methods below, so the three parts stay consistent.
+#[derive(Default)]
+pub(crate) struct CoinRegistry {
+    entries: HashMap<String, MmCoinEnum>,
+    /// The registered platform coins that are passive. A ticker in this set is a key of `entries`.
+    passive: HashSet<String>,
+    dependents: HashMap<String, BTreeSet<String>>,
+}
+/// The coins that are registered and not passive: what every method that needs an active coin sees (CRD ch.43
+/// R43.1E.6 item 1).
+pub(crate) struct ActiveCoins<'a>(&'a CoinRegistry);
+impl<'a> ActiveCoins<'a> {
+    pub(crate) fn get(&self, ticker: &str) -> Option<&'a MmCoinEnum> {
+        if self.0.passive.contains(ticker) {
+            return None;
+        }
+        self.0.entries.get(ticker)
+    }
+}
+/// The coins that are registered, active or passive: what the checks that a passive coin still takes part in see
+/// (CRD ch.43 R43.1E.6 items 2, 3 and 6).
+pub(crate) struct RegisteredCoins<'a>(&'a CoinRegistry);
+impl<'a> RegisteredCoins<'a> {
+    pub(crate) fn get(&self, ticker: &str) -> Option<&'a MmCoinEnum> { self.0.entries.get(ticker) }
+    pub(crate) fn contains(&self, ticker: &str) -> bool { self.0.entries.contains_key(ticker) }
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &'a String> { self.0.entries.keys() }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&'a String, &'a MmCoinEnum)> { self.0.entries.iter() }
+    pub(crate) fn values(&self) -> impl Iterator<Item = &'a MmCoinEnum> { self.0.entries.values() }
+    /// Whether `ticker` is a registered platform coin that is passive.
+    pub(crate) fn is_passive(&self, ticker: &str) -> bool { self.0.passive.contains(ticker) }
+}
+impl CoinRegistry {
+    /// The coins that are registered and not passive.
+    pub(crate) fn active(&self) -> ActiveCoins<'_> { ActiveCoins(self) }
+    /// The coins that are registered, active or passive.
+    pub(crate) fn registered(&self) -> RegisteredCoins<'_> { RegisteredCoins(self) }
+    /// Registers a coin that joins no platform's dependent set: a platform or standalone coin, or a token of
+    /// the legacy `enable`/`electrum` (R43.1E.5 item 1).
+    pub(crate) fn insert(&mut self, ticker: String, coin: MmCoinEnum) -> Option<MmCoinEnum> {
+        self.entries.insert(ticker, coin)
+    }
+    /// Registers a token or layer-two coin and records it as a dependent of `platform`.
+    pub(crate) fn insert_dependent(&mut self, platform: &str, ticker: String, coin: MmCoinEnum) {
+        self.dependents
+            .entry(platform.to_owned())
+            .or_default()
+            .insert(ticker.clone());
+        self.entries.insert(ticker, coin);
+    }
+    /// Records `ticker` in the dependent set of `platform` without registering a coin. A ticker that is already a
+    /// member stays one.
+    pub(crate) fn add_dependent_ticker(&mut self, platform: &str, ticker: String) {
+        self.dependents.entry(platform.to_owned()).or_default().insert(ticker);
+    }
+    /// Makes the passive platform coin `ticker` active again (CRD ch.43 R43.1F.3 item 5). Returns `false`, and
+    /// changes nothing, when the ticker is not a registered passive coin.
+    pub(crate) fn make_active(&mut self, ticker: &str) -> bool { self.passive.remove(ticker) }
+    /// Removes a coin, passive or not. The coin leaves the dependent set of its platform and loses its passive
+    /// flag, and a platform loses its own set: its tokens stay registered (CRD ch.43 §43.1E compatibility note
+    /// item 2). A platform whose last dependent leaves stays registered, and passive if it was (R43.1E.6 item 5).
+    pub(crate) fn remove(&mut self, ticker: &str) -> Option<MmCoinEnum> {
+        let removed = self.entries.remove(ticker)?;
+        self.passive.remove(ticker);
+        self.dependents.remove(ticker);
+        self.dependents.retain(|_, set| {
+            set.remove(ticker);
+            !set.is_empty()
+        });
+        Some(removed)
+    }
+    /// Makes a registered platform coin that has at least one dependent passive (R43.1E.5 item 3). Returns
+    /// `false`, and changes nothing, for a ticker that is not registered or has no dependent: only a platform
+    /// can be passive.
+    pub(crate) fn make_passive(&mut self, ticker: &str) -> bool {
+        if !self.entries.contains_key(ticker) || self.dependents_of(ticker).is_empty() {
+            return false;
+        }
+        self.passive.insert(ticker.to_owned());
+        true
+    }
+    /// The tickers of the dependents of `platform`.
+    pub(crate) fn dependents_of(&self, platform: &str) -> BTreeSet<String> {
+        self.dependents.get(platform).cloned().unwrap_or_default()
+    }
+}
 pub struct CoinsContext {
-    /// A map from a currency ticker symbol to the corresponding coin.
-    /// Similar to `LP_coins`.
-    pub(crate) coins: AsyncMutex<HashMap<String, MmCoinEnum>>,
+    /// The activated coins by ticker, with the dependent set of each platform. Similar to `LP_coins`.
+    pub(crate) coins: AsyncMutex<CoinRegistry>,
     /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
     activation_locks: ActivationLocks,
+    /// The Electrum clients that QTUM and its QRC20 tokens share, by weak reference (CRD ch.38 D38.6.4Q.1 status note).
+    pub(crate) electrum_clients: ElectrumClientRegistry,
+    /// The recently-spent records that QTUM and its QRC20 tokens share, by weak reference (CRD ch.38 D38.6.4Q.4
+    /// status note).
+    pub(crate) spent_records: SpentRecordRegistry,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
+    /// The swap layer's reader of the saved swaps that are not finished, registered at start; a shielded
+    /// coin's activation checks the key against it (CRD ch.39 R39.8.0bd).
+    unfinished_swaps_view: parking_lot::Mutex<Option<Arc<dyn crate::z_coin::UnfinishedSwapsView>>>,
     pub(crate) withdraw_task_manager: WithdrawTaskManagerShared,
     pub(crate) create_account_manager: CreateAccountTaskManagerShared,
     pub(crate) scan_addresses_manager: ScanAddressesTaskManagerShared,
@@ -164,16 +259,69 @@ pub struct CoinIsAlreadyActivatedErr {
 pub struct PlatformIsAlreadyActivatedErr {
     pub ticker: String,
 }
+/// The registered token that a platform-with-tokens request refused (CRD ch.43 R43.1F.4).
+#[derive(Debug)]
+pub struct RegisteredTokenRefused {
+    pub ticker: String,
+}
+/// The passive platform entry that a re-activation started from is not registered and passive any more.
+#[derive(Debug)]
+pub struct PlatformNotPassiveErr {
+    pub ticker: String,
+}
+/// What a platform-with-tokens request does with a requested token that is already registered (CRD ch.43
+/// R43.1F.4, D43.1F.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisteredTokenPolicy {
+    /// A registered token that is a dependent of the platform, or whose instance belongs to it, is kept; a registered
+    /// token of another platform is refused.
+    Refuse,
+    /// The registered instance is kept whatever it is (the reference behavior of R43.1F.4).
+    Keep,
+}
+impl RegisteredTokenPolicy {
+    /// The policy a node uses when `reactivation_registered_token` is absent or `null`.
+    pub const DEFAULT: RegisteredTokenPolicy = RegisteredTokenPolicy::Refuse;
+
+    /// Reads the top-level `reactivation_registered_token` member of the startup configuration (CRD ch.43
+    /// D43.1F.1): `"refuse"` or `"keep"`; an absent or `null` member selects [`Self::DEFAULT`]. Any other value is an error
+    /// that names the member and the two values.
+    pub fn from_conf(conf: &Json) -> Result<RegisteredTokenPolicy, String> {
+        match conf.get("reactivation_registered_token") {
+            None | Some(Json::Null) => Ok(Self::DEFAULT),
+            Some(Json::String(value)) if value == "refuse" => Ok(RegisteredTokenPolicy::Refuse),
+            Some(Json::String(value)) if value == "keep" => Ok(RegisteredTokenPolicy::Keep),
+            Some(other) => Err(format!(
+                "Invalid `reactivation_registered_token` in the configuration: {other}; it must be \"refuse\" or \"keep\""
+            )),
+        }
+    }
+}
 impl CoinsContext {
+    /// The registered reader of the unfinished swaps, if the swap layer has registered one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unfinished_swaps_view(&self) -> Option<Arc<dyn crate::z_coin::UnfinishedSwapsView>> {
+        self.unfinished_swaps_view.lock().clone()
+    }
+
+    pub(crate) fn has_unfinished_swaps_view(&self) -> bool { self.unfinished_swaps_view.lock().is_some() }
+
+    pub(crate) fn set_unfinished_swaps_view(&self, view: Arc<dyn crate::z_coin::UnfinishedSwapsView>) {
+        *self.unfinished_swaps_view.lock() = Some(view);
+    }
+
     /// Obtains a reference to this crate context, creating it if necessary.
     pub fn from_ctx(ctx: &MmArc) -> Result<Arc<CoinsContext>, String> {
         Ok(try_s!(from_ctx(&ctx.coins_ctx, move || {
             // A node whose top-level setting is invalid does not start; this only keeps the guard.
             explicit_fee_estimate_cache_secs(&ctx.conf)?;
             Ok(CoinsContext {
-                coins: AsyncMutex::new(HashMap::new()),
+                coins: AsyncMutex::new(CoinRegistry::default()),
                 activation_locks: ActivationLocks::default(),
+                electrum_clients: ElectrumClientRegistry::default(),
+                spent_records: SpentRecordRegistry::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
+                unfinished_swaps_view: parking_lot::Mutex::new(None),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
                 create_account_manager: CreateAccountTaskManager::new_shared(),
                 scan_addresses_manager: ScanAddressesTaskManager::new_shared(),
@@ -200,9 +348,19 @@ impl CoinsContext {
         self.activation_locks.lock(tickers).await
     }
 
+    /// Like [`Self::lock_activation`], for the activation of a token or layer-two coin: the locks of `tickers` are
+    /// taken exclusively and the lock of the `platform` shared, in one call (CRD ch.43 D43.1F.2 (b)). Several
+    /// tokens of one platform activate in parallel, and a `disable_coin` or an activation of the platform, which
+    /// take its lock exclusively, wait for them.
+    pub async fn lock_activation_under(&self, platform: &str, tickers: &[&str]) -> Result<ActivationGuard, String> {
+        self.activation_locks.lock_with_shared(&[platform], tickers).await
+    }
+
     pub async fn add_coin(&self, coin: MmCoinEnum) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
-        if coins.contains_key(coin.ticker()) {
+        // A passive platform is registered: its ticker counts as already activated until the re-activation of a
+        // passive platform is built (CRD ch.43 R43.1E.6 item 6).
+        if coins.registered().contains(coin.ticker()) {
             return MmError::err(CoinIsAlreadyActivatedErr {
                 ticker: coin.ticker().into(),
             });
@@ -213,27 +371,134 @@ impl CoinsContext {
         Ok(())
     }
 
+    /// Registers a token or layer-two coin of `platform_ticker` and records it in that platform's dependent set
+    /// (CRD ch.43 R43.1E.5 item 1). Refuses a registered ticker like [`Self::add_coin`].
+    pub async fn add_token(
+        &self,
+        platform_ticker: &str,
+        coin: MmCoinEnum,
+    ) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
+        let mut coins = self.coins.lock().await;
+        if coins.registered().contains(coin.ticker()) {
+            return MmError::err(CoinIsAlreadyActivatedErr {
+                ticker: coin.ticker().into(),
+            });
+        }
+
+        self.fee_estimate_cache.forget_coin(coin.ticker());
+        coins.insert_dependent(platform_ticker, coin.ticker().into(), coin);
+        Ok(())
+    }
+
+    /// The tickers of the dependent tokens and layer-two coins of `platform_ticker`.
+    pub async fn dependents_of(&self, platform_ticker: &str) -> BTreeSet<String> {
+        self.coins.lock().await.dependents_of(platform_ticker)
+    }
+
+    /// Whether `ticker` is a registered platform coin that is passive (CRD ch.43 R43.1E.6).
+    pub async fn is_passive(&self, ticker: &str) -> bool { self.coins.lock().await.registered().is_passive(ticker) }
+
+    /// Makes the registered platform coin `ticker` passive (CRD ch.43 R43.1E.5 item 3). Returns `false`, and
+    /// changes nothing, when the ticker is not registered or has no dependent token.
+    pub async fn make_passive(&self, ticker: &str) -> bool { self.coins.lock().await.make_passive(ticker) }
+
+    /// Refuses the first requested ticker that is registered and that `policy` does not keep, before anything
+    /// is built (CRD ch.43 R43.1F.4). Under [`RegisteredTokenPolicy::Refuse`] a ticker is kept when it is already a
+    /// dependent of `platform_ticker`, or when its registered instance belongs to `platform_ticker` (it joins the
+    /// set again); a registered ticker whose instance belongs to another platform is refused. Nothing is changed.
+    pub async fn check_requested_tokens(
+        &self,
+        platform_ticker: &str,
+        tickers: &[String],
+        policy: RegisteredTokenPolicy,
+    ) -> Result<(), MmError<RegisteredTokenRefused>> {
+        let coins = self.coins.lock().await;
+        let dependents = coins.dependents_of(platform_ticker);
+        for ticker in tickers {
+            let kept = match policy {
+                RegisteredTokenPolicy::Refuse => {
+                    dependents.contains(ticker)
+                        || coins
+                            .registered()
+                            .get(ticker)
+                            .map_or(false, |coin| coin.platform_ticker() == platform_ticker)
+                },
+                RegisteredTokenPolicy::Keep => true,
+            };
+            if coins.registered().contains(ticker) && !kept {
+                return MmError::err(RegisteredTokenRefused { ticker: ticker.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Registers the tokens of a platform-with-tokens request under the registry lock, as dependents of
+    /// `platform_ticker`. A token whose ticker is registered keeps its instance and only joins the set; the same
+    /// ticker twice in `tokens` registers once (CRD ch.43 R43.1F.4).
+    fn add_requested_tokens(&self, coins: &mut CoinRegistry, platform_ticker: &str, tokens: Vec<MmCoinEnum>) {
+        for token in tokens {
+            if coins.registered().contains(token.ticker()) {
+                coins.add_dependent_ticker(platform_ticker, token.ticker().to_owned());
+            } else {
+                self.fee_estimate_cache.forget_coin(token.ticker());
+                coins.insert_dependent(platform_ticker, token.ticker().into(), token);
+            }
+        }
+    }
+
     pub async fn add_platform_with_tokens(
         &self,
         platform: MmCoinEnum,
         tokens: Vec<MmCoinEnum>,
     ) -> Result<(), MmError<PlatformIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
-        if coins.contains_key(platform.ticker()) {
+        // A registered platform, passive or not, is refused: a passive one is re-activated through
+        // [`Self::reactivate_platform_with_tokens`].
+        if coins.registered().contains(platform.ticker()) {
             return MmError::err(PlatformIsAlreadyActivatedErr {
                 ticker: platform.ticker().into(),
             });
         }
 
-        self.fee_estimate_cache.forget_coin(platform.ticker());
-        coins.insert(platform.ticker().into(), platform);
-
-        // Tokens can't be activated without platform coin so we can safely insert them without checking prior existence
-        for token in tokens {
-            self.fee_estimate_cache.forget_coin(token.ticker());
-            coins.insert(token.ticker().into(), token);
-        }
+        let platform_ticker = platform.ticker().to_owned();
+        self.fee_estimate_cache.forget_coin(&platform_ticker);
+        coins.insert(platform_ticker.clone(), platform);
+        self.add_requested_tokens(&mut coins, &platform_ticker, tokens);
         Ok(())
+    }
+
+    /// The registration step of the re-activation of a passive platform (CRD ch.43 R43.1F.3 item 5), in one hold
+    /// of the registry: the platform becomes active, every requested token that is not registered is registered,
+    /// and every requested ticker joins the platform's dependent set.
+    ///
+    /// The activation locks keep `disable_coin` from removing the entry meanwhile, so a platform that is not
+    /// registered and passive here cannot happen; the call then changes nothing and answers the error, which the
+    /// caller reports as an internal failure.
+    pub async fn reactivate_platform_with_tokens(
+        &self,
+        platform_ticker: &str,
+        tokens: Vec<MmCoinEnum>,
+    ) -> Result<(), MmError<PlatformNotPassiveErr>> {
+        let mut coins = self.coins.lock().await;
+        if !coins.make_active(platform_ticker) {
+            return MmError::err(PlatformNotPassiveErr {
+                ticker: platform_ticker.to_owned(),
+            });
+        }
+        self.add_requested_tokens(&mut coins, platform_ticker, tokens);
+        Ok(())
+    }
+
+    /// Records the NFT chain `nft_ticker` (for example `NFT_ETH`) in the dependent set of the registered
+    /// platform coin `platform_ticker`, with no coin entry of its own (CRD ch.43 R43.1F.8 item 1). Returns `false`,
+    /// and changes nothing, when the platform is not registered.
+    pub async fn add_nft_dependent(&self, platform_ticker: &str, nft_ticker: &str) -> bool {
+        let mut coins = self.coins.lock().await;
+        if !coins.registered().contains(platform_ticker) {
+            return false;
+        }
+        coins.add_dependent_ticker(platform_ticker, nft_ticker.to_owned());
+        true
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -311,7 +576,7 @@ pub enum PrivKeyPolicy<T> {
         /// The key pair derived at the user's chosen address path.
         activated_key: T,
         /// The BIP32 root extended private key for deriving additional coin keys.
-        bip39_secp_priv_key: bip32::ExtendedPrivateKey<secp256k1::SecretKey>,
+        bip39_secp_priv_key: crypto::Secp256k1ExtendedPrivateKey,
         /// The `path_to_address` the key was derived at (CRD ch.05 R36 compares it with the address the coin pays from).
         path_to_address: PathToAddress,
     },
@@ -455,9 +720,7 @@ pub enum CoinProtocol {
         network: BlockchainNetwork,
         confirmations: PlatformCoinConfirmations,
     },
-    #[cfg(not(target_arch = "wasm32"))]
     SOLANA,
-    #[cfg(not(target_arch = "wasm32"))]
     SPLTOKEN {
         platform: String,
         /// A base58 32-byte public key, checked when the protocol is parsed (like `SOLANATOKEN`'s `mint_address`).
@@ -469,7 +732,6 @@ pub enum CoinProtocol {
     /// `mint_address` and `program_id` are base58 32-byte public keys, checked when the protocol is parsed, so an
     /// invalid key makes the protocol unparsable. `program_id` is the token program that owns the mint (SPL Token
     /// or Token-2022).
-    #[cfg(not(target_arch = "wasm32"))]
     SOLANATOKEN {
         platform: String,
         decimals: u8,
@@ -553,7 +815,6 @@ pub enum CoinProtocol {
 }
 
 /// A Solana public key as a base58 string in JSON (the crate's own serde form is a byte array).
-#[cfg(not(target_arch = "wasm32"))]
 mod base58_pubkey {
     use solana_pubkey::Pubkey;
 
@@ -761,7 +1022,10 @@ mod coin_protocol_tests {
                 use zcash_protocol::consensus::NetworkConstants;
                 assert!(info.check_point_block.is_some());
                 assert!(info.z_derivation_path.is_some());
-                assert_eq!(info.consensus_params.hrp_sapling_payment_address(), "zs");
+                // The test is of this crate's own implementation of the (deprecated) trait method.
+                #[allow(deprecated)]
+                let hrp = info.consensus_params.hrp_sapling_payment_address();
+                assert_eq!(hrp, "zs");
                 assert_eq!(info.consensus_params.coin_type(), 133);
             },
             other => panic!("expected ZHTLC, got {:?}", other),
@@ -1005,12 +1269,9 @@ mod coin_protocol_tests {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    #[cfg(not(target_arch = "wasm32"))]
     const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn solanatoken_json() -> serde_json::Value {
         json!({
             "type": "SOLANATOKEN",
@@ -1024,7 +1285,6 @@ mod coin_protocol_tests {
     }
 
     /// T40.2: the platform descriptor in the bare form, with an empty `protocol_data` and with a null one.
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solana_protocol_accepts_three_forms() {
         for protocol in [
@@ -1047,7 +1307,6 @@ mod coin_protocol_tests {
         assert!(CoinProtocol::from_conf_json(json!({"type": "SOLANA", "protocol_data": 5})).is_err());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn solana_protocol_serializes_without_protocol_data() {
         assert_eq!(
@@ -1069,7 +1328,6 @@ mod coin_protocol_tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solanatoken_protocol_parses_and_round_trips() {
         let parsed = CoinProtocol::from_conf_json(solanatoken_json()).unwrap();
@@ -1098,7 +1356,6 @@ mod coin_protocol_tests {
         ));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solanatoken_protocol_requires_every_key() {
         for key in ["platform", "decimals", "mint_address", "program_id"] {
@@ -1110,7 +1367,6 @@ mod coin_protocol_tests {
         assert!(CoinProtocol::from_conf_json(json!({"type": "SOLANATOKEN"})).is_err());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_2_solanatoken_protocol_rejects_invalid_keys() {
         // Not base58, and base58 of a wrong length (31 and 33 bytes).
@@ -1132,7 +1388,6 @@ mod coin_protocol_tests {
         assert!(CoinProtocol::from_conf_json(protocol).is_err());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn spltoken_protocol_still_parses() {
         match CoinProtocol::from_conf_json(json!({

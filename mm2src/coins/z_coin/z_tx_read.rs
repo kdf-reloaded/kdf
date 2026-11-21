@@ -421,7 +421,7 @@ async fn recorded_own_send(coin: &ZCoin, client: &LightwalletdClient, script_pub
     let records = match coin
         .z_fields
         .shielded_history
-        .recorded_transactions_containing(script_pubkey)
+        .recorded_transactions_containing_in_any_wallet(script_pubkey)
     {
         Ok(records) => records,
         Err(e) => {
@@ -607,11 +607,26 @@ mod tests {
     /// A hand-assembled transparent-only transaction, so a test can choose the output script, value
     /// and input script. `v5` selects the ZIP-225 layout, otherwise version 4.
     fn transparent_tx(v5: bool, out_script: &[u8], out_value: u64, in_script: &[u8]) -> Vec<u8> {
+        transparent_tx_on_branch(v5, NU5_BRANCH_ID, out_script, out_value, in_script)
+    }
+
+    /// The consensus branch identifier of NU5 and of NU7 (ZIP 244 / ZIP 259), as a version-5 header carries it.
+    const NU5_BRANCH_ID: u32 = 0xC2D6_D0B4;
+    const NU7_BRANCH_ID: u32 = 0x7719_0AD9;
+
+    /// [`transparent_tx`] with the consensus branch identifier of a version-5 header chosen by the caller.
+    fn transparent_tx_on_branch(
+        v5: bool,
+        branch_id: u32,
+        out_script: &[u8],
+        out_value: u64,
+        in_script: &[u8],
+    ) -> Vec<u8> {
         let mut b = Vec::new();
         if v5 {
             b.extend_from_slice(&0x8000_0005u32.to_le_bytes());
             b.extend_from_slice(&0x26A7_270Au32.to_le_bytes());
-            b.extend_from_slice(&0xC2D6_D0B4u32.to_le_bytes()); // NU5 branch id
+            b.extend_from_slice(&branch_id.to_le_bytes());
             b.extend_from_slice(&0u32.to_le_bytes()); // lock time
             b.extend_from_slice(&1_000_000u32.to_le_bytes()); // expiry height
         } else {
@@ -747,8 +762,10 @@ mod tests {
         let amount = 123_456u64;
         let secret = [7u8; 32];
 
-        for v5 in [false, true] {
-            let raw = transparent_tx(v5, &expected, amount, &spend_script_sig(&secret, &redeem));
+        // Version 4, and version 5 under the NU5 and the NU7 branch identifiers (the transaction version
+        // since NU7 is 5 or 6, also for a transparent-only transaction).
+        for (v5, branch_id) in [(false, NU5_BRANCH_ID), (true, NU5_BRANCH_ID), (true, NU7_BRANCH_ID)] {
+            let raw = transparent_tx_on_branch(v5, branch_id, &expected, amount, &spend_script_sig(&secret, &redeem));
             let routed = read_tx(&raw).expect("routed reader accepts the transaction");
             assert_eq!(routed.version(), if v5 { TxVersion::V5 } else { TxVersion::V4 });
             assert_eq!(check_payment_output(&routed, &expected, amount), Ok(()));
@@ -761,7 +778,7 @@ mod tests {
 
             let secret_hash = dhash160(&secret);
             let routed_secret = extract_secret(secret_hash.as_slice(), &raw);
-            assert_eq!(routed_secret, Ok(secret.to_vec()), "v5={v5}");
+            assert_eq!(routed_secret, Ok(secret.to_vec()), "v5={v5} branch={branch_id:#x}");
             assert!(extract_secret(dhash160(b"wrong").as_slice(), &raw).is_err());
 
             let shared: UtxoTx = deserialize(raw.as_slice()).expect("the shared parser reads versions 4 and 5");

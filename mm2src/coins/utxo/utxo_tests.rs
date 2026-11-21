@@ -7,7 +7,7 @@ use crate::rpc_command::init_scan_for_new_addresses::{InitScanAddressesRpcOps, S
                                                       ScanAddressesResponse};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::qtum::{qtum_coin_with_priv_key, QtumCoin, QtumDelegationOps, QtumDelegationRequest};
-use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClient, ElectrumClientImpl,
+use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClient, ElectrumClientImpl, ElectrumOwner,
                                GetAddressInfoRes, ListSinceBlockRes, ListTransactionsItem, NativeClient,
                                NativeClientImpl, NativeUnspent, NetworkInfo, UtxoRpcClientOps, ValidateAddressRes,
                                VerboseBlock};
@@ -219,13 +219,15 @@ pub(crate) fn utxo_coin_fields_for_test(
         dust_amount: UTXO_DUST_AMOUNT,
         tx_fee: TxFee::FixedPerKb(1000),
         rpc_client,
+        electrum_owner: ElectrumOwner::new_unique(),
         priv_key_policy,
         hw_ctx: None,
         derivation_method,
         history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
         tx_cache: DummyVerboseCache::default().into_shared(),
         block_headers_storage: None,
-        recently_spent_outpoints: AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey)),
+        recently_spent_outpoints: Arc::new(AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey))),
+        spent_record_is_shared: false,
         tx_hash_algo: TxHashAlgo::DSHA256,
         check_utxo_maturity: false,
     }
@@ -297,6 +299,23 @@ fn test_utxo_min_trading_vol_values() {
         ("RVN", TxFee::FixedPerKb(1_000_000), 1000, "0.0496"),
         ("ZEC", TxFee::FixedPerKb(100_000), 1000, "0.00496"),
         ("ZEC", TxFee::FixedPerKb(70_000), 1000, "0.003472"),
+        // The ZIP 317 rule: F is the conventional fee of the standard claim, 10,000 (2 actions); `txfee` is not read.
+        (
+            "ZEC",
+            TxFee::Zip317 {
+                legacy_rate_per_kb: 70_000,
+            },
+            1000,
+            "0.001",
+        ),
+        (
+            "ZEC",
+            TxFee::Zip317 {
+                legacy_rate_per_kb: 1_000_000,
+            },
+            1000,
+            "0.001",
+        ),
         ("QTUM", TxFee::FixedPerKb(400_000), 72_800, "0.01984"),
         ("BTC", dynamic(), 1000, "0.0001"),
         ("BTC-segwit", dynamic(), 1000, "0.0001"),
@@ -1123,6 +1142,9 @@ fn test_withdraw_impl_set_fixed_fee() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1170,6 +1192,9 @@ fn test_withdraw_impl_sat_per_kb_fee() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1215,6 +1240,24 @@ fn explicit_fee_withdraw(
     input_count: u8,
     input_value: u64,
 ) -> ExplicitFeeWithdraw {
+    // The coin's own rate differs from every tested descriptor rate: the descriptor replaces the policy.
+    let tx_fee = if whole_kilobyte_coin {
+        TxFee::FixedPerStartedKb(50_000)
+    } else {
+        TxFee::FixedPerKb(50_000)
+    };
+    explicit_fee_withdraw_on_coin_with_fee(tx_fee, fixed, rate, input_count, input_value)
+}
+
+/// [`explicit_fee_withdraw`] on a coin whose own fee rule is `tx_fee`.
+#[cfg(not(target_arch = "wasm32"))]
+fn explicit_fee_withdraw_on_coin_with_fee(
+    tx_fee: TxFee,
+    fixed: bool,
+    rate: &str,
+    input_count: u8,
+    input_value: u64,
+) -> ExplicitFeeWithdraw {
     UtxoStandardCoin::get_unspent_ordered_list.mock_safe(move |coin, _| {
         let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
         let unspents: Vec<UnspentInfo> = (0..input_count)
@@ -1230,17 +1273,14 @@ fn explicit_fee_withdraw(
         MockResult::Return(Box::pin(futures::future::ok((unspents, cache))))
     });
 
-    // The coin's own rate differs from every tested descriptor rate: the descriptor replaces the policy.
-    let tx_fee = if whole_kilobyte_coin {
-        TxFee::FixedPerStartedKb(50_000)
-    } else {
-        TxFee::FixedPerKb(50_000)
-    };
     let coin = floor_test_coin(TEST_COIN_NAME, tx_fee, UTXO_DUST_AMOUNT, TEST_COIN_DECIMALS);
 
     let amount: BigDecimal = rate.parse().unwrap();
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1345,8 +1385,10 @@ fn test_withdraw_explicit_fee_change_output_is_rounded_once() {
         let without_change = worst_case - 34;
         let expected = rate_sat * worst_case / 1000;
         let separately_rounded = rate_sat * without_change / 1000 + rate_sat * 34 / 1000;
-        let plain_fixed_mapping = ActualTxFee::FixedPerKb(rate_sat).fee_for_size(without_change)
-            + ActualTxFee::FixedPerKb(rate_sat).change_output_increase(without_change);
+        let plain_fixed_mapping = ActualTxFee::FixedPerKb(rate_sat).fee_for_size(without_change).unwrap()
+            + ActualTxFee::FixedPerKb(rate_sat)
+                .change_output_increase(without_change)
+                .unwrap();
         assert_eq!(expected, expected_fee);
         assert_eq!(expected - separately_rounded, 1);
         assert_eq!(plain_fixed_mapping, expected);
@@ -1383,6 +1425,9 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1430,6 +1475,9 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max_dust_included_to_fee() 
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1477,6 +1525,9 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_over_max() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.97939455".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1511,6 +1562,9 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 0u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1573,6 +1627,9 @@ fn test_withdraw_kmd_rewards_impl(
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1684,6 +1741,9 @@ fn test_withdraw_kmd_rewards_post_fork_reduction() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1810,7 +1870,9 @@ fn tx_details_prev_output_index_out_of_range_is_an_error() {
     ));
 
     let hash = spending_tx.hash().reversed().to_vec();
-    let err = block_on(coin.tx_details_by_hash(&hash, &mut input_transactions)).unwrap_err();
+    let err = block_on(coin.tx_details_by_hash(&hash, &mut input_transactions))
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("output 5 of transaction") && err.contains("it has 1 outputs"),
         "unexpected error: {}",
@@ -1929,6 +1991,9 @@ fn test_withdraw_doc_rewards_none() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -3656,6 +3721,7 @@ fn fixed_policy_preview_fee_sat(policy: ActualTxFee, count: u64, unspent_value: 
         ActualTxFee::Dynamic(_) => TxFee::Dynamic(EstimateFeeMethod::Standard),
         ActualTxFee::FixedPerKb(rate) => TxFee::FixedPerKb(rate),
         ActualTxFee::FixedPerStartedKb(rate) => TxFee::FixedPerStartedKb(rate),
+        ActualTxFee::Zip317 { legacy_rate_per_kb } => TxFee::Zip317 { legacy_rate_per_kb },
     };
     let coin = utxo_coin_from_fields(coin_fields);
     let fee = futures::executor::block_on(coin.get_sender_trade_fee(
@@ -3670,23 +3736,56 @@ fn fixed_policy_preview_fee_sat(policy: ActualTxFee, count: u64, unspent_value: 
 #[test]
 fn test_actual_tx_fee_arithmetic_r38_6_6b() {
     let plain = ActualTxFee::FixedPerKb(1000);
-    assert_eq!([226, 1000, 1001].map(|s| plain.fee_for_size(s)), [226, 1000, 1001]);
+    assert_eq!([226, 1000, 1001].map(|s| plain.fee_for_size(s)), [
+        Some(226),
+        Some(1000),
+        Some(1001)
+    ]);
     let whole_kb = ActualTxFee::FixedPerStartedKb(1000);
-    assert_eq!([226, 1000, 1001].map(|s| whole_kb.fee_for_size(s)), [1000, 1000, 2000]);
+    assert_eq!([226, 1000, 1001].map(|s| whole_kb.fee_for_size(s)), [
+        Some(1000),
+        Some(1000),
+        Some(2000)
+    ]);
     // Plain fixed truncates and the dynamic rate keeps its proportional rule.
-    assert_eq!(ActualTxFee::FixedPerKb(1001).fee_for_size(999), 999);
-    assert_eq!(ActualTxFee::Dynamic(20_000).fee_for_size(496), 9_920);
+    assert_eq!(ActualTxFee::FixedPerKb(1001).fee_for_size(999), Some(999));
+    assert_eq!(ActualTxFee::Dynamic(20_000).fee_for_size(496), Some(9_920));
     // A zero-size transaction costs nothing under either rule; large products saturate.
-    assert_eq!(whole_kb.fee_for_size(0), 0);
-    assert_eq!(ActualTxFee::FixedPerKb(u64::MAX).fee_for_size(u64::MAX), u64::MAX);
-    assert_eq!(ActualTxFee::FixedPerStartedKb(u64::MAX).fee_for_size(2000), u64::MAX);
+    assert_eq!(whole_kb.fee_for_size(0), Some(0));
+    assert_eq!(ActualTxFee::FixedPerKb(u64::MAX).fee_for_size(u64::MAX), Some(u64::MAX));
+    assert_eq!(
+        ActualTxFee::FixedPerStartedKb(u64::MAX).fee_for_size(2000),
+        Some(u64::MAX)
+    );
     // The 34-byte change output increase.
-    assert_eq!(plain.change_output_increase(226), 34);
-    assert_eq!(whole_kb.change_output_increase(226), 0);
-    assert_eq!(whole_kb.change_output_increase(966), 0);
-    assert_eq!(whole_kb.change_output_increase(967), 1000);
-    assert_eq!(whole_kb.change_output_increase(1000), 1000);
-    assert_eq!(whole_kb.change_output_increase(1001), 0);
+    assert_eq!(plain.change_output_increase(226), Some(34));
+    assert_eq!(whole_kb.change_output_increase(226), Some(0));
+    assert_eq!(whole_kb.change_output_increase(966), Some(0));
+    assert_eq!(whole_kb.change_output_increase(967), Some(1000));
+    assert_eq!(whole_kb.change_output_increase(1000), Some(1000));
+    assert_eq!(whole_kb.change_output_increase(1001), Some(0));
+    // The ZIP 317 rule has no rate and no fee for a size alone.
+    let zip317 = ActualTxFee::Zip317 {
+        legacy_rate_per_kb: 70_000,
+    };
+    assert_eq!(zip317.rate_per_kb(), None);
+    assert_eq!(zip317.fee_for_size(226), None);
+    assert_eq!(zip317.change_output_increase(226), None);
+    // The legacy size rule reads the entry's rate for a ZIP 317 coin and is the size rule for the others.
+    assert_eq!(zip317.legacy_fee_for_size(496), 34_720);
+    assert_eq!(plain.legacy_fee_for_size(1001), 1001);
+    assert_eq!(whole_kb.legacy_fee_for_size(1001), 2000);
+    assert_eq!(plain.rate_per_kb(), Some(1000));
+    assert_eq!(whole_kb.rate_per_kb(), Some(1000));
+    assert_eq!(ActualTxFee::Dynamic(20_000).rate_per_kb(), Some(20_000));
+    // The shape-based fee is the size rule for the per-kilobyte policies and ignores the bytes.
+    let bytes = zip317::Zip317Bytes { input: 148, output: 68 };
+    assert_eq!(plain.fee_for_shape(226, bytes), 226);
+    assert_eq!(whole_kb.fee_for_shape(226, bytes), 1000);
+    assert_eq!(plain.change_output_increase_for_shape(226, bytes), 34);
+    assert_eq!(whole_kb.change_output_increase_for_shape(967, bytes), 1000);
+    assert_eq!(zip317.fee_for_shape(226, bytes), 10_000);
+    assert_eq!(zip317.fee_for_shape(1_000_000, bytes), 10_000);
 }
 
 /// CRD ch.38 R38.6.6b: the builder charges the fee of the final transaction (change output included) under
@@ -4170,7 +4269,8 @@ fn test_generate_tx_doge_fee() {
         let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
         let expected_fee = ActualTxFee::FixedPerKb(1000000)
             .fee_for_size(size)
-            .max(ActualTxFee::Dynamic(relay_rate_sat).fee_for_size(size));
+            .unwrap()
+            .max(ActualTxFee::Dynamic(relay_rate_sat).fee_for_size(size).unwrap());
         assert_eq!(expected_fee, data.fee_amount, "{outputs_count} outputs, {size} bytes");
     }
 }
@@ -4497,6 +4597,9 @@ fn test_withdraw_to_p2pkh() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2pkh_address.to_string(),
@@ -4545,6 +4648,9 @@ fn test_withdraw_to_p2sh() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2sh_address.to_string(),
@@ -4593,6 +4699,9 @@ fn test_withdraw_to_p2wpkh() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2wpkh_address.to_string(),
@@ -4874,6 +4983,7 @@ fn test_account_balance_rpc() {
             addresses_map.insert($address.to_string(), $balance);
             balances_by_der_path.insert($der_path.to_string(), HDAddressBalance {
                 address: $address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(
@@ -5214,6 +5324,7 @@ fn test_scan_for_new_addresses() {
             checking_addresses.insert($address.to_string(), balance);
             balances_by_der_path.insert($der_path.to_string(), HDAddressBalance {
                 address: $address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(
@@ -9786,6 +9897,9 @@ mod withdraw_recent_spent {
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -9910,6 +10024,75 @@ mod withdraw_recent_spent {
         assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
         assert!(record_is_empty(&coin));
         assert_eq!(listing(&coin), before);
+    }
+
+    const GET_TX: &str = "blockchain.transaction.get";
+
+    /// [`coin_on_backend`] with the maturity check on. The server answers the verbose transaction of the one listed
+    /// output (and no other: a transaction it has not seen is answered with a result that is not a transaction, as a
+    /// spread read of a server that has not indexed it fails), and the tip.
+    fn coin_with_maturity_on_backend() -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let (client, server) = electrum_client_over_stub(|server| {
+            server.set_scripthash_result(
+                "blockchain.scripthash.listunspent",
+                &p2pkh_hash,
+                json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": LISTED_VALUE}]),
+            );
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+            server.set_result(BROADCAST, json!("ab".repeat(32)));
+            server.set_result("blockchain.headers.subscribe", json!({"height": 777, "hex": "00"}));
+            server.set_params_result(
+                GET_TX,
+                json!(["01".repeat(32), true]),
+                json!({
+                    "hex": hex::encode(serialize(&UtxoTx::default())),
+                    "txid": "01".repeat(32),
+                    "version": 1,
+                    "locktime": 0,
+                    "vin": [],
+                    "vout": [],
+                    "height": 10,
+                    "time": 1_600_000_000u32,
+                    "blocktime": 1_600_000_000u32,
+                    "confirmations": 100,
+                }),
+            );
+        });
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+        fields.check_utxo_maturity = true;
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    /// The transaction ids the server was asked for with `blockchain.transaction.get`.
+    fn fetched_parents(server: &StubServer) -> Vec<String> {
+        server
+            .request_params(GET_TX)
+            .iter()
+            .map(|params| params[0].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// A output the server listed keeps the parent fetch of the maturity check; an output the record supplied (the
+    /// change of a transaction this node built, whose broadcast the backend accepted) is not fetched: it is never a
+    /// coinbase, and a server that has not seen it yet would fail the spend (CRD ch.38 D38.6.4Q.4 follow-up).
+    #[test]
+    fn maturity_check_fetches_the_parent_of_a_listed_output_and_not_of_a_record_supplied_one() {
+        let (coin, server) = coin_with_maturity_on_backend();
+        let first_details = legacy_withdraw(&coin);
+        let first = tx_of(&first_details);
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+        // The listed output was fetched.
+        assert!(fetched_parents(&server).contains(&"01".repeat(32)));
+
+        broadcast_hex(&coin, &first_details).unwrap();
+        let fetches_before = fetched_parents(&server).len();
+        let second = tx_of(&legacy_withdraw(&coin));
+        // The second withdraw spent the first one's change, and no parent was fetched for it.
+        assert!(inputs_of(&second).iter().all(|input| input.hash == first.hash()));
+        let fetched = fetched_parents(&server);
+        assert_eq!(fetched.len(), fetches_before, "{fetched:?}");
+        assert!(fetched.iter().all(|txid| *txid == "01".repeat(32)));
     }
 
     /// T38.5B.3 (R38.5B.9 items 2 and 6): an accepted broadcast of a withdraw's bytes records the spend.
@@ -11259,6 +11442,9 @@ mod hd_coin_swap_key_tests {
         fn request(from: Option<WithdrawFrom>) -> WithdrawRequest {
             WithdrawRequest {
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 amount: 1u64.into(),
                 from,
                 to: RECEIVER.to_string(),
@@ -11787,6 +11973,9 @@ mod sighash_suffix_sites {
     fn withdraw_request() -> WithdrawRequest {
         WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -12030,6 +12219,875 @@ mod sighash_suffix_sites {
         let (plain_coin, _plain_server) = coin_on_backend(0);
         let preimage = plain_coin.parse_preimage(&serialize(&tx)).unwrap();
         assert_eq!(preimage.0.sighash_suffix, 0);
+    }
+}
+
+// ---- ZEC transactions of version 5: builders, signing and the swap path (CRD ch.39 §39.11.4V) ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod zec_v5_wiring {
+    use super::order_posting_latency::{my_address, script_hashes_of_test_coin};
+    use super::*;
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::utxo::utxo_common::{build_funding_spend_preimage_tx, build_taker_payment_spend_preimage_tx,
+                                   extract_secret, payment_script, send_maker_payment, send_taker_fee,
+                                   sign_taker_payment_spend_input};
+    use crate::ValidatePaymentInput;
+    use futures::compat::Future01CompatExt;
+    use keys::{Public, Signature};
+    use serialization::serialize;
+
+    /// The version group id of the ZIP 225 transaction format.
+    const GROUP_ID: u32 = 0x26a7_270a;
+    /// The consensus branch id of the Zcash network upgrade 7 (ZIP 259).
+    const BRANCH_ID: u32 = 0x7719_0ad9;
+    const LISTED_VALUE: u64 = 900_000;
+    const TIME_LOCK: u32 = 1_700_000_000;
+    const SECRET: [u8; 32] = [0x22; 32];
+
+    /// The test coin configured like the expected shared entry of a Zcash coin: overwintered, `txversion` 5, the
+    /// version group id of ZIP 225 and the branch id of the upgrade.
+    fn v5_fields(rpc_client: UtxoRpcClientEnum) -> UtxoCoinFields {
+        let mut fields = utxo_coin_fields_for_test(rpc_client, None, false);
+        fields.conf.tx_version = 5;
+        fields.conf.version_group_id = GROUP_ID;
+        fields.conf.consensus_branch_id = BRANCH_ID;
+        fields
+    }
+
+    /// A version 5 coin on a scripted Electrum server that lists the given unspent outputs of the coin's
+    /// pay-to-public-key-hash and pay-to-public-key scripts and accepts every broadcast.
+    fn coin_with_unspents(p2pkh: serde_json::Value, p2pk: serde_json::Value) -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let (client, server) = electrum_client_over_stub(|server| {
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pkh_hash, p2pkh);
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, p2pk);
+            server.set_result("blockchain.transaction.broadcast", json!("ab".repeat(32)));
+        });
+        (
+            utxo_coin_from_fields(v5_fields(UtxoRpcClientEnum::Electrum(client))),
+            server,
+        )
+    }
+
+    /// A version 5 coin whose address has one unspent output of [`LISTED_VALUE`].
+    fn coin_on_backend() -> (UtxoStandardCoin, StubServer) {
+        coin_with_unspents(
+            json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": LISTED_VALUE}]),
+            json!([]),
+        )
+    }
+
+    fn withdraw_request(amount: &str) -> WithdrawRequest {
+        WithdrawRequest {
+            memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
+            amount: amount.parse().unwrap(),
+            from: None,
+            to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+            coin: TEST_COIN_NAME.into(),
+            max: false,
+            fee: None,
+        }
+    }
+
+    fn utxo_tx_of(sent: TransactionEnum) -> UtxoTx {
+        match sent {
+            TransactionEnum::UtxoTx(tx) => tx,
+            _ => panic!("expected a UTXO transaction"),
+        }
+    }
+
+    fn p2pkh_script_of(coin: &UtxoStandardCoin) -> Script { Builder::build_p2pkh(&my_address(coin).hash) }
+
+    fn own_public(coin: &UtxoStandardCoin) -> Public { *coin.as_ref().priv_key_policy.key_pair().unwrap().public() }
+
+    /// The `index`-th data push of a scriptSig.
+    fn push_of(script_sig: &Bytes, index: usize) -> Vec<u8> {
+        let script = Script::from(script_sig.to_vec());
+        let instruction = script
+            .get_instruction(index)
+            .expect("the scriptSig has the instruction")
+            .expect("the instruction decodes");
+        instruction.data.expect("the instruction is a push").to_vec()
+    }
+
+    /// The signature, without its sighash-type byte, that a scriptSig pushes first; the type byte is `SIGHASH_ALL`.
+    fn signature_of(script_sig: &Bytes) -> Signature {
+        let with_type = push_of(script_sig, 0);
+        assert_eq!(with_type.last().copied(), Some(0x01), "SIGHASH_ALL, fork id 0");
+        Signature::from(with_type[..with_type.len() - 1].to_vec())
+    }
+
+    /// The ZIP 244 digest of input `index` of `tx` as the verifier computes it from the spent outputs, `(amount,
+    /// scriptPubKey)` for every input in order.
+    fn zip244_digest(tx: &UtxoTx, spent: &[(u64, Script)], index: usize) -> H256 {
+        let mut signer = TransactionInputSigner::from_transaction(tx.clone(), 0);
+        assert_eq!(signer.inputs.len(), spent.len());
+        for (input, (amount, script)) in signer.inputs.iter_mut().zip(spent) {
+            input.amount = *amount;
+            input.script_pubkey = Some(script.clone());
+        }
+        signer
+            .signature_hash(
+                index,
+                spent[index].0,
+                &Script::from(Vec::<u8>::new()),
+                SignatureVersion::Base,
+                1,
+            )
+            .expect("the ZIP 244 digest")
+    }
+
+    /// Input `index` of `tx` carries a signature that verifies under the ZIP 244 digest of the given spent outputs
+    /// and under no digest that commits to another amount or another spent scriptPubKey.
+    fn assert_signed_under_zip244(tx: &UtxoTx, spent: &[(u64, Script)], index: usize, public: &Public) {
+        let signature = signature_of(&tx.inputs[index].script_sig);
+        let digest = zip244_digest(tx, spent, index);
+        assert!(
+            public.verify(&digest, &signature).unwrap(),
+            "input {index}: the ZIP 244 digest"
+        );
+
+        let mut other_amount = spent.to_vec();
+        other_amount[index].0 += 1;
+        assert!(
+            !public
+                .verify(&zip244_digest(tx, &other_amount, index), &signature)
+                .unwrap(),
+            "input {index}: the digest commits to the amount"
+        );
+        let mut other_script = spent.to_vec();
+        other_script[index].1 = Script::from(vec![0x51u8]);
+        assert!(
+            !public
+                .verify(&zip244_digest(tx, &other_script, index), &signature)
+                .unwrap(),
+            "input {index}: the digest commits to the scriptPubKey"
+        );
+    }
+
+    /// The bytes of a transparent-only version 5 transaction: the header word with version 5 and the overwintered
+    /// flag, the version group id, the branch id, the lock time and an expiry height of 0, and at the end three
+    /// zero counts (Sapling spends, Sapling outputs, Orchard actions). The transaction is the one the bytes parse to.
+    fn assert_zip225_bytes(bytes: &[u8], tx: &UtxoTx) {
+        assert_eq!(&bytes[..4], &[0x05, 0x00, 0x00, 0x80][..], "header word");
+        assert_eq!(&bytes[4..8], &[0x0a, 0x27, 0xa7, 0x26][..], "version group id");
+        assert_eq!(&bytes[8..12], &[0xd9, 0x0a, 0x19, 0x77][..], "consensus branch id");
+        assert_eq!(&bytes[12..16], &tx.lock_time.to_le_bytes()[..], "lock time");
+        assert_eq!(&bytes[16..20], &[0u8; 4][..], "expiry height");
+        assert_eq!(
+            &bytes[bytes.len() - 3..],
+            &[0u8; 3][..],
+            "empty Sapling and Orchard parts"
+        );
+        assert_eq!(tx.version, 5);
+        assert!(tx.overwintered);
+        assert_eq!(tx.version_group_id, GROUP_ID);
+        assert_eq!(tx.consensus_branch_id, BRANCH_ID);
+        assert_eq!(tx.expiry_height, 0);
+        assert_eq!(tx.sapling_v5, Default::default());
+        assert_eq!(tx.orchard, Default::default());
+    }
+
+    /// The identifier of `tx` is the ZIP 244 one: not the double SHA-256 of its bytes, and the same after the
+    /// transaction went through the shared parser.
+    fn assert_zip244_identifier(tx: &UtxoTx, bytes: &[u8]) {
+        assert_ne!(tx.hash(), kdf_crypto::dhash256(bytes));
+        let parsed: UtxoTx = deserialize(bytes).unwrap();
+        assert_eq!(parsed.hash(), tx.hash());
+    }
+
+    /// T39.11.4V.5 (this repository's result) and the end-to-end withdraw: on a coin configured like the expected
+    /// shared entry the answered bytes are the ZIP 225 layout with the version group id and the branch id, the
+    /// input's signature verifies under the ZIP 244 digest, and `tx_hash` is the reversed ZIP 244 identifier.
+    #[test]
+    fn t39_11_4v_5_a_withdraw_builds_a_zip225_transaction_signed_under_the_zip244_digest() {
+        let (coin, _server) = coin_on_backend();
+        let details = block_on(coin.withdraw(withdraw_request("0.001")).compat()).unwrap();
+        let bytes = details.tx_hex.as_slice().to_vec();
+        let tx: UtxoTx = deserialize(bytes.as_slice()).unwrap();
+
+        assert_zip225_bytes(&bytes, &tx);
+        assert_eq!(bytes[20], 1, "one input");
+        assert_eq!(tx.inputs.len(), 1);
+        // The withdrawn output and the change.
+        assert_eq!(tx.outputs.len(), 2);
+        assert_signed_under_zip244(&tx, &[(LISTED_VALUE, p2pkh_script_of(&coin))], 0, &own_public(&coin));
+
+        assert_zip244_identifier(&tx, &bytes);
+        assert_eq!(details.tx_hash, hex::encode(tx.hash().reversed().to_vec()));
+    }
+
+    /// The builder records the scriptPubKey of every input, and the signer corrects it for a pay-to-public-key
+    /// input: a withdraw that spends one pay-to-public-key-hash and one pay-to-public-key output signs both under
+    /// the ZIP 244 digest, which commits to both spent scripts.
+    #[test]
+    fn t39_11_4v_5_every_input_is_signed_over_the_script_it_spends() {
+        let (coin, _server) = coin_with_unspents(
+            json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 400_000}]),
+            json!([{"tx_hash": "02".repeat(32), "tx_pos": 0, "height": 10, "value": 500_000}]),
+        );
+        let public = own_public(&coin);
+        let p2pkh_script = p2pkh_script_of(&coin);
+        let p2pk_script = Builder::build_p2pk(&public);
+
+        let details = block_on(coin.withdraw(withdraw_request("0.006")).compat()).unwrap();
+        let bytes = details.tx_hex.as_slice().to_vec();
+        let tx: UtxoTx = deserialize(bytes.as_slice()).unwrap();
+        assert_zip225_bytes(&bytes, &tx);
+        assert_eq!(tx.inputs.len(), 2, "both outputs are needed for the amount");
+
+        let spent: Vec<(u64, Script)> = tx
+            .inputs
+            .iter()
+            .map(|input| {
+                if input.previous_output.hash == H256::from([1u8; 32]) {
+                    (400_000, p2pkh_script.clone())
+                } else {
+                    assert_eq!(input.previous_output.hash, H256::from([2u8; 32]));
+                    (500_000, p2pk_script.clone())
+                }
+            })
+            .collect();
+        for index in 0..tx.inputs.len() {
+            assert_signed_under_zip244(&tx, &spent, index, &public);
+        }
+    }
+
+    /// T39.11.4V.7 and T39.11.4V.9: a version 5 DEX-fee transaction carries an expiry height of 0, is signed under
+    /// the ZIP 244 digest, and validates on the receiving side through the shared parser.
+    #[test]
+    fn t39_11_4v_9_a_version_5_dex_fee_is_signed_and_validates() {
+        let (coin, server) = coin_on_backend();
+        let dex_fee = DexFee::Standard(MmNumber::from((10_000u64, 100_000_000u64)));
+        let sent = block_on(send_taker_fee(coin.clone(), &dex_fee, test_dex_fee_addr_raw_pubkey()).compat()).unwrap();
+        let fee_tx = utxo_tx_of(sent);
+        let bytes = serialize(&fee_tx).take();
+        assert_zip225_bytes(&bytes, &fee_tx);
+        assert_signed_under_zip244(
+            &fee_tx,
+            &[(LISTED_VALUE, p2pkh_script_of(&coin))],
+            0,
+            &own_public(&coin),
+        );
+        assert_zip244_identifier(&fee_tx, &bytes);
+
+        // The counterparty's backend answers with the transaction under its identifier.
+        server.set_result(
+            "blockchain.transaction.get",
+            json!({
+                "hex": hex::encode(&bytes),
+                "txid": hex::encode(fee_tx.hash().reversed().to_vec()),
+                "version": 5,
+                "locktime": fee_tx.lock_time,
+                "vin": [],
+                "vout": [],
+                "height": 5_000,
+                "confirmations": 3,
+            }),
+        );
+        let my_pub = coin.my_public_key().unwrap().to_vec();
+        let fee_tx = TransactionEnum::UtxoTx(fee_tx);
+        block_on(
+            coin.validate_fee(ValidateFeeArgs {
+                fee_tx: &fee_tx,
+                expected_sender: &my_pub,
+                fee_addr: test_dex_fee_addr_raw_pubkey(),
+                dex_fee: &dex_fee,
+                min_block_number: 0,
+                uuid: &[],
+            })
+            .compat(),
+        )
+        .unwrap();
+    }
+
+    /// T39.11.4V.6 and T39.11.4V.9 for version 5: the payment is a version 5 transaction whose HTLC output the
+    /// receiving side validates through the shared parser; the spend and the refund are version 5 transactions
+    /// with one input each, signed under the ZIP 244 digest, which commits to the payment's P2SH scriptPubKey and
+    /// not to the redeem script; the spend reveals the secret, which the extraction reads back; and the search for
+    /// the spend of the payment finds the version 5 transaction under the payment's ZIP 244 identifier.
+    #[test]
+    fn t39_11_4v_6_payment_spend_and_refund_of_version_5() {
+        UtxoStandardCoin::get_current_mtp
+            .mock_safe(|_fields| MockResult::Return(Box::pin(futures::future::ok(TIME_LOCK - 1_000))));
+        let (coin, server) = coin_on_backend();
+        let my_key = coin.as_ref().priv_key_policy.key_pair().unwrap();
+        let other = key_pair_from_seed("zec v5 counterparty").unwrap();
+        let (my_pub, other_pub) = (my_key.public().to_vec(), other.public().to_vec());
+        let secret_hash = dhash160(&SECRET).to_vec();
+        let amount: BigDecimal = "0.001".parse().unwrap();
+
+        // The payment.
+        let sent = block_on(
+            send_maker_payment(
+                coin.clone(),
+                TIME_LOCK,
+                &my_pub,
+                &other_pub,
+                &secret_hash,
+                amount.clone(),
+            )
+            .compat(),
+        )
+        .unwrap();
+        let payment = utxo_tx_of(sent);
+        let payment_bytes = serialize(&payment).take();
+        assert_zip225_bytes(&payment_bytes, &payment);
+        assert_signed_under_zip244(
+            &payment,
+            &[(LISTED_VALUE, p2pkh_script_of(&coin))],
+            0,
+            &own_public(&coin),
+        );
+        assert_zip244_identifier(&payment, &payment_bytes);
+
+        let redeem = payment_script(TIME_LOCK, &secret_hash, my_key.public(), other.public());
+        let p2sh_script = Builder::build_p2sh(&dhash160(&redeem).into());
+        assert_eq!(payment.outputs[0].script_pubkey, p2sh_script.to_bytes());
+        assert_eq!(payment.outputs[0].value, 100_000);
+
+        // The receiving side validates it: its backend answers with the bytes under the payment's identifier.
+        server.set_result("blockchain.transaction.get", json!(hex::encode(&payment_bytes)));
+        block_on(
+            coin.validate_maker_payment(ValidatePaymentInput {
+                payment_tx: payment_bytes.clone(),
+                time_lock: TIME_LOCK,
+                taker_pub: other_pub.clone(),
+                maker_pub: my_pub.clone(),
+                secret_hash: secret_hash.clone(),
+                amount,
+                swap_contract_address: None,
+                try_spv_proof_until: 0,
+                confirmations: 1,
+            })
+            .compat(),
+        )
+        .unwrap();
+
+        let outputs = vec![TransactionOutput {
+            value: 90_000,
+            script_pubkey: p2pkh_script_of(&coin).to_bytes(),
+        }];
+
+        // The spend by the counterparty, which reveals the secret.
+        let spend_data = Builder::default()
+            .push_data(&SECRET)
+            .push_opcode(Opcode::OP_0)
+            .into_script();
+        let spend = block_on(coin.p2sh_spending_tx(
+            payment.clone(),
+            redeem.to_bytes(),
+            outputs.clone(),
+            spend_data,
+            0xffff_ffff,
+            TIME_LOCK,
+            &other,
+        ))
+        .unwrap();
+        let spend_bytes = serialize(&spend).take();
+        assert_zip225_bytes(&spend_bytes, &spend);
+        assert_eq!(spend.inputs.len(), 1);
+        assert_eq!(spend.inputs[0].previous_output.hash, payment.hash());
+        assert_eq!(spend.inputs[0].previous_output.index, 0);
+        let spent = [(100_000, p2sh_script.clone())];
+        assert_signed_under_zip244(&spend, &spent, 0, other.public());
+        // The redeem script is not what the digest commits to.
+        let signature = signature_of(&spend.inputs[0].script_sig);
+        let with_redeem = zip244_digest(&spend, &[(100_000, redeem.clone())], 0);
+        assert!(!other.public().verify(&with_redeem, &signature).unwrap());
+        assert_zip244_identifier(&spend, &spend_bytes);
+        // The secret comes out of the spend that went through the shared parser.
+        assert_eq!(extract_secret(&secret_hash, &spend_bytes).unwrap(), SECRET.to_vec());
+
+        // The search for the spend of the payment reads the version 5 spend from the history of the HTLC address.
+        server.set_scripthash_result(
+            "blockchain.scripthash.get_history",
+            &hex::encode(electrum_script_hash(&p2sh_script)),
+            json!([{"tx_hash": "aa".repeat(32), "height": 5}, {"tx_hash": "bb".repeat(32), "height": 6}]),
+        );
+        server.set_result("blockchain.transaction.get", json!(hex::encode(&spend_bytes)));
+        let client = match &coin.as_ref().rpc_client {
+            UtxoRpcClientEnum::Electrum(client) => client.clone(),
+            _ => unreachable!("the test coin is on an Electrum server"),
+        };
+        let found = block_on(
+            client
+                .find_output_spend(payment.hash(), &p2sh_script.to_bytes(), 0, BlockHashOrHeight::Height(0))
+                .compat(),
+        )
+        .unwrap()
+        .expect("the spend is found");
+        assert_eq!(found.spending_tx.hash(), spend.hash());
+
+        // The refund by the payer, after the lock time.
+        let refund_data = Builder::default().push_opcode(Opcode::OP_1).into_script();
+        let refund = block_on(coin.p2sh_spending_tx(
+            payment.clone(),
+            redeem.to_bytes(),
+            outputs,
+            refund_data,
+            0xffff_fffe,
+            TIME_LOCK,
+            my_key,
+        ))
+        .unwrap();
+        let refund_bytes = serialize(&refund).take();
+        assert_zip225_bytes(&refund_bytes, &refund);
+        assert_eq!(refund.inputs.len(), 1);
+        assert_eq!(refund.inputs[0].previous_output.hash, payment.hash());
+        assert_signed_under_zip244(&refund, &spent, 0, my_key.public());
+        assert_zip244_identifier(&refund, &refund_bytes);
+    }
+
+    /// The version-two preimage builders record the scriptPubKey and the amount of the output the input spends,
+    /// which the ZIP 244 digest commits to, and the taker's single-output pre-signature (`SIGHASH_SINGLE`) is
+    /// computed under it.
+    #[test]
+    fn t39_11_4v_6_the_version_two_preimages_record_the_spent_output() {
+        let fields = v5_fields(UtxoRpcClientEnum::Native(native_client_for_test()));
+        let spent_script = vec![0xaa; 23];
+        let mut payment = UtxoTx::default();
+        payment.version = 5;
+        payment.overwintered = true;
+        payment.outputs.push(TransactionOutput {
+            value: 1_000_000,
+            script_pubkey: spent_script.clone().into(),
+        });
+
+        let taker = key_pair_from_seed("zec v5 taker").unwrap();
+        let maker = key_pair_from_seed("zec v5 maker").unwrap();
+        let redeem = crate::utxo::swap_proto_v2_scripts::taker_payment_script(
+            TIME_LOCK,
+            &[0xbb; 32],
+            taker.public(),
+            maker.public(),
+        );
+        let outputs = vec![TransactionOutput {
+            value: 10_000,
+            script_pubkey: Builder::build_p2pkh(&maker.public().address_hash().into()).to_bytes(),
+        }];
+        let signer = build_taker_payment_spend_preimage_tx(&fields, &payment, outputs).unwrap();
+        assert_eq!(signer.inputs[0].amount, 1_000_000);
+        assert_eq!(signer.inputs[0].script_pubkey, Some(Script::from(spent_script.clone())));
+        assert_eq!(signer.transaction_branch_id(), BRANCH_ID);
+        sign_taker_payment_spend_input(&signer, &redeem, &taker, &fields, 3).unwrap();
+
+        let fee = 1_000;
+        let signer = build_funding_spend_preimage_tx(&fields, &payment, &redeem, fee).unwrap();
+        assert_eq!(signer.inputs[0].amount, 1_000_000);
+        assert_eq!(signer.inputs[0].script_pubkey, Some(Script::from(spent_script)));
+    }
+
+    /// A preimage that comes over the wire is parsed from transaction bytes, without the amount and the scriptPubKey
+    /// of the spent output. The receiving side records them from the output it knows the input spends, and the
+    /// counterparty's signature then verifies under the ZIP 244 digest, for the funding spend (`SIGHASH_ALL`) and the
+    /// taker-payment spend (`SIGHASH_SINGLE`); the receiver's own signature over the recorded signer verifies too.
+    /// Without the record the digest is refused, never computed over a wrong amount.
+    #[test]
+    fn t39_11_4v_6_a_received_version_5_preimage_verifies_under_the_recorded_spent_output() {
+        use crate::utxo::utxo_common::{sign_funding_spend_input, with_spent_output_recorded};
+
+        let (coin, _server) = coin_on_backend();
+        let fields = v5_fields(UtxoRpcClientEnum::Native(native_client_for_test()));
+        let taker = key_pair_from_seed("zec v5 taker").unwrap();
+        let maker = key_pair_from_seed("zec v5 maker").unwrap();
+        let redeem = crate::utxo::swap_proto_v2_scripts::taker_payment_script(
+            TIME_LOCK,
+            &[0xbb; 32],
+            taker.public(),
+            maker.public(),
+        );
+        let mut spent_tx = UtxoTx::default();
+        spent_tx.version = 5;
+        spent_tx.overwintered = true;
+        spent_tx.outputs.push(TransactionOutput {
+            value: 1_000_000,
+            script_pubkey: Builder::build_p2sh(&dhash160(&redeem).into()).to_bytes(),
+        });
+        let spent_output = spent_tx.outputs[0].clone();
+        let to_maker = || {
+            vec![TransactionOutput {
+                value: 10_000,
+                script_pubkey: Builder::build_p2pkh(&maker.public().address_hash().into()).to_bytes(),
+            }]
+        };
+        let over_the_wire = |signer: &TransactionInputSigner| {
+            let bytes = serialize(&UtxoTx::from(signer.clone())).take();
+            coin.parse_preimage(&bytes).unwrap().0
+        };
+
+        // The taker-payment spend: the taker signs `SIGHASH_SINGLE`, the maker verifies and signs `SIGHASH_ALL`.
+        let signer = build_taker_payment_spend_preimage_tx(&fields, &spent_tx, to_maker()).unwrap();
+        let taker_sig = sign_taker_payment_spend_input(&signer, &redeem, &taker, &fields, 3).unwrap();
+        let received = over_the_wire(&signer);
+        assert_eq!(received.inputs[0].amount, 0);
+        assert!(received.inputs[0].script_pubkey.is_none());
+        let unrecorded = received.signature_hash(0, 0, &redeem, SignatureVersion::Base, 3);
+        assert!(
+            matches!(&unrecorded, Err(e) if e.to_string().contains("scriptPubKey")),
+            "{unrecorded:?}"
+        );
+        let recorded = with_spent_output_recorded(&received, &spent_output, BRANCH_ID);
+        assert_eq!(recorded.inputs[0].amount, 1_000_000);
+        let digest = recorded
+            .signature_hash(0, 1_000_000, &redeem, SignatureVersion::Base, 3)
+            .unwrap();
+        assert_eq!(
+            digest,
+            signer
+                .signature_hash(0, 1_000_000, &redeem, SignatureVersion::Base, 3)
+                .unwrap()
+        );
+        assert!(taker.public().verify(&digest, &taker_sig).unwrap());
+        let maker_sig = sign_taker_payment_spend_input(&recorded, &redeem, &maker, &fields, 1).unwrap();
+        let maker_digest = recorded
+            .signature_hash(0, 1_000_000, &redeem, SignatureVersion::Base, 1)
+            .unwrap();
+        assert!(maker.public().verify(&maker_digest, &maker_sig).unwrap());
+
+        // The funding spend: the first signer signs `SIGHASH_ALL`, the receiver verifies and signs the same digest.
+        let signer = build_funding_spend_preimage_tx(&fields, &spent_tx, &redeem, 1_000).unwrap();
+        let taker_sig = sign_funding_spend_input(&signer, &redeem, &taker, &fields).unwrap();
+        let recorded = with_spent_output_recorded(&over_the_wire(&signer), &spent_output, BRANCH_ID);
+        let digest = recorded
+            .signature_hash(0, 1_000_000, &redeem, SignatureVersion::Base, 1)
+            .unwrap();
+        assert!(taker.public().verify(&digest, &taker_sig).unwrap());
+        let maker_sig = sign_funding_spend_input(&recorded, &redeem, &maker, &fields).unwrap();
+        assert!(maker.public().verify(&digest, &maker_sig).unwrap());
+    }
+}
+
+// ---- Version-two swaps: the received preimage of an overwintered coin ----
+
+/// The signature digest of an overwintered transaction commits to the amount of the output an input spends, to the
+/// consensus branch id and, from version 5 on, to the scriptPubKey of that output. A preimage a node receives is
+/// parsed from transaction bytes, which carry none of the three for the digest's purposes, so the receiving side
+/// takes the amount and the script from the funding or taker-payment output the swap knows, and the branch id from
+/// its own configuration. These tests run the preimage through its wire form (serialize, then `parse_preimage`) for
+/// an overwintered version 4 coin and for a version 5 coin, for the funding spend and the taker-payment spend.
+#[cfg(not(target_arch = "wasm32"))]
+mod received_preimage_spent_output {
+    use super::order_posting_latency::my_address;
+    use super::*;
+    use crate::utxo::swap_proto_v2_scripts::{taker_funding_script, taker_payment_script};
+    use crate::utxo::utxo_common::{build_taker_payment_spend_preimage_tx, gen_taker_funding_spend_preimage,
+                                   gen_taker_payment_spend_preimage, sign_and_broadcast_taker_payment_spend,
+                                   sign_and_send_taker_funding_spend, sign_funding_spend_input,
+                                   sign_taker_payment_spend_input, validate_taker_funding_spend_preimage,
+                                   validate_taker_payment_spend_preimage, with_spent_output_recorded};
+    use crate::utxo::utxo_standard_swap_v2::UtxoTxPreimage;
+    use crate::{GenTakerFundingSpendArgs, GenTakerPaymentSpendArgs, TxPreimageWithSig};
+    use keys::{KeyPair, Public, Signature};
+    use serialization::serialize;
+
+    const SPENT_VALUE: u64 = 1_000_000;
+    const FUNDING_TIME_LOCK: u64 = 1_700_000_000;
+    const PAYMENT_TIME_LOCK: u64 = 1_700_001_000;
+    const TAKER_SECRET_HASH: [u8; 32] = [0xcc; 32];
+    const MAKER_SECRET_HASH: [u8; 32] = [0xbb; 32];
+    const MAKER_SECRET: [u8; 32] = [0x42; 32];
+    const UNIQUE_DATA: &[u8] = b"received preimage";
+
+    /// The coin shapes under test.
+    #[derive(Clone, Copy, Debug)]
+    enum Shape {
+        /// Overwintered, `txversion` 4, the version group id `0x892f2085` and the branch id `0x76b809bb`, ticker KMD.
+        Version4,
+        /// Overwintered, `txversion` 5, the version group id `0x26a7270a` and the branch id `0x77190ad9`.
+        Version5,
+    }
+
+    fn coin_of(shape: Shape, seed: &str) -> UtxoStandardCoin {
+        let mut fields =
+            utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), Some(seed), false);
+        match shape {
+            Shape::Version4 => {
+                fields.conf.ticker = "KMD".to_owned();
+                assert_eq!(
+                    (
+                        fields.conf.tx_version,
+                        fields.conf.version_group_id,
+                        fields.conf.consensus_branch_id
+                    ),
+                    (4, 0x892f_2085, 0x76b8_09bb)
+                );
+            },
+            Shape::Version5 => {
+                fields.conf.tx_version = 5;
+                fields.conf.version_group_id = 0x26a7_270a;
+                fields.conf.consensus_branch_id = 0x7719_0ad9;
+            },
+        }
+        assert!(fields.conf.overwintered);
+        utxo_coin_from_fields(fields)
+    }
+
+    fn key_pair_of(coin: &UtxoStandardCoin) -> &KeyPair { coin.as_ref().priv_key_policy.key_pair().unwrap() }
+
+    /// A transaction of the coin's version whose output 0 pays `script`.
+    fn paying_tx(coin: &UtxoStandardCoin, script: &Script) -> UtxoTx {
+        let conf = &coin.as_ref().conf;
+        let mut tx = UtxoTx::default();
+        tx.version = conf.tx_version;
+        tx.overwintered = true;
+        tx.version_group_id = conf.version_group_id;
+        tx.consensus_branch_id = if conf.tx_version == 5 {
+            conf.consensus_branch_id
+        } else {
+            0
+        };
+        tx.outputs.push(TransactionOutput {
+            value: SPENT_VALUE,
+            script_pubkey: script.to_bytes(),
+        });
+        tx
+    }
+
+    /// The preimage as the receiving node gets it: through its wire form.
+    fn parsed(receiver: &UtxoStandardCoin, in_memory: &TransactionInputSigner) -> TransactionInputSigner {
+        let bytes = serialize(&UtxoTx::from(in_memory.clone())).take();
+        receiver.parse_preimage(&bytes).unwrap().0
+    }
+
+    fn with_sig(preimage: TransactionInputSigner, signature: &Signature) -> TxPreimageWithSig<UtxoStandardCoin> {
+        TxPreimageWithSig {
+            preimage: UtxoTxPreimage(preimage),
+            signature: signature.clone(),
+        }
+    }
+
+    /// The `index`-th data push of a scriptSig, without the sighash-type byte that ends it.
+    fn signature_push(script_sig: &Bytes, index: usize) -> Signature {
+        let script = Script::from(script_sig.to_vec());
+        let instruction = script
+            .get_instruction(index)
+            .expect("the scriptSig has the instruction")
+            .expect("the instruction decodes");
+        let push = instruction.data.expect("the instruction is a push");
+        Signature::from(push[..push.len() - 1].to_vec())
+    }
+
+    fn mock_broadcast() {
+        NativeClient::send_transaction
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(H256Json::default()))));
+    }
+
+    /// The signature of `public` over the digest of the received signer, taken with the amount and the script of
+    /// `spent` verifies; taken with another amount it does not.
+    fn assert_digest_commits_to_the_spent_output(
+        received: &TransactionInputSigner,
+        spent: &TransactionOutput,
+        branch_id: u32,
+        script_code: &Script,
+        hash_type: u32,
+        public: &Public,
+        signature: &Signature,
+    ) {
+        let digest = |output: &TransactionOutput| {
+            with_spent_output_recorded(received, output, branch_id)
+                .signature_hash(0, output.value, script_code, SignatureVersion::Base, hash_type)
+                .unwrap()
+        };
+        assert!(public.verify(&digest(spent), signature).unwrap());
+        let mut other_amount = spent.clone();
+        other_amount.value += 1;
+        assert!(!public.verify(&digest(&other_amount), signature).unwrap());
+        // A received version 4 signer has no branch id; the record gives it the receiving coin's.
+        assert_eq!(
+            with_spent_output_recorded(received, spent, branch_id).consensus_branch_id,
+            branch_id
+        );
+    }
+
+    fn funding_spend_case(shape: Shape) {
+        // The maker authors the preimage, the taker receives it.
+        let author = coin_of(shape, "received preimage maker");
+        let receiver = coin_of(shape, "received preimage taker");
+        let (maker_pub, taker_pub) = (*key_pair_of(&author).public(), *key_pair_of(&receiver).public());
+        let funding_redeem = taker_funding_script(FUNDING_TIME_LOCK as u32, &TAKER_SECRET_HASH, &taker_pub, &maker_pub);
+        let funding_tx = paying_tx(&receiver, &Builder::build_p2sh(&dhash160(&funding_redeem).into()));
+        let args = GenTakerFundingSpendArgs {
+            funding_tx: &funding_tx,
+            maker_pub: &maker_pub,
+            taker_pub: &taker_pub,
+            funding_time_lock: FUNDING_TIME_LOCK,
+            taker_secret_hash: &TAKER_SECRET_HASH,
+            taker_payment_time_lock: PAYMENT_TIME_LOCK,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+        };
+        let authored = block_on(gen_taker_funding_spend_preimage(&author, &args, UNIQUE_DATA)).unwrap();
+        let in_memory = authored.preimage.0;
+        let author_signature = authored.signature;
+        let received = parsed(&receiver, &in_memory);
+
+        // An honest peer's signature verifies.
+        block_on(validate_taker_funding_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &author_signature),
+        ))
+        .unwrap();
+        assert_digest_commits_to_the_spent_output(
+            &received,
+            &funding_tx.outputs[0],
+            receiver.as_ref().conf.consensus_branch_id,
+            &funding_redeem,
+            1,
+            &maker_pub,
+            &author_signature,
+        );
+
+        // A signature of another key does not.
+        let stranger = key_pair_from_seed("received preimage stranger").unwrap();
+        let wrong = sign_funding_spend_input(&in_memory, &funding_redeem, &stranger, author.as_ref()).unwrap();
+        let rejected = block_on(validate_taker_funding_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &wrong),
+        ));
+        assert!(rejected.is_err());
+
+        // Signing from the stored, parsed preimage, as a restarted swap does, gives the signature of a fresh run.
+        mock_broadcast();
+        let sent = block_on(sign_and_send_taker_funding_spend(
+            &receiver,
+            &with_sig(received, &author_signature),
+            &args,
+            UNIQUE_DATA,
+        ))
+        .unwrap();
+        let fresh =
+            sign_funding_spend_input(&in_memory, &funding_redeem, key_pair_of(&receiver), receiver.as_ref()).unwrap();
+        // The cooperative script pushes the maker's signature, then the taker's.
+        assert!(signature_push(&sent.inputs[0].script_sig, 0) == author_signature);
+        assert!(signature_push(&sent.inputs[0].script_sig, 1) == fresh, "{shape:?}");
+    }
+
+    fn taker_payment_spend_case(shape: Shape) {
+        // The taker authors the preimage, the maker receives it.
+        let author = coin_of(shape, "received preimage taker");
+        let receiver = coin_of(shape, "received preimage maker");
+        let (taker_pub, maker_pub) = (*key_pair_of(&author).public(), *key_pair_of(&receiver).public());
+        let taker_redeem = taker_payment_script(PAYMENT_TIME_LOCK as u32, &MAKER_SECRET_HASH, &taker_pub, &maker_pub);
+        let taker_tx = paying_tx(&receiver, &Builder::build_p2sh(&dhash160(&taker_redeem).into()));
+        let maker_address = my_address(&receiver);
+        let dex_fee = DexFee::Standard(MmNumber::from((10_000u64, 100_000_000u64)));
+        let args = GenTakerPaymentSpendArgs {
+            taker_tx: &taker_tx,
+            time_lock: PAYMENT_TIME_LOCK,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+            maker_pub: &maker_pub,
+            maker_address: &maker_address,
+            taker_pub: &taker_pub,
+            dex_fee: &dex_fee,
+            premium_amount: 0u64.into(),
+            trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: test_dex_fee_addr_raw_pubkey(),
+        };
+        let authored = block_on(gen_taker_payment_spend_preimage(&author, &args, UNIQUE_DATA)).unwrap();
+        let in_memory = authored.preimage.0;
+        let author_signature = authored.signature;
+        let received = parsed(&receiver, &in_memory);
+
+        // An honest peer's signature (`SIGHASH_SINGLE`) verifies.
+        block_on(validate_taker_payment_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &author_signature),
+        ))
+        .unwrap();
+        assert_digest_commits_to_the_spent_output(
+            &received,
+            &taker_tx.outputs[0],
+            receiver.as_ref().conf.consensus_branch_id,
+            &taker_redeem,
+            3,
+            &taker_pub,
+            &author_signature,
+        );
+
+        // A signature of another key does not.
+        let stranger = key_pair_from_seed("received preimage stranger").unwrap();
+        let wrong = sign_taker_payment_spend_input(&in_memory, &taker_redeem, &stranger, author.as_ref(), 3).unwrap();
+        let rejected = block_on(validate_taker_payment_spend_preimage(
+            &receiver,
+            &args,
+            &with_sig(received.clone(), &wrong),
+        ));
+        assert!(rejected.is_err());
+
+        // Signing from the stored, parsed preimage, as a restarted swap does, gives the signature of a fresh run
+        // over the same final outputs (`SIGHASH_ALL`).
+        mock_broadcast();
+        let sent = block_on(sign_and_broadcast_taker_payment_spend(
+            &receiver,
+            Some(&with_sig(received, &author_signature)),
+            &args,
+            &MAKER_SECRET,
+            UNIQUE_DATA,
+        ))
+        .unwrap();
+        assert_eq!(sent.outputs.len(), 2, "the fee output, then the maker's");
+        let final_signer = TransactionInputSigner {
+            outputs: sent.outputs.clone(),
+            ..in_memory
+        };
+        let fresh = sign_taker_payment_spend_input(
+            &final_signer,
+            &taker_redeem,
+            key_pair_of(&receiver),
+            receiver.as_ref(),
+            1,
+        )
+        .unwrap();
+        // The cooperative script pushes the maker's signature, then the taker's.
+        assert!(signature_push(&sent.inputs[0].script_sig, 0) == fresh, "{shape:?}");
+        assert!(signature_push(&sent.inputs[0].script_sig, 1) == author_signature);
+    }
+
+    #[test]
+    fn received_funding_spend_preimage_of_an_overwintered_version_4_coin() { funding_spend_case(Shape::Version4); }
+
+    #[test]
+    fn received_funding_spend_preimage_of_a_version_5_coin() { funding_spend_case(Shape::Version5); }
+
+    #[test]
+    fn received_taker_payment_spend_preimage_of_an_overwintered_version_4_coin() {
+        taker_payment_spend_case(Shape::Version4);
+    }
+
+    #[test]
+    fn received_taker_payment_spend_preimage_of_a_version_5_coin() { taker_payment_spend_case(Shape::Version5); }
+
+    /// A signer that is not overwintered is returned unchanged by the record.
+    #[test]
+    fn recording_the_spent_output_leaves_a_coin_that_is_not_overwintered_unchanged() {
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        fields.conf.overwintered = false;
+        fields.conf.zcash = false;
+        fields.conf.tx_version = 2;
+        let mut spent = UtxoTx::default();
+        spent.version = 2;
+        spent.outputs.push(TransactionOutput {
+            value: SPENT_VALUE,
+            script_pubkey: vec![0xaa; 23].into(),
+        });
+        let outputs = vec![TransactionOutput {
+            value: 10_000,
+            script_pubkey: vec![0x51].into(),
+        }];
+        let signer = build_taker_payment_spend_preimage_tx(&fields, &spent, outputs).unwrap();
+        let received = TransactionInputSigner::from_transaction(UtxoTx::from(signer), 0);
+        let recorded = with_spent_output_recorded(&received, &spent.outputs[0], 0x76b8_09bb);
+        assert_eq!(recorded.inputs[0].amount, received.inputs[0].amount);
+        assert_eq!(recorded.inputs[0].script_pubkey, received.inputs[0].script_pubkey);
+        assert_eq!(recorded.consensus_branch_id, received.consensus_branch_id);
     }
 }
 
@@ -13681,79 +14739,94 @@ pub(crate) mod hd_accounts_at_index_tests {
     }
 }
 
-/// A Qtum coin with a stub Electrum client that was never connected: nothing here reaches a network.
+/// A Qtum coin over a scripted Electrum server that lists one large unspent output of the coin's address. The coin
+/// holds a shared recently-spent record, as an activated QTUM does (CRD ch.38 D38.6.4Q.4 status note).
 #[cfg(not(target_arch = "wasm32"))]
-fn qtum_coin_without_network_for_test() -> QtumCoin {
-    let client = ElectrumClient(Arc::new(ElectrumClientImpl::new("tQTUM".to_owned(), vec![])));
-    let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
-    QtumCoin::from(UtxoArc::new(fields))
+fn qtum_coin_on_scripted_electrum_for_test() -> (QtumCoin, crate::utxo::rpc_clients::electrum_stub_server::StubServer) {
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+
+    let (p2pkh_hash, p2pk_hash) = order_posting_latency::script_hashes_of_test_coin(false);
+    let (client, server) = electrum_client_over_stub(|server| {
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            &p2pkh_hash,
+            json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 100_000_000_000u64}]),
+        );
+        server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+    });
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+    fields.spent_record_is_shared = true;
+    (QtumCoin::from(UtxoArc::new(fields)), server)
 }
 
-/// Runs `build` (a delegation build) while this test holds the process-wide build lock, and checks that the build
-/// does not list the unspents (CRD ch.38 R38.5B.5: the lock is held from the listing through signing) until the
-/// lock is released, and that it does after.
+/// Runs `build` (a delegation build) twice against a QTUM coin that holds a shared recently-spent record:
+/// - while this test holds the process-wide build lock, the build does not wait for it (CRD ch.38 D38.6.4Q.4 status
+///   note, item 4: the record's lock replaces it for the QTUM family);
+/// - while this test holds the guard of the coin's record, the build does not finish, and it does once the guard is
+///   released: the record's lock is the lock of the address, held through signing and the pending entry.
 #[cfg(not(target_arch = "wasm32"))]
-fn assert_delegation_build_waits_for_the_build_lock<F>(build: impl FnOnce(&QtumCoin) -> F)
+fn assert_delegation_build_waits_for_the_record_guard<F>(build: impl Fn(&QtumCoin) -> F)
 where
     F: futures::Future<
         Output = Result<crate::TransactionDetails, mm2_err_handle::prelude::MmError<crate::DelegationError>>,
     >,
 {
-    use crate::utxo::rpc_clients::UtxoRpcError;
-    use futures::task::noop_waker_ref;
-    use std::future::Future;
-    use std::task::{Context, Poll};
+    use futures::future::{select, Either};
 
-    let listings = Arc::new(AtomicUsize::new(0));
-    let listings_in_mock = listings.clone();
-    QtumCoin::get_unspent_ordered_list.mock_safe(move |_, _| {
-        listings_in_mock.fetch_add(1, Ordering::SeqCst);
-        MockResult::Return(Box::pin(futures::future::err(MmError::new(UtxoRpcError::Internal(
-            "no network in this test".to_owned(),
-        )))))
-    });
     // `am_i_currently_staking` (the add path) asks the Electrum server for the add and the remove history.
     crate::qrc20::rpc_clients::Qrc20ElectrumOps::blockchain_contract_event_get_history
         .mock_safe(|_: &ElectrumClient, _, _, _| MockResult::Return(Box::new(futures01::future::ok(Vec::new()))));
 
-    let coin = qtum_coin_without_network_for_test();
+    let (coin, server) = qtum_coin_on_scripted_electrum_for_test();
+    let listings = || server.requests("blockchain.scripthash.listunspent");
 
-    // The test holds the build lock, as a concurrent withdraw would.
+    // The process-wide lock is held, as a concurrent withdraw of another coin would: the build does not wait for it.
     let held = block_on(UTXO_LOCK.lock());
-    let mut build = Box::pin(build(&coin));
-    let first_poll = build.as_mut().poll(&mut Context::from_waker(noop_waker_ref()));
+    let first = block_on(build(&coin));
     assert!(
-        matches!(first_poll, Poll::Pending),
-        "the build must wait for the build lock, got {:?}",
-        first_poll.map(|result| result.map(|_| ()))
+        listings() >= 1,
+        "the build listed the unspents while the process-wide lock was held"
     );
-    assert_eq!(
-        listings.load(Ordering::SeqCst),
-        0,
-        "the unspents must not be listed before the build lock is held"
-    );
-
     drop(held);
-    let result = block_on(build);
-    assert_eq!(
-        listings.load(Ordering::SeqCst),
-        1,
-        "the build lists the unspents once it holds the lock"
-    );
+    let after_first = listings();
+
+    // The record's guard is held: the build lists, and then waits for the guard.
+    let guard = block_on(coin.as_ref().recently_spent_outpoints.lock());
+    let mut waiting = Box::pin(build(&coin));
+    let outcome = block_on(select(waiting.as_mut(), Box::pin(common::executor::Timer::sleep(1.5))));
     assert!(
-        result.is_err(),
-        "the mocked listing fails the build: {:?}",
-        result.map(|_| ())
+        matches!(outcome, Either::Right(_)),
+        "the build must wait for the guard of the record"
+    );
+    assert!(listings() > after_first, "the build listed before it waited");
+    let first_noted = first.is_ok() as usize;
+    assert_eq!(
+        guard.pending_withdraws.len(),
+        first_noted,
+        "the first build noted its pending entry, nothing was noted while the guard was held"
+    );
+    drop(guard);
+    let second = block_on(waiting);
+    // A build that succeeds notes a pending entry in the shared record, so that its broadcast can be promoted.
+    let noted = block_on(coin.as_ref().recently_spent_outpoints.lock())
+        .pending_withdraws
+        .len();
+    assert_eq!(noted, first_noted + second.is_ok() as usize);
+    assert!(
+        first.is_ok() && second.is_ok(),
+        "{:?} {:?}",
+        first.map(|_| ()),
+        second.map(|_| ())
     );
 }
 
-/// The add-delegation build takes the build lock before it lists the unspents.
+/// The add-delegation build waits for the guard of the shared record, not for the process-wide build lock.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn qtum_delegation_build_waits_for_the_build_lock() {
+fn qtum_delegation_build_waits_for_the_record_guard() {
     use futures::compat::Future01CompatExt;
 
-    assert_delegation_build_waits_for_the_build_lock(|coin| {
+    assert_delegation_build_waits_for_the_record_guard(|coin| {
         let request = QtumDelegationRequest {
             address: "qcyBHeSct7Wr4mAw18iuQ1zW5mMFYmtmBE".to_owned(),
             fee: Some(10),
@@ -13762,11 +14835,406 @@ fn qtum_delegation_build_waits_for_the_build_lock() {
     });
 }
 
-/// The remove-delegation build takes the build lock before it lists the unspents.
+/// The remove-delegation build waits for the guard of the shared record, not for the process-wide build lock.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn qtum_remove_delegation_build_waits_for_the_build_lock() {
+fn qtum_remove_delegation_build_waits_for_the_record_guard() {
     use futures::compat::Future01CompatExt;
 
-    assert_delegation_build_waits_for_the_build_lock(|coin| coin.remove_delegation().compat());
+    assert_delegation_build_waits_for_the_record_guard(|coin| coin.remove_delegation().compat());
+}
+
+/// ZIP 317 conventional fee (Reloaded's own rule, `crate::utxo::zip317`): the builder, the previews, the
+/// version-one HTLC spends and the explicit withdraw fee. The version-two spends have their own module below.
+#[cfg(not(target_arch = "wasm32"))]
+mod zip317_fee_tests {
+    use super::*;
+
+    const ZIP317: TxFee = TxFee::Zip317 {
+        legacy_rate_per_kb: 70_000,
+    };
+    const ZIP317_ACTUAL: ActualTxFee = ActualTxFee::Zip317 {
+        legacy_rate_per_kb: 70_000,
+    };
+
+    fn zip317_coin() -> UtxoStandardCoin { floor_test_coin("ZEC", ZIP317, 1000, 8) }
+
+    fn unspents(values: &[u64]) -> Vec<UnspentInfo> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| UnspentInfo {
+                value: *value,
+                outpoint: OutPoint {
+                    hash: H256::from([i as u8 + 1; 32]),
+                    index: 0,
+                },
+                height: None,
+            })
+            .collect()
+    }
+
+    fn p2pkh_out(value: u64) -> TransactionOutput {
+        TransactionOutput {
+            value,
+            script_pubkey: vec![0x51; 25].into(),
+        }
+    }
+
+    fn p2sh_out(value: u64) -> TransactionOutput {
+        TransactionOutput {
+            value,
+            script_pubkey: vec![0xa9; 23].into(),
+        }
+    }
+
+    /// The swap OP_RETURN with a 20-byte secret hash: 22 bytes of script, 31 of output.
+    fn op_return_out() -> TransactionOutput {
+        TransactionOutput {
+            value: 0,
+            script_pubkey: Builder::default()
+                .push_opcode(Opcode::OP_RETURN)
+                .push_bytes(&[0u8; 20])
+                .into_bytes(),
+        }
+    }
+
+    fn build(
+        values: &[u64],
+        outputs: Vec<TransactionOutput>,
+        policy: FeePolicy,
+    ) -> (TransactionInputSigner, AdditionalTxData) {
+        block_on(
+            UtxoTxBuilder::new(&zip317_coin())
+                .add_available_inputs(unspents(values))
+                .add_outputs(outputs)
+                .with_fee_policy(policy)
+                .with_fee(ZIP317_ACTUAL)
+                .build(),
+        )
+        .unwrap()
+    }
+
+    /// The builder shapes of the analysis: the fee of the final transaction, inputs and outputs counted.
+    #[test]
+    fn test_builder_shapes() {
+        // withdraw 1 in -> 1 out (max, no change)
+        let (tx, data) = build(&[1_000_000], vec![p2pkh_out(1_000_000)], FeePolicy::DeductFromOutput(0));
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 1));
+        assert_eq!(data.fee_amount, 10_000);
+        assert_eq!(tx.outputs[0].value, 990_000);
+
+        // withdraw 1 in -> 2 out
+        let (tx, data) = build(&[10_000_000], vec![p2pkh_out(1_000_000)], FeePolicy::SendExact);
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 2));
+        assert_eq!(data.fee_amount, 10_000);
+        assert_eq!(tx.outputs[1].value, 10_000_000 - 1_000_000 - 10_000);
+
+        // withdraw 2 in -> 2 out
+        let (tx, data) = build(&[600_000, 600_000], vec![p2pkh_out(1_000_000)], FeePolicy::SendExact);
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (2, 2));
+        assert_eq!(data.fee_amount, 10_000);
+
+        // withdraw 3 in -> 2 out: 444 input bytes are 3 actions
+        let (tx, data) = build(&[400_000; 3], vec![p2pkh_out(1_100_000)], FeePolicy::SendExact);
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (3, 2));
+        assert_eq!(data.fee_amount, 15_000);
+        assert_eq!(tx.outputs[1].value, 1_200_000 - 1_100_000 - 15_000);
+
+        // DEX fee with a burn address: 1 in -> fee + burn + change = 3 out
+        let (tx, data) = build(
+            &[10_000_000],
+            vec![p2pkh_out(750_000), p2pkh_out(250_000)],
+            FeePolicy::SendExact,
+        );
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 3));
+        assert_eq!(data.fee_amount, 15_000);
+
+        // HTLC payment with change: P2SH (32) + OP_RETURN (31) + change (34) = 97 bytes, 3 actions
+        let (tx, data) = build(
+            &[10_000_000],
+            vec![p2sh_out(1_000_000), op_return_out()],
+            FeePolicy::SendExact,
+        );
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 3));
+        assert_eq!(data.fee_amount, 15_000);
+
+        // HTLC payment without change: 63 output bytes, 2 actions
+        let (tx, data) = build(
+            &[1_010_000],
+            vec![p2sh_out(1_000_000), op_return_out()],
+            FeePolicy::SendExact,
+        );
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 2));
+        assert_eq!(data.fee_amount, 10_000);
+        assert_eq!(data.unused_change, None);
+
+        // 1 in -> 5 out: four payments and the change, 170 output bytes, 5 actions
+        let (tx, data) = build(&[10_000_000], vec![p2pkh_out(100_000); 4], FeePolicy::SendExact);
+        assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 5));
+        assert_eq!(data.fee_amount, 25_000);
+    }
+
+    /// The change output pushes the outputs from 2 to 3 actions (SendExact), and a change below dust is not
+    /// created, so it does not add the action.
+    #[test]
+    fn test_change_output_can_add_an_action() {
+        let payments = || vec![p2pkh_out(750_000), p2pkh_out(250_000)];
+        let (tx, data) = build(&[10_000_000], payments(), FeePolicy::SendExact);
+        assert_eq!(tx.outputs.len(), 3);
+        assert_eq!(data.fee_amount, 10_000 + 5_000);
+        assert_eq!(tx.outputs[2].value, 10_000_000 - 1_000_000 - 15_000);
+
+        // A change of 500 is below the dust of 1,000: no change output, no further action.
+        let (tx, data) = build(&[1_000_000 + 10_000 + 500], payments(), FeePolicy::SendExact);
+        assert_eq!(tx.outputs.len(), 2);
+        assert_eq!(data.fee_amount, 10_000);
+        assert_eq!(data.unused_change, Some(500));
+    }
+
+    /// `DeductFromOutput`: the fee, the change output's action included, comes off the chosen output.
+    #[test]
+    fn test_deduct_from_output() {
+        let (tx, data) = build(
+            &[10_000_000],
+            vec![p2pkh_out(500_000), p2pkh_out(500_000)],
+            FeePolicy::DeductFromOutput(1),
+        );
+        assert_eq!(tx.outputs.len(), 3);
+        assert_eq!(data.fee_amount, 15_000);
+        assert_eq!(tx.outputs[0].value, 500_000);
+        assert_eq!(tx.outputs[1].value, 500_000 - 15_000);
+        assert_eq!(tx.outputs[2].value, 10_000_000 - 1_000_000);
+    }
+
+    /// The forced minimum relay fee stays a floor over the size: it wins when it is higher and is ignored
+    /// when it is lower than the conventional fee.
+    #[test]
+    fn test_min_relay_fee_floor() {
+        let build_with_relay = |relay: &'static str, policy: FeePolicy, output_value: u64| {
+            NativeClient::get_relay_fee
+                .mock_safe(move |_| MockResult::Return(Box::new(futures01::future::ok(relay.parse().unwrap()))));
+            let mut fields =
+                utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+            fields.tx_fee = ZIP317;
+            fields.conf.force_min_relay_fee = true;
+            let coin = utxo_coin_from_fields(fields);
+            let (tx, data) = block_on(
+                UtxoTxBuilder::new(&coin)
+                    .add_available_inputs(unspents(&[1_000_000_000]))
+                    .add_outputs(vec![TransactionOutput {
+                        value: output_value,
+                        script_pubkey: vec![0x51; 25].into(),
+                    }])
+                    .with_fee_policy(policy)
+                    .with_fee(ZIP317_ACTUAL)
+                    .build(),
+            )
+            .unwrap();
+            let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+            (data.fee_amount, size)
+        };
+
+        // A relay rate of 1.0 coin per kB (100,000 base units per byte) is far above 10,000.
+        let (fee, size) = build_with_relay("1.0", FeePolicy::SendExact, 900_000_000);
+        assert_eq!(fee, 100_000 * size);
+        let (fee, size) = build_with_relay("1.0", FeePolicy::DeductFromOutput(0), 1_000_000_000);
+        assert_eq!(fee, 100_000 * size);
+        // A relay rate of 1 base unit per kB gives 0: the conventional fee stays.
+        let (fee, _) = build_with_relay("0.00000001", FeePolicy::SendExact, 900_000_000);
+        assert_eq!(fee, 10_000);
+        let (fee, _) = build_with_relay("0.00000001", FeePolicy::DeductFromOutput(0), 1_000_000_000);
+        assert_eq!(fee, 10_000);
+    }
+
+    /// Entries that do not follow the rule pay what they paid before: the per-kilobyte fee of the same transaction.
+    #[test]
+    fn test_per_kilobyte_coins_are_unchanged() {
+        // KMD (1,000), FLUX, ZER, BTCZ style rates, and the ZEC rate of 70,000 on a version 4 entry.
+        for rate in [1000u64, 10_000, 70_000] {
+            let coin = floor_test_coin("ZEC", TxFee::FixedPerKb(rate), 1000, 8);
+            let (tx, data) = block_on(
+                UtxoTxBuilder::new(&coin)
+                    .add_available_inputs(unspents(&[10_000_000]))
+                    .add_outputs(vec![p2pkh_out(1_000_000)])
+                    .with_fee(ActualTxFee::FixedPerKb(rate))
+                    .build(),
+            )
+            .unwrap();
+            let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+            assert_eq!(data.fee_amount, rate * size / 1000, "rate {rate}");
+        }
+    }
+
+    /// An explicit withdraw fee is used as given on a ZIP 317 coin: a rate per 1,000 bytes over the worst-case size
+    /// (245 bytes for 1 input and 2 outputs): floor(1234 * 245 / 1000) = 302, for `UtxoFixed` and `UtxoPerKbyte`.
+    #[test]
+    fn test_explicit_withdraw_fee_is_used_as_given() {
+        for fixed in [true, false] {
+            let withdraw = explicit_fee_withdraw_on_coin_with_fee(ZIP317, fixed, "0.00001234", 1, 1_000_000_000);
+            assert_eq!(withdraw.fee, 302, "fixed: {fixed}");
+            assert_ne!(withdraw.fee, 10_000);
+        }
+    }
+
+    fn mock_one_unspent() {
+        UtxoStandardCoin::get_unspent_ordered_list.mock_safe(|coin, _| {
+            let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+            MockResult::Return(Box::pin(futures::future::ok((unspents(&[10_000_000]), cache))))
+        });
+    }
+
+    fn sat(fee: &TradeFee) -> u64 { sat_from_big_decimal(&fee.amount.to_decimal(), 8).unwrap() }
+
+    /// `trade_preimage`'s sender and receiver fees, the DEX fee estimate and `get_trade_fee` (the figures
+    /// `max_taker_vol` deducts) of a ZIP 317 coin.
+    #[test]
+    fn test_previews() {
+        mock_one_unspent();
+        let coin = zip317_coin();
+        let stage = FeeApproxStage::WithoutApprox;
+
+        // The sender: P2SH + OP_RETURN + one change output, 97 output bytes: 3 actions, for both value kinds.
+        let exact = futures::executor::block_on(utxo_common::get_sender_trade_fee(
+            &coin,
+            TradePreimageValue::Exact(BigDecimal::from_str("0.099").unwrap()),
+            stage.clone(),
+        ))
+        .unwrap();
+        assert_eq!(sat(&exact), 15_000);
+        assert!(!exact.paid_from_trading_vol);
+        let upper = futures::executor::block_on(utxo_common::get_sender_trade_fee(
+            &coin,
+            TradePreimageValue::UpperBound(BigDecimal::from_str("0.1").unwrap()),
+            stage.clone(),
+        ))
+        .unwrap();
+        assert_eq!(sat(&upper), 15_000);
+
+        // The receiver: the version-one claim, 2 actions, paid from the trading volume.
+        let receiver = utxo_common::get_receiver_trade_fee(coin.clone()).wait().unwrap();
+        assert_eq!(sat(&receiver), 10_000);
+        assert!(receiver.paid_from_trading_vol);
+
+        // The DEX fee estimate counts the fee output, a P2PKH burn output and the change output (the real DEX fee
+        // transaction with a burn is 1 in -> 3 out): 102 output bytes, 3 actions.
+        let dex = futures::executor::block_on(utxo_common::get_fee_to_send_taker_fee(
+            &coin,
+            BigDecimal::from_str("0.001").unwrap(),
+            stage,
+        ))
+        .unwrap();
+        assert_eq!(sat(&dex), 15_000);
+
+        // The trade fee is the conventional fee of a standard transaction, not a per-kilobyte rate.
+        let trade_fee = utxo_common::get_trade_fee(coin.clone()).wait().unwrap();
+        assert_eq!(sat(&trade_fee), 10_000);
+        let per_kb = floor_test_coin("ZEC", TxFee::FixedPerKb(70_000), 1000, 8);
+        assert_eq!(sat(&utxo_common::get_trade_fee(per_kb).wait().unwrap()), 70_000);
+    }
+
+    /// The DEX fee estimate of a per-kilobyte coin is unchanged: one payment output and one change output, 245
+    /// bytes (29 of overhead, 148 for the input and 68 for the two outputs), so 245 at 1,000 per kilobyte.
+    #[test]
+    fn test_dex_fee_estimate_of_a_per_kilobyte_coin_is_unchanged() {
+        mock_one_unspent();
+        for (rate, expected) in [(1000u64, 245u64), (70_000, 17_150)] {
+            let coin = floor_test_coin("ZEC", TxFee::FixedPerKb(rate), 1000, 8);
+            let dex = futures::executor::block_on(utxo_common::get_fee_to_send_taker_fee(
+                &coin,
+                BigDecimal::from_str("0.001").unwrap(),
+                FeeApproxStage::WithoutApprox,
+            ))
+            .unwrap();
+            assert_eq!(sat(&dex), expected, "rate {rate}");
+        }
+    }
+
+    /// The sender preview of a per-kilobyte coin is the same as before.
+    #[test]
+    fn test_sender_preview_of_a_per_kilobyte_coin_is_unchanged() {
+        assert_eq!(
+            fixed_policy_preview_fee_sat(ActualTxFee::FixedPerKb(1000), 1, 10_000_000, "0.099"),
+            274
+        );
+        assert_eq!(
+            fixed_policy_preview_fee_sat(ZIP317_ACTUAL, 1, 10_000_000, "0.099"),
+            15_000
+        );
+    }
+
+    /// The version-one claim and refund of a ZIP 317 coin pay the conventional fee of their shape, one P2SH
+    /// input with its scriptSig and one P2PKH output. A per-kilobyte coin still pays `fee_for_size(496)`.
+    #[test]
+    fn test_v1_claim_and_refund_fee() {
+        let pub_0 = Public::from_slice(&[0u8; 33]).unwrap();
+        let pub_1 = Public::from_slice(&[0u8; 33]).unwrap();
+        let redeem = utxo_common::payment_script(1_700_000_000, &[0u8; 20], &pub_0, &pub_1);
+        assert_eq!(redeem.len(), 107);
+        let claim_data = Builder::default()
+            .push_data(&[7u8; 32])
+            .push_opcode(Opcode::OP_0)
+            .into_script();
+        let refund_data = Builder::default().push_opcode(Opcode::OP_1).into_script();
+
+        // claim: scriptSig 73 + 33 + 1 + 109 = 216, input 257; refund: 73 + 1 + 109 = 183, input 224
+        let claim = utxo_common::p2sh_spend_to_p2pkh_bytes(claim_data.len(), &redeem);
+        assert_eq!((claim.input, claim.output), (257, 34));
+        let refund = utxo_common::p2sh_spend_to_p2pkh_bytes(refund_data.len(), &redeem);
+        assert_eq!((refund.input, refund.output), (224, 34));
+        assert_eq!(utxo_common::v1_claim_spend_bytes(), claim);
+
+        let size = utxo_common::DEFAULT_SWAP_TX_SPEND_SIZE;
+        let coin = zip317_coin();
+        for shape in [claim, refund] {
+            assert_eq!(
+                block_on(utxo_common::get_htlc_spend_fee_for_shape(&coin, size, shape)).unwrap(),
+                10_000
+            );
+        }
+        assert_eq!(
+            block_on(utxo_common::get_v1_htlc_spend_fee_estimate(&coin)).unwrap(),
+            10_000
+        );
+        // A per-kilobyte coin: fee_for_size(496), whatever the shape is.
+        let kmd = floor_test_coin("ZEC", TxFee::FixedPerKb(70_000), 1000, 8);
+        for shape in [claim, refund] {
+            assert_eq!(
+                block_on(utxo_common::get_htlc_spend_fee_for_shape(&kmd, size, shape)).unwrap(),
+                34_720
+            );
+        }
+        assert_eq!(block_on(utxo_common::get_htlc_spend_fee(&kmd, size)).unwrap(), 34_720);
+        assert_eq!(
+            block_on(utxo_common::get_v1_htlc_spend_fee_estimate(&kmd)).unwrap(),
+            34_720
+        );
+        // A ZIP 317 coin has no fee for a size alone.
+        assert!(block_on(utxo_common::get_htlc_spend_fee(&coin, size)).is_err());
+    }
+
+    /// The version-two swap spend estimate is size-based even on a ZIP 317 coin: the plain proportional fee at
+    /// the rate of the entry's `txfee` over 496 bytes.
+    #[test]
+    fn test_v2_swap_spend_estimate_stays_size_based() {
+        let size = utxo_common::V2_SWAP_SPEND_TX_SIZE;
+        assert_eq!(
+            block_on(utxo_common::get_v2_swap_spend_fee(&zip317_coin(), size)).unwrap(),
+            34_720
+        );
+        let kmd = floor_test_coin("ZEC", TxFee::FixedPerKb(70_000), 1000, 8);
+        assert_eq!(
+            block_on(utxo_common::get_v2_swap_spend_fee(&kmd, size)).unwrap(),
+            34_720
+        );
+    }
+
+    /// The safe amount of a ZIP 317 coin is the conventional claim fee plus dust.
+    #[test]
+    fn test_spend_safe_amount() {
+        let safe = block_on(utxo_common::spend_safe_amount(&zip317_coin()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(safe, MmNumber::from("0.00011"));
+    }
 }

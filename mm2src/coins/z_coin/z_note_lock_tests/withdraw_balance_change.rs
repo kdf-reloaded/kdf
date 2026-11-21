@@ -97,7 +97,10 @@ async fn t39_5a_c_a_sapling_withdrawal_reports_received_minus_spent() {
     };
     let to = encode_payment_address(
         fixture.coin.z_fields.consensus_params.hrp_sapling_payment_address(),
-        &ExtendedSpendingKey::master(&[97; 32]).default_address().1,
+        &ExtendedSpendingKey::master(&[97; 32])
+            .expect("a valid master key")
+            .default_address()
+            .1,
     );
     let fee = fixture.fee_sat;
     assert_response_and_row(fixture, &to, fee).await;

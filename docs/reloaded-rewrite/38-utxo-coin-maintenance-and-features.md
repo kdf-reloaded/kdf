@@ -880,6 +880,43 @@ addition no row is removed while the coin is in the state of R38.6.4o item
 Under each option Reloaded's legacy collector first has to meet R38.5A.3
 item (a).
 
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.1 is
+decided:* option (c), with a Reloaded refinement for how absence is
+established. It applies to the legacy history file, the QRC20 token
+collector (in place of R38.6.4Q.6 item 2) and the SQLite store alike, and
+replaces R38.5C.1 and R38.5C.3 items 2 and 3 for removal. For confirmed rows
+of the SQLite store it is a recorded departure from R38.5C.4 item 1.
+
+1. *When a row is removed.* A stored row, confirmed or not, is removed only
+   when **two successful listings in a row**, at least one block apart, both
+   answered by up-to-date servers (R38.6.4o item 4), do not contain its
+   transaction hash. The two listings must together cover every own address
+   the row concerns. All rows of one transaction hash (the several rows of a
+   QRC20 transaction, the BCH row and the SLP token row) are removed together.
+   A coin with a single connected server needs two listings from that server,
+   at least one block apart.
+   "One block apart" is judged from the chain tips observed with the two
+   listings: for an Electrum server, its last reported tip; for a native
+   daemon, its block count read with the listing.
+2. *What never removes.* A failed listing, a listing cut off by its time
+   budget or by a `history too large` answer, a listing from an out-of-date
+   server, and any listing while the coin is in the disagreement state of
+   R38.6.4o item 12.
+3. *Rows cannot stay forever.* A row found absent once carries a mark: the
+   height at which its absence was first seen. While any row carries such a
+   mark, the collector's need-to-run test (R38.5A.5) is true, so the second
+   listing comes at the next pass after a new block, not only at a balance
+   change. A listing that contains the hash clears the mark. What holds a
+   removal back is named in item 2, plus the absence of a new block. Each ends
+   by itself when its cause ends; none needs a user action.
+   The marks are kept in memory only; after a restart of the node the
+   counting starts again, which can delay a removal but never causes one.
+4. *Write and log.* A pass that removed rows writes the history at once
+   (R38.5A.3) and logs one INFO line naming the coin and the number of rows
+   removed. No line is logged per row.
+5. *Afterwards.* A removed hash that a later listing contains is fetched as
+   new, as in R38.5C.1 item 4.
+
 D38.5C.2 *(Open, 2026-11-16.)* **A stored confirmed row whose transaction is
 now at another height.** Neither store of the reference takes the new height
 over, and no pass runs for it while the balance is unchanged (R38.5C.2,
@@ -892,6 +929,79 @@ goes back to height 0; (c) option (b), and a pass is also started when the
 coin's client sees that the chain it follows has changed, since the
 need-to-run test alone does not start one. *Recommendation:* (c); what
 makes the client see the change is this repository's own design.
+
+*Status note (2026-11-16, clean side; maintainer decision). D38.5C.2 is
+decided:* option (c), in two steps. It is a recorded departure from R38.5C.2
+and R38.5C.4 item 2 for both stores.
+
+1. *In a pass that runs.* A listed positive height that differs from a
+   stored row's height is taken over, together with that block's time. A
+   stored confirmed row that the listing reports as unconfirmed goes back to
+   height 0. All rows of the hash change together.
+2. *Starting a pass.* A pass is also started when the coin's client sees
+   that the chain it follows has changed. One WARN line names the coin and
+   the height from which the chain changed, if known. How the client sees
+   the change is this repository's own design, specified when it is built;
+   until then, item 1 applies in the passes that run anyway.
+
+*Amendment (2026-11-18, clean side; Reloaded-original; implements item 2 of
+the status note above). How the client sees that its chain changed.*
+1. *The chain view.* Each Electrum client keeps the base headers (the first
+   80 bytes, as compared by item 12 of R38.6.4o, D38.6.4o.14) of the last
+   2*T* + 2 heights of the chain it follows, *T* being the coin's tolerance
+   (R38.6.4o item 1). The view is fed only by header notifications and
+   header answers of up-to-date maintained connections (R38.6.4o item 4), and
+   not at all while the coin is in the disagreement state (item 12). No block
+   identifier is computed: the identifier function differs between header
+   families, and comparing base headers at the same height works for all of
+   them.
+2. *One check per new tip.* When an up-to-date connection first reports a
+   height above the highest in the view, the client sends that connection one
+   directed `blockchain.block.headers` request (R38.6.4g) for the heights from
+   the highest in the view up to the one below the new tip. It compares each
+   returned base header with the view at the same height.
+   - All equal: the chain only grew; the view takes the new headers, the new
+     tip's included, and drops the oldest.
+   - A difference: the chain changed. One more directed request over the
+     whole view finds the lowest height that differs, the height from which
+     the chain changed; a difference at the bottom of the view is reported as
+     "at or below" its lowest height. The view is then replaced by the new
+     chain's headers.
+   - A request that fails or is not answered within the per-request bound
+     concludes nothing; the next tip is checked as usual.
+3. *What a change starts.* The client sends a chain-changed event to every
+   history collector of the coin instance: the legacy UTXO collector, the
+   QRC20 collector and the BCH/SLP collector. The event makes the collector
+   run a pass at once, whatever its need-to-run test says. That pass applies
+   item 1 of the status note above and counts absences under D38.5C.1.
+4. *The log.* One WARN line per change: `<ticker>: the Electrum servers report
+   a reorganization of the chain from height <H>` (or `at or below height
+   <L>`).
+   Nothing is said about consequences. Every change is reported, a change
+   back to a chain the view held before included, as in a race of two blocks
+   at the tip: each is a reorganization.
+5. *Cost and bounds.* At most one small directed request per new block per
+   coin instance, plus one when a change is found, always to a connection
+   that is already maintained. A chain that only grows always compares equal,
+   so no header family can make every block look like a change. A single
+   server answering a made-up header can cause at most one extra history pass
+   and one WARN line. It cannot remove a row, which needs two listings under
+   D38.5C.1.
+6. *One connected server.* The same applies to that server's headers alone.
+7. *Edges.*
+   - When the view is empty, or a new tip is more than 2*T* + 2 heights above
+     its highest, the view starts again from the new tip, with no request, no
+     event and no WARN: there is nothing to compare with.
+   - A tip at or below the view's highest height is not checked. A
+     replacement at the same height is therefore seen when the next higher
+     tip arrives.
+   - A header list that cannot be split into equal parts of at least 80 bytes
+     matching the requested count concludes nothing. A coin whose servers
+     never return such a list therefore never sees a change, and relies on
+     the passes that run anyway.
+   - With `electrum_tip_checks` `false` (R38.6.4o item 11) the view is not
+     fed and no change is seen; the history then relies on the passes that
+     run anyway.
 
 *Acceptance rows for a mock backend.* Each row names what the mock answers
 and what the node does. *Parity* is the reference behavior bound above;
@@ -1087,6 +1197,16 @@ caller simply queries again. For spendability, an unconfirmed output that is
 not a coinbase output counts as mature; only coinbase outputs are withheld
 until the configured maturity (R38.2). An unconfirmed change output is thus
 eligible as soon as the backend lists it.
+
+*Status note (2026-11-20, clean side; maintainer decision).* In this tree the
+maturity check of a listing does not fetch the transaction of an output that
+the record knows as an output of a transaction this node built, for every
+UTXO coin, whether step 2 added it or the backend listed it. Such an output
+belongs to a transaction this node built and signed, so it is never a
+coinbase or coinstake output and counts as mature. The fetch was a read
+spread over the servers whose error answer is final (R38.6.4f item 1), so a
+server that had not yet seen the fresh transaction could fail the next spend
+from the same address. Every other listed output keeps the check as before.
 
 R38.5B.5 **Serialization of own-address spends.** (Reference-bound at both
 rows; also the baseline's behaviour.) Two locks order concurrent spends from
@@ -2668,6 +2788,27 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    ends the wait therefore always comes from the server the wait is polling,
    never from whichever server a spread read reached. No request is added
    (D38.6.4o.3).
+
+   *Status note (2026-11-21, clean side; Reloaded-original; maintainer
+   decision of 2026-11-21).* While `electrum_tip_checks` is `true`, the wait
+   also chooses again in two more cases. (i) After every poll that does not
+   end the wait, the state of item 4 of the polled server is looked at; when
+   that server is out of date, the wait continues on the first up-to-date
+   maintained connection in priority order that has not failed during this
+   wait, or, when there is none, on the first up-to-date one that has; a
+   server taken this way no longer counts as failed, and the wait polls it
+   only after its usual pause. The out-of-date server is not counted as failed
+   and a later choice may return to it. (ii) Three error answers in a row of
+   the polled server to the transaction request count as a failure of that
+   server for this wait: it is left out while another choice exists, as after
+   a failed request, and the wait chooses again. An answer that is not an
+   error resets the count. An up-to-date server that answers too few
+   confirmations keeps the wait, as before. Every change of server logs one
+   INFO line naming both servers by host and port (§38.6.9) and the reason.
+   With `electrum_tip_checks` `false` neither case applies. This is prompted
+   by a field report in which a taker payment had its confirmations 88 minutes
+   before the wait's deadline, and the wait still timed out on the server it
+   had chosen.
 7. *Headers at the same height (amends R38.6.4l item 4).* Two servers that
    answer different header bytes for the same height, in a measurement round
    or in their header notifications, are not judged by the majority: the
@@ -2994,6 +3135,10 @@ from turning every node into a periodic prober of the public servers.
 >   too few confirmations, never too many, so the cost is a longer wait or a
 >   timed-out swap step, not a false confirmation. Choosing again when the
 >   chosen server turns out of date is a candidate for a later change.
+>
+>   *Status note (2026-11-21).* Closed by the status note of 2026-11-21 under
+>   item 6: the wait now chooses again when its server turns out of date and
+>   after three error answers in a row.
 > - The per-round WARN of item 9 (a measured server behind or ahead) is logged
 >   in every re-measure round, without the once-per-change state of the WARNs
 >   for maintained connections, and can repeat the text of such a WARN for the
@@ -3489,6 +3634,26 @@ unconfirmed, the coin shall not enter the disagreement state, and no further
 wake shall be scheduled for the period end that has passed; the pair is tried
 again after the comparison limit (item 12, D38.6.4o.15).
 
+T38.6.4o.23 *The wait leaves a server that turns out of date.* With two
+maintained stubs, *A* chosen first and up to date when the wait starts and
+answering 0 confirmations, and *B* answering 3: when *A* turns out of date
+(item 4) during a wait for 1 confirmation, the wait shall continue on *B* and
+end on its answer, with one INFO line naming *A*, *B* and the reason. While
+*A* stays up to date, the wait shall stay on *A* (T38.6.4o.7). When a request
+to *A* fails first, so that the wait moves to *B*, and *B* then turns out of
+date while *A* is up to date again, the wait shall return to *A* and end on its
+answer. With
+`electrum_tip_checks` `false` the wait shall stay on *A* (item 6, status note
+of 2026-11-21).
+
+T38.6.4o.24 *The wait leaves a server that answers errors.* With two
+maintained stubs, *A* chosen first and *B* answering 3 confirmations: when *A*
+answers the transaction request with an error three times in a row, the wait
+shall continue on *B* and end on its answer. When *A* answers two errors and
+then 0 confirmations, the wait shall stay on *A*, and the count shall start
+again. With `electrum_tip_checks` `false`, error answers of *A* shall keep the
+wait on *A* until its deadline (item 6, status note of 2026-11-21).
+
 D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
 becomes the default.* The plan intends `mixed` as the default and left the
 moment to the maintainer: with the implementation, or after a field run on a
@@ -3640,6 +3805,12 @@ one server define it.
 D38.6.4o.3 *(Decided 2026-11-09, maintainer.)* *Confirmation waits.* Sticky to
 one server only. Corroborating a "confirmed" answer by a second server for
 coins without `spv_conf` was considered and left for a later change.
+
+*Status note (2026-11-21, maintainer decision).* The wait still polls one
+server at a time and still trusts that server's answer alone, but it no
+longer stays with a server that is out of date or that answers errors three
+times in a row (status note of 2026-11-21 under item 6). Corroboration
+remains open.
 
 D38.6.4o.4 *(Decided 2026-11-09, maintainer.)* *Header request on joining under
 every order.* Yes: without heights no connection can be judged under the
@@ -3951,6 +4122,37 @@ servers, and when.
 > incomplete, and the next pass asks for the history again after the retry
 > delay, whatever the balance.
 
+*Status note (2026-11-17, clean side; decision within the lane). The
+code-quality finding above is fixed as proposed:* a pass that left a listed
+transaction out, because a detail request failed, counts as incomplete. The
+next pass asks for the history again after the retry delay, whatever the
+balance. The delay doubles while passes stay incomplete, up to the cap of the
+failed-request delay, and is reset by a complete pass.
+
+*Amendment (2026-11-17, clean side; Reloaded-original; maintainer decision).
+The history collector's end state when no server serves the history.* When
+three passes in a row end because every server tried answered the history
+request of R38.6.4Q.6 item 2 with an error, the collector stops:
+
+- the token's history state becomes an error with code `-2` that names the
+  cause: no listed server answers the contract-event history; `my_tx_history`
+  reports it as `sync_status`;
+- the collector starts again when the token is activated again;
+- `history too large` keeps its own end state, code `-1` (R38.6.4Q.6 item 4).
+
+*Counting (2026-11-18, clean side; decision within the lane).* A pass counts
+only when every server tried answered with an error answer. A pass that gets a
+history answer, an unreadable answer or `history too large` resets the count.
+A pass in which a server failed by transport neither counts nor resets it, so
+a node that is offline never reaches this end state.
+
+This is a recorded divergence from R38.6.4Q.6 item 4, under which a failed
+history request is repeated without limit.
+
+Basis: on 2026-11-17 the four `cipig.net` QTUM servers answered every
+contract-event history request with an internal error, so a token listing only
+them never got a history.
+
 R38.6.4Q.7 **Ordering and remembering spends of the shared QTUM outputs.**
 (Reference-bound at both rows; also the baseline's behaviour. §38.5B binds
 the standard UTXO path; this rule states how the QTUM family differs from
@@ -4177,6 +4379,45 @@ client. *Recommendation:* (b). No peer and no server contract observes the
 number of sessions, so this falls under the second arm of the default-side
 rule of `docs/COMPAT_SWITCHES.md`.
 
+*Status note (2026-11-15 and 2026-11-18, clean side; maintainer decisions).
+D38.6.4Q.1 is decided:* option (b), on 2026-11-15. Its details were decided
+on 2026-11-18.
+
+1. *When instances share.* Instances of the QTUM family (`protocol.type`
+   `QTUM` or `QRC20`) use one Electrum client when every input that shapes
+   the client is exactly equal: the platform (a token's
+   `protocol.protocol_data.platform`, QTUM's own ticker), the server list as
+   the activation request gives it (in order, and per entry), `min_connected`
+   and `max_connected`, the coin entry's `listed_order_for_spends` and
+   `block_interval`, and the builder arguments (ping, version negotiation
+   and its client name, metrics). An instance whose inputs differ in any of
+   them builds its own client, so the servers a token's request names are
+   always honored. Every other coin builds its own client as before.
+2. *Lifetime.* The node keeps the shared clients in a registry of its context,
+   by weak reference, so the registry owns none of them. A client lives as
+   long as any instance holds it, and the last holder's release closes it. A
+   token activates without QTUM and keeps working after QTUM is disabled.
+   Disabling one instance, or failing one activation, closes no session that
+   another instance uses. R38.6.4b-R item 2 binds the server order of a
+   reused client.
+3. *Reuse.* A reused client is not probed again. While its servers disagree,
+   an instance that would reuse it is refused as a fresh build would be
+   (R38.6.4o item 12), and holds no part of it. A build that failed is not
+   remembered: an instance that waited for it builds from the start.
+4. *Lock order.* The activation locks of R55.1.12 (chapter 55), then one
+   build lock per set of inputs, then the registry itself, and the coin
+   registry only after both registry locks are released. `disable_coin`
+   never takes a registry lock, and never waits for an activation lock while
+   it holds the coin registry. A build sends no transaction.
+5. *Naming.* A shared client goes by the platform ticker in its log lines,
+   its error texts and its transport metrics, so each connection is counted
+   once, and a token's transport errors name the platform. The
+   `electrum_servers` request for a token reports the shared client.
+6. *Subscriptions of a disabled instance.* On disable, an instance's
+   remembered subscriptions, script-hash and contract-event alike, are
+   removed from the shared client, unless another live instance remembers
+   the same one. They are then no longer placed again after a reconnect.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -4194,6 +4435,30 @@ history as long as one listed server answers the contract methods correctly.
 and no peer observes it; because that item is reference-bound text, the
 departure needs a maintainer decision.
 
+*Status note (2026-11-17, clean side; maintainer decision). D38.6.4Q.2 is
+decided:* option (b), with one narrowing, together with the spreading of
+R38.6.4a. It is a recorded departure from R38.6.4f item 1 for three methods.
+
+1. *Failover.* A JSON-RPC error answer to `blockchain.contract.call`,
+   `blockchain.contract.event.get_history` or
+   `blochchain.transaction.get_receipt` moves the request to the next session,
+   then to the retry of R38.6.4f item 2, exactly as a transport failure does.
+   Unlike a transport failure, it does not close the session, and a server
+   that answered the request with an error is not asked again within the same
+   request. A connection the retry opened is released as after any answer. If
+   every server tried answers with an error, the request fails with the
+   failures of R38.6.4i, within the budget of R38.6.4j.
+2. *What stays final.* The exact answer
+   `{"code": 1, "message": "history too large"}` (R38.6.4Q.6 item 4), and an
+   answer that cannot be read as the expected shape. The second is the
+   narrowing of option (b): it can only be judged by the caller, after the
+   pool has returned.
+3. *Spreading.* The three methods join the read-only queries of R38.6.4a
+   item 1. They take turns among the near sessions and try up-to-date sessions
+   first (R38.6.4o item 5). This amends R38.6.4a item 1 for Reloaded.
+4. *Later.* A per-server mark "does not serve the contract methods" is decided
+   only after measurements show that its repeated cost matters.
+
 D38.6.4Q.3 *(Open, 2026-11-15.)* **The contract-event subscription after a
 reconnect.** Parity asks for nothing here, because the reference has no such
 subscription (R38.6.4Q.5). This tree places it when a client enables the
@@ -4206,6 +4471,23 @@ reference does. Under every option an error answer, or no answer, to the
 subscription leaves the token active and polling, and a server that does not
 know the method fails neither activation nor balance nor history.
 *Recommendation:* (b).
+
+*Status note (2026-11-17, clean side; maintainer decision). D38.6.4Q.3 is
+decided:* option (b). The contract-event subscription that the balance stream
+places for a token (§38.6.5 decision 2) is kept, and polling stays.
+
+1. *Placed again.* After a disconnect, the subscription is placed again on a
+   maintained session, as R38.6.4h binds for a script-hash subscription, with
+   one difference: a placement that fails is not retried (item 2). This amends
+   the last sentence of R38.6.4h for Reloaded.
+2. *Answers.* A server that refuses the subscription or answers it with an
+   error breaks neither activation, nor balance, nor history, and the
+   subscription is not asked again in a loop: at most once per newly
+   maintained session.
+3. *Measured basis (2026-11-17, this project's own probes).* The public Qtum
+   servers `s1`, `s3`, `s4` and `s8.electrum.qtum.site` accept the
+   subscription. Servers without the contract-event index answer it with an
+   internal error.
 
 D38.6.4Q.4 *(Open, 2026-11-15.)* **One record and one ordering for the shared
 QTUM outputs.** The reference keeps a record per instance, records nothing for
@@ -4226,6 +4508,50 @@ its inputs, and its change is offered, whichever of QTUM, a token or
 delegation built either one and whichever session answers the listing.
 *Recommendation:* (b). No peer observes it.
 
+*Status note (2026-11-15 and 2026-11-19, clean side; maintainer decisions).
+D38.6.4Q.4 is decided:* option (b), on 2026-11-15. Its key was decided on
+2026-11-19.
+
+1. *Key.* One recently-spent record per platform and address script: the
+   platform (a token's `protocol.protocol_data.platform`, QTUM's own ticker)
+   and the script of the address whose outputs are spent. QTUM and its
+   tokens use one record wherever they spend from the same address. Under an
+   HD login, QTUM's enabled address and the tokens' address are different
+   scripts, so each has its own record. Every other coin keeps its record
+   per instance, as before.
+2. *Lifetime.* The node keeps the shared records in a registry of its
+   context, by weak reference. An instance takes the record of its activated
+   address when it is built. A record lives as long as any instance holds
+   it; when the last one is disabled, the record ends, as an instance's own
+   record does today. A spend from another address of an HD wallet keeps the
+   behavior of an instance's own record: it is entered into the record of
+   the instance's activated address, and no lasting record is kept for that
+   other address.
+3. *What is entered.* Every transaction of the QTUM family that this node
+   built and the backend accepted, when it spends outputs of the address:
+   QTUM's swap sends and merges, every token broadcast (payments, fees,
+   spends and refunds, which pay their gas from the address), and the
+   withdraws and delegations promoted as in R38.5B.9. A refused broadcast
+   enters nothing.
+4. *Ordering.* The record's own lock is the lock of the address. Every build
+   of the QTUM family that spends outputs of the address takes it when the
+   unspent listing has been answered, filters the listing through the record
+   under it, and holds it through the broadcast and the entry, or, for a
+   build that is not broadcast at once (a withdraw or a delegation), through
+   signing and the pending entry of R38.5B.9. The listing request itself is
+   sent before the lock is taken, so two builds can ask at the same time;
+   their selections are made one after the other. It replaces the
+   process-wide lock for this family; the other UTXO coins keep the
+   process-wide lock. A withdraw holds the lock through signing; with a
+   hardware wallet that includes the wait for the device, during which the
+   listings of that address wait too. A pending entry
+   does not hide inputs: two builds made before either is broadcast can
+   select the same input, and the backend refuses the second broadcast.
+5. *Lock order.* The record's lock is a lock of the send path. It is never
+   taken while the activation locks of R55.1.12 (chapter 55), the client
+   build lock or a registry of the status note after D38.6.4Q.1 are held,
+   and `disable_coin` does not take it.
+
 D38.6.4Q.5 *(Open, 2026-11-15.)* **Ending a token's background work when it
 is disabled.** The reference ends it at once (R38.6.4Q.10 item 1); this tree
 does not, and a quick disable and enable leaves two collectors (the note
@@ -4237,6 +4563,16 @@ today); (c) both. The observable requirement: once `disable_coin` has
 answered, the token sends no further request to any server, and after a
 disable and an enable exactly one collector and one client serve it.
 *Recommendation:* (a), with (b) wherever work cannot be ended at once.
+
+*Status note (2026-11-16, clean side; decision within the maintainer's lane
+plan). D38.6.4Q.5 is decided:* option (c), that is (a) and (b).
+
+1. Disabling a token ends its history collector and its client at once.
+2. A collector's registry check also compares the coin instance, not only the
+   ticker, so the collector of a disabled instance ends even if the token was
+   enabled again.
+3. After a disable and an enable, exactly one collector and one client serve
+   the token.
 
 *Acceptance rows for a mock Electrum server.* Each row names what the mock
 has to answer and what the node does. *Parity* is the reference behavior
@@ -4634,6 +4970,18 @@ fixed for the life of an order and a swap. It first appears in this form
 at `v2.6.0-beta`. In the `v2.5.0-beta`, `v2.5.1-beta` and `v2.5.2-beta`
 releases the rule was `10 × D` for every UTXO coin; before `v2.5.0-beta`
 it was `10 × D` for every UTXO coin except the ticker `BTC` (R38.6.6f).
+
+> *Reloaded status (clean side, 2026-11-18):* by the maintainer's decisions of
+> 2026-11-18 a ZEC entry that is `overwintered`, has `txversion` 5 and names a
+> Zcash branch id from NU7 on pays ZIP 317's conventional fee instead of the
+> policies of R38.6.6a -- R38.6.6b ([Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> R39.11.4V.10 status note of 2026-11-18). For such an entry `F` in R38.6.6e is
+> the conventional fee of a version-1 HTLC claim, 10000 base units (two logical
+> actions), not an estimate over 496 bytes. With the default dust of 1,000 base
+> units ZEC's minimum trading volume is therefore 0.001 ZEC, which is also the
+> default minimum volume of a new ZEC order (chapter 60 R60.4.2); the value
+> stays independent of any fee estimate or network state. The ZEC row of
+> R38.6.6h keeps the per-kilobyte figures of a version-4 entry.
 
 R38.6.6f *No ticker exception.* Every ticker follows R38.6.6e, Bitcoin
 included. `BTC` and `BTC-segwit` are dynamic-fee coins without a `dust`
@@ -6161,6 +6509,19 @@ R38.8.6 **Tests (two-direction, observable).**
   server.* Written by a session that never read the forbidden corpus. The input
   is this repository's code and its tests. It takes no forbidden-class input,
   so chapter 01 R38 is not engaged and no gate pass is required.
+- *Maintainer decisions (2026-11-16), clean side -- status notes after D38.5C.1
+  and D38.5C.2: removal of unlisted rows after two listings, and changed
+  heights taken over.* Written by a session that never read the forbidden
+  corpus, from the maintainer's decisions and this repository's code. It takes
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.
+- *Reloaded-original amendment (2026-11-18), clean side -- after the status
+  note on D38.5C.2: how the client sees that its chain changed (a view of base
+  headers, one directed header request per new tip, a chain-changed event to
+  the history collectors, one WARN line).* Written by a session that never
+  read the forbidden corpus, from the maintainer's decision of 2026-11-16 and
+  this repository's code. It takes no forbidden-class input, so chapter 01 R38
+  is not engaged and no gate pass is required.
 - *Scoped addition (2026-11-18, Spec Reader round 0.5.0-12) -- §38.6.10 (R38.6.10.1 -- R38.6.10.6, the code-quality finding and
   T38.6.10.1 -- T38.6.10.4) and the status note at the head of this
   chapter; cleared together with chapter 37 §37.5.11. No other text of this
@@ -6175,3 +6536,44 @@ R38.8.6 **Tests (two-direction, observable).**
   median-time query, refund readiness and the errors of the version-two
   history, at the rows `v2.6.0-beta`, `v3.0.0-beta`, `main (as of
   2026-10-07)` and `add-krgn-chain-variant (as of 2026-04-18)`.
+- *Maintainer decisions (2026-11-16 to 2026-11-18), clean side -- status notes
+  after D38.6.4Q.2, D38.6.4Q.3 and D38.6.4Q.5 and after the code-quality
+  finding of R38.6.4Q.6, and the Reloaded-original amendment after it (the
+  history collector's end state, with its counting).* Written by a session
+  that never read the forbidden corpus, from the maintainer's decisions, this
+  project's own probes of public servers and this repository's code. It takes
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.
+- *Maintainer decisions (2026-11-15 and 2026-11-18), clean side -- status
+  note after D38.6.4Q.1 (one Electrum client for the QTUM family: when
+  instances share, lifetime, reuse, lock order, naming, and the
+  subscriptions of a disabled instance).* Written by a session that never
+  read the forbidden corpus, from the maintainer's decisions and this
+  repository's code. It takes no forbidden-class input, so chapter 01 R38 is
+  not engaged and no gate pass is required.
+- *Status note added 2026-11-18 -- after R38.6.6e.* Reloaded-original, clean
+  side: it records the maintainer's decisions of 2026-11-18 on the ZIP 317 fee
+  for ZEC and its minimum trading volume, written from this repository's code
+  and the public ZIP 317; no forbidden-class input, chapter 01 R38 not engaged.
+- *Maintainer decision (2026-11-20), clean side -- status note after
+  R38.5B.4 (no maturity fetch for an output the record supplied, for every
+  UTXO coin).* Written by a session that never read the forbidden corpus,
+  from the maintainer's decision and this repository's code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
+- *Maintainer decisions (2026-11-15 and 2026-11-19), clean side -- status
+  note after D38.6.4Q.4 (one recently-spent record per platform and address
+  for the QTUM family: key, lifetime, what is entered, ordering, and lock
+  order).* Written by a session that never read the forbidden corpus, from
+  the maintainer's decisions and this repository's code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
+- *Maintainer decision (2026-11-21), clean side -- status notes after
+  R38.6.4o item 6, after the first known limitation of the R38.6.4o as-built
+  note and after D38.6.4o.3, and T38.6.4o.23 and T38.6.4o.24 (a swap's
+  confirmation wait chooses again when its server turns out of date or
+  answers errors three times in a row).* Written by a session that never read
+  the forbidden corpus, from the maintainer's decision, a field report, this
+  project's own reads of public LCC Electrum servers and this repository's
+  code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
+  and no gate pass is required.

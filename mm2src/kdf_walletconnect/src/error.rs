@@ -55,5 +55,108 @@ impl From<crate::chain::UnknownChain> for WalletConnectError {
 }
 
 impl From<relay_client::error::ClientError> for WalletConnectError {
-    fn from(e: relay_client::error::ClientError) -> Self { WalletConnectError::Relay(e.to_string()) }
+    fn from(e: relay_client::error::ClientError) -> Self { WalletConnectError::Relay(relay_error_kind(&e).to_string()) }
+}
+
+impl<T> From<relay_client::error::Error<T>> for WalletConnectError {
+    fn from(e: relay_client::error::Error<T>) -> Self {
+        WalletConnectError::Relay(relay_call_error_kind(&e).to_string())
+    }
+}
+
+/// A fixed category for a relay client error. The relay connection URL carries the auth token and the project id as
+/// query parameters, and the `Display` of a client or transport error can contain that URL, so no log line or RPC
+/// answer may format such an error; they use this category instead.
+pub fn relay_error_kind(e: &relay_client::error::ClientError) -> &'static str {
+    use relay_client::error::ClientError;
+    match e {
+        ClientError::RequestBuilder(_) => "failed to build the connection request",
+        ClientError::WebsocketClient(_) => "websocket client error",
+        ClientError::ChannelClosed => "internal channel closed",
+        ClientError::DuplicateRequestId => "duplicate request id",
+        ClientError::InvalidResponseId => "invalid response id",
+        // The library raises this when the relay answered with an error whose code or tag is outside its table.
+        ClientError::InvalidErrorResponse => "relay error answer the client library cannot classify",
+        ClientError::Serialization(_) => "serialization failed",
+        ClientError::Deserialization(_) => "deserialization failed",
+        ClientError::Rpc { .. } => "relay rpc error",
+        ClientError::InvalidRequestType => "invalid request type",
+        #[allow(unreachable_patterns)]
+        _ => "relay client error",
+    }
+}
+
+/// Like [`relay_error_kind`], for the error of a relay request (a client failure or an answer of the relay).
+pub fn relay_call_error_kind<T>(e: &relay_client::error::Error<T>) -> &'static str {
+    match e {
+        relay_client::error::Error::Client(c) => relay_error_kind(c),
+        relay_client::error::Error::Response(e) => match e {
+            relay_rpc::rpc::Error::Auth(_) => "relay rejected the request: auth",
+            relay_rpc::rpc::Error::Payload(_) => "relay rejected the request: payload",
+            relay_rpc::rpc::Error::Handler(_) => "relay rejected the request: handler",
+            relay_rpc::rpc::Error::Internal(_) => "relay rejected the request: internal",
+            relay_rpc::rpc::Error::TooManyRequests => "relay rejected the request: too many requests",
+        },
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod relay_error_kind_tests {
+    use super::*;
+    use relay_client::error::ClientError;
+
+    fn assert_clean(text: &str) {
+        for needle in ["wss://", "projectId", "auth"] {
+            assert!(!text.contains(needle), "{text:?} contains {needle:?}");
+        }
+    }
+
+    #[test]
+    fn the_kinds_never_carry_a_url_or_credentials() {
+        let leaky = "wss://relay.example/?projectId=P&auth=JWT";
+        let errors = vec![
+            ClientError::RequestBuilder(relay_client::error::RequestBuildError::Url(leaky.to_string())),
+            ClientError::WebsocketClient(relay_client::websocket::WebsocketClientError::IntoClientError(
+                leaky.to_string(),
+            )),
+            ClientError::WebsocketClient(relay_client::websocket::WebsocketClientError::NotConnected),
+            ClientError::ChannelClosed,
+            ClientError::DuplicateRequestId,
+            ClientError::InvalidResponseId,
+            ClientError::InvalidErrorResponse,
+            ClientError::Rpc {
+                code: 1,
+                message: leaky.to_string(),
+                data: Some(leaky.to_string()),
+            },
+            ClientError::InvalidRequestType,
+        ];
+        for e in &errors {
+            assert_clean(relay_error_kind(e));
+            let wc = WalletConnectError::from(ClientError::Rpc {
+                code: 1,
+                message: leaky.to_string(),
+                data: None,
+            });
+            assert_clean(&wc.to_string());
+        }
+    }
+
+    #[test]
+    fn a_failed_request_names_what_the_relay_answered() {
+        use relay_client::error::Error;
+        type E = Error<()>;
+        let unclassified: E = Error::Client(ClientError::InvalidErrorResponse);
+        assert_eq!(
+            relay_call_error_kind(&unclassified),
+            "relay error answer the client library cannot classify"
+        );
+        let too_many: E = Error::Response(relay_rpc::rpc::Error::TooManyRequests);
+        assert_eq!(
+            relay_call_error_kind(&too_many),
+            "relay rejected the request: too many requests"
+        );
+        let handler: E = Error::Response(relay_rpc::rpc::Error::Handler(()));
+        assert_clean(relay_call_error_kind(&handler));
+    }
 }

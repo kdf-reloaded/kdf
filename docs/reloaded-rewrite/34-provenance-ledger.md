@@ -306,6 +306,19 @@ Two provenance statements were tightened after an external audit:
   `zcash_client_backend 0.24.0` fail to compile with its `orchard` feature on. No new vendored
   source, no license change; the §34.3 row for this directory stays accurate. See `KDF-PATCH.md`.
 
+### 2026-11-18 — the three vendored Zcash crates removed
+
+- `vendor-patches/zcash_primitives-0.30.1/`, `vendor-patches/zcash_transparent-0.10.0/` and
+  `vendor-patches/zcash_client_sqlite-0.22.0/` were deleted, together with their `[patch.crates-io]`
+  and workspace `exclude` entries. The Zcash library family is now consumed unmodified from crates.io
+  (`zcash_primitives 0.31.1`, `zcash_transparent 0.11.1`, `zcash_client_sqlite 0.23.0` with its
+  `orchard` feature, and the matching `zcash_client_backend`, `zcash_keys`, `zcash_protocol`,
+  `zcash_proofs`, `sapling-crypto`, `orchard`). The transaction hooks the vendored copies provided are
+  replaced by this project's own transaction assembler over the published public interface; the
+  panic-avoiding patch of the wallet-database crate is replaced by enabling that crate's `orchard`
+  feature. The §34.3 rows of the three directories are removed with them; the entries above stay as the
+  record of the period they were in the tree. No new imported source, no license change.
+
 ## 34.3 Entries
 
 ### Generated artifacts
@@ -323,6 +336,7 @@ Two provenance statements were tightened after an external audit:
 | `mm2src/coins/utxo/bchrpc.proto` | interop-reuse | `gcash/bchd` upstream `bchrpc/pb/bchrpc.proto` (Bitcoin Cash node RPC). | ISC (gcash/bchd project license). | Drives `mm2src/coins/utxo/pb.rs` generation. Upstream file does not carry a per-file copyright header; project license applies. |
 | `mm2src/coins/eth/maker_swap_v2_abi.json` | interop-reuse | ABI of the deployed `EtomicSwapMakerV2` Solidity contract. | Derived from the deployed bytecode; ABI is a public derivation. | Bytes must match the deployed contract or the in-tree alloy-backed ABI facade's calls fail at runtime. |
 | `mm2src/coins/eth/taker_swap_v2_abi.json` | interop-reuse | ABI of the deployed `EtomicSwapTakerV2` Solidity contract. | Same as above. | Same as above. |
+| `mm2src/coins/eth/tron/gasfree/bytecode/proxy_creation_mainnet.bin`, `proxy_creation_nile.bin`, `proxy_creation_shasta.bin` | interop-reuse | Creation bytecode of the GasFree proxy contract on TRON mainnet, Nile and Shasta: the bytes carried by the transactions that deployed the GasFree contracts, `7f5e37bc9d78822d5b72bf90ea65444208c6a42b9b3b2f811666a992ba42f037` (mainnet, block 69944703), `df2f6668a4b7dd086f34876f919db63afa1e1649c81a07594552c85540feae1d` (Nile, block 52537691) and `a6a20ec22185c82111f1ceceb70ccb144040f71a659c5e15643bcab7fe445aae` (Shasta, block 66317600). | Public-chain interop constant (CRD ch.01 R6): bytes of deployed contracts, read from the public chain. | Bytes must match the deployed proxy or the derived custody address is wrong (CRD ch.63 §63.5 and its status note of 2026-11-19); the unit tests pin the keccak-256 of each file. The test vectors in `mm2src/coins/eth/tron/gasfree/test_vectors.rs` are cited data from the public GasFree SDK v1.1.2 (`gasfreeio/gasfree-sdk-js`, Apache-2.0); no SDK code is used. |
 
 ### Interop reuse — wire-format-only source
 
@@ -493,9 +507,6 @@ Distinct from the in-tree fragment scheme.
 | Destination | Classification | Source reference | License basis | Notes |
 |---|---|---|---|---|
 | `mm2src/testcontainers-vendored/` | vendored-subtree | `artemii235/testcontainers-rs` commit `65e7380`, a fork of `testcontainers-rs` 0.7.0 (see in-tree crate metadata). Vendored in `6c83fec81` (2026-05-28). | MIT, chosen from upstream `MIT OR Apache-2.0`; upstream MIT notice (Copyright 2018 CoBloX) retained in `LICENSE-MIT`. | Vendored for deterministic CI behaviour. Test-only. |
-| `vendor-patches/zcash_primitives-0.30.1/` | vendored-subtree | Published crates.io `zcash_primitives 0.30.1`. Re-vendored from 0.28.0 in `3f2f2bcc0` (2026-10-12). | MIT, chosen from `MIT OR Apache-2.0`; both license texts retained in-tree. | Narrow transaction-builder compatibility extension; see `KDF-PATCH.md`. |
-| `vendor-patches/zcash_transparent-0.10.0/` | vendored-subtree | Published crates.io `zcash_transparent 0.10.0`. Re-vendored from 0.8.0 in `3f2f2bcc0` (2026-10-12). | MIT, chosen from `MIT OR Apache-2.0`; both license texts retained in-tree. | Narrow KDF P2SH/raw-output compatibility extension; see `KDF-PATCH.md`. |
-| `vendor-patches/zcash_client_sqlite-0.22.0/` | vendored-subtree | Published crates.io `zcash_client_sqlite 0.22.0`. Introduced in PR #246 (2026-11-05). | MIT, chosen from `MIT OR Apache-2.0`; the published package ships no license files, so both texts were copied from the sibling `zcash_transparent 0.10.0` (same upstream repository). | Skips the Orchard/Ironwood nullifier marking instead of panicking when built without the `orchard` feature; see `KDF-PATCH.md`. |
 | `vendor-patches/libp2p-gossipsub-0.45.0/` | vendored-subtree | `KomodoPlatform/rust-libp2p` tag `k-0.52.12` (commit `8bcc1fda79d56a2f398df3d45a29729b8ce0148d`), `protocols/gossipsub`. Introduced in `9b18d4140` (2026-09-23). | MIT; upstream per-file MIT notices retained. | Security patch (PRUNE backoff overflow); see `PATCH-NOTES.md`. |
 | `vendor-patches/libp2p-yamux-0.44.0/` | vendored-subtree | `KomodoPlatform/rust-libp2p` tag `k-0.52.12` (commit `8bcc1fda79d56a2f398df3d45a29729b8ce0148d`), `muxers/yamux`. Introduced in `a57e9b834` (2026-09-23). | MIT; upstream per-file MIT notices retained. | Removes the yamux 0.12 path; see `PATCH-NOTES.md`. |
 | `vendor-patches/libp2p-websocket-0.42.0/` | vendored-subtree | `KomodoPlatform/rust-libp2p` tag `k-0.52.12` (commit `8bcc1fda79d56a2f398df3d45a29729b8ce0148d`), `transports/websocket`. | MIT; upstream per-file MIT notices retained. | TLS layer (`tls.rs`, one type in `framed.rs`) ported to rustls 0.23 with the ring provider; `PrivateKey::new` returns a `Result`; see `PATCH-NOTES.md`. The `tests/` directory and `tests/fixtures/` (a throwaway RSA test key) are original to this repository. |

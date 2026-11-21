@@ -398,6 +398,19 @@ is deferred as non-blocking (chapter 16 D5). Interoperability with
 a reference maker depends on this project's taker using the R14A
 fee estimate.
 
+> *Status note (Spec Reader round 0.5.0-14, 2026-11-18; passed the KDF
+> Dirty Gate with chapter 39 §39.11.4W):* the roles in R21 and R22 read
+> reversed against the reference rows `v2.6.0-beta` and `v3.0.0-beta`. There
+> the **maker** builds the funding-spend preimage, paying its own spend-fee
+> estimate, and signs it with its own key; the **taker** validates it (the
+> ratio band above and the exact rebuild), verifies the **maker's** signature,
+> and then co-signs and broadcasts as R23 states. Chapter 52 R17 step 3 and
+> R29 step 2, and this repository's code, have that order. The interoperability
+> sentence above therefore concerns this project's **maker** and a reference
+> **taker**: a reference taker accepts this project's preimage only while the
+> fee in it lies within the band around the taker's own estimate. Chapter 39
+> §39.11.4W lists this check with the other counterparty fee checks.
+
 **R23.** `sign_and_send_taker_funding_spend` (taker side, having
 received the maker's signature on top of the preimage) MUST: (1)
 re-derive the preimage transaction exactly as in R21; (2) sign
@@ -987,3 +1000,11 @@ non-participation noted in chapter 16 R23.
   It passed the KDF Dirty Gate with chapter 37 §37.5.11 on 2026-11-18, measure
   0.03, no findings; the attestation is in chapter 37 §37.10. R14 and R15
   are unchanged.
+- *Scoped addition (2026-11-18, Spec Reader round 0.5.0-14) -- the status
+  note after R22.* It records which role builds and which validates the
+  funding-spend preimage at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  chapter 02 §2.15A (`main (as of 2026-10-07)` compared, no difference), and
+  this repository's matching order. Behavior and public state names only.
+  **Passed the KDF Dirty Gate** with chapter 39 §39.11.4W on 2026-11-18,
+  measure 0.03, no findings; the attestation is in chapter 39 §39.9. R21 --
+  R23 are unchanged.

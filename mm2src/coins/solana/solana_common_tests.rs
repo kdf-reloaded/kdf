@@ -54,6 +54,7 @@ pub fn spl_coin_for_test(
             token_contract_address,
             program_id: spl_token::ID,
             settings: SolanaCoinSettings::default(),
+            custom: false,
         }),
         platform_coin: solana_coin,
     };

@@ -29,20 +29,20 @@ use derive_more::Display;
 use dispatcher_legacy::LegacyOutcome;
 use futures::future::join_all;
 use http::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN};
+#[cfg(not(target_arch = "wasm32"))]
+use http::header::{CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use http::request::Parts;
 use http::{Method, Request, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
 #[cfg(not(target_arch = "wasm32"))]
 use hyper::body::{Bytes, Incoming};
-use lazy_static::lazy_static;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use mm2_rpc::mm_protocol::{MmRpcBuilder, MmRpcResponse, MmRpcVersion};
-use regex::Regex;
+#[cfg(test)] use regex::Regex;
 use serde::Serialize;
 use serde_json::{self as json, Value as Json};
-use std::borrow::Cow;
 use std::net::SocketAddr;
 
 #[cfg(target_arch = "wasm32")]
@@ -74,6 +74,9 @@ mod swap_rpc_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "rpc/lp_commands/trezor.rs"]
 pub mod trezor;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc/lp_commands/tron_activation_tests.rs"]
+mod tron_activation_tests;
 #[path = "rpc/lp_commands/wallet_connect.rs"]
 pub mod wallet_connect;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -361,33 +364,18 @@ fn response_from_dispatcher_error(
     response.serialize_http_response()
 }
 
-pub fn escape_answer<'a, S: Into<Cow<'a, str>>>(input: S) -> Cow<'a, str> {
-    lazy_static! {
-        static ref REGEX: Regex = Regex::new("[<>&]").unwrap();
+/// Builds the HTTP response from the handler's parts and body. The body bytes go out exactly as the handler produced
+/// them (no escaping); a body that is not UTF-8 is refused.
+#[cfg(not(target_arch = "wasm32"))]
+fn response_from_handler_output(parts: http::response::Parts, body: Vec<u8>) -> Response<RpcBody> {
+    if std::str::from_utf8(&body).is_err() {
+        return Response::builder()
+            .status(500)
+            .header("Content-Type", "application/json")
+            .body(full_body(err_to_rpc_json_string("Non UTF-8 output")))
+            .unwrap();
     }
-
-    let input = input.into();
-    let mut last_match = 0;
-
-    if REGEX.is_match(&input) {
-        let matches = REGEX.find_iter(&input);
-        let mut output = String::with_capacity(input.len());
-        for mat in matches {
-            let (begin, end) = (mat.start(), mat.end());
-            output.push_str(&input[last_match..begin]);
-            match &input[begin..end] {
-                "<" => output.push_str("&lt;"),
-                ">" => output.push_str("&gt;"),
-                "&" => output.push_str("&amp;"),
-                _ => unreachable!(),
-            }
-            last_match = end;
-        }
-        output.push_str(&input[last_match..]);
-        Cow::Owned(output)
-    } else {
-        input
-    }
+    Response::from_parts(parts, full_body(body))
 }
 
 async fn process_single_request(ctx: MmArc, req: Json, client: SocketAddr) -> Result<Response<Vec<u8>>, String> {
@@ -461,8 +449,26 @@ type RpcBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
 #[cfg(not(target_arch = "wasm32"))]
 fn full_body(data: impl Into<Bytes>) -> RpcBody { Full::new(data.into()).boxed_unsync() }
 
+/// Applies the headers every answer of the native HTTP server carries: `X-Content-Type-Options: nosniff`, and
+/// `Content-Type: application/json` when the answer has no content type yet (an answer that set its own keeps it).
+#[cfg(not(target_arch = "wasm32"))]
+fn with_standard_answer_headers<B>(mut response: Response<B>) -> Response<B> {
+    let headers = response.headers_mut();
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    if !headers.contains_key(CONTENT_TYPE) {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
+    response
+}
+
+/// The single exit of the native HTTP server: every answer, including the SSE endpoint's, passes through here.
 #[cfg(not(target_arch = "wasm32"))]
 async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> Response<RpcBody> {
+    with_standard_answer_headers(rpc_service_answer(req, ctx_h, client).await)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn rpc_service_answer(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> Response<RpcBody> {
     /// Unwraps a result or propagates its error 500 response with the specified headers (if they are present).
     macro_rules! try_sf {
         ($value: expr $(, $header_key:expr => $header_val:expr)*) => {
@@ -546,20 +552,7 @@ async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> 
         trace!("[unsafe-rpc-wire-dump] response to {}: {}", client, response_dump);
     }
 
-    let body_escaped = match std::str::from_utf8(&body) {
-        Ok(body_utf8) => {
-            let escaped = escape_answer(body_utf8);
-            escaped.as_bytes().to_vec()
-        },
-        Err(_) => {
-            return Response::builder()
-                .status(500)
-                .header("Content-Type", "application/json")
-                .body(full_body(err_to_rpc_json_string("Non UTF-8 output")))
-                .unwrap();
-        },
-    };
-    Response::from_parts(parts, full_body(body_escaped))
+    response_from_handler_output(parts, body)
 }
 
 #[cfg(all(test, feature = "unsafe-rpc-wire-dump"))]
@@ -851,6 +844,7 @@ mod server_tests {
     use common::wio::CORE;
     use mm2_core::mm_ctx::MmCtxBuilder;
     use mm2_event_stream::{mpsc, oneshot, Broadcaster, Event, EventStreamer, NoDataIn, StreamerId};
+    use regex::Regex;
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -1065,6 +1059,89 @@ mod server_tests {
                 }
             }
         }
+    }
+
+    /// CRD ch.21 R-D1, R21.10B.9, R21.B3, T21.10B.15: Reloaded has no TRON swap (`coins::TRON_SWAPS_AVAILABLE`), so
+    /// over the wire a real TRX coin and a real TRC20 token are refused by the routes that start a new trade
+    /// (`setprice`, `buy`, `sell` and the v2 `start_swap`), on either side of the pair, with the usual wallet-only
+    /// answer: the legacy error body with HTTP 500, naming the ticker. Neither coin's config says `wallet_only`.
+    /// No order is created.
+    #[test]
+    fn tron_coins_are_refused_by_the_new_trade_routes() {
+        use coins::eth::tron::tron_coin_from_conf_and_request;
+        use coins::{CoinProtocol, CoinsContext, MmCoinEnum, TestCoin};
+
+        let coins = json!([
+            { "coin": "TRX", "mm2": 1, "wallet_only": false,
+              "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
+            { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "protocol": { "type": "TRC20", "protocol_data": {
+                "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } } },
+            { "coin": "TRADE", "mm2": 1 },
+        ]);
+        let (ctx, addr) = start_server_with_coins(coins.clone());
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tron trade refusal test passphrase")
+            .expect("initialize the crypto context");
+        let priv_key = *ctx.secp256k1_key_pair().private().secret;
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for conf in [&coins[0], &coins[1]] {
+            let ticker = conf["coin"].as_str().unwrap();
+            let protocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).unwrap();
+            // Nothing listens on port 1 of the loopback interface; building the coin asks no node.
+            let request = json!({ "urls": ["http://127.0.0.1:1"] });
+            let coin = common::block_on(tron_coin_from_conf_and_request(
+                &ctx, ticker, conf, &request, &priv_key, protocol,
+            ))
+            .unwrap_or_else(|e| panic!("cannot build {ticker}: {e}"));
+            common::block_on(coins_ctx.add_coin(MmCoinEnum::from(coin))).unwrap();
+        }
+        common::block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new("TRADE")))).unwrap();
+
+        for tron in ["TRX", "USDT-TRC20"] {
+            for (base, rel, side) in [(tron, "TRADE", "Base"), ("TRADE", tron, "Rel")] {
+                let wallet_only_error = format!("{side} coin {tron} is wallet only");
+
+                // The legacy routes answer `{"error": ...}` with HTTP 500.
+                for method in ["setprice", "buy", "sell"] {
+                    let request = json!({
+                        "userpass": "pw", "method": method, "base": base, "rel": rel, "price": 1, "volume": 1
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(status.contains("500"), "{method} {base}/{rel}: {status}");
+                    let error = body["error"].as_str().unwrap_or_else(|| panic!("{method}: {body}"));
+                    assert!(error.ends_with(&wallet_only_error), "{method} {base}/{rel}: {body}");
+                }
+
+                // `start_swap` is the v2 front of the same three.
+                for method in ["set_price", "buy", "sell"] {
+                    let request = json!({
+                        "mmrpc": "2.0", "userpass": "pw", "method": "start_swap", "id": 3,
+                        "params": {
+                            "base": base, "rel": rel, "base_coin_amount": "1", "rel_coin_amount": "1",
+                            "method": { method: {} },
+                        },
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(
+                        status.contains("500"),
+                        "start_swap {method} {base}/{rel}: {status} {body}"
+                    );
+                    assert_eq!(body["error_type"], "Internal", "{body}");
+                    assert!(
+                        body["error_data"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .ends_with(&wallet_only_error),
+                        "start_swap {method} {base}/{rel}: {body}"
+                    );
+                }
+            }
+        }
+
+        // T21.10B.15: no order was created.
+        let (status, body) = post(addr, &json!({ "userpass": "pw", "method": "my_orders" }));
+        assert!(status.contains("200"), "{status}: {body}");
+        assert_eq!(body["result"]["maker_orders"], json!({}), "{body}");
+        assert_eq!(body["result"]["taker_orders"], json!({}), "{body}");
     }
 
     /// Methods that only the legacy method table knows (CRD ch.43 R43.1A.4): `get_trade_fee`, which stays legacy-only
@@ -2290,5 +2367,127 @@ mod server_tests {
         for line in &lines {
             assert!(line.starts_with("ERROR RPC error response: "), "{line}");
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod answer_unescaped_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use kdf_walletconnect::pairing::build_pairing_uri;
+    use serde_json::json;
+
+    /// Runs the handler's body through the function that builds the HTTP response and returns the bytes on the wire.
+    fn wire_bytes(body: &str) -> Vec<u8> {
+        let (parts, _) = Response::builder()
+            .header("Content-Type", "application/json")
+            .body(Vec::<u8>::new())
+            .unwrap()
+            .into_parts();
+        let response = response_from_handler_output(parts, body.as_bytes().to_vec());
+        assert_eq!(response.headers()["Content-Type"], "application/json");
+        let (_, wire_body) = response.into_parts();
+        let collected = futures::executor::block_on(wire_body.collect()).unwrap();
+        collected.to_bytes().to_vec()
+    }
+
+    /// Splits a `wc:<topic>@2?<query>` URI the way a wallet does: scheme, path, then `&`-separated `key=value` pairs.
+    fn query_pairs(uri: &str) -> Vec<(String, String)> {
+        let (_path, query) = uri.split_once('?').expect("the URI has a query");
+        query
+            .split('&')
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').expect("every pair has a value");
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn json_answer_with_markup_characters_is_written_byte_identical() {
+        let body = json!({
+            "mmrpc": "2.0",
+            "result": { "memo": "a<b>c&d'e", "url": "https://x.example/p?a=1&b=2", "label": "<tag>&amp;" },
+            "id": 0,
+        })
+        .to_string();
+        let wire = wire_bytes(&body);
+        assert_eq!(wire, body.as_bytes());
+        let parsed: Json = json::from_slice(&wire).unwrap();
+        assert_eq!(parsed["result"]["memo"], "a<b>c&d'e");
+        assert_eq!(parsed["result"]["url"], "https://x.example/p?a=1&b=2");
+        assert_eq!(parsed["result"]["label"], "<tag>&amp;");
+    }
+
+    #[test]
+    fn wc_new_connection_answer_carries_the_plain_pairing_uri() {
+        let topic = kdf_walletconnect::Topic::generate();
+        let sym_key = [7u8; 32];
+        let uri = build_pairing_uri(&topic, &sym_key, 1_800_000_000);
+        let topic_str: &str = topic.as_ref();
+        let body = json!({
+            "mmrpc": "2.0",
+            "result": { "url": uri, "pairing_topic": topic_str },
+            "id": 0,
+        })
+        .to_string();
+
+        let wire = wire_bytes(&body);
+        let wire_str = String::from_utf8(wire).unwrap();
+        assert!(!wire_str.contains("&amp;"), "{wire_str}");
+        assert!(wire_str.contains('&'), "{wire_str}");
+
+        let decoded: Json = json::from_str(&wire_str).unwrap();
+        let url = decoded["result"]["url"].as_str().unwrap();
+        assert_eq!(url, uri);
+        let pairs = query_pairs(url);
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["relay-protocol", "symKey", "expiryTimestamp"]);
+        assert_eq!(pairs[1].1, hex::encode(sym_key));
+    }
+
+    #[test]
+    fn legacy_error_body_with_markup_characters_is_unchanged() {
+        let body = json!({ "error": "a&b<c>d'e" }).to_string();
+        let wire = wire_bytes(&body);
+        assert_eq!(wire, body.as_bytes());
+        let parsed: Json = json::from_slice(&wire).unwrap();
+        assert_eq!(parsed["error"], "a&b<c>d'e");
+    }
+
+    #[test]
+    fn answer_without_content_type_gets_json_and_nosniff() {
+        let response = with_standard_answer_headers(Response::builder().body(full_body(b"{}".to_vec())).unwrap());
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+    }
+
+    #[test]
+    fn answer_with_own_content_type_keeps_it_and_gets_nosniff() {
+        for own in ["text/event-stream", "text/plain"] {
+            let response = with_standard_answer_headers(
+                Response::builder()
+                    .header(CONTENT_TYPE, own)
+                    .body(full_body(b"x".to_vec()))
+                    .unwrap(),
+            );
+            assert_eq!(response.headers()[CONTENT_TYPE], own);
+            assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+        }
+    }
+
+    #[test]
+    fn error_answer_of_the_500_path_gets_both_headers() {
+        // The shape the `try_sf!` 500 path and the SSE "No context" answer build: status 500, JSON error body, no
+        // headers of their own.
+        let response = with_standard_answer_headers(
+            Response::builder()
+                .status(500)
+                .body(full_body(err_to_rpc_json_string("boom")))
+                .unwrap(),
+        );
+        assert_eq!(response.status(), 500);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
     }
 }

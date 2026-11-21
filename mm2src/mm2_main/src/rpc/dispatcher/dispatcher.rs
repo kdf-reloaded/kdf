@@ -74,6 +74,7 @@ use coins_activation::{cancel_init_platform_coin_with_tokens, cancel_init_token,
                        init_platform_coin_with_tokens_status, init_platform_coin_with_tokens_user_action, init_token,
                        init_token_status, init_token_user_action};
 use coins_activation::{cancel_init_standalone_coin, cancel_l2_activation, enable_l2, enable_platform_coin_with_tokens,
+                       enable_solana_token, enable_solana_with_assets, enable_solana_with_tokens, enable_spl,
                        enable_tendermint_token, enable_token, init_l2, init_l2_status, init_l2_user_action,
                        init_standalone_coin, init_standalone_coin_status, init_standalone_coin_user_action};
 use common::log::{debug, warn};
@@ -94,7 +95,6 @@ cfg_native! {
     use coins::lightning::{add_trusted_node, close_channel, connect_to_lightning_node, generate_invoice, get_channel_details,
         get_claimable_balances, get_payment_details, list_closed_channels_by_filter, list_open_channels_by_filter, list_payments_by_filter, list_trusted_nodes, open_channel,
         remove_trusted_node, send_payment, update_channel, LightningCoin};
-    use coins_activation::{enable_solana_with_tokens, enable_spl};
     use coins::my_tx_history_v2::z_coin_tx_history_rpc;
     use crate::mm2::lp_wallet::{change_mnemonic_password_rpc, create_wallet_rpc, delete_wallet_rpc, get_mnemonic_rpc, get_wallet_names_rpc};
     use crate::mm2::rpc::trezor::trezor_connection_status_rpc;
@@ -265,6 +265,11 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "enable_nft" => handle_mmrpc(ctx, request, enable_evm_token).await,
         "enable_sia" => handle_mmrpc(ctx, request, init_standalone_coin::<SiaCoin>).await,
         "enable_slp" => handle_mmrpc(ctx, request, enable_token::<SlpToken>).await,
+        // Solana (CRD ch.40 R40.1.1): the primary pair and the compatibility pair, on every target.
+        "enable_solana_with_tokens" => handle_mmrpc(ctx, request, enable_solana_with_tokens).await,
+        "experimental::enable_solana_with_assets" => handle_mmrpc(ctx, request, enable_solana_with_assets).await,
+        "experimental::enable_solana_token" => handle_mmrpc(ctx, request, enable_solana_token).await,
+        "enable_spl" => handle_mmrpc(ctx, request, enable_spl).await,
         "enable_tendermint_token" => handle_mmrpc(ctx, request, enable_tendermint_token).await,
         "enable_tendermint_with_assets" => {
             handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<TendermintCoin>).await
@@ -394,8 +399,6 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             "list_payments_by_filter" => handle_mmrpc(ctx, request, list_payments_by_filter).await,
             "open_channel" => handle_mmrpc(ctx, request, open_channel).await,
             "send_payment" => handle_mmrpc(ctx, request, send_payment).await,
-            "enable_solana_with_tokens" => handle_mmrpc(ctx, request, enable_solana_with_tokens).await,
-            "enable_spl" => handle_mmrpc(ctx, request, enable_spl).await,
             "trezor_connection_status" => handle_mmrpc(ctx, request, trezor_connection_status_rpc).await,
             _ => {
                 warn!("No such v2 RPC method: '{}'", native_only_methods);
@@ -974,50 +977,174 @@ mod tests {
         }
     }
 
-    /// TRON is postponed for this beta: the mmrpc 2.0 routes `enable_eth_with_tokens`, `enable_erc20` and
-    /// `task::enable_erc20::init` refuse a TRON platform or TRC20 token with the "not available in this build" text
-    /// and register nothing (the switch is `coins::TRON_ACTIVATION_AVAILABLE`, which the legacy routes read too).
+    /// T40.1 (native): the two compatibility methods are routed, and while Solana is switched off they answer as the
+    /// primary methods do (`PlatformCoinCreationError` for the platform method, `Internal` for the token method,
+    /// both HTTP 500, "not available in this build") and register nothing.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn tron_mmrpc_activation_routes_refuse_while_tron_is_switched_off() {
-        use coins::{lp_coinfind, TRON_ACTIVATION_AVAILABLE, TRON_NOT_AVAILABLE};
+    fn solana_compat_routes_refuse_while_solana_is_switched_off() {
+        use coins::{lp_coinfind, SOLANA_NOT_AVAILABLE};
 
-        const { assert!(!TRON_ACTIVATION_AVAILABLE) };
         let ctx = MmCtxBuilder::default()
             .with_conf(json!({ "coins": [
-                { "coin": "TRX", "mm2": 1, "wallet_only": true,
-                  "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
-                { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "protocol": { "type": "TRC20", "protocol_data": {
-                    "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } } },
+                { "coin": "SOL-REF", "mm2": 1, "protocol": { "type": "SOLANA", "protocol_data": {} } },
+                { "coin": "USDC-SOL-REF", "mm2": 1, "protocol": { "type": "SOLANATOKEN", "protocol_data": {
+                    "platform": "SOL-REF",
+                    "decimals": 6,
+                    "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" } } },
             ] }))
             .into_mm_arc();
-        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tron gate test passphrase").unwrap();
 
         let (status, body) = answer_of(
             &ctx,
-            "enable_eth_with_tokens",
+            "experimental::enable_solana_with_assets",
             json!({
-                "ticker": "TRX",
+                "ticker": "SOL-REF",
                 "nodes": [{ "url": "http://127.0.0.1:1" }],
-                "erc20_tokens_requests": [{ "ticker": "USDT-TRC20" }],
+                "tokens_params": [{ "ticker": "USDC-SOL-REF" }],
+                "tx_history": true,
             }),
         );
         assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
-        assert_eq!(body["error_data"]["ticker"], "TRX");
-        assert_eq!(body["error_data"]["error"], TRON_NOT_AVAILABLE);
+        assert_eq!(body["error_data"]["ticker"], "SOL-REF");
+        assert_eq!(body["error_data"]["error"], SOLANA_NOT_AVAILABLE);
 
-        for method in ["enable_erc20", "task::enable_erc20::init"] {
-            let (status, body) = answer_of(&ctx, method, json!({ "ticker": "USDT-TRC20", "activation_params": {} }));
-            assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR, "{method}: {body}");
-            assert_eq!(body["error_type"], "Internal", "{method}: {body}");
-            assert_eq!(body["error_data"], TRON_NOT_AVAILABLE, "{method}: {body}");
-        }
-        for ticker in ["TRX", "USDT-TRC20"] {
+        let (status, body) = answer_of(
+            &ctx,
+            "experimental::enable_solana_token",
+            json!({ "ticker": "USDC-SOL-REF", "activation_params": {} }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "Internal", "{body}");
+        assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
+
+        for ticker in ["SOL-REF", "USDC-SOL-REF"] {
             assert!(
                 block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
                 "{ticker} registered"
             );
+        }
+    }
+
+    /// T40.1 and T40.9 on WASM (browser tests, `wasm-pack test --firefox --headless mm2src/mm2_main`): the four
+    /// Solana activation methods are routed on the WASM target as on native, and while Solana is switched off each
+    /// answers its refusal shape (`PlatformCoinCreationError` for the two platform methods, `Internal` for the two
+    /// token methods, HTTP 500, "not available in this build"), not `NoSuchMethod`, and registers nothing.
+    #[cfg(target_arch = "wasm32")]
+    mod solana_wasm_tests {
+        use super::*;
+        use coins::{lp_coinfind, SOLANA_NOT_AVAILABLE};
+        use wasm_bindgen_test::*;
+
+        wasm_bindgen_test_configure!(run_in_browser);
+
+        const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+        async fn answer_of(
+            ctx: &MmArc,
+            method: &str,
+            params: serde_json::Value,
+        ) -> (http::StatusCode, serde_json::Value) {
+            let request = MmRpcRequest {
+                mmrpc: MmRpcVersion::V2,
+                userpass: None,
+                method: method.to_owned(),
+                params,
+                id: Some(7),
+            };
+            match dispatcher_v2(request, ctx.clone()).await {
+                Ok(response) => match serde_json::from_slice(response.body()) {
+                    Ok(body) => (response.status(), body),
+                    Err(_) => panic!("`{}` answered a body that is not JSON", method),
+                },
+                Err(_) => panic!("`{}` must reach its handler", method),
+            }
+        }
+
+        fn solana_ctx() -> MmArc {
+            MmCtxBuilder::default()
+                .with_conf(json!({ "coins": [
+                    { "coin": "SOL", "mm2": 1, "protocol": { "type": "SOLANA" } },
+                    { "coin": "USDC-SOL", "mm2": 1, "protocol": { "type": "SPLTOKEN", "protocol_data": {
+                        "platform": "SOL", "token_contract_address": MINT, "decimals": 6 } } },
+                    { "coin": "SOL-REF", "mm2": 1, "protocol": { "type": "SOLANA", "protocol_data": {} } },
+                    { "coin": "USDC-SOL-REF", "mm2": 1, "protocol": { "type": "SOLANATOKEN", "protocol_data": {
+                        "platform": "SOL-REF",
+                        "decimals": 6,
+                        "mint_address": MINT,
+                        "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" } } },
+                ] }))
+                .into_mm_arc()
+        }
+
+        fn assert_platform_refusal(status: http::StatusCode, body: &serde_json::Value, ticker: &str) {
+            assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
+            assert_eq!(body["error_data"]["ticker"], ticker);
+            assert_eq!(body["error_data"]["error"], SOLANA_NOT_AVAILABLE);
+        }
+
+        fn assert_token_refusal(status: http::StatusCode, body: &serde_json::Value) {
+            assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["error_type"], "Internal", "{body}");
+            assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
+        }
+
+        #[wasm_bindgen_test]
+        async fn solana_activation_routes_refuse_while_solana_is_switched_off_on_wasm() {
+            let ctx = solana_ctx();
+
+            let (status, body) = answer_of(
+                &ctx,
+                "enable_solana_with_tokens",
+                json!({
+                    "ticker": "SOL",
+                    "confirmation_commitment": "finalized",
+                    "client_url": "http://127.0.0.1:1",
+                    "tx_history": false,
+                    "spl_tokens_requests": [{ "ticker": "USDC-SOL" }],
+                }),
+            )
+            .await;
+            assert_platform_refusal(status, &body, "SOL");
+
+            let (status, body) = answer_of(
+                &ctx,
+                "enable_spl",
+                json!({ "ticker": "USDC-SOL", "activation_params": {} }),
+            )
+            .await;
+            assert_token_refusal(status, &body);
+
+            let (status, body) = answer_of(
+                &ctx,
+                "experimental::enable_solana_with_assets",
+                json!({
+                    "ticker": "SOL-REF",
+                    "nodes": [{ "url": "http://127.0.0.1:1" }],
+                    "tokens_params": [{ "ticker": "USDC-SOL-REF" }],
+                    "tx_history": true,
+                }),
+            )
+            .await;
+            assert_platform_refusal(status, &body, "SOL-REF");
+
+            let (status, body) = answer_of(
+                &ctx,
+                "experimental::enable_solana_token",
+                json!({ "ticker": "USDC-SOL-REF", "activation_params": {} }),
+            )
+            .await;
+            assert_token_refusal(status, &body);
+
+            for ticker in ["SOL", "USDC-SOL", "SOL-REF", "USDC-SOL-REF"] {
+                assert!(
+                    matches!(lp_coinfind(&ctx, ticker).await, Ok(None)),
+                    "a refused coin is registered"
+                );
+            }
         }
     }
 

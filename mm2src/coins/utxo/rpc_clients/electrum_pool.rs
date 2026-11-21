@@ -15,13 +15,14 @@
 //! Every duration is held in [`ElectrumPoolTimings`]; production uses [`ElectrumPoolTimings::default`],
 //! tests build the pool with millisecond values.
 
+use super::electrum_chain_view::{base_of, split_header_list, ChainView, TipPlan};
 use super::electrum_measure::{agreed_tip, block_interval_from_conf, common_height, eligible_servers,
                               first_reports_above, header_differences, is_beyond_tolerance, is_far_ahead, is_slow,
                               lag, lead, near_sessions, next_round_at, note_first_reports, out_of_date_states,
                               pick_replacement, rank_after_round, rank_with_replacement, remeasure_gap,
                               round_agreed_tip, same_block, shuffle, signed_lag, stale_limit, stuck_period,
                               tolerance_blocks, Draw, Measurement, Measuring, OutOfDate, PoorReason, RoundServer,
-                              ServerQuality, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
+                              ServerQuality, BASE_HEADER_LEN, NEAR_FACTOR_DEFAULT, NEAR_OFFSET_DEFAULT_MS};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, HeaderSource, ServerSpec, Session,
                                  SessionEnded, TlsNotice};
 use super::*;
@@ -391,7 +392,8 @@ pub(super) fn call_budget_of_caller(default: Duration) -> Duration {
 }
 
 /// The Electrum methods whose request is a read-only query in the sense of CRD ch.38 R38.6.4a item 1: balance,
-/// unspent-list, history, header, block-count, transaction-get, fee-estimate and relay-fee requests. The list
+/// unspent-list, history, header, block-count, transaction-get, fee-estimate and relay-fee requests, and, for
+/// Reloaded, the three Qtum contract reads of [`ERROR_FAILOVER_METHODS`] (D38.6.4Q.2 status note, item 3). The list
 /// is closed: a method that is not on it keeps the priority routing.
 ///
 /// The block-count read of this client is the one-shot `blockchain.headers.subscribe` request (its answer is
@@ -399,6 +401,9 @@ pub(super) fn call_budget_of_caller(default: Duration) -> Duration {
 /// The other subscriptions (`blockchain.scripthash.subscribe`, `blockchain.contract.event.subscribe`) are not
 /// on the list.
 const READ_ONLY_METHODS: &[&str] = &[
+    "blockchain.contract.call",
+    "blockchain.contract.event.get_history",
+    "blochchain.transaction.get_receipt",
     "blockchain.scripthash.get_balance",
     "blockchain.scripthash.listunspent",
     "blockchain.scripthash.get_history",
@@ -410,6 +415,20 @@ const READ_ONLY_METHODS: &[&str] = &[
     "blockchain.relayfee",
 ];
 
+/// The decision of [`PoolShared::listing_tip_of`] over its inputs: whether the coin is in the disagreement state,
+/// whether the answering server is a maintained connection that is up to date (`None`: it is not a maintained
+/// connection, so it was not judged), and its tip. Only an up-to-date maintained server on a coin whose servers agree
+/// gives a tip.
+pub(super) fn qualifying_listing_tip(disagreement: bool, up_to_date: Option<bool>, tip: Option<u64>) -> Option<u64> {
+    if disagreement {
+        return None;
+    }
+    match up_to_date {
+        Some(true) => tip,
+        _ => None,
+    }
+}
+
 /// Whether `request` is a read-only query: a single request whose method is on [`READ_ONLY_METHODS`], or a
 /// non-empty batch of which every element is (R38.6.4a item 1, R38.6.3a batches).
 pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
@@ -419,6 +438,32 @@ pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
             !batch.is_empty() && batch.methods().all(|method| READ_ONLY_METHODS.contains(&method))
         },
     }
+}
+
+/// The three Qtum contract reads whose JSON-RPC error answer moves the request on to the next server instead of ending
+/// it (CRD ch.38 D38.6.4Q.2 status note, item 1). The third method is spelled as the server spells it.
+const ERROR_FAILOVER_METHODS: &[&str] = &[
+    "blockchain.contract.call",
+    "blockchain.contract.event.get_history",
+    "blochchain.transaction.get_receipt",
+];
+
+/// The failure of a server that answered `request` with a JSON-RPC error, when that answer moves the request on
+/// (D38.6.4Q.2 status note): `request` is a single request of [`ERROR_FAILOVER_METHODS`], `response` is an error
+/// answer, and the error is not exactly `{"code": 1, "message": "history too large"}`, which is final (item 2).
+/// `None` for everything else: a result, an answer that cannot be read (the pool does not judge shapes), and every
+/// other method, whose error answer ends the request as before (R38.6.4f item 1).
+fn error_answer_failure(request: &JsonRpcRequestEnum, response: &JsonRpcResponseEnum) -> Option<String> {
+    let (JsonRpcRequestEnum::Single(request), JsonRpcResponseEnum::Single(response)) = (request, response) else {
+        return None;
+    };
+    if !ERROR_FAILOVER_METHODS.contains(&request.method.as_str())
+        || response.error.is_null()
+        || crate::utxo::utxo_common::HISTORY_TOO_LARGE_ERROR.eq(&response.error)
+    {
+        return None;
+    }
+    Some(format!("the server answered with an error: {}", response.error))
 }
 
 /// The Electrum method of an unspent-list request (R38.6.4a item 1 and its amendment of 2026-11-15).
@@ -637,12 +682,37 @@ pub(super) struct OpenedConnections {
 
 pub(super) type OpenedByCall = Arc<StdMutex<OpenedConnections>>;
 
-/// The failures of a call, one per server tried (CRD ch.38 R38.6.4i).
+/// The failures of a call, one per server tried (CRD ch.38 R38.6.4i), and which of those servers answered with a
+/// JSON-RPC error answer instead of failing by transport (D38.6.4Q.2 status note).
 #[derive(Default)]
-struct Failures(Vec<(String, String)>);
+struct Failures(Vec<(String, String)>, HashSet<String>);
+
+/// The headline of the failure of a call whose every server tried answered with an error answer. The history collector
+/// of a QRC20 token counts only such failures towards the end of its collector (CRD ch.38, amendment after R38.6.4Q.6,
+/// "Counting"); a failure with any transport failure among the servers carries the ordinary headline.
+pub(super) const EVERY_SERVER_ANSWERED_AN_ERROR: &str =
+    "every Electrum server tried answered the request with an error";
+
+/// Whether `failure`, the text of a failed call of the coin `ticker`, says that every server tried answered with an
+/// error answer (see [`EVERY_SERVER_ANSWERED_AN_ERROR`]). The text starts with the ticker, which no server controls.
+pub(crate) fn every_server_answered_an_error(ticker: &str, failure: &str) -> bool {
+    failure.starts_with(&format!("{ticker}: {EVERY_SERVER_ANSWERED_AN_ERROR} ("))
+}
 
 impl Failures {
+    /// A server that failed by transport (or timed out).
     fn record(&mut self, addr: &str, error: String) {
+        self.1.remove(addr);
+        self.store(addr, error);
+    }
+
+    /// A server that answered with an error answer.
+    fn record_error_answer(&mut self, addr: &str, error: String) {
+        self.1.insert(addr.to_owned());
+        self.store(addr, error);
+    }
+
+    fn store(&mut self, addr: &str, error: String) {
         match self.0.iter_mut().find(|(known, _)| known == addr) {
             Some(entry) => entry.1 = error,
             None => self.0.push((addr.to_owned(), error)),
@@ -650,7 +720,13 @@ impl Failures {
     }
 
     fn describe(&self, ticker: &str, note: &str) -> String {
-        self.describe_as(ticker, "the request failed on every Electrum server tried", note)
+        let every_answered = !self.0.is_empty() && self.0.iter().all(|(addr, _)| self.1.contains(addr));
+        let headline = if every_answered {
+            EVERY_SERVER_ANSWERED_AN_ERROR
+        } else {
+            "the request failed on every Electrum server tried"
+        };
+        self.describe_as(ticker, headline, note)
     }
 
     fn describe_as(&self, ticker: &str, headline: &str, note: &str) -> String {
@@ -756,6 +832,25 @@ struct Comparison {
     diverged_since: Option<f64>,
 }
 
+/// The tip report that the per-tip check of the chain view takes next (CRD ch.38 §38.5C amendment, item 2): a height
+/// above the highest of the view, reported by an up-to-date maintained connection, with its base header.
+struct TipReport {
+    session_id: u64,
+    server: usize,
+    addr: String,
+    height: u64,
+    base: Vec<u8>,
+}
+
+/// The newest tip report waiting for the per-tip check, and whether the task that checks runs. At most one check is
+/// in flight per pool; a report that arrives meanwhile replaces the waiting one, since the check of the newer tip
+/// covers the heights in between.
+#[derive(Default)]
+struct ChainFeed {
+    pending: Option<TipReport>,
+    running: bool,
+}
+
 /// What the pool knows about the servers' agreement about the chain (R38.6.4o item 12).
 #[derive(Default)]
 struct DisagreementState {
@@ -846,6 +941,12 @@ pub(super) struct PoolShared {
     /// maintained connections was first reported by one of them (R38.6.4o item 4, amendment of 2026-11-15); at most
     /// `2 * tolerance + 1` heights, see [`note_first_reports`].
     first_reports: StdMutex<BTreeMap<u64, f64>>,
+    /// The chain view of the client (CRD ch.38 §38.5C, D38.5C.2 status note, amendment of 2026-11-18).
+    chain_view: StdMutex<ChainView>,
+    /// The tip report waiting for the per-tip check, and whether the check task runs.
+    chain_feed: StdMutex<ChainFeed>,
+    /// The history collectors that want to know when the chain changed.
+    chain_subscribers: StdMutex<Vec<futures_mpsc::UnboundedSender<()>>>,
     /// The activation probe has ended, its measured rank applied.
     probe_ended: AtomicBool,
     disagreement: StdMutex<DisagreementState>,
@@ -868,6 +969,10 @@ pub(super) struct PoolShared {
     /// Counts the connections that ended; a change tells a subscriber its subscription may be lost.
     session_epoch: AtomicU64,
     resubscribe_pending: AtomicBool,
+    /// The contract-event subscriptions are to be placed again, once (D38.6.4Q.3 status note). Set when a maintained
+    /// connection ends and when a connection joins an empty maintained set, taken separately from
+    /// `resubscribe_pending`, and never set again by a failed attempt, so a refusal is not repeated.
+    contract_resubscribe_pending: AtomicBool,
     trigger_tx: futures_mpsc::UnboundedSender<Wake>,
     trigger_rx: StdMutex<Option<futures_mpsc::UnboundedReceiver<Wake>>>,
 }
@@ -898,6 +1003,9 @@ impl PoolShared {
             tolerance: tolerance_blocks(options.block_interval),
             tip_checks: options.tip_checks,
             first_reports: StdMutex::new(BTreeMap::new()),
+            chain_view: StdMutex::new(ChainView::new(tolerance_blocks(options.block_interval))),
+            chain_feed: StdMutex::new(ChainFeed::default()),
+            chain_subscribers: StdMutex::new(Vec::new()),
             probe_ended: AtomicBool::new(false),
             disagreement: StdMutex::new(DisagreementState::default()),
             comparing: AtomicUsize::new(0),
@@ -914,6 +1022,7 @@ impl PoolShared {
             next_request_id: AtomicU64::new(0),
             session_epoch: AtomicU64::new(0),
             resubscribe_pending: AtomicBool::new(false),
+            contract_resubscribe_pending: AtomicBool::new(false),
             trigger_tx,
             trigger_rx: StdMutex::new(Some(trigger_rx)),
         }
@@ -1050,7 +1159,19 @@ impl PoolShared {
         let _ = self.trigger_tx.unbounded_send(Wake::Resubscribe);
     }
 
+    /// Asks for the contract-event subscriptions to be placed again, once, over a maintained connection (CRD ch.38
+    /// D38.6.4Q.3 status note). It is asked for when a maintained connection ends and when the maintained set was empty
+    /// and a connection joined it, so at most once for each newly maintained connection, whatever the outcome.
+    pub(super) fn request_contract_resubscribe(&self) {
+        self.contract_resubscribe_pending.store(true, AtomicOrdering::Relaxed);
+        let _ = self.trigger_tx.unbounded_send(Wake::Resubscribe);
+    }
+
     fn take_resubscribe_pending(&self) -> bool { self.resubscribe_pending.swap(false, AtomicOrdering::Relaxed) }
+
+    fn take_contract_resubscribe_pending(&self) -> bool {
+        self.contract_resubscribe_pending.swap(false, AtomicOrdering::Relaxed)
+    }
 
     #[cfg(test)]
     pub(super) fn snapshot(&self) -> Vec<ServerStateSnapshot> {
@@ -1303,19 +1424,24 @@ impl PoolShared {
     /// maintained set fell below the floor (R38.6.4c item 1). Ending the same connection twice is harmless.
     fn session_ended(&self, id: usize, session_id: u64) {
         let Some(slot) = self.slot_by_id(id) else { return };
-        {
+        let was_maintained = {
             let mut state = slot.state();
             if state.session.as_ref().map(|session| session.id()) != Some(session_id) {
                 return;
             }
+            let was_maintained = state.maintained;
             state.session = None;
             state.maintained = false;
             state
                 .suspension
                 .on_failure(now_float(), self.timings.suspension_base, self.timings.suspension_cap);
-        }
+            was_maintained
+        };
         self.session_epoch.fetch_add(1, AtomicOrdering::Relaxed);
         self.request_resubscribe();
+        if was_maintained {
+            self.request_contract_resubscribe();
+        }
         if self.maintained_count() < self.floor() {
             self.trigger();
         }
@@ -1389,6 +1515,7 @@ impl PoolShared {
         self.signal_measure();
         if was_empty {
             self.resubscribe_pending.store(true, AtomicOrdering::Relaxed);
+            self.contract_resubscribe_pending.store(true, AtomicOrdering::Relaxed);
         }
         let maintained = self.maintained_slots();
         if maintained.len() > self.ceiling() {
@@ -1900,6 +2027,21 @@ impl PoolShared {
             .clone()
     }
 
+    /// The tip of the server that answered a listing from `addr`, when that answer may serve the absence rule of the
+    /// history collectors (CRD ch.38 §38.5C, D38.5C.1 status note): the server is a maintained connection, is up to
+    /// date at this moment (R38.6.4o item 4), reports a tip, and the coin is not in the disagreement state (item 12).
+    /// `None` otherwise. The state is judged anew, as a routed request judges it.
+    pub(super) fn listing_tip_of(&self, addr: &str) -> Option<u64> {
+        let states = self.refresh_out_of_date();
+        let disagreement = self.chain_disagreement().is_some();
+        let slot = self.slot_by_addr(addr)?;
+        let up_to_date = states
+            .iter()
+            .find(|(other, _)| other.id == slot.id)
+            .map(|(_, state)| state.is_none());
+        qualifying_listing_tip(disagreement, up_to_date, Self::tip_height(&slot))
+    }
+
     /// Notes the pairs of a measurement round that answered different base headers at one height (item 7).
     fn note_header_differences(&self, round: &[RoundServer]) { self.add_pending(header_differences(round)); }
 
@@ -2296,13 +2438,14 @@ impl PoolShared {
     /// A header notification of the height `height` arrived over the connection `session_id` of server `id`
     /// (R38.6.4l items 2 and 6, R38.6.4o item 4): under a measured order the count of P1 with several maintained
     /// connections moves, and the maintained connections are judged again for being out of date.
-    fn header_notified(&self, id: usize, session_id: u64, height: u64, source: HeaderSource) {
+    fn header_notified(self: &Arc<Self>, id: usize, session_id: u64, height: u64, source: HeaderSource) {
         let Some(slot) = self.slot_by_id(id) else { return };
         self.record_first_reports(now_float());
         if source == HeaderSource::Answer {
             // A header answer moves the connection's height and nothing else (R38.6.4o item 4): the connections are
             // judged again.
-            self.refresh_out_of_date();
+            let states = self.refresh_out_of_date();
+            self.offer_chain_tip(&slot, session_id, height, &states);
             if self.tip_checks {
                 self.signal_measure();
             }
@@ -2332,10 +2475,217 @@ impl PoolShared {
             // A notification can end the silence of a connection or make another one stuck (R38.6.4o item 4).
             wake = stale || self.tip_checks;
         }
-        self.refresh_out_of_date();
+        let states = self.refresh_out_of_date();
+        self.offer_chain_tip(&slot, session_id, height, &states);
         if wake {
             self.signal_measure();
         }
+    }
+
+    // ---- the chain view: how the client sees that its chain changed (CRD ch.38 §38.5C amendment) ----------------
+
+    /// Tests: the base headers of the chain view, by height.
+    #[cfg(test)]
+    pub(super) fn chain_view_for_test(&self) -> BTreeMap<u64, Vec<u8>> {
+        self.chain_view.lock().unwrap_or_else(|p| p.into_inner()).snapshot()
+    }
+
+    /// Tests: no per-tip check runs or waits.
+    #[cfg(test)]
+    pub(super) fn chain_check_idle_for_test(&self) -> bool {
+        let feed = self.chain_feed.lock().unwrap_or_else(|p| p.into_inner());
+        feed.pending.is_none() && !feed.running
+    }
+
+    /// A history collector's channel of chain-changed events: one `()` for each change the client sees (item 3).
+    pub(super) fn subscribe_chain_changes(&self) -> futures_mpsc::UnboundedReceiver<()> {
+        let (tx, rx) = futures_mpsc::unbounded();
+        self.chain_subscribers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(tx);
+        rx
+    }
+
+    /// Whether the connection `session_id` of server `id` may feed the chain view now: it is a maintained connection
+    /// that is up to date in `states`, and the coin is not in the disagreement state (item 1).
+    fn may_feed_chain_view(&self, id: usize, session_id: u64, states: &[(Arc<ServerSlot>, Option<OutOfDate>)]) -> bool {
+        let up_to_date = states
+            .iter()
+            .any(|(slot, state)| slot.id == id && state.is_none() && Self::session_id_of(slot) == Some(session_id));
+        up_to_date
+            && self
+                .disagreement
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .current
+                .is_none()
+    }
+
+    fn session_id_of(slot: &ServerSlot) -> Option<u64> { slot.state().session.as_ref().map(|session| session.id()) }
+
+    /// A connection reported the height `height` (a header notification or a header answer). When the connection may
+    /// feed the view and the height is above the highest of the view, the per-tip check is started, or queued when one
+    /// is running (item 2).
+    fn offer_chain_tip(
+        self: &Arc<Self>,
+        slot: &Arc<ServerSlot>,
+        session_id: u64,
+        height: u64,
+        states: &[(Arc<ServerSlot>, Option<OutOfDate>)],
+    ) {
+        if !self.tip_checks || !self.may_feed_chain_view(slot.id, session_id, states) {
+            return;
+        }
+        // The header bytes that came with this height; a header shorter than a base header is no UTXO header.
+        let Some(base) = slot
+            .state()
+            .session
+            .as_ref()
+            .filter(|session| session.id() == session_id)
+            .and_then(|session| session.headers().last_header())
+            .filter(|(held, bytes)| *held == height && bytes.len() >= BASE_HEADER_LEN)
+            .map(|(_, bytes)| base_of(&bytes))
+        else {
+            return;
+        };
+        if self.chain_view.lock().unwrap_or_else(|p| p.into_inner()).plan(height) == TipPlan::Nothing {
+            return;
+        }
+        {
+            let mut feed = self.chain_feed.lock().unwrap_or_else(|p| p.into_inner());
+            feed.pending = Some(TipReport {
+                session_id,
+                server: slot.id,
+                addr: slot.addr.clone(),
+                height,
+                base,
+            });
+            if feed.running {
+                return;
+            }
+            feed.running = true;
+        }
+        let pool = self.clone();
+        spawn(async move { pool.run_chain_checks().await });
+    }
+
+    /// Runs the per-tip checks one after the other until no report waits.
+    async fn run_chain_checks(self: Arc<Self>) {
+        loop {
+            let next = {
+                let mut feed = self.chain_feed.lock().unwrap_or_else(|p| p.into_inner());
+                match feed.pending.take() {
+                    Some(report) => report,
+                    None => {
+                        feed.running = false;
+                        return;
+                    },
+                }
+            };
+            self.check_chain(next).await;
+        }
+    }
+
+    /// Whether the connection of `report` may still feed the view, judged anew (the state can change while a request
+    /// is out).
+    fn chain_report_still_feeds(&self, report: &TipReport) -> bool {
+        let states = self.refresh_out_of_date();
+        self.may_feed_chain_view(report.server, report.session_id, &states)
+    }
+
+    /// `count` consecutive base headers from `from`, asked of the server at `addr` with one directed
+    /// `blockchain.block.headers` request (R38.6.4g). `None` when the request failed or was not answered within the
+    /// request bound, or the answer is not a list of `count` headers that splits at an even stride: nothing is
+    /// concluded from it.
+    async fn directed_base_headers(self: &Arc<Self>, addr: &str, from: u64, count: u64) -> Option<Vec<Vec<u8>>> {
+        let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: self.fresh_request_id(),
+            method: "blockchain.block.headers".into(),
+            params: vec![json::json!(from), json::json!(count)],
+        });
+        let Ok((_, JsonRpcResponseEnum::Single(single))) = self.route_directed(request, addr).await else {
+            return None;
+        };
+        if !single.error.is_null() || single.result["count"].as_u64() != Some(count) {
+            return None;
+        }
+        let bytes = hex::decode(single.result["hex"].as_str()?).ok()?;
+        split_header_list(&bytes, count)
+    }
+
+    /// The per-tip check of the chain view (item 2) for the tip of `report`.
+    async fn check_chain(self: &Arc<Self>, report: TipReport) {
+        let plan = self
+            .chain_view
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .plan(report.height);
+        let (from, count) = match plan {
+            TipPlan::Nothing => return,
+            TipPlan::Restart => {
+                if self.chain_report_still_feeds(&report) {
+                    self.chain_view
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .restart(report.height, report.base);
+                }
+                return;
+            },
+            TipPlan::Request { from, count } => (from, count),
+        };
+        let Some(mut headers) = self.directed_base_headers(&report.addr, from, count).await else {
+            return;
+        };
+        if !self.chain_report_still_feeds(&report) {
+            return;
+        }
+        let (differs, lowest) = {
+            let view = self.chain_view.lock().unwrap_or_else(|p| p.into_inner());
+            (view.lowest_difference(from, &headers).is_some(), view.lowest())
+        };
+        headers.push(report.base.clone());
+        if !differs {
+            self.chain_view
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .extend(from, headers);
+            return;
+        }
+        // The chain changed: one more request over the whole view finds the lowest height that differs.
+        let Some(low) = lowest else { return };
+        let Some(mut whole) = self.directed_base_headers(&report.addr, low, report.height - low).await else {
+            return;
+        };
+        if !self.chain_report_still_feeds(&report) {
+            return;
+        }
+        whole.push(report.base);
+        let first = {
+            let mut view = self.chain_view.lock().unwrap_or_else(|p| p.into_inner());
+            // The server may have changed its answer meanwhile: then nothing is concluded.
+            let Some(first) = view.lowest_difference(low, &whole) else {
+                return;
+            };
+            view.replace(low, whole);
+            first
+        };
+        if first == low {
+            warn!(
+                "{}: the Electrum servers report a reorganization of the chain at or below height {}",
+                self.ticker, first
+            );
+        } else {
+            warn!(
+                "{}: the Electrum servers report a reorganization of the chain from height {}",
+                self.ticker, first
+            );
+        }
+        self.chain_subscribers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|subscriber| subscriber.unbounded_send(()).is_ok());
     }
 
     /// The time without a header notification that makes a lone connection stale (R38.6.4l item 6): the larger of 3
@@ -2818,6 +3168,53 @@ impl PoolShared {
         self.wait_choice(failed).or_else(|| self.wait_choice(&[]))
     }
 
+    /// Whether the tip checks are on for this coin (R38.6.4o item 11).
+    pub(super) fn tip_checks_on(&self) -> bool { self.tip_checks }
+
+    /// R38.6.4o item 6, status note of 2026-11-21: the server a wait that polls `addr` continues on when `addr` is
+    /// now out of date (item 4). The polled server is left out; the choice is the first up-to-date maintained
+    /// connection in priority order that is not in `failed` (the servers that failed during this wait), else the
+    /// first up-to-date one in `failed`. `None` when `addr` is up to date or not maintained, or when no other
+    /// up-to-date server exists. `addr` is not marked as failed and a later choice may return to it; the caller
+    /// takes the chosen server off `failed`.
+    pub(super) fn wait_server_after_out_of_date(&self, addr: &str, failed: &[String]) -> Option<String> {
+        let maintained = self.refresh_out_of_date();
+        let polled_is_out_of_date = maintained
+            .iter()
+            .any(|(slot, state)| slot.addr == addr && state.is_some());
+        if !polled_is_out_of_date {
+            return None;
+        }
+        // An up-to-date server that has not failed first; when there is none, the first up-to-date one among
+        // those that failed during the wait (the caller then takes it off `failed`).
+        let up_to_date = |(slot, state): &&(Arc<ServerSlot>, Option<OutOfDate>)| state.is_none() && slot.addr != addr;
+        maintained
+            .iter()
+            .filter(up_to_date)
+            .find(|(slot, _)| !failed.contains(&slot.addr))
+            .or_else(|| maintained.iter().find(up_to_date))
+            .map(|(slot, _)| slot.addr.clone())
+    }
+
+    /// Logs one change of server of a confirmation wait (R38.6.4o item 6, status note of 2026-11-21): both servers
+    /// named `host:port` (R38.6.9a) and the reason.
+    pub(super) fn log_wait_server_change(&self, tx_hash: &str, from: Option<&str>, to: &str, reason: &str) {
+        info!(
+            "{}: the wait for the confirmations of {} moves from Electrum server {} to {}: {}",
+            self.ticker,
+            tx_hash,
+            from.map_or_else(|| "(none)".to_owned(), |from| self.server_label(from)),
+            self.server_label(to),
+            reason
+        );
+    }
+
+    /// The only form in which texts name the server configured as `addr` (R38.6.9a): `host:port`, or a placeholder.
+    pub(super) fn server_label(&self, addr: &str) -> String {
+        self.slot_by_addr(addr)
+            .map_or_else(|| UNNAMED_SERVER.to_owned(), |slot| slot.label.clone())
+    }
+
     fn wait_choice(&self, excluded: &[String]) -> Option<String> {
         let allowed = |slot: &Arc<ServerSlot>| !excluded.contains(&slot.addr);
         let maintained: Vec<(Arc<ServerSlot>, Option<OutOfDate>)> = self
@@ -3066,6 +3463,9 @@ impl PoolShared {
         // the connections still to try are counted as before.
         let maintained = self.in_turn_for(request, maintained);
         let mut tried: Vec<usize> = Vec::new();
+        // The servers that answered this request with an error answer: not asked again within the request, the retry
+        // included (D38.6.4Q.2 status note, item 1).
+        let mut error_answered: HashSet<usize> = HashSet::new();
         for (i, slot) in maintained.iter().enumerate() {
             let remaining = secs_left(deadline);
             if remaining.is_zero() {
@@ -3082,7 +3482,15 @@ impl PoolShared {
             tried.push(slot.id);
             let attempt_timeout = round.min(timings.request).min(remaining);
             match self.request_on(slot, &session, request, attempt_timeout).await {
-                Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                // An error answer to one of the three contract reads moves the request on and closes nothing
+                // (D38.6.4Q.2 status note).
+                Ok(response) => match error_answer_failure(request, &response) {
+                    Some(failure) => {
+                        failures.record_error_answer(&slot.label, failure);
+                        error_answered.insert(slot.id);
+                    },
+                    None => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                },
                 Err(e) => failures.record(&slot.label, e),
             }
         }
@@ -3091,7 +3499,11 @@ impl PoolShared {
         // tried come first. As soon as an attempt ends without an answer, the next server starts (D38.6.4j.1), so one
         // attempt that is slow to fail never holds back a server that could answer. The budget of an attempt is
         // derived from the servers not yet started, this one included (R38.6.4j item 2).
-        let usable = self.usable_slots();
+        let usable: Vec<Arc<ServerSlot>> = self
+            .usable_slots()
+            .into_iter()
+            .filter(|slot| !error_answered.contains(&slot.id))
+            .collect();
         let (untried, retried): (Vec<_>, Vec<_>) = usable.into_iter().partition(|slot| !tried.contains(&slot.id));
         let order: Vec<Arc<ServerSlot>> = untried.into_iter().chain(retried).collect();
         let mut next = 0;
@@ -3122,7 +3534,10 @@ impl PoolShared {
                 return None;
             };
             match result {
-                Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                Ok(response) => match error_answer_failure(request, &response) {
+                    Some(failure) => failures.record_error_answer(&slot.label, failure),
+                    None => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                },
                 Err(e) => failures.record(&slot.label, e),
             }
         }
@@ -3257,12 +3672,17 @@ async fn maintenance_loop(client: Weak<ElectrumClientImpl>, mut trigger_rx: futu
         }
         // The subscriptions are placed over a maintained connection (R38.6.4h); while there is none,
         // the request stays pending until a pass has made one.
+        let client = ElectrumClient(client);
         if pool.maintained_count() > 0 && pool.take_resubscribe_pending() {
-            let client = ElectrumClient(client);
             if !client.resubscribe_watched_scripthashes().await {
                 pool.resubscribe_pending.store(true, AtomicOrdering::Relaxed);
                 next_pass_at = next_pass_at.min(now_float() + pool.timings.short_repass.as_secs_f64());
             }
+        }
+        // The contract-event subscriptions get one attempt each per newly maintained session, whatever the outcome
+        // (D38.6.4Q.3 status note, item 2): a failed attempt neither sets the flag again nor shortens the pass delay.
+        if pool.maintained_count() > 0 && pool.take_contract_resubscribe_pending() {
+            client.resubscribe_watched_contract_events().await;
         }
     }
 }

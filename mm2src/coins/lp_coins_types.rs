@@ -524,6 +524,14 @@ pub enum WithdrawFee {
         gas_limit: u64,
         gas_price_option: CosmosGasPriceOption,
     },
+    /// The form a TRON result's `fee_details` carries in `type` (CRD ch.21 R-F2). It exists only so that a request
+    /// with such a `fee` parses and a TRON withdraw can refuse it with `InvalidFeePolicy` like any other
+    /// descriptor (CRD ch.21 R-WP6): the TRON fee is always estimated (CRD ch.21 R-W3), so the form has no
+    /// members and any other member of the object is ignored. No family takes it: the other families that take
+    /// a fee descriptor refuse it as a fee type they do not take, ZCoin refuses every custom fee (CRD ch.49
+    /// R49.27a), a Tendermint request ignores it as it ignores any other foreign descriptor (CRD ch.49 R49.30,
+    /// D49.1), and Solana does not read the descriptor.
+    Tron,
 }
 /// The level named by a [`WithdrawFee::CosmosGasPriority`] descriptor (CRD ch.49 R49.29): the spellings are
 /// exactly these four, case-sensitive. `Low`, `Average` and `High` select position 0, 1 and 2 of the platform
@@ -575,6 +583,70 @@ pub struct WithdrawRequest {
     /// the transaction and of an unsigned result). Absent is the empty memo. Ignored by every other family.
     #[serde(default)]
     pub(crate) memo: Option<String>,
+    /// TRON only (CRD ch.21 R21.10B.7): the transaction expires this many seconds after the time of its reference
+    /// block. Absent is 60. Ignored by every other family.
+    #[serde(default)]
+    pub(crate) expiration_seconds: Option<u64>,
+    /// The fee rail of the withdraw (CRD ch.63 §63.3.4). Absent is `native`. `gasless` and `auto` are served for a
+    /// TRON coin only; every other family refuses them (CRD ch.63 R21).
+    #[serde(default)]
+    pub(crate) fee_method: Option<WithdrawFeeMethod>,
+    /// The constraints of the gasless rail (CRD ch.63 §63.3.4). Refused without `fee_method` `gasless` or `auto`.
+    #[serde(default)]
+    pub(crate) gasless: Option<GaslessWithdrawOptions>,
+}
+/// The fee rail a withdraw request selects (CRD ch.63 §63.3.4).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WithdrawFeeMethod {
+    /// The coin's own fee model: the withdraw as it is without the member.
+    Native,
+    /// The gasless rail is required: the fee is paid in the token, through a fee-delegation provider.
+    Gasless,
+    /// The native rail first; the gasless rail only when the native rail cannot be funded.
+    Auto,
+}
+/// The `gasless` object of a withdraw request (CRD ch.63 §63.3.4).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct GaslessWithdrawOptions {
+    /// The cap of this request on the provider fee, a decimal amount in token units. It is kept as sent, so that
+    /// a value that is not a decimal amount is answered as a fee-validation error of the withdraw (CRD ch.63
+    /// §63.9.4) and not as a request that does not decode; [`GaslessWithdrawOptions::max_fee_amount`] reads it.
+    #[serde(default)]
+    pub(crate) max_fee: Option<Json>,
+    /// How long the signed authorization stays valid, in seconds from signing. Zero is refused; absent is 300.
+    #[serde(default)]
+    pub(crate) deadline_seconds: Option<u64>,
+    /// With `fee_method` `gasless`: whether a deterministically unavailable gasless rail may be replaced by the
+    /// native rail (CRD ch.63 §63.8 step 6).
+    #[serde(default)]
+    pub(crate) fallback_to_native: bool,
+}
+impl GaslessWithdrawOptions {
+    /// `max_fee` as a decimal amount: `None` when the request gave none.
+    ///
+    /// # Errors
+    ///
+    /// [`WithdrawError::InvalidFeePolicy`] when the member is neither a JSON string nor a JSON number that reads
+    /// as a decimal amount, or is below zero (CRD ch.63 §63.9.4). The text does not repeat the value.
+    pub(crate) fn max_fee_amount(&self) -> Result<Option<BigDecimal>, WithdrawError> {
+        let amount = match &self.max_fee {
+            None | Some(Json::Null) => return Ok(None),
+            Some(value @ (Json::String(_) | Json::Number(_))) => json::from_value::<BigDecimal>(value.clone())
+                .map_err(|_| WithdrawError::InvalidFeePolicy("'gasless.max_fee' is not a decimal amount".to_owned()))?,
+            Some(_) => {
+                return Err(WithdrawError::InvalidFeePolicy(
+                    "'gasless.max_fee' is not a decimal amount".to_owned(),
+                ))
+            },
+        };
+        if amount < BigDecimal::from(0) {
+            return Err(WithdrawError::InvalidFeePolicy(
+                "'gasless.max_fee' is below zero".to_owned(),
+            ));
+        }
+        Ok(Some(amount))
+    }
 }
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -627,6 +699,9 @@ impl WithdrawRequest {
             max,
             fee,
             memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
         }
     }
 
@@ -639,8 +714,52 @@ impl WithdrawRequest {
             max: true,
             fee: None,
             memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
         }
     }
+
+    /// Whether the request asks for the gasless rail: `fee_method` is `gasless` or `auto`.
+    pub(crate) fn asks_for_gasless_rail(&self) -> bool {
+        matches!(
+            self.fee_method,
+            Some(WithdrawFeeMethod::Gasless | WithdrawFeeMethod::Auto)
+        )
+    }
+
+    /// The fee-rail check every withdraw passes before anything else is done with the request (CRD ch.63 §63.3.4,
+    /// R21), for a coin of any family, on the direct method and on the task route. `serves_gasless_rail` says
+    /// whether the coin is of the one family that has a gasless rail (a TRON coin).
+    ///
+    /// # Errors
+    ///
+    /// - [`WithdrawError::InvalidFeePolicy`] (HTTP 400) for `gasless` options without `fee_method` `gasless` or
+    ///   `auto`, for every coin;
+    /// - [`WithdrawError::Gasless`] with [`GaslessWithdrawError::Unavailable`] (HTTP 503) for `fee_method` `gasless`
+    ///   or `auto` on a coin without a gasless rail.
+    pub(crate) fn check_fee_rail(&self, serves_gasless_rail: bool) -> Result<(), WithdrawError> {
+        if !self.asks_for_gasless_rail() {
+            if self.gasless.is_some() {
+                return Err(WithdrawError::InvalidFeePolicy(
+                    "'gasless' options need 'fee_method' to be 'gasless' or 'auto'".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+        if !serves_gasless_rail {
+            return Err(WithdrawError::Gasless(GaslessWithdrawError::Unavailable(format!(
+                "{} has no gasless withdraw rail",
+                self.coin
+            ))));
+        }
+        Ok(())
+    }
+}
+/// [`WithdrawRequest::check_fee_rail`] for `coin`: only a TRON coin has a gasless rail.
+pub(crate) fn check_withdraw_fee_rail(coin: &MmCoinEnum, request: &WithdrawRequest) -> Result<(), WithdrawError> {
+    let serves_gasless_rail = matches!(coin, MmCoinEnum::EthCoin(eth) if eth.is_tron_family());
+    request.check_fee_rail(serves_gasless_rail)
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -671,12 +790,13 @@ pub enum TxFeeDetails {
     Eth(EthTxFeeDetails),
     Qrc20(Qrc20FeeDetails),
     Slp(SlpFeeDetails),
-    #[cfg(not(target_arch = "wasm32"))]
     Solana(SolanaFeeDetails),
     Sia(siacoin::SiaFeeDetails),
     Tendermint(tendermint::TendermintFeeDetails),
     /// TRON fee breakdown: bandwidth + energy + optional activation.
     Tron(crate::eth::tron::fee::TronTxFeeDetails),
+    /// The fee of a TRC20 withdraw through the gasless rail, paid in the token (CRD ch.63 §63.3.5).
+    TronGasless(crate::eth::tron::fee::TronGaslessFeeDetails),
 }
 /// Deserialize the TxFeeDetails as an untagged enum.
 impl<'de> Deserialize<'de> for TxFeeDetails {
@@ -709,6 +829,16 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
         // was reported but the same oversight. Genuine Utxo entries have no
         // `gas_limit` field, so this reordering can't misclassify them.
         //
+        // `Solana { fee_amount, rent_amount, total_amount }` (CRD ch.40 R40.6B.12) needs no particular place: all
+        // three members are required and `fee_amount` is in no other family's fee object, so it reads no other
+        // family's entry (Sia has a `total_amount` but no `fee_amount`) and no other arm reads its entry (every
+        // other family requires a member it lacks: `amount`, `coin`, `gas`, `miner_fee`, `bandwidth_used`).
+        //
+        // `TronGasless` (CRD ch.63 §63.3.5) needs no particular place either: it requires `gasfree_address` and
+        // the fixed texts of `fee_method` and `provider_name`, which no other family's fee object has, and every
+        // other arm requires a member it lacks (`amount`, `gas`, `miner_fee`, `fee_amount`, `policy`,
+        // `bandwidth_used`).
+        //
         // `Slp { amount, coin: String }` is deliberately NOT added: its shape
         // is *identical* to Utxo's whenever `coin` is present, so no
         // placement in this list can distinguish the two structurally --
@@ -721,10 +851,10 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
             Utxo(UtxoFeeDetails),
             Eth(EthTxFeeDetails),
             Qrc20(Qrc20FeeDetails),
-            #[cfg(not(target_arch = "wasm32"))]
             Solana(SolanaFeeDetails),
             Sia(siacoin::SiaFeeDetails),
             Tron(crate::eth::tron::fee::TronTxFeeDetails),
+            TronGasless(crate::eth::tron::fee::TronGaslessFeeDetails),
         }
 
         match Deserialize::deserialize(deserializer)? {
@@ -732,10 +862,10 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
             TxFeeDetailsUnTagged::Utxo(f) => Ok(TxFeeDetails::Utxo(f)),
             TxFeeDetailsUnTagged::Eth(f) => Ok(TxFeeDetails::Eth(f)),
             TxFeeDetailsUnTagged::Qrc20(f) => Ok(TxFeeDetails::Qrc20(f)),
-            #[cfg(not(target_arch = "wasm32"))]
             TxFeeDetailsUnTagged::Solana(f) => Ok(TxFeeDetails::Solana(f)),
             TxFeeDetailsUnTagged::Sia(f) => Ok(TxFeeDetails::Sia(f)),
             TxFeeDetailsUnTagged::Tron(f) => Ok(TxFeeDetails::Tron(f)),
+            TxFeeDetailsUnTagged::TronGasless(f) => Ok(TxFeeDetails::TronGasless(f)),
         }
     }
 }
@@ -751,13 +881,15 @@ impl From<EthTxFeeDetails> for TxFeeDetails {
 impl From<crate::eth::tron::fee::TronTxFeeDetails> for TxFeeDetails {
     fn from(tron_details: crate::eth::tron::fee::TronTxFeeDetails) -> Self { TxFeeDetails::Tron(tron_details) }
 }
+impl From<crate::eth::tron::fee::TronGaslessFeeDetails> for TxFeeDetails {
+    fn from(details: crate::eth::tron::fee::TronGaslessFeeDetails) -> Self { TxFeeDetails::TronGasless(details) }
+}
 impl From<UtxoFeeDetails> for TxFeeDetails {
     fn from(utxo_details: UtxoFeeDetails) -> Self { TxFeeDetails::Utxo(utxo_details) }
 }
 impl From<Qrc20FeeDetails> for TxFeeDetails {
     fn from(qrc20_details: Qrc20FeeDetails) -> Self { TxFeeDetails::Qrc20(qrc20_details) }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<SolanaFeeDetails> for TxFeeDetails {
     fn from(solana_details: SolanaFeeDetails) -> Self { TxFeeDetails::Solana(solana_details) }
 }
@@ -831,7 +963,8 @@ impl Default for TransactionType {
 ///
 /// `Serialize` is written by hand (see [`TransactionDetailsWire`]): a result serializes exactly as it always did,
 /// `tx_hex` and `tx_hash` included even when empty, except the unsigned result of a watch-only Tendermint coin
-/// (`unsigned` is `Some`), which omits the two members (CRD ch.36 R36.14.17).
+/// and the sign-only result of the TRON gasless rail (`unsigned` is `Some`), which omit the two members (CRD ch.36
+/// R36.14.17, ch.63 R25).
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct TransactionDetails {
     /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction.
@@ -884,7 +1017,8 @@ pub struct TransactionDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) memo: Option<String>,
     /// The unsigned document a watch-only Tendermint coin answers instead of a signed transaction (CRD ch.36
-    /// R36.14.17). Its members sit flat in the result; `None` for every signed transaction and every other family.
+    /// R36.14.17), or the off-chain authorization of a sign-only TRON gasless withdraw (CRD ch.63 §63.8A). Its
+    /// members sit flat in the result; `None` for every signed transaction.
     #[serde(default, flatten)]
     pub(crate) unsigned: Option<UnsignedTransaction>,
 }
@@ -952,8 +1086,8 @@ pub struct UnsignedSignDoc {
     pub chain_id: String,
     pub account_number: u64,
 }
-/// What a watch-only Tendermint coin answers in place of `tx_hex` and `tx_hash` (CRD ch.36 R36.14.17). The members
-/// of the variant sit flat in the withdraw result.
+/// What a watch-only Tendermint coin (CRD ch.36 R36.14.17) and the TRON gasless rail (CRD ch.63 §63.8A) answer in
+/// place of `tx_hex` and `tx_hash`. The members of the variant sit flat in the withdraw result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum UnsignedTransaction {
@@ -965,6 +1099,9 @@ pub enum UnsignedTransaction {
         legacy_amino_json: Json,
         original_tx_type_url: String,
     },
+    /// The sign-only result of the TRON gasless rail (CRD ch.63 §63.8A, D63.8 (a)): a signed off-chain
+    /// authorization that is neither broadcast nor submitted to the provider.
+    TronGasFree(crate::eth::tron::gasfree::authorization::GasFreeRelayPayload),
 }
 #[derive(Clone, Copy, Debug)]
 pub struct BlockHeightAndTime {
@@ -972,8 +1109,9 @@ pub struct BlockHeightAndTime {
     pub(crate) timestamp: u64,
 }
 impl TransactionDetails {
-    /// Whether this is the unsigned result of a watch-only coin: nothing was signed or broadcast, and the caller's
-    /// own wallet signs the document (CRD ch.36 R36.14.17).
+    /// Whether this is a result without a transaction: the unsigned result of a watch-only coin, where nothing was
+    /// signed or broadcast and the caller's own wallet signs the document (CRD ch.36 R36.14.17), or the sign-only
+    /// result of the TRON gasless rail, whose authorization is not a transaction (CRD ch.63 R25).
     pub fn is_unsigned(&self) -> bool { self.unsigned.is_some() }
 
     /// Whether the transaction details block height should be updated (when tx is confirmed)
@@ -1262,6 +1400,63 @@ pub enum HistorySyncState {
     InProgress(Json),
     Error(Json),
     Finished,
+    /// A finished pass of a UTXO history collector that skipped transactions it could not read (CRD ch.39
+    /// D39.11.4V.1). It serializes with the state name `Finished`, and its `additional_info` is the object
+    /// `{"unreadable_transactions": [...]}`. A pass that skipped nothing is [`HistorySyncState::Finished`], which has
+    /// no `additional_info`.
+    #[serde(rename = "Finished")]
+    FinishedWithUnreadable(Json),
+}
+
+/// A transaction that a UTXO history collector skipped in the current pass because it cannot be read (CRD ch.39
+/// D39.11.4V.1, R38.5A.9). The list of them lives in memory only and is rebuilt on every pass.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnreadableTransaction {
+    /// The transaction hash as the history rows show it.
+    pub tx_hash: String,
+    /// A short fixed reason. It never carries a transaction body, hex or key.
+    pub error: String,
+}
+
+impl HistorySyncState {
+    /// `InProgress` of a UTXO history collector: `transactions_left`, and the `unreadable_transactions` member only
+    /// when the pass has skipped a transaction. With nothing skipped the answer is exactly `{"transactions_left": n}`.
+    pub(crate) fn utxo_in_progress(transactions_left: usize, unreadable: &[UnreadableTransaction]) -> Self {
+        let mut info = json!({ "transactions_left": transactions_left });
+        if !unreadable.is_empty() {
+            info["unreadable_transactions"] = json!(unreadable);
+        }
+        HistorySyncState::InProgress(info)
+    }
+
+    /// The finished state of a UTXO history collector: plain `Finished` when the pass skipped nothing.
+    pub(crate) fn utxo_finished(unreadable: &[UnreadableTransaction]) -> Self {
+        if unreadable.is_empty() {
+            HistorySyncState::Finished
+        } else {
+            HistorySyncState::FinishedWithUnreadable(json!({ "unreadable_transactions": unreadable }))
+        }
+    }
+
+    /// The running `InProgress` state with the `unreadable_transactions` member set, so that a skip shows at once;
+    /// `None` for any other state (a pass that is not running has no `transactions_left` to keep).
+    pub(crate) fn in_progress_with_unreadable(&self, unreadable: &[UnreadableTransaction]) -> Option<Self> {
+        let HistorySyncState::InProgress(info) = self else {
+            return None;
+        };
+        let mut info = info.clone();
+        info.as_object_mut()?
+            .insert("unreadable_transactions".to_owned(), json!(unreadable));
+        Some(HistorySyncState::InProgress(info))
+    }
+
+    /// Whether the history is finished, with or without skipped transactions.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self,
+            HistorySyncState::Finished | HistorySyncState::FinishedWithUnreadable(_)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1290,6 +1485,29 @@ mod tx_fee_details_tests {
         }));
     }
 
+    /// CRD ch.63 §63.3.5: the gasless fee details read back as themselves, with `trace_id` written as `null`.
+    #[test]
+    fn test_tron_gasless_fee_details_roundtrip() {
+        use crate::eth::tron::fee::{GaslessFeeMethod, GaslessProviderName, TronGaslessFeeDetails};
+        let details = TxFeeDetails::TronGasless(TronGaslessFeeDetails {
+            coin: "USDT-TRC20".to_owned(),
+            fee_method: GaslessFeeMethod::Gasless,
+            provider_name: GaslessProviderName::GasFree,
+            gasfree_address: "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye".to_owned(),
+            transfer_fee: "2".parse().unwrap(),
+            activation_fee: "0".parse().unwrap(),
+            total_token_fee: "2".parse().unwrap(),
+            signed_max_fee: Some("2.5".parse().unwrap()),
+            trace_id: None,
+        });
+        let document = json::to_value(&details).unwrap();
+        assert_eq!(document["type"], "TronGasless");
+        assert_eq!(document["fee_method"], "gasless");
+        assert_eq!(document["provider_name"], "gasfree");
+        assert!(document.as_object().unwrap().contains_key("trace_id") && document["trace_id"].is_null());
+        roundtrip(details);
+    }
+
     #[test]
     fn test_tendermint_fee_details_roundtrip() {
         roundtrip(TxFeeDetails::Tendermint(tendermint::TendermintFeeDetails {
@@ -1298,6 +1516,102 @@ mod tx_fee_details_tests {
             uamount: 0,
             gas_limit: 100000,
         }));
+    }
+
+    fn solana_details() -> SolanaFeeDetails {
+        SolanaFeeDetails::new("0.000005".parse().unwrap(), "0.00203928".parse().unwrap())
+    }
+
+    /// T40.6B.13: the Solana object is exactly the tag and the three members, the last three decimal strings, and
+    /// the total is the sum.
+    #[test]
+    fn test_solana_fee_details_wire_shape() {
+        let details = TxFeeDetails::Solana(solana_details());
+        let wire: Json = json::to_value(&details).unwrap();
+        let members: std::collections::BTreeSet<&str> = wire.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            members,
+            ["type", "fee_amount", "rent_amount", "total_amount"]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(wire["type"], "Solana");
+        assert_eq!(wire["fee_amount"], "0.000005");
+        assert_eq!(wire["rent_amount"], "0.00203928");
+        assert_eq!(wire["total_amount"], "0.00204428");
+        let no_rent = json::to_value(TxFeeDetails::Solana(SolanaFeeDetails::new(
+            "0.000005".parse().unwrap(),
+            0.into(),
+        )))
+        .unwrap();
+        assert_eq!(no_rent["rent_amount"], "0");
+        assert_eq!(no_rent["total_amount"], "0.000005");
+    }
+
+    /// T40.6B.13: the untagged reader reads the new shape back as Solana, with and without rent.
+    #[test]
+    fn test_solana_fee_details_roundtrip() {
+        roundtrip(TxFeeDetails::Solana(solana_details()));
+        roundtrip(TxFeeDetails::Solana(SolanaFeeDetails::new(
+            "0.000005".parse().unwrap(),
+            0.into(),
+        )));
+    }
+
+    /// T40.6B.13: every other family's sample still reads as its own family, and none of them as Solana.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_other_families_are_not_read_as_solana() {
+        roundtrip(TxFeeDetails::Utxo(UtxoFeeDetails {
+            coin: None,
+            amount: "0.0001".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Eth(EthTxFeeDetails {
+            coin: "ETH".to_owned(),
+            gas: 21000,
+            gas_price: "20".parse().unwrap(),
+            total_fee: "0.00042".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Qrc20(Qrc20FeeDetails {
+            coin: "QTUM".to_owned(),
+            miner_fee: "0.0001".parse().unwrap(),
+            gas_limit: 100000,
+            gas_price: 40,
+            total_gas_fee: "0.04".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Tron(crate::eth::tron::fee::TronTxFeeDetails {
+            coin: "TRX".to_owned(),
+            bandwidth_used: 267,
+            energy_used: 0,
+            bandwidth_fee: "0.267".parse().unwrap(),
+            energy_fee: 0.into(),
+            total_fee: "1.267".parse().unwrap(),
+            account_creation_fee: Some(1.into()),
+        }));
+        roundtrip(TxFeeDetails::Tron(crate::eth::tron::fee::TronTxFeeDetails {
+            coin: "TRX".to_owned(),
+            bandwidth_used: 345,
+            energy_used: 14_000,
+            bandwidth_fee: 0.into(),
+            energy_fee: "5.88".parse().unwrap(),
+            total_fee: "5.88".parse().unwrap(),
+            account_creation_fee: None,
+        }));
+        roundtrip(TxFeeDetails::Sia(siacoin::SiaFeeDetails {
+            coin: "SC".to_owned(),
+            policy: siacoin::SiaFeePolicy::Fixed,
+            total_amount: "0.001".parse().unwrap(),
+        }));
+        roundtrip(TxFeeDetails::Tendermint(tendermint::TendermintFeeDetails {
+            coin: "ATOM".to_owned(),
+            amount: "0.002".parse().unwrap(),
+            uamount: 0,
+            gas_limit: 100000,
+        }));
+        // A Sia object next to a Solana-looking `total_amount`: it is still Sia.
+        let sia: TxFeeDetails =
+            json::from_str(r#"{"type":"Sia","coin":"SC","policy":"Fixed","total_amount":"0.001"}"#).unwrap();
+        assert!(matches!(sia, TxFeeDetails::Sia(_)));
     }
 
     /// A real Utxo entry (no `gas_limit`) must keep deserializing as `Utxo`
@@ -1355,5 +1669,91 @@ mod transaction_details_wire_tests {
         assert_eq!(wire["legacy_amino_json"], json!({}));
         assert_eq!(wire["original_tx_type_url"], "/x");
         assert!(wire.get("internal_id").is_some());
+    }
+}
+
+#[cfg(test)]
+mod history_sync_state_tests {
+    use super::*;
+
+    fn skipped(hash: &str, error: &str) -> UnreadableTransaction {
+        UnreadableTransaction {
+            tx_hash: hash.to_owned(),
+            error: error.to_owned(),
+        }
+    }
+
+    #[test]
+    fn finished_without_a_skip_is_exactly_the_state_member() {
+        let wire = json::to_string(&HistorySyncState::utxo_finished(&[])).unwrap();
+        assert_eq!(wire, r#"{"state":"Finished"}"#);
+        assert_eq!(
+            json::to_string(&HistorySyncState::Finished).unwrap(),
+            r#"{"state":"Finished"}"#
+        );
+    }
+
+    #[test]
+    fn in_progress_without_a_skip_is_exactly_the_old_answer() {
+        let wire = json::to_string(&HistorySyncState::utxo_in_progress(3, &[])).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"state":"InProgress","additional_info":{"transactions_left":3}}"#
+        );
+        let old = json::to_string(&HistorySyncState::InProgress(json!({ "transactions_left": 3 }))).unwrap();
+        assert_eq!(wire, old);
+    }
+
+    #[test]
+    fn finished_with_a_skip_carries_the_list_under_the_finished_state() {
+        let state = HistorySyncState::utxo_finished(&[skipped("ab", "unreadable")]);
+        assert!(state.is_finished());
+        assert_eq!(
+            json::to_value(&state).unwrap(),
+            json!({
+                "state": "Finished",
+                "additional_info": { "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }] },
+            })
+        );
+    }
+
+    #[test]
+    fn a_running_state_gains_the_list_and_keeps_transactions_left() {
+        let running = HistorySyncState::InProgress(json!({ "transactions_left": 4 }));
+        let next = running
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .expect("a running state takes the list");
+        assert_eq!(
+            json::to_value(&next).unwrap(),
+            json!({
+                "state": "InProgress",
+                "additional_info": {
+                    "transactions_left": 4,
+                    "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }],
+                },
+            })
+        );
+        assert!(HistorySyncState::Finished
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .is_none());
+        assert!(HistorySyncState::NotStarted
+            .in_progress_with_unreadable(&[skipped("ab", "unreadable")])
+            .is_none());
+    }
+
+    #[test]
+    fn in_progress_with_a_skip_has_the_list_beside_transactions_left() {
+        let state = HistorySyncState::utxo_in_progress(2, &[skipped("ab", "unreadable")]);
+        assert!(!state.is_finished());
+        assert_eq!(
+            json::to_value(&state).unwrap(),
+            json!({
+                "state": "InProgress",
+                "additional_info": {
+                    "transactions_left": 2,
+                    "unreadable_transactions": [{ "tx_hash": "ab", "error": "unreadable" }],
+                },
+            })
+        );
     }
 }

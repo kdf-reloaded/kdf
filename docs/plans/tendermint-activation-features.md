@@ -77,6 +77,27 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
      status note of 2026-11-16 there).
      This tree has no IBC `withdraw`, so a watch-only coin cannot produce an
      unsigned IBC document; that is a separate item (the IBC send route).
+   - *Item 1a built (2026-11-16, 0.5.0).* Both WalletConnect forms
+     (`{"type": "WalletConnect", "params": {"session_topic": ...}}` and the
+     public-docs `{"priv_key_policy": {"type": "WalletConnect", "data": ...}}`,
+     accepted exactly alike) activate a coin the paired wallet signs for:
+     `TendermintActivationPolicy::WalletConnect` holds the session topic, the
+     wallet's account key and the Ledger flag, and the interim rejection is gone.
+     The activation reads the live session for the coin's chain (R36.14.14, with
+     D36.16 (b): the key record of that chain, else one parameterless
+     `cosmos_getAccounts`, and a refusal when the key does not give the session's
+     account); `withdraw` and the staking requests are signed by the wallet
+     (`cosmos_signDirect`, or `cosmos_signAmino` for a Ledger-backed session),
+     `withdraw` answers the signed transaction and broadcasts nothing, the staking
+     requests broadcast as they do with a local key; a wallet that does not sign
+     fails with the typed `SigningError` (D36.15 (b), HTTP 500). Orders stay
+     refused (R18.11.23a, D18.11.10 (a)); swaps are not in this item (R18.11.51).
+     Lab row L3 (a WalletConnect-capable Cosmos wallet, ATOM mainnet, activation
+     by key record and by enumeration, one withdraw signed in the wallet and
+     broadcast, one refusal, a Ledger-backed wallet if available) is owed before
+     READY. The top-level `priv_key_policy` request member keeps refusing the
+     WalletConnect spelling at request parsing (`InvalidRequest`); only the
+     `activation_params` spellings above activate.
 2. **HD-wallet mode**: honor `path_to_address` under the coin's derivation path
    (R36.1.2, R36.1.4 step 3). The ch. 36 code-quality finding applies: derive
    the public key from the activated private key, not the wallet's root public
@@ -151,8 +172,9 @@ References are to CRD ch. 36 (Dirty-Gate-passed).
 ## Order
 
 Items 2 and 3 are done, item 4 is built (PR #363) and item 1b, the public-key
-form, is built (0.5.0). The remaining order: WalletConnect (item 1a), then item
-5's future package (item 7). Item 6 is not in 0.5.0.
+form, is built (0.5.0). Item 1a, the WalletConnect form, is built (0.5.0, note
+under item 1; its lab row L3 is owed). The remaining order: item 5's future
+package (item 7). Item 6 is not in 0.5.0.
 
 ## Lab rows owed before swaps are switched on
 
@@ -241,6 +263,14 @@ it), a token uses its platform coin's policy, `get_htlc_key_pair` answers `None`
 and every swap send, claim, refund, message-signing and private-key path refuses
 with `PrivKeyNotAllowed::WatchOnlyCoin` before any node is asked. The gate
 described below stands unchanged; only the order-time refusal is relied on.
+
+*Update (2026-11-16, item 1a).* The third policy variant exists:
+`TendermintActivationPolicy::WalletConnect`. It holds no local key either
+(`has_local_key` is false, so the same order-time refusal covers the coin and its
+tokens, `get_htlc_key_pair` answers `None`, and every node-key signing path
+refuses with `PrivKeyNotAllowed::WalletConnectCoin`). The wallet signs only the
+transactions of `withdraw` and the staking requests; the swap paths are not
+routed through it (CRD ch.18 R18.11.51).
 
 **Not covered by the existing early-refusal duties.** Ch. 22 RP11.1 binds the
 swap-protocol-v2 HTLC paths and the watcher-message paths; ch. 47 R47.5.13a

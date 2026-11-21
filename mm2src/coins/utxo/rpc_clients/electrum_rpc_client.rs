@@ -5,10 +5,12 @@ use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::header_time_only::read_window_times;
 #[cfg(not(target_arch = "wasm32"))]
 use common::dns_resolver::connect_tcp;
+use common::jsonrpc_client::process_transport_single_result;
+use common::log::debug;
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Mutex as StdMutex;
 
 // Response/request data types and the `electrum_script_hash` helper live in
@@ -499,13 +501,34 @@ pub struct ElectrumClientImpl {
     /// Concurrent-request map of the R38.6.3a unspent-list batch, keyed by the P2PKH and P2PK script hashes.
     list_unspent_with_p2pk_concurrent_map:
         ConcurrentRequestMap<(String, String), (Vec<ElectrumUnspent>, Vec<ElectrumUnspent>)>,
-    /// Script hashes this client has asked its servers to watch (R38.6.5).
+    /// Script hashes this client has asked its servers to watch (R38.6.5), each with the instances that remember it.
     ///
     /// Held so every subscription can be placed again over another connection
     /// (R38.6.4h): a subscription belongs to one TCP session, so a dropped
     /// connection silently loses it. Nothing may assume a subscription
-    /// survived.
-    watched_script_hashes: AsyncMutex<HashSet<String>>,
+    /// survived. A client shared by several coin instances (CRD ch.38 D38.6.4Q.1 status note) keeps a subscription
+    /// only while an instance remembers it (item 6). Never held across an await.
+    watched_script_hashes: StdMutex<HashMap<String, HashSet<ElectrumOwner>>>,
+    /// Contract events this client has asked its servers to watch, as the three parameters of
+    /// `blockchain.contract.event.subscribe`: the address, the contract and the topic, each with the instances that
+    /// remember it (CRD ch.38 D38.6.4Q.3 status note, D38.6.4Q.1 status note item 6). Held so each can be placed again
+    /// once over a newly maintained connection, as the script hashes are. Never held across an await.
+    watched_contract_events: StdMutex<Vec<([Json; 3], HashSet<ElectrumOwner>)>>,
+}
+
+/// The identity of a coin instance towards an Electrum client that several instances share (CRD ch.38 D38.6.4Q.1
+/// status note, item 6). It is allocated once for each built instance from a process-wide counter and never given
+/// again, so a token that is disabled and enabled again is a different owner from the one that left, and the
+/// subscriptions the first one placed are never taken for the second one's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ElectrumOwner(u64);
+
+impl ElectrumOwner {
+    /// A new identity.
+    pub fn new_unique() -> ElectrumOwner {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        ElectrumOwner(NEXT.fetch_add(1, AtomicOrdering::Relaxed))
+    }
 }
 
 impl fmt::Debug for PoolShared {
@@ -568,6 +591,12 @@ impl ElectrumClientImpl {
     /// The error text while the servers disagree about the chain, `None` otherwise (R38.6.4o item 12): new orders,
     /// new swaps and withdrawals of the coin are refused with it.
     pub fn chain_disagreement(&self) -> Option<String> { self.pool.chain_disagreement() }
+
+    /// A channel of chain-changed events: one `()` each time the client sees that the chain it follows has changed
+    /// (CRD ch.38 §38.5C, D38.5C.2 status note, amendment of 2026-11-18). The history collectors of the coin subscribe.
+    pub fn subscribe_chain_changes(&self) -> futures::channel::mpsc::UnboundedReceiver<()> {
+        self.pool.subscribe_chain_changes()
+    }
 
     /// Starts the background maintenance of the pool: the first pass connects the servers in the
     /// background and later passes keep the maintained set (CRD ch.38 R38.6.4c). Nothing waits for it.
@@ -729,6 +758,10 @@ impl ElectrumClient {
     }
 }
 
+/// The error answers of one server to the transaction request, in a row, that a confirmation wait counts as a failure
+/// of that server (CRD ch.38 R38.6.4o item 6, status note of 2026-11-21).
+const WAIT_ERROR_ANSWERS_LIMIT: u32 = 3;
+
 /// Read-only requests addressed to one named server (CRD ch.38 R38.6.4g): the request opens the server's
 /// connection if it is closed and releases it afterwards when the server is not maintained, and it is
 /// answered by that server or fails naming it. Used where the answer of a particular server is the
@@ -766,13 +799,94 @@ impl ElectrumClient {
         rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
     }
 
+    /// The spend of output `vout` of the transaction `tx_hash`, searched on one named server with directed
+    /// requests (R38.6.4g): the history of the output's script hash, then each transaction of it, as
+    /// [`UtxoRpcOps::find_output_spend`] does through the spread reads.
+    async fn find_output_spend_from(
+        &self,
+        server: &str,
+        tx_hash: H256,
+        script_pubkey: &[u8],
+        vout: usize,
+    ) -> Result<Option<SpentOutputInfo>, String> {
+        let script_hash = hex::encode(electrum_script_hash(script_pubkey));
+        let history = try_s!(self.scripthash_get_history_from(server, &script_hash).compat().await);
+        if history.len() < 2 {
+            return Ok(None);
+        }
+        for item in history.iter() {
+            let transaction = try_s!(self.transaction_get_from(server, &item.tx_hash).compat().await);
+            let maybe_spend_tx: UtxoTx =
+                try_s!(crate::utxo::utxo_common::read_utxo_tx(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+            for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
+                if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
+                    return Ok(Some(SpentOutputInfo {
+                        spending_tx: maybe_spend_tx,
+                        input_index: index,
+                        spent_in_block: BlockHashOrHeight::Height(item.height),
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// CRD ch.51 R31a, status note of 2026-11-21: the search of [`Self::find_output_spend_from`] on every usable
+    /// server of the coin's rank at the same time. `found` turns the spend one server found into the answer, or
+    /// `None` when it does not count. Returns the first answer; a server that fails or finds nothing is left
+    /// out. One INFO line names the server that found it. The caller bounds the time the search takes.
+    pub(crate) async fn find_output_spend_on_every_server<T>(
+        &self,
+        tx_hash: H256,
+        script_pubkey: &[u8],
+        vout: usize,
+        found: impl Fn(SpentOutputInfo) -> Option<T>,
+    ) -> Option<T> {
+        let found = &found;
+        let mut searches: futures::stream::FuturesUnordered<_> = self
+            .pool
+            .usable_addrs()
+            .into_iter()
+            .map(|addr| async move {
+                match self.find_output_spend_from(&addr, tx_hash, script_pubkey, vout).await {
+                    Ok(spend) => spend.and_then(found).map(|answer| (addr, answer)),
+                    Err(e) => {
+                        debug!(
+                            "{}: the search for a spend on Electrum server {} failed: {}",
+                            self.coin_ticker,
+                            self.pool.server_label(&addr),
+                            e
+                        );
+                        None
+                    },
+                }
+            })
+            .collect();
+        while let Some(answer) = searches.next().await {
+            if let Some((addr, answer)) = answer {
+                info!(
+                    "{}: Electrum server {} found the spend of the swap payment {:?}",
+                    self.coin_ticker,
+                    self.pool.server_label(&addr),
+                    tx_hash.reversed()
+                );
+                return Some(answer);
+            }
+        }
+        None
+    }
+
     /// The wait for the confirmations of a transaction (CRD ch.38 R38.6.4o item 6). It chooses one server when it
     /// starts (see [`PoolShared::choose_wait_server`]) and sends every transaction request and block-count request
     /// to it as a directed request (R38.6.4g), so that the answer that ends the wait always comes from the server
     /// being polled and never from whichever server a spread read reached. When a request to the server fails in
     /// transport, the wait chooses again, leaving out the servers that failed during this wait while another choice
     /// exists, and goes on with the new server. An error answer of the server is an answer, not a failure of the
-    /// server. No request is added: the wait asks as often as it did.
+    /// server, except that, with the tip checks on, [`WAIT_ERROR_ANSWERS_LIMIT`] of them in a row count as one (status
+    /// note of 2026-11-21).
+    /// After a poll that does not end the wait the wait also leaves a server that is out of date (item 4) for an
+    /// up-to-date one, without counting it as failed; with the tip checks off no server is out of date. No request is
+    /// added: the wait asks as often as it did. Every change of server logs one INFO line.
     pub(crate) async fn wait_for_confirmations_on_one_server(
         &self,
         tx_hash: H256Json,
@@ -784,6 +898,9 @@ impl ElectrumClient {
     ) -> Result<(), String> {
         let mut failed: Vec<String> = Vec::new();
         let mut server = self.pool.choose_wait_server(&failed);
+        // The error answers of the polled server to the transaction request, in a row.
+        let mut error_answers = 0u32;
+        let tx_text = format!("{:?}", tx_hash);
         loop {
             if now_ms() / 1000 > wait_until {
                 return ERR!(
@@ -797,11 +914,16 @@ impl ElectrumClient {
                 error!("No Electrum server to poll for the transaction {:?}, retrying", tx_hash);
                 Timer::sleep(check_every as f64).await;
                 server = self.pool.choose_wait_server(&failed);
+                if let Some(next) = &server {
+                    self.pool
+                        .log_wait_server_change(&tx_text, None, next, "no server before");
+                }
                 continue;
             };
 
             match self.transaction_get_verbose_from(&addr, &tx_hash).compat().await {
                 Ok(t) => {
+                    error_answers = 0;
                     let tx_confirmations = if requires_notarization {
                         t.confirmations
                     } else {
@@ -817,9 +939,24 @@ impl ElectrumClient {
                     }
                 },
                 Err(e) => {
-                    if e.error.is_transport() {
-                        failed.push(addr);
+                    let failure = if e.error.is_transport() {
+                        Some("request failed")
+                    } else if self.pool.tip_checks_on() {
+                        error_answers += 1;
+                        (error_answers >= WAIT_ERROR_ANSWERS_LIMIT).then_some("three error answers in a row")
+                    } else {
+                        // With the tip checks off an error answer keeps the wait on its server (item 11).
+                        None
+                    };
+                    if let Some(reason) = failure {
+                        error_answers = 0;
+                        if !failed.contains(&addr) {
+                            failed.push(addr.clone());
+                        }
                         server = self.pool.choose_wait_server(&failed);
+                        if let Some(next) = server.as_ref().filter(|next| **next != addr) {
+                            self.pool.log_wait_server_change(&tx_text, Some(&addr), next, reason);
+                        }
                         // Another server is asked at once; with none left to choose, the wait goes on as before.
                         if server.as_ref().map_or(false, |next| !failed.contains(next)) {
                             continue;
@@ -840,8 +977,13 @@ impl ElectrumClient {
                             Err(e) => {
                                 error!("Error {} getting block number, retrying in 10 seconds", e);
                                 if e.error.is_transport() {
-                                    failed.push(addr);
+                                    failed.push(addr.clone());
                                     server = self.pool.choose_wait_server(&failed);
+                                    error_answers = 0;
+                                    if let Some(next) = server.as_ref().filter(|next| **next != addr) {
+                                        self.pool
+                                            .log_wait_server_change(&tx_text, Some(&addr), next, "request failed");
+                                    }
                                 }
                                 Timer::sleep(check_every as f64).await;
                                 continue;
@@ -853,6 +995,23 @@ impl ElectrumClient {
                         e, tx_hash
                     )
                 },
+            }
+
+            // The poll did not end the wait: leave the server when it is out of date and another is up to date.
+            let polled = server.clone().unwrap_or(addr);
+            if let Some(next) = self.pool.wait_server_after_out_of_date(&polled, &failed) {
+                self.pool
+                    .log_wait_server_change(&tx_text, Some(&polled), &next, "out of date");
+                // A server that failed earlier and is up to date again is back in the choice.
+                let was_failed = failed.contains(&next);
+                failed.retain(|failed_addr| *failed_addr != next);
+                server = Some(next);
+                error_answers = 0;
+                if was_failed {
+                    // Back on a server that failed: keep the pace of the polls.
+                    Timer::sleep(check_every as f64).await;
+                }
+                continue;
             }
 
             Timer::sleep(check_every as f64).await;
@@ -1010,6 +1169,36 @@ impl ElectrumClient {
         rpc_func!(self, "blockchain.scripthash.get_history", hash)
     }
 
+    /// `blockchain.scripthash.get_history` with the tip a history collector may judge the listing by: `Some(tip)`
+    /// only when the server that answered was up to date at that moment and the coin's servers did not disagree about
+    /// the chain (CRD ch.38 §38.5C, D38.5C.1 status note).
+    pub async fn scripthash_get_history_for_absence(
+        &self,
+        hash: &str,
+    ) -> Result<(Vec<ElectrumTxHistoryItem>, Option<u64>), JsonRpcError> {
+        let request = rpc_req!(self, "blockchain.scripthash.get_history", hash);
+        self.send_request_with_listing_tip(request).await
+    }
+
+    /// Sends `request` over the pool like [`rpc_func!`] does and returns, with the decoded answer, the tip by which
+    /// the answering server's listing may be judged (see [`PoolShared::listing_tip_of`]).
+    pub async fn send_request_with_listing_tip<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        request: JsonRpcRequest,
+    ) -> Result<(T, Option<u64>), JsonRpcError> {
+        let client_info = JsonRpcClient::client_info(self);
+        let budget = call_budget_of_caller(self.pool.timings.call_budget);
+        let routed = self
+            .pool
+            .route(JsonRpcRequestEnum::Single(request.clone()), budget)
+            .await;
+        let tip = routed
+            .as_ref()
+            .ok()
+            .and_then(|(addr, _)| self.pool.listing_tip_of(&addr.0));
+        process_transport_single_result(routed, client_info, request).map(|answer| (answer, tip))
+    }
+
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-scripthash-gethistory
     pub fn scripthash_get_balance(&self, hash: &str) -> RpcRes<ElectrumBalance> {
         let arc = self.clone();
@@ -1042,13 +1231,24 @@ impl ElectrumClient {
     /// A failure here is not fatal. The caller keeps its existing polling, so
     /// the effect of a lost subscription is added latency rather than a stale
     /// balance.
-    pub async fn subscribe_scripthash(&self, script_hash: String) -> Result<(), String> {
+    pub async fn subscribe_scripthash(&self, owner: ElectrumOwner, script_hash: String) -> Result<(), String> {
+        // A subscription this instance placed already is not placed twice (D38.6.4Q.1 status note, item 6).
+        if self
+            .lock_watched_script_hashes()
+            .get(&script_hash)
+            .is_some_and(|owners| owners.contains(&owner))
+        {
+            return Ok(());
+        }
         let epoch = self.pool.session_epoch();
         let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
             .compat()
             .await;
         res.map_err(|e| ERRL!("{}", e))?;
-        self.watched_script_hashes.lock().await.insert(script_hash);
+        self.lock_watched_script_hashes()
+            .entry(script_hash)
+            .or_default()
+            .insert(owner);
         // The connection that carried the subscription may have ended before the hash was remembered
         // (a call that had to open a connection of its own releases it when it is done).
         if self.pool.session_epoch() != epoch {
@@ -1061,7 +1261,7 @@ impl ElectrumClient {
     /// logged and skipped so one unusable server cannot stall the rest; `false` tells that some
     /// subscription could not be placed and the attempt is to be repeated.
     pub async fn resubscribe_watched_scripthashes(&self) -> bool {
-        let hashes: Vec<String> = self.watched_script_hashes.lock().await.iter().cloned().collect();
+        let hashes: Vec<String> = self.lock_watched_script_hashes().keys().cloned().collect();
         let mut all_placed = true;
         for script_hash in hashes {
             let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
@@ -1073,6 +1273,103 @@ impl ElectrumClient {
             }
         }
         all_placed
+    }
+
+    fn lock_watched_script_hashes(&self) -> std::sync::MutexGuard<'_, HashMap<String, HashSet<ElectrumOwner>>> {
+        self.watched_script_hashes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_watched_contract_events(&self) -> std::sync::MutexGuard<'_, Vec<([Json; 3], HashSet<ElectrumOwner>)>> {
+        self.watched_contract_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Removes `owner`, the instance that was disabled, from every subscription this client remembers, script-hash and
+    /// contract-event alike; a subscription that no other instance remembers is forgotten and is not placed again
+    /// after a reconnect (CRD ch.38 D38.6.4Q.1 status note, item 6). No request is sent to any server.
+    pub fn forget_owner(&self, owner: ElectrumOwner) {
+        self.lock_watched_script_hashes().retain(|_, owners| {
+            owners.remove(&owner);
+            !owners.is_empty()
+        });
+        self.lock_watched_contract_events().retain_mut(|(_, owners)| {
+            owners.remove(&owner);
+            !owners.is_empty()
+        });
+    }
+
+    /// The instances that remember the script-hash subscription of `script_hash`.
+    #[cfg(test)]
+    pub(crate) fn script_hash_owners(&self, script_hash: &str) -> Option<HashSet<ElectrumOwner>> {
+        self.lock_watched_script_hashes().get(script_hash).cloned()
+    }
+
+    /// The number of contract-event subscriptions this client remembers.
+    #[cfg(test)]
+    pub(crate) fn contract_event_subscriptions(&self) -> usize { self.lock_watched_contract_events().len() }
+
+    /// Asks the servers to notify this client when the contract event (`address`, `contract`, `topic`) is logged, and
+    /// remembers the subscription for `owner` (once the answer is in) so that it is placed again over a newly
+    /// maintained connection (CRD ch.38 D38.6.4Q.3 status note, item 1; R38.6.4h for the script-hash ones).
+    ///
+    /// A failure is the caller's to ignore: nothing here retries, and a subscription that failed is not remembered. A
+    /// subscription that `owner` placed already is not placed twice: no request is sent, and the answer is
+    /// `Json::Null` (D38.6.4Q.1 status note, item 6).
+    pub async fn subscribe_contract_event(
+        &self,
+        owner: ElectrumOwner,
+        address: Json,
+        contract: Json,
+        topic: String,
+    ) -> Result<Json, JsonRpcError> {
+        let entry = [address, contract, Json::String(topic)];
+        if self
+            .lock_watched_contract_events()
+            .iter()
+            .any(|(known, owners)| known == &entry && owners.contains(&owner))
+        {
+            return Ok(Json::Null);
+        }
+        let epoch = self.pool.session_epoch();
+        let answer: Json = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &entry[0], &entry[1], &entry[2])
+            .compat()
+            .await?;
+        {
+            let mut watched = self.lock_watched_contract_events();
+            match watched.iter_mut().find(|(known, _)| known == &entry) {
+                Some((_, owners)) => {
+                    owners.insert(owner);
+                },
+                None => watched.push((entry, HashSet::from([owner]))),
+            }
+        }
+        // The connection that carried the subscription may have ended before it was remembered.
+        if self.pool.session_epoch() != epoch {
+            self.pool.request_contract_resubscribe();
+        }
+        Ok(answer)
+    }
+
+    /// Places every remembered contract-event subscription again, once, over a maintained connection (D38.6.4Q.3
+    /// status note, items 1 and 2). An error answer, a refusal or a failure is logged and not repeated: the pool asks
+    /// for this once for each newly maintained session, and nothing here retries or fails anything else.
+    pub async fn resubscribe_watched_contract_events(&self) {
+        let events: Vec<[Json; 3]> = self
+            .lock_watched_contract_events()
+            .iter()
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        for [address, contract, topic] in events {
+            let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &address, &contract, &topic)
+                .compat()
+                .await;
+            if let Err(e) = res {
+                common::log::debug!("Could not place the contract-event subscription {} again: {}", topic, e);
+            }
+        }
     }
 
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-headers-subscribe
@@ -1398,7 +1695,9 @@ impl UtxoRpcClientOps for ElectrumClient {
             for item in history.iter() {
                 let transaction = try_s!(selfi.get_transaction_bytes(&item.tx_hash).compat().await);
 
-                let maybe_spend_tx: UtxoTx = try_s!(deserialize(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                let maybe_spend_tx: UtxoTx = try_s!(
+                    crate::utxo::utxo_common::read_utxo_tx(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e))
+                );
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
@@ -1510,7 +1809,8 @@ impl ElectrumClientImpl {
             list_unspent_concurrent_map: ConcurrentRequestMap::new(),
             get_balance_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
             list_unspent_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
-            watched_script_hashes: AsyncMutex::new(HashSet::new()),
+            watched_script_hashes: StdMutex::new(HashMap::new()),
+            watched_contract_events: StdMutex::new(Vec::new()),
         }
     }
 

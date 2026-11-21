@@ -67,6 +67,7 @@ fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) 
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -249,6 +250,9 @@ fn withdraw_eth_and_erc20() {
     let details = eth_coin
         .withdraw(WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             coin: "ETH".into(),
             from: None,
             to: recipient.into(),
@@ -279,6 +283,9 @@ fn withdraw_eth_and_erc20() {
     let details = erc20_coin
         .withdraw(WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             coin: "TEST".into(),
             from: None,
             to: recipient.into(),

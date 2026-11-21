@@ -50,7 +50,7 @@ KDF Reloaded is currently in **public beta** (the early roadmap is in [`ROADMAP.
 ## What it does
 
 - **Atomic swaps** between supported chains via Hash Time Locked Contracts (HTLCs) — no custodian, no proxy tokens, you keep your keys.
-- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos (wallet-only in this beta), TRON and Solana (cannot be activated in this beta), Zcash (sapling), Lightning Network (no orders or swaps yet), and others — see [`mm2src/coins/`](mm2src/coins/).
+- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos (wallet-only in this beta), TRON (TRX and TRC20 tokens; wallet-only: activation, HD wallet, withdrawals, and a transaction history with a TronGrid API key, no orders or swaps), Solana (cannot be activated in this beta), Zcash (sapling), Lightning Network (no orders or swaps yet), and others — see [`mm2src/coins/`](mm2src/coins/).
 - **Distributed orderbook** propagated over [libp2p](https://libp2p.io/) gossipsub.
 - **JSON-RPC API** consumable from CLI, scripts, or third-party GUIs.
 
@@ -113,6 +113,16 @@ Minimal example:
 > It defaults to `open` (GLEEC-compatible plaintext, byte-interchangeable with
 > GLEEC KDF); set it to `none` to disable session persistence. See
 > [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) for details.
+
+> **WalletConnect app name.** A wallet lists this node as `KDF Reloaded <identifier>`,
+> where the identifier is the first eight characters of the node's relay client key (the
+> one the connect log prints), so several nodes can be told apart. Set the optional
+> `walletconnect.app_name` in `MM2.json` to a non-empty text to use a name of your own.
+>
+> The relay client identity is persistent: the WalletConnect relay operator can link all
+> connections and sessions of a node across restarts and reconnects, whereas before each
+> connect had a fresh identity. This is the price of sessions that survive reconnects and
+> restarts.
 
 > **Memory allocator arenas (Linux).** On Linux with glibc the daemon limits the
 > memory allocator to two arenas at start-up, which removed the memory growth

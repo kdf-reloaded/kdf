@@ -1,6 +1,7 @@
 use crate::sign_common::{complete_tx, p2pkh_spend_with_signature};
 use crate::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParams};
-use crate::{refuse_sighash_suffix_for_hardware_wallet, TxProvider, UtxoSignTxError, UtxoSignTxResult};
+use crate::{refuse_sighash_suffix_for_hardware_wallet, refuse_transaction_version_for_hardware_wallet, TxProvider,
+            UtxoSignTxError, UtxoSignTxResult};
 use chain::{Transaction as UtxoTx, TransactionOutput};
 use common::log::debug;
 use crypto::trezor::utxo::{PrevTx, PrevTxInput, PrevTxOutput, TrezorInputScriptType, TrezorUtxoCoin, TxOutput,
@@ -25,6 +26,10 @@ impl<TxP: TxProvider + Send + Sync> TrezorTxSigner<TxP> {
     pub async fn sign_tx(self) -> UtxoSignTxResult<UtxoTx> {
         // CRD ch.61 R61.4.4: refuse before any message is built for or sent to the device.
         refuse_sighash_suffix_for_hardware_wallet(self.params.unsigned_tx.sighash_suffix)?;
+        refuse_transaction_version_for_hardware_wallet(
+            self.params.unsigned_tx.overwintered,
+            self.params.unsigned_tx.version,
+        )?;
         if let SignatureVersion::WitnessV0 = self.params.signature_version {
             return MmError::err(UtxoSignTxError::TrezorDoesntSupportP2WPKH);
         }

@@ -2027,7 +2027,9 @@ impl TakerSwap {
     /// after R30's wait; a refund already on chain ends the swap as refunded. `None` when neither is found,
     /// when the search or the secret extraction fails or the search takes longer than `timeout_secs` (the
     /// refund chain then goes on as before), and when the swap has already recorded a spend of the taker
-    /// payment (a resumed swap whose spend of the maker payment failed must not go round again).
+    /// payment (a resumed swap whose spend of the maker payment failed must not go round again). When the
+    /// look ends without a spend or a refund, an Electrum-backed taker coin is searched once more on every
+    /// usable server at the same time, within one bound of `timeout_secs` (status note of 2026-11-21).
     async fn refund_outcome_from_chain(
         &self,
         timeout_secs: f64,
@@ -2057,20 +2059,32 @@ impl TakerSwap {
             .timeout_secs(timeout_secs)
             .await;
         let found = match found {
-            Ok(Ok(found)) => found?,
-            Ok(Err(e)) => {
-                warn!(
-                    "Swap {}: could not look for a spend of the taker payment, going on with the refund: {}",
-                    self.uuid, e
-                );
-                return None;
-            },
-            Err(timeout) => {
-                warn!(
-                    "Swap {}: the look for a spend of the taker payment did not finish, going on with the refund: {}",
-                    self.uuid, timeout
-                );
-                return None;
+            Ok(Ok(Some(found))) => found,
+            other => {
+                match other {
+                    Ok(Err(e)) => warn!(
+                        "Swap {}: could not look for a spend of the taker payment: {}",
+                        self.uuid, e
+                    ),
+                    Err(timeout) => warn!(
+                        "Swap {}: the look for a spend of the taker payment did not finish: {}",
+                        self.uuid, timeout
+                    ),
+                    Ok(_) => (),
+                }
+                // CRD ch.51 R31a, status note of 2026-11-21: the look ended without a spend or a refund, so
+                // every server of an Electrum-backed taker coin is asked once, within one shared bound.
+                self.taker_coin
+                    .search_for_swap_tx_spend_my_on_every_server(
+                        taker_payment_lock as u32,
+                        my_taker_coin_htlc_pub.as_slice(),
+                        other_taker_coin_htlc_pub.as_slice(),
+                        &secret_hash,
+                        &taker_payment,
+                    )
+                    .timeout_secs(timeout_secs)
+                    .await
+                    .ok()??
             },
         };
 
@@ -5091,6 +5105,227 @@ mod taker_swap_tests {
         );
         assert_eq!(SENDS.load(Ordering::SeqCst), 0);
         assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// The other servers of an Electrum-backed taker coin (CRD ch.51 R31a, status note of 2026-11-21): the first
+    /// `quiet` asks find nothing, every later one finds `found`.
+    fn mock_other_servers(
+        quiet: usize,
+        found: fn() -> FoundSwapTxSpend,
+        asks: &'static std::sync::atomic::AtomicUsize,
+    ) {
+        TestCoin::search_for_swap_tx_spend_my_on_every_server.mock_safe(move |_, _, _, _, _, _| {
+            let ask = asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = if ask < quiet { None } else { Some(found()) };
+            MockResult::Return(Box::pin(futures::future::ready(answer)))
+        });
+    }
+
+    /// The single search of the coin ends without an answer: it fails, or finds nothing.
+    fn mock_single_search_without_an_answer(fails: bool, searches: &'static std::sync::atomic::AtomicUsize) {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(move |_, _, _, _, _, _, _, _| {
+            searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = if fails {
+                Err("the server answered an error".to_owned())
+            } else {
+                Ok(None)
+            };
+            MockResult::Return(Box::pin(futures::future::ready(answer)))
+        });
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Ok(MAKER_SECRET.to_vec())));
+    }
+
+    /// T34.1: a spend another server holds is found when the single search fails or finds nothing: the look on
+    /// entry emits the spend, no refund is built.
+    #[test]
+    fn r31a_the_look_on_entry_asks_every_server_when_the_search_has_no_answer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (fails, case) in [(true, "the search fails"), (false, "the search finds nothing")] {
+            static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+            static ASKS: AtomicUsize = AtomicUsize::new(0);
+            static GATES: AtomicUsize = AtomicUsize::new(0);
+            static SENDS: AtomicUsize = AtomicUsize::new(0);
+            for counter in [&SEARCHES, &ASKS, &GATES, &SENDS] {
+                counter.store(0, Ordering::SeqCst);
+            }
+            let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+            mock_single_search_without_an_answer(fails, &SEARCHES);
+            mock_other_servers(0, spent_by_the_maker, &ASKS);
+            mock_gate_open_counting(&GATES);
+            mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+            let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+            assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+            assert_eq!(SEARCHES.load(Ordering::SeqCst), 1, "{case}");
+            assert_eq!(ASKS.load(Ordering::SeqCst), 1, "{case}");
+            assert_eq!(
+                GATES.load(Ordering::SeqCst),
+                0,
+                "{case}: the refund gate is not reached"
+            );
+            assert_eq!(SENDS.load(Ordering::SeqCst), 0, "{case}: no refund is built");
+            assert_eq!(published_count(&mut published), 0, "{case}");
+        }
+    }
+
+    /// T34.1 (the bound): a single search that does not finish within its bound is followed by the search on
+    /// every server, with a bound of its own.
+    #[test]
+    fn r31a_a_single_search_that_does_not_finish_is_followed_by_the_search_on_every_server() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::pending::<
+                Result<Option<FoundSwapTxSpend>, String>,
+            >()))
+        });
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Ok(MAKER_SECRET.to_vec())));
+        mock_other_servers(0, spent_by_the_maker, &ASKS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+        let pacing = RefundPacing {
+            chain_look_timeout_secs: 0.05,
+            ..fast_pacing()
+        };
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(pacing)).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(ASKS.load(Ordering::SeqCst), 1);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+    }
+
+    /// T34.2: the same after a refund rejected for a terminal reason; the rejected refund is not published.
+    #[test]
+    fn r31a_the_look_after_a_rejected_refund_asks_every_server() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_single_search_without_an_answer(true, &SEARCHES);
+        // Nothing on entry; the spend is found by the look after the rejection.
+        mock_other_servers(1, spent_by_the_maker, &ASKS);
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2, "on entry and after the rejection");
+        assert_eq!(ASKS.load(Ordering::SeqCst), 2);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// T34.3: a refund of the taker payment found on another server ends the chain as refunded.
+    #[test]
+    fn r31a_a_refund_found_on_another_server_ends_the_swap_as_refunded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_single_search_without_an_answer(false, &SEARCHES);
+        mock_other_servers(0, already_refunded, &ASKS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// T34.4: when every server fails, does not answer within the shared bound or finds nothing, the chain
+    /// continues as R31 states: here a terminal rejection ends in the refund failure, and an accepted refund
+    /// goes through.
+    #[test]
+    fn r31a_when_no_server_finds_anything_the_chain_continues_as_before() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        // Nothing found anywhere.
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_single_search_without_an_answer(true, &SEARCHES);
+        mock_other_servers(usize::MAX, spent_by_the_maker, &ASKS);
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(ASKS.load(Ordering::SeqCst), 2, "on entry and after the rejection");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 0);
+
+        // The servers do not answer within the shared bound: the same, and the bound is the look's.
+        SENDS.store(0, Ordering::SeqCst);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        TestCoin::search_for_swap_tx_spend_my_on_every_server.mock_safe(|_, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::pending::<Option<FoundSwapTxSpend>>()))
+        });
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+        let pacing = RefundPacing {
+            chain_look_timeout_secs: 0.05,
+            ..fast_pacing()
+        };
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(pacing)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    /// T34.4 (a spend whose secret cannot be read): a spend found on another server whose secret cannot be read
+    /// leaves the chain as it was.
+    #[test]
+    fn r31a_a_spend_on_another_server_without_a_readable_secret_leaves_the_chain_as_it_was() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        mock_single_search_without_an_answer(false, &SEARCHES);
+        mock_other_servers(0, spent_by_the_maker, &ASKS);
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Err("no secret in the spend".to_owned())));
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    /// T34.5: a coin that is not Electrum-backed (the test coin keeps the default of the trait: no other
+    /// source) makes its single search only.
+    #[test]
+    fn r31a_a_coin_without_electrum_makes_its_single_search_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        mock_single_search_without_an_answer(true, &SEARCHES);
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            2,
+            "on entry and after the rejection, one search each"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
     }
 
     /// T39.5.f: `recover_funds_of_swap` before the gate opens reports "too early", names the chain time it

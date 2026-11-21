@@ -188,6 +188,10 @@ impl RpcTask for InitCreateAccountTask {
             MmCoinEnum::QtumCoin(qtum) => {
                 create_new_account_helper(&self.ctx, qtum, self.req.params, &self.created_account, task_handle).await
             },
+            // A TRON coin never creates an account (CRD ch.21 R21.10B.4): the task fails before any account is made.
+            MmCoinEnum::EthCoin(eth) if eth.is_tron_family() => MmError::err(HDWalletRpcError::Internal(
+                "TRON does not support creating HD accounts".to_owned(),
+            )),
             MmCoinEnum::EthCoin(eth) => {
                 create_new_account_helper(&self.ctx, eth, self.req.params, &self.created_account, task_handle).await
             },

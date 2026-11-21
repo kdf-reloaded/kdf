@@ -1,5 +1,6 @@
 use super::*;
-use crate::utxo::rpc_clients::{UtxoRpcError, UtxoRpcFut};
+use crate::utxo::rpc_clients::{ElectrumOwner, UtxoRpcError, UtxoRpcFut};
+use common::jsonrpc_client::JsonRpcError;
 use rpc::v1::types::H256;
 
 impl From<crate::eth::abi::AbiError> for UtxoRpcError {
@@ -282,8 +283,12 @@ pub trait Qrc20ElectrumOps {
     /// set, so a token transfer need not disturb the QTUM address's script hash
     /// and cannot be observed through a script-hash subscription.
     /// https://github.com/qtumproject/qtum-electrumx-server/blob/master/docs/qrc20-integration.md
+    ///
+    /// `owner` is the instance that asks: the client, which several instances of the QTUM family may share, remembers
+    /// the subscription for it (CRD ch.38 D38.6.4Q.1 status note, item 6).
     fn blockchain_contract_event_subscribe(
         &self,
+        owner: ElectrumOwner,
         address: &H160Json,
         contract_addr: &H160Json,
         topic: &str,
@@ -314,6 +319,7 @@ pub trait Qrc20NativeOps {
     ) -> UtxoRpcFut<Vec<TxReceipt>>;
 }
 
+#[cfg_attr(test, mockable)]
 impl Qrc20NativeOps for NativeClient {
     fn call_contract(&self, contract_addr: &H160Json, data: BytesJson) -> RpcRes<ContractCallResult> {
         rpc_func!(self, "callcontract", contract_addr, data)
@@ -349,6 +355,27 @@ impl Qrc20NativeOps for NativeClient {
     }
 }
 
+impl ElectrumClient {
+    /// `blockchain.contract.event.get_history` with the tip the history collector may judge the listing by (CRD
+    /// ch.38 §38.5C): `Some(tip)` only when the answering server was up to date at that moment and the coin's servers
+    /// did not disagree about the chain.
+    pub async fn blockchain_contract_event_get_history_for_absence(
+        &self,
+        address: &H160Json,
+        contract_addr: &H160Json,
+        topic: &str,
+    ) -> Result<(Vec<TxHistoryItem>, Option<u64>), JsonRpcError> {
+        let request = rpc_req!(
+            self,
+            "blockchain.contract.event.get_history",
+            address,
+            contract_addr,
+            topic
+        );
+        self.send_request_with_listing_tip(request).await
+    }
+}
+
 #[cfg_attr(test, mockable)]
 impl Qrc20ElectrumOps for ElectrumClient {
     fn blockchain_token_get_info(&self, token_addr: &H160Json) -> RpcRes<TokenInfo> {
@@ -377,16 +404,25 @@ impl Qrc20ElectrumOps for ElectrumClient {
 
     fn blockchain_contract_event_subscribe(
         &self,
+        owner: ElectrumOwner,
         address: &H160Json,
         contract_addr: &H160Json,
         topic: &str,
     ) -> RpcRes<Json> {
-        rpc_func!(
-            self,
-            "blockchain.contract.event.subscribe",
-            address,
-            contract_addr,
-            topic
+        // The subscription is remembered by the client once the answer is in, so that it is placed again after a
+        // reconnect (CRD ch.38 D38.6.4Q.3 status note).
+        let client = self.clone();
+        let address = json::to_value(address).expect("a hash serializes");
+        let contract_addr = json::to_value(contract_addr).expect("a hash serializes");
+        let topic = topic.to_owned();
+        Box::new(
+            async move {
+                client
+                    .subscribe_contract_event(owner, address, contract_addr, topic)
+                    .await
+            }
+            .boxed()
+            .compat(),
         )
     }
 

@@ -265,30 +265,52 @@ fn parsed_form(activation_params: Json) -> Result<Option<ActivationParamsForm>, 
 }
 
 #[test]
-fn the_wallet_connect_forms_are_parsed_and_refused_as_a_platform_coin_creation_error() {
-    // R36.1.3 forms 2 and 3 are not built yet (plan item 2): refused instead of activating with the local key.
+fn the_wallet_connect_forms_are_parsed_alike_and_a_missing_session_is_a_platform_coin_creation_error() {
+    // R36.1.3 forms 2 and 3 (the second is the public docs' example) parse to the same thing; the activation reads
+    // the session (R36.14.14 item 1): a topic that names no live session, and a build without a configured
+    // WalletConnect subsystem, fail as a platform-coin creation error, with no hot-key fallback and nothing
+    // registered. The nodes are never asked: the failure comes first (the node set is valid, the wallet is not).
     let ctx = ctx();
-    for activation_params in [
-        json!({ "type": "WalletConnect", "params": { "session_topic": "topic" } }),
-        json!({ "priv_key_policy": { "type": "WalletConnect", "data": "topic" } }),
-    ] {
-        assert_eq!(
-            parsed_form(activation_params.clone()),
-            Ok(Some(ActivationParamsForm::WalletConnect))
-        );
-        let wire = failure(&ctx, request(json!({ "activation_params": activation_params })));
-        assert_creation_error(&wire, PLATFORM);
-        // The refusal is the signing-policy one, not a node failure.
-        assert!(
-            wire.0["error_data"]["error"]
-                .as_str()
-                .unwrap()
-                .contains("activation_params"),
-            "{:?}",
-            wire.0
-        );
-    }
+    let form_2 = json!({ "type": "WalletConnect", "params": { "session_topic": "topic" } });
+    let form_3 = json!({ "priv_key_policy": { "type": "WalletConnect", "data": "topic" } });
+    let expected = Ok(Some(ActivationParamsForm::WalletConnect {
+        session_topic: "topic".to_owned(),
+    }));
+    assert_eq!(parsed_form(form_2.clone()), expected);
+    assert_eq!(
+        parsed_form(form_3.clone()),
+        expected,
+        "form 3 is treated exactly as form 2"
+    );
+
+    let wire_2 = failure(&ctx, request(json!({ "activation_params": form_2 })));
+    let wire_3 = failure(&ctx, request(json!({ "activation_params": form_3 })));
+    assert_creation_error(&wire_2, PLATFORM);
+    assert_creation_error(&wire_3, PLATFORM);
+    assert_eq!(wire_2.0, wire_3.0, "form 3 fails exactly as form 2");
+    assert!(
+        wire_2.0["error_data"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("WalletConnect"),
+        "{:?}",
+        wire_2.0
+    );
     assert_nothing_registered(&ctx, &[PLATFORM]);
+}
+
+#[test]
+fn a_malformed_wallet_connect_form_fails_request_parsing() {
+    // R36.1.3: a `session_topic` that is not a string, a missing one and a form-3 `data` that is not a string are
+    // request-parse failures.
+    for malformed in [
+        json!({ "type": "WalletConnect", "params": { "session_topic": 5 } }),
+        json!({ "type": "WalletConnect", "params": { "session_topic": null } }),
+        json!({ "priv_key_policy": { "type": "WalletConnect", "data": 5 } }),
+        json!({ "priv_key_policy": { "type": "WalletConnect" } }),
+    ] {
+        assert!(parsed_form(malformed.clone()).is_err(), "{malformed}");
+    }
 }
 
 #[test]
@@ -348,7 +370,6 @@ fn a_malformed_activation_params_fails_request_parsing() {
 #[test]
 fn an_absent_or_null_activation_params_is_not_refused() {
     assert_eq!(parsed_form(Json::Null), Ok(None));
-    assert!(reject_unsupported_activation_params(PLATFORM, &None).is_ok());
     // End to end the request proceeds to the nodes, so the error is the node failure, not the policy refusal.
     let ctx = ctx();
     let wire = failure(&ctx, request(json!({ "activation_params": null })));
@@ -856,6 +877,9 @@ fn an_inline_token_is_enabled_beside_the_platform_and_is_wallet_only() {
         Err(_) => panic!("the tokens must be enabled"),
     };
     assert_eq!(coins.len(), 2);
+    // Building the tokens writes no token record; the activation does at registration (CRD ch.43 D43.1F.2 (b)).
+    assert!(platform.activated_token_tickers().is_empty());
+    let built = coins.clone();
     let tokens: Vec<TendermintToken> = coins
         .into_iter()
         .map(|coin| match coin {
@@ -879,8 +903,13 @@ fn an_inline_token_is_enabled_beside_the_platform_and_is_wallet_only() {
     assert!(!configured.custom_token);
     assert_eq!(configured.denom.to_string(), "unyan");
 
+    for coin in &built {
+        platform.record_token(coin);
+    }
     let recorded = platform.activated_token_tickers();
     assert!(recorded.contains("CUSTOM-TOKEN") && recorded.contains("IRIS-NYAN"));
+    platform.forget_token_record("CUSTOM-TOKEN");
+    assert!(!platform.activated_token_tickers().contains("CUSTOM-TOKEN"));
 }
 
 #[test]
@@ -1353,4 +1382,150 @@ fn the_task_variant_under_an_hd_login_honors_iguana_priv_key() {
         status["details"]["address"],
         json!(hd_address_at(&ctx, "m/44'/118'/0'/0/0"))
     );
+}
+
+// ---------------------------------------------------------------------------
+// The dependent set and the unregister hook of `disable_coin` (CRD ch.43 R43.1E.5 items 1-2)
+// ---------------------------------------------------------------------------
+
+fn dependents(ctx: &MmArc) -> Vec<String> {
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    block_on(coins_ctx.dependents_of(PLATFORM)).into_iter().collect()
+}
+
+#[test]
+fn a_tendermint_token_joins_the_dependent_set_and_disable_coin_takes_it_out_with_its_platform_record() {
+    let ctx = ctx();
+    let node = balance_node("unyan", 5_000_000);
+    let platform = register_platform_on(&ctx, &node.url);
+    assert!(dependents(&ctx).is_empty());
+
+    match block_on(enable_tendermint_token(ctx.clone(), token_request("IRIS-NYAN"))) {
+        Ok(_) => {},
+        Err(e) => panic!("the configured token must activate: {:?}", token_wire(&e).0),
+    }
+    assert_eq!(dependents(&ctx), vec!["IRIS-NYAN".to_owned()]);
+    assert!(platform.activated_token_tickers().contains("IRIS-NYAN"));
+
+    block_on(coins::disable_coin(&ctx, "IRIS-NYAN")).expect("the token is disabled");
+    assert!(dependents(&ctx).is_empty(), "the token left the dependent set");
+    assert!(
+        platform.activated_token_tickers().is_empty(),
+        "the platform no longer records the token"
+    );
+    assert!(
+        block_on(coins::disable_coin(&ctx, "IRIS-NYAN")).is_err(),
+        "disabled already"
+    );
+    assert!(platform.activated_token_tickers().is_empty());
+}
+
+#[test]
+fn disabling_a_tendermint_platform_drops_its_dependent_set_and_its_token_stays_registered() {
+    let ctx = ctx();
+    let node = balance_node("unyan", 5_000_000);
+    register_platform_on(&ctx, &node.url);
+    block_on(enable_tendermint_token(ctx.clone(), token_request("IRIS-NYAN")))
+        .unwrap_or_else(|e| panic!("the configured token must activate: {:?}", token_wire(&e).0));
+
+    block_on(coins::disable_coin(&ctx, PLATFORM)).expect("the platform is disabled");
+
+    assert!(dependents(&ctx).is_empty(), "the platform's entry is gone");
+    assert!(block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_none());
+    assert!(
+        block_on(lp_coinfind(&ctx, "IRIS-NYAN")).unwrap().is_some(),
+        "the token stays registered, as before"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Re-activation of a passive platform (CRD ch.43 R43.1F.2, R43.1F.3, R43.1F.4)
+// ---------------------------------------------------------------------------
+
+/// A node that answers the health check, the ABCI info the answer asks for and every balance query.
+fn reactivation_node() -> crate::evm_test_support::MockEvmNode {
+    let value = base64_standard(&balance_response("unyan", 5_000_000));
+    spawn_node(move |method, _params| match method {
+        "health" => Reply::Result(json!({})),
+        "abci_info" => Reply::Result(json!({ "response": {
+            "data": "test", "version": "0", "app_version": "1", "last_block_height": "42",
+            "last_block_app_hash": ""
+        } })),
+        "abci_query" => Reply::Result(json!({ "response": { "code": 0, "value": value } })),
+        _ => Reply::RpcError,
+    })
+}
+
+/// The platform with the dependent token `IRIS-NYAN`, made passive as an unforced `disable_coin` does.
+fn passive_platform_with_token(ctx: &MmArc, node_url: &str) -> TendermintCoin {
+    let platform = register_platform_on(ctx, node_url);
+    if let Err(e) = block_on(enable_tendermint_token(ctx.clone(), token_request("IRIS-NYAN"))) {
+        panic!("the configured token must activate: {:?}", token_wire(&e).0);
+    }
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    assert!(
+        block_on(coins_ctx.make_passive(PLATFORM)),
+        "the platform has a dependent"
+    );
+    platform
+}
+
+#[test]
+fn a_passive_tendermint_platform_is_re_activated_and_keeps_its_token() {
+    let ctx = ctx();
+    let node = reactivation_node();
+    let platform = passive_platform_with_token(&ctx, &node.url);
+    assert!(block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_none());
+
+    // The request's nodes are never contacted (the default node is a port nothing listens on), `get_balances`
+    // shapes the answer, and the dependent named again is kept.
+    let result = block_on(enable_platform_coin_with_tokens::<TendermintCoin>(
+        ctx.clone(),
+        request(json!({ "get_balances": false, "tokens_params": [{ "ticker": "IRIS-NYAN" }] })),
+    ))
+    .unwrap_or_else(|e| panic!("the re-activation failed: {:?}", wire(&e)));
+    let result = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(result["current_block"], 42);
+    assert_eq!(result["tokens_tickers"], json!(["IRIS-NYAN"]));
+    assert!(result.get("balance").is_none());
+    assert!(
+        block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_some(),
+        "the platform is active"
+    );
+    assert_eq!(dependents(&ctx), vec!["IRIS-NYAN".to_owned()]);
+    assert!(platform.activated_token_tickers().contains("IRIS-NYAN"));
+}
+
+#[test]
+fn a_refused_tendermint_re_activation_leaves_the_platform_passive_and_the_record_unchanged() {
+    let ctx = ctx();
+    let node = reactivation_node();
+    let platform = passive_platform_with_token(&ctx, &node.url);
+
+    // A token whose configuration names another platform: refused before any token is built.
+    let (body, status) = failure(
+        &ctx,
+        request(json!({ "tokens_params": [{ "ticker": "IRIS-NYAN" }, { "ticker": "OSMO-TOKEN" }] })),
+    );
+    assert_eq!(body["error_type"], "PlatformCoinMismatch", "{:?}", body);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // A registered token that is no dependent of the platform.
+    block_on(
+        CoinsContext::from_ctx(&ctx)
+            .unwrap()
+            .add_coin(coins::TestCoin::new("OSMO-TOKEN").into()),
+    )
+    .unwrap();
+    let (body, status) = failure(&ctx, request(json!({ "tokens_params": [{ "ticker": "OSMO-TOKEN" }] })));
+    assert_eq!(body["error_type"], "TokenIsAlreadyActivated", "{:?}", body);
+    assert_eq!(body["error_data"], "OSMO-TOKEN");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert!(
+        block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_none(),
+        "the platform stays passive"
+    );
+    assert_eq!(dependents(&ctx), vec!["IRIS-NYAN".to_owned()]);
+    assert_eq!(platform.activated_token_tickers().len(), 1);
 }

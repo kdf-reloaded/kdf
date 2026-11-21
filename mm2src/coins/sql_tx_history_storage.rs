@@ -459,6 +459,72 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         .await
     }
 
+    async fn tx_hashes_and_heights(&self, for_coin: &str) -> Result<Vec<(String, u64)>, MmError<Self::Error>> {
+        let table_name = tx_history_table(for_coin);
+        validate_table_name(&table_name)?;
+        let sql = format!("SELECT tx_hash, block_height FROM {};", table_name);
+        let selfi = self.clone();
+
+        async_blocking(move || {
+            let conn = selfi.0.lock().unwrap();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query([])?;
+            let result = rows
+                .mapped(|row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)))
+                .collect::<Result<_, _>>()?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn get_txes_by_hash(
+        &self,
+        for_coin: &str,
+        tx_hash: &str,
+    ) -> Result<Vec<TransactionDetails>, MmError<Self::Error>> {
+        let table_name = tx_history_table(for_coin);
+        validate_table_name(&table_name)?;
+        let sql = format!("SELECT details_json FROM {} WHERE tx_hash = ?1;", table_name);
+        let params = [tx_hash.to_owned()];
+        let selfi = self.clone();
+
+        async_blocking(move || {
+            let conn = selfi.0.lock().unwrap();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query(params)?;
+            let result = rows.mapped(tx_details_from_row).collect::<Result<_, _>>()?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn remove_txes_by_hash(&self, for_coin: &str, tx_hashes: Vec<String>) -> Result<usize, MmError<Self::Error>> {
+        let table_name = tx_history_table(for_coin);
+        validate_table_name(&table_name)?;
+        let select_sql = format!("SELECT internal_id FROM {} WHERE tx_hash = ?1;", table_name);
+        let for_coin = for_coin.to_owned();
+        let selfi = self.clone();
+
+        async_blocking(move || {
+            let mut conn = selfi.0.lock().unwrap();
+            let sql_transaction = conn.transaction()?;
+            let mut removed = 0;
+            for tx_hash in tx_hashes {
+                let internal_ids: Vec<String> = {
+                    let mut stmt = sql_transaction.prepare(&select_sql)?;
+                    let rows = stmt.query([tx_hash])?;
+                    rows.mapped(|row| row.get::<_, String>(0)).collect::<Result<_, _>>()?
+                };
+                for internal_id in internal_ids {
+                    removed += delete_history_row(&sql_transaction, &for_coin, &internal_id)?;
+                }
+            }
+            sql_transaction.commit()?;
+            Ok(removed)
+        })
+        .await
+    }
+
     async fn get_tx_from_history(
         &self,
         for_coin: &str,

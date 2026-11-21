@@ -125,6 +125,8 @@ pub mod nft_maker_swap_v2;
 #[path = "lp_swap/taker_swap.rs"] mod taker_swap;
 #[path = "lp_swap/taker_swap_v2.rs"] pub mod taker_swap_v2;
 #[path = "lp_swap/trade_preimage.rs"] mod trade_preimage;
+#[path = "lp_swap/unfinished_swaps_view.rs"]
+pub(crate) mod unfinished_swaps_view;
 
 #[cfg(target_arch = "wasm32")]
 #[path = "lp_swap/swap_wasm_db.rs"]
@@ -682,6 +684,19 @@ pub async fn get_locked_amount_rpc(
         coin: req.coin,
         locked_amount: locked_amount.into(),
     })
+}
+
+/// Registers an active second-generation swap of the two coins, as the V2 swap state machines do, so that the tests of
+/// the checks that read the active swaps (`disable_coin`, CRD ch.43 R43.1E.3) can have a running swap.
+#[cfg(test)]
+pub(crate) fn add_active_swap_v2_for_test(ctx: &MmArc, uuid: Uuid, maker_coin: &str, taker_coin: &str) {
+    let info = ActiveSwapV2Info {
+        uuid,
+        maker_coin: maker_coin.to_owned(),
+        taker_coin: taker_coin.to_owned(),
+        swap_type: swap_v2_common::SwapV2Type::MakerV2,
+    };
+    SwapsContext::from_ctx(ctx).unwrap().add_active_swap_v2(info);
 }
 
 /// Get number of currently running swaps

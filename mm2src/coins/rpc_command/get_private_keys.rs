@@ -31,9 +31,11 @@ use crate::{coin_conf, lp_coinfind, CoinProtocol, MarketCoinOps};
 #[cfg(not(target_arch = "wasm32"))]
 use sapling::zip32::{ExtendedFullViewingKey, ExtendedSpendingKey};
 #[cfg(not(target_arch = "wasm32"))]
-use zcash_keys::encoding::{encode_extended_full_viewing_key, encode_extended_spending_key, encode_payment_address};
+use zcash_address::constants::mainnet as z_mainnet_address_constants;
 #[cfg(not(target_arch = "wasm32"))]
-use zcash_protocol::constants::mainnet as z_mainnet_constants;
+use zcash_keys::constants::mainnet as z_mainnet_constants;
+#[cfg(not(target_arch = "wasm32"))]
+use zcash_keys::encoding::{encode_extended_full_viewing_key, encode_extended_spending_key, encode_payment_address};
 
 /// Maximum number of HD addresses derivable in a single `get_private_keys`
 /// call (R-K4). A request whose `[start_index, end_index]` range exceeds this
@@ -679,7 +681,11 @@ fn derive_zhtlc(ticker: &str, secret: &Secp256k1Secret) -> Result<DerivedKey, Mm
     })?;
     let pubkey_compressed = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
 
-    let z_spending_key = ExtendedSpendingKey::master(secret.as_slice());
+    let z_spending_key =
+        ExtendedSpendingKey::master(secret.as_slice()).or_mm_err(|| GetPrivateKeysError::KeyDerivationFailed {
+            ticker: ticker.to_owned(),
+            reason: "the shielded master spending key is not valid for this secret".to_owned(),
+        })?;
     let priv_key =
         encode_extended_spending_key(z_mainnet_constants::HRP_SAPLING_EXTENDED_SPENDING_KEY, &z_spending_key);
     #[allow(deprecated)]
@@ -687,7 +693,10 @@ fn derive_zhtlc(ticker: &str, secret: &Secp256k1Secret) -> Result<DerivedKey, Mm
     let viewing_key =
         encode_extended_full_viewing_key(z_mainnet_constants::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY, &efvk);
     let (_, payment_address) = z_spending_key.default_address();
-    let address = encode_payment_address(z_mainnet_constants::HRP_SAPLING_PAYMENT_ADDRESS, &payment_address);
+    let address = encode_payment_address(
+        z_mainnet_address_constants::HRP_SAPLING_PAYMENT_ADDRESS,
+        &payment_address,
+    );
 
     Ok(DerivedKey {
         pubkey: hex::encode(pubkey_compressed),
@@ -1030,7 +1039,8 @@ mod tests {
             viewing_key
         );
         assert!(
-            z.address.starts_with(z_mainnet_constants::HRP_SAPLING_PAYMENT_ADDRESS),
+            z.address
+                .starts_with(z_mainnet_address_constants::HRP_SAPLING_PAYMENT_ADDRESS),
             "got {}",
             z.address
         );

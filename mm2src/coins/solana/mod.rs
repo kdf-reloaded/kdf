@@ -18,9 +18,9 @@ pub mod rpc_pool;
 
 pub(crate) use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, TradeFee, TransactionEnum,
                        WatcherOps};
-pub(crate) use crate::solana::rpc_client::{RpcError, RpcErrorKind, SolanaRpcClient, TokenAccountsFilter};
+pub(crate) use crate::solana::rpc_client::{RpcError, RpcErrorKind, SolanaRpcClient};
 pub(crate) use crate::solana::rpc_pool::SolanaRpcPool;
-pub(crate) use crate::solana::solana_common::{lamports_to_sol, PrepareTransferData, SufficientBalanceError};
+pub(crate) use crate::solana::solana_common::lamports_to_sol;
 pub(crate) use crate::solana::spl::SplTokenInfo;
 pub(crate) use crate::{BalanceError, BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend,
                        NegotiateSwapContractAddrErr, RawTransactionError, RawTransactionFut, RawTransactionRequest,
@@ -32,7 +32,7 @@ pub(crate) use async_trait::async_trait;
 pub(crate) use base58::ToBase58;
 pub(crate) use bigdecimal::BigDecimal;
 pub(crate) use bincode::{deserialize, serialize};
-pub(crate) use common::{async_blocking, mm_number::MmNumber, now_ms};
+pub(crate) use common::{mm_number::MmNumber, now_ms};
 pub(crate) use derive_more::Display;
 pub(crate) use futures::{FutureExt, TryFutureExt};
 pub(crate) use futures01::Future;
@@ -56,12 +56,21 @@ pub(crate) use std::{convert::TryFrom,
                      sync::Arc};
 
 pub mod solana_common;
-#[cfg(test)] mod solana_common_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_common_tests;
 mod solana_decode_tx_helpers;
-#[cfg(test)] mod solana_tests;
-#[cfg(test)] mod solana_wallet_answers_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_disable_coin_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_node_pool_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod solana_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_wallet_answers_tests;
+#[cfg(all(test, target_arch = "wasm32"))] mod solana_wasm_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod solana_withdraw_tests;
 pub mod spl;
-#[cfg(test)] mod spl_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod spl_tests;
 
 mod solana_helpers;
 mod solana_market_ops;

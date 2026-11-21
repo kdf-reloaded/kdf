@@ -14,10 +14,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **The shielded (ARRR, Pirate) wallet database is migrated irreversibly on the first start of this version, and an
+  older build cannot open the migrated database.** The Zcash libraries were upgraded (see "Changed"), and the new
+  wallet library changes the layout of the wallet database. On the first activation of a shielded coin the node
+  writes a consistent, checked backup named `<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak` next to the wallet
+  database, migrates a copy of it, and replaces the original only when the result checks out. If the migration
+  fails, the original is set aside as `.upgrade-failed.<ms>.bak` and the wallet is scanned again from the chain.
+  - *Upgrade risk:* after the migration an older KDF Reloaded build cannot read the wallet database. The node
+    needs free disk space for two copies of the database plus 16 MiB and refuses to activate the coin, without
+    changing anything, when it is short of it.
+  - *Going back to an older build:* stop the node, copy the `.pre-upgrade.<ms>.bak` file over
+    `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal` and `<TICKER>_RELOADED_WALLET.db-shm` if
+    they exist, and start the older build. Anything the wallet recorded after the upgrade is not in the backup; the
+    older build scans it again. A wallet of another key (`<TICKER>_RELOADED_WALLET.<fingerprint>.db`, made by a
+    development build) has its own backup named after that file and is restored the same way. Keep the backup until
+    you are sure you stay on this version
+    (`shielded_db_upgrade_backups` in `MM2.json` sets how many backups the node keeps; the default is 1).
+  - *Before you upgrade:* make your own copy of the wallet database file and of the seed or passphrase as for any
+    upgrade; the steps under "Coins that are no longer visible after an upgrade" below apply if a coin is no longer
+    shown afterwards.
+  Detail: PR #411; CRD ch.39 R39.8.0ba, R39.8.0bc and the status note of 2026-11-18; RELOADED_VS_GLEEC.md.
 - **Under an HD login, `priv_key_policy: IguanaPrivKey` now selects the node's single internal key for Tendermint
-  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia and Lightning.** Until now these families ignored the
-  value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed single-address HD key, and BCH
-  with tokens and Lightning the key derived from the passphrase. A request that asks for `IguanaPrivKey` now gets a
+  coins, EVM coins and their tokens, BCH with its SLP tokens, Sia, Lightning and shielded coins such as ARRR.** Until
+  now these families ignored the value: Tendermint and EVM coins used their HD key at `path_to_address`, Sia its fixed
+  single-address HD key, BCH with tokens and Lightning the key derived from the passphrase, and shielded coins the key
+  the HD login derives (at `z_derivation_path` and `account`). A request that asks for `IguanaPrivKey` now gets a
   different address or Lightning identity.
   - *Upgrade risk:* if your activation requests already contain `IguanaPrivKey`, the address or Lightning identity of
     those coins changes after this upgrade, although you changed nothing. Follow the steps under "Coins that are no
@@ -30,6 +51,65 @@ or undo, and every change that needs a step from you.
     `IguanaPrivKey`.
   - *Sia and Lightning:* they now read `priv_key_policy`. A hardware value or an unknown value fails the request,
     where it used to be ignored.
+  - *Shielded coins (ARRR):* under an HD login, `IguanaPrivKey` now activates the coin with the internal key, for the
+    shielded address and the transparent key, and with a wallet database of its own; the HD wallet stays in its own
+    file with its scan state, and the two never mix. If your ARRR activation requests already contain `IguanaPrivKey`,
+    the address changes after this upgrade and the balance of the HD wallet is not shown. To keep the HD wallet, leave
+    `priv_key_policy` out or send `ContextPrivKey`. If coins are not visible after the upgrade, read "Coins that are
+    no longer visible after an upgrade" below and start the previous version again before you move or spend
+    anything. A hardware value fails the request, where it used to be ignored.
+- **ZEC sends need the coins entry with `"txversion": 5` and `"consensus_branch_id": "77190ad9"`** (the branch id is
+  accepted with or without `0x`). Since the Zcash network upgrade NU7 the network refuses version-4 transactions. This
+  release builds version-5 ZEC transactions when the ZEC entry says `txversion` 5; with the old entry (`txversion` 4) every
+  ZEC send is still refused by the network. With either entry, a lab
+  test of 0.4.0-beta.1 and of the development build before this change activated ZEC and showed its balance, and the
+  network refused the ZEC withdrawal it sent (version-4 entry: "not supported by the network upgrade Nu7"; version-5
+  entry: an invalid consensus branch id).
+  - *Activation:* a Zcash-family (`overwintered`) entry whose `txversion` is not 4 or 5, and a version-5 entry without
+    `consensus_branch_id`, are now refused with an error that names the field.
+
+- **WalletConnect sessions paired with an earlier version must be paired again.** The node now keeps one relay
+  identity across reconnects and restarts. Sessions made by an earlier version were made under a different identity,
+  so the relay refuses requests on them after the upgrade: remove them in the wallet and pair again.
+  - *Browser (WASM) builds:* the WalletConnect store in the browser is upgraded to a new format at the first start.
+    An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
+    in the browser first, then pair again.
+- **`disable_coin` of a platform coin that has active tokens no longer removes it.** The legacy `disable_coin`
+  now makes such a platform coin passive and answers `passivized: true`: its tokens stay active, and every
+  method that needs an active coin answers as if the platform were not activated. Before, the call removed the
+  platform and left its tokens registered. A script or wallet that disabled a platform to remove it, then
+  activated it again, now finds it still registered, and its `enable` or `electrum` is refused as already
+  activated.
+  - *What to do:* to remove the platform and its tokens, send `"force_disable": true`.
+  - *Versioned form:* the `mmrpc: "2.0"` `disable_coin` does not change. It neither makes a platform passive nor
+    reads `force_disable`: it removes the platform, and its tokens stay registered.
+  - *Activating it again:* `enable_eth_with_tokens` and the other platform-with-tokens methods activate a passive
+    platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
+    Ending a removed coin's background work is still to come.
+  - Detail: PR #424; CRD ch.43 §43.1E and §43.1F.
+- **A platform-with-tokens activation that names a token registered for another platform is now refused.**
+  Before, `enable_eth_with_tokens`, `enable_bch_with_tokens`, `enable_tendermint_with_assets`,
+  `experimental::enable_solana_with_assets` and the task forms replaced a registered token of the same ticker by a new
+  one built from the request. Now a token that is registered for this same platform is kept as it is and joins the
+  platform again, for example after the versioned `disable_coin` of the platform or after a token was activated by
+  the legacy `enable`; the request's settings for it are not applied. A token registered for another platform is
+  refused with `TokenIsAlreadyActivated` (HTTP 400) before anything is built.
+  - *What to do:* disable the token first, leave it out of the request, or set `reactivation_registered_token` to
+    `"keep"` in `MM2.json` (see "Added" below).
+  - Detail: PR #432; CRD ch.43 §43.1F R43.1F.4.
+
+- **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
+  handler produced them. A client that decoded those entities itself to get the original text must stop doing so,
+  or it will now change text that really contains such a sequence.
+  - *What you see:* URLs with query strings, memos, error texts and labels in answers arrive with their plain
+    characters.
+  - Detail: PR #421; CRD ch.55 status note of 2026-11-18.
+- **Transaction history now drops transactions that are no longer on the chain, and shows a moved transaction at its
+  new height.** This applies to UTXO coins, Qtum, QRC20 tokens, BCH and SLP. After the upgrade, a stored history row
+  whose transaction the coin's servers no longer list disappears, once two server listings at least one block apart
+  confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
+  servers now report at another height shows that height and its block's time.
+  - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
 
 - **A Kerrigan (KRGN) coin entry needs `"chain_variant": "KRGN"` in its `protocol` object.** Without it, the
   coin's Electrum headers cannot be read, so its median block time is almost always unknown, and claims and refunds
@@ -64,9 +144,43 @@ the previous version used. The safe way:
   servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
   on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
   Detail: PR #348; CRD ch.45 §45.6C.
+- **A setting that keeps a registered token named in a platform-with-tokens activation.** The `MM2.json` member
+  `reactivation_registered_token` is `"refuse"` (default, also when absent or `null`) or `"keep"`. With `"keep"`, a token that is already
+  registered for another platform and is named in `enable_eth_with_tokens` or another platform-with-tokens method is
+  kept silently and joins the platform, as in GLEEC KDF; a token whose coin configuration names another platform is
+  still refused with `PlatformCoinMismatch`. With `"refuse"` it is refused with `TokenIsAlreadyActivated`. Any other
+  value stops the node at start with an error that names the member. Detail: PR #435; CRD ch.43 §43.1F D43.1F.1.
 
 #### RPC interface
 
+- **The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized`, and takes
+  `force_disable`.** A platform coin (an EVM, BCH, Tendermint, Solana or standard UTXO coin) that has at least one
+  active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens
+  activation, is not removed by `disable_coin`. The call cancels the platform's own orders, keeps the platform
+  registered but passive, and answers `{"coin", "cancelled_orders", "passivized": true}`. A passive platform is
+  listed by `get_enabled_coins`, its tokens stay active (a TRC20 token's `withdraw`, HD methods and GasFree address
+  included), and its history collection goes on, TRON's included; every other method answers as if it were not
+  activated, and a second `disable_coin` for it is refused like one for an unknown coin.
+  With `"force_disable": true` the call removes the platform and all its tokens and answers `passivized: false`;
+  unlike in GLEEC KDF it first checks the platform and every token, and refuses the whole call if any of them has a
+  running swap or an order that is being matched. Every other successful call now also answers `passivized: false`.
+  Only the JSON value `true` forces. A node restart makes every coin inactive, as before. Detail: PR #424; CRD ch.43 §43.1E
+  and §43.1F.
+- **A passive platform coin is activated again by the platform-with-tokens methods.** `enable_eth_with_tokens`,
+  `enable_bch_with_tokens`, `enable_tendermint_with_assets`, `experimental::enable_solana_with_assets` and the task
+  forms `task::enable_eth::init` and `task::enable_tendermint::init`, given the ticker of a passive platform of their
+  own family, make it active again with the instance it already has. The request's nodes, signing policy, swap-contract
+  settings, required confirmations and `tx_history` are not applied, and no history collection is started (a
+  platform first activated without `tx_history` gets none until it is removed and activated again);
+  `get_balances` and, for an HD wallet, the address-scan settings and `path_to_address` shape the answer. The requested
+  tokens are activated, and the answer lists every token the platform was activated with and not disabled since, plus
+  the request's tokens. An active platform, and a passive platform of another family, still answer
+  `PlatformIsAlreadyActivated`. A refused request leaves the platform passive and its token list as it was. Detail: PR
+  #432; CRD ch.43 §43.1F R43.1F.2 to R43.1F.5.
+- **An EVM platform's NFT chain counts as its dependent.** An NFT chain activated by `enable_nft`, or inline by
+  `nft_req`, now keeps its platform from being removed by an unforced `disable_coin`: a platform whose only dependent
+  is its NFT chain becomes passive, and a forced `disable_coin` deactivates the NFT chain with the platform's tokens. A
+  re-activation without `nft_req` keeps the NFT chain. Detail: PR #432; CRD ch.43 R43.1F.8.
 - **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
   members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
@@ -100,7 +214,39 @@ the previous version used. The safe way:
   `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
   purpose, and the test-only `sim_panic`. Detail: PR #387; CRD ch.43 §43.1R.
 
+#### Shielded coins
+
+- **ARRR and the other shielded coins accept `priv_key_policy`, and each key gets a wallet of its own.**
+  Under an HD login, `IguanaPrivKey` activates the shielded coin with the node's single internal key; leaving
+  the member out keeps the HD key. The shielded balance and history are per key and per `account`: switching
+  the policy or the `account` opens the other wallet instead of failing, and switching back reopens the first
+  one with its scan state, without a rescan. The existing wallet file keeps the name it has and keeps the key
+  it already holds; another key's wallet is stored in files whose names carry a short fingerprint of that key.
+  Amounts a swap step pays or receives appear in the account that was active when that step ran; activate that
+  account to see them. The coin is refused with a message that names the swaps and says what to do, in two
+  cases: when swaps of that coin that are not finished were started with another key (activate with the key they
+  were started with, let them finish or refund, then switch), and when a wallet database of the coin cannot be
+  read while a swap still has to send its payment or fee. Changing `account` alone is allowed.
+  Detail: PR #414; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
+
 #### Solana coins
+
+- **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
+  entries in both forms and route `enable_solana_with_tokens`, `enable_spl` and the two
+  `experimental::` methods as native builds do, with the same node pool. While Solana is switched
+  off they answer the same refusal as native builds instead of an unknown method. A Solana coin
+  cannot be traded in browser builds either. Detail: PR #430; CRD ch.40 R40.1.1, T40.1.
+
+- **The Solana activation methods of GLEEC KDF are routed.** `experimental::enable_solana_with_assets`
+  activates a Solana platform with its tokens and `experimental::enable_solana_token` a single SPL
+  token, with the requests, results and errors GLEEC KDF uses, in native builds. They share the
+  activation of `enable_solana_with_tokens` and `enable_spl`: a platform activated through either
+  method takes tokens through either token method, and `disable_coin` treats both the same. A token
+  can also be activated from a `protocol` given in the request; such a token is wallet-only. A coin
+  activated through these methods sends no commitment level, so the node's default applies.
+  `enable_solana_with_tokens` now also refuses an inline token whose platform is another coin
+  (`PlatformCoinMismatch`). Solana stays switched off in this build. Detail: PR #426; CRD ch.40
+  §40.2, §40.3, R40.3A.3.
 
 - **Solana activates under an HD login, at a path the request chooses.** Under an HD login the
   Solana key is now derived from the seed phrase at `m/44'/501'/N'/0'` by default, or at
@@ -122,6 +268,23 @@ the previous version used. The safe way:
 
 #### TRON coins
 
+- **TRON is back, as a wallet-only coin family: TRX and TRC20 tokens can be activated and used as a wallet, and
+  cannot be traded.** 0.4.0 refused every TRON activation. From this version a TRX coin and its TRC20 tokens
+  activate through `enable_eth_with_tokens`, the `task::enable_eth::*` methods, `enable_erc20` and the
+  `task::enable_erc20::*` methods, the way GLEEC KDF serves TRON, and through the legacy `enable` and `electrum`
+  methods, which is a Reloaded extension. A TRON wallet covers balances and addresses, an HD wallet under a
+  global-HD login, withdrawals with their real fee (TRC20 amounts of any size; a transfer the token contract
+  refuses is not signed), and a transaction history when a TronGrid API key is set; the items below describe each.
+  *Swaps stay off.* Reloaded has no TRON swap, so every TRX and TRC20 coin counts as wallet-only, whatever its
+  coins-file entry says: `setprice`, `buy`, `sell` and `start_swap` refuse it with the usual "… is wallet only"
+  answer, as GLEEC KDF does for a coin configured `"wallet_only": true` (every published TRON entry is), a TRON coin
+  declines to match, an order with a TRON coin saved earlier is cancelled at startup with a line in the log, and an
+  unfinished saved swap that names a TRON coin is not resumed at startup (its record is kept). For a TRON entry that
+  does not say `"wallet_only": true`, GLEEC KDF refuses the order at a later check; the answer has the same form, so
+  no setting exists for this. Gasless TRC20 transfers through GasFree are signed but not submitted yet: a GasFree
+  provider can be configured, the GasFree address is shown and a gasless withdraw returns a signed authorization
+  (items below). Detail: PR #451; CRD
+  ch.21 D6, R-D1, R21.10B.9, R21.B3 and their status notes of 2026-11-20; ch.55 D55.5.
 - **The TRON node client gives each node a time limit and fails over when a node answers badly.** A node
   that does not answer within 10 seconds is skipped, and so is a node that answers with an error status
   (a rate limit included), with something that is not the expected JSON, or with the node's own error form;
@@ -132,8 +295,8 @@ the previous version used. The safe way:
   and `https` URLs. A signed transaction that a node rejects with any other code ends the request with that code. An entry of the
   TRON `urls` list can now be an object `{"url": "...", "headers": {...}}` whose headers go to that node
   only, and the new `MM2.json` key `tron_api_key` is sent as the `TRON-PRO-API-KEY` header to TronGrid
-  hosts over HTTPS only. Header values and the key are never logged or shown. TRON stays switched off in this build,
-  so none of this can be used yet. Detail: PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
+  hosts over HTTPS only. Header values and the key are never logged or shown. Detail: PR #394; CRD ch.21 §21.9 R-N3
+  to R-N9.
 - **TRON has an activation route on the standard platform-with-tokens methods.** `enable_eth_with_tokens`,
   `task::enable_eth::init` and its status, user-action and cancel calls accept a TRX platform with its TRC20
   tokens, and `enable_erc20` and `task::enable_erc20::init` accept a TRC20 token, the way GLEEC KDF serves TRON.
@@ -142,12 +305,118 @@ the previous version used. The safe way:
   unparsable URL or a scheme other than `http` and `https` with `InvalidPayload`, before any node is asked.
   The result lists the balances at the base58check address, with the head block from the TRON node. A TRC20 token
   whose config has no `decimals` reads them from the contract, on both routes. The Trezor, WalletConnect and MetaMask
-  policies are refused at activation, and so is a global-HD login for now, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key (the other HD forms wait for TRON HD wallets, in a later change).
+  policies are refused at activation.
   The legacy `enable` and `electrum` methods keep activating TRON as an extension. A key in the query string of a
   TRON node URL now works: `https://h/x?key=1` is asked as `https://h/x/wallet/getaccount?key=1`.
-  `task::withdraw` takes TRX and TRC20 coins. **TRON stays switched off in this build**, so every route still
-  answers "TRON support is not available in this build" and none of this can be used yet. Detail: PR #405; CRD
-  ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5; ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+  `task::withdraw` takes TRX and TRC20 coins. Detail: PR #405; CRD ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5;
+  ch.35 R35.1.1; ch.55 D55.5; ch.49 R49.9.
+- **TRON has an HD wallet under a global-HD login.** `enable_eth_with_tokens` and `task::enable_eth::init` derive the
+  TRX address under the `derivation_path` of the coin config (coin type 195, `m/44'/195'`) with `path_to_address`,
+  `gap_limit`, `scan_policy` and `min_addresses_number`, the way every EVM platform does, for the default policy and for
+  `ContextPrivKey`; a config without `derivation_path` is refused with `InvalidPayload`. `IguanaPrivKey` keeps the node's
+  single internal key. The result lists the accounts with base58check addresses, their derivation paths and the balances
+  of TRX and the enabled TRC20 tokens. `get_new_address`, `account_balance`, `task::scan_for_new_addresses::init` and
+  `task::account_balance::init` work for TRX and TRC20 tickers. Asked for TRX,
+  each balance map covers TRX and the enabled TRC20 tokens; asked for a TRC20 ticker, that token only, as for an ERC-20
+  ticker. For either ticker an address counts as used when the chain has created its account or an enabled TRC20 token
+  has a balance there. For a TRC20 ticker GLEEC KDF looks at the account only; receiving a TRC20 token does not create
+  the account, so Reloaded also looks at the token balances and finds an address that holds only a token.
+  `task::create_new_account::init` fails with `Internal` for every TRON coin. `withdraw` and `task::withdraw` take an HD
+  `from` for TRX and TRC20 and sign with the key of that path, and `show_priv_key` answers the key of the activated
+  address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, as an EVM ERC-20
+  withdraw also does since PR #438. A TRON coin on a single key now refuses `from` with `UnexpectedFromAddress`, as an EVM coin
+  does; it was ignored before. The legacy `enable` method keeps the node's internal key under a global-HD login, as the
+  EVM and UTXO legacy routes do in Reloaded, so its TRON address differs from the one the mmrpc 2.0 methods give for the
+  same seed.
+  Detail: PR #428; CRD ch.21 R-A2, R21.10B.4, R21.10B.5, R21.10B.8, T21.10B.8.
+- **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.** Its
+  `to_address_format` is `{"format": "base58"}` or `{"format": "hex"}`, `from` may also be `0x41...`, and an EVM `0x`
+  address or an EVM format value is refused; GLEEC KDF answers the EVM `0x` form here. `validateaddress` and
+  `get_my_address` already answered as the CRD states. Detail: PR #412; CRD ch.21 R21.10B.8, D21.10B.2.
+- **A TRON withdrawal works out its real fee, takes it into account in the amount, and fails instead of guessing.**
+  The fee of a TRX or TRC20 withdrawal is now estimated from the real size of the transaction, the sender's free and
+  staked bandwidth and energy, and the chain's current prices. Bandwidth follows the TRON node's own rule: a
+  transaction is paid from the staked bandwidth as a whole, or from the free bandwidth as a whole, or all of it is
+  paid in TRX; the two are never added up, so the estimate is never below what the node charges. Sending TRX to an
+  address the chain has not seen adds the account-creation fee; a TRC20 transfer never does. `max: true` for TRX now
+  sends the balance less the fee (it used to send the whole balance, which the network refused), a zero balance
+  answers `ZeroBalanceToWithdrawMax`, a balance that does not exceed the fee answers `AmountTooLow`, and a TRX amount
+  plus fee above the balance answers `NotSufficientBalance` with the sum. A TRC20 withdrawal whose sender does not
+  hold enough TRX for the fee answers `NotSufficientPlatformBalanceForFee`. If the node cannot be asked for the
+  resources, the prices or the energy of a token transfer, the withdrawal fails with `Transport`; it no longer shows
+  made-up figures or leaves the fee out.
+  The fee limit of a TRC20 transfer is the cost of the energy the transfer needs plus 20%, rounded up, and at most
+  100 TRX; it was a fixed 100 TRX. The fee limit is the most the token transfer's contract call can cost. A transfer
+  whose energy alone would cost more than 100 TRX is refused before anything is signed, with both figures in the
+  error.
+  The members of the TRON fee details changed to the documented ones: `coin`, `bandwidth_used`, `energy_used`,
+  `bandwidth_fee`, `energy_fee`, `total_fee` and, when an account is created, `account_creation_fee`, with the fees as
+  decimal amounts in TRX, as GLEEC KDF reports them. The earlier members in SUN (`total_fee_sun`, `bandwidth_fee_sun`,
+  `energy_fee_sun`, `activation_fee_sun`) are gone. `total_fee` is the expected charge. `spent_by_me` includes the fee
+  for TRX. A `memo` is refused with `UnsupportedError`, and the new optional request member `expiration_seconds` sets
+  how long the transaction stays valid (60 seconds by default); other coins ignore it. An HD `from` is honored
+  throughout: every balance and resource is read for that address.
+  Detail: PR #437; CRD ch.21 R21.10B.7, D21.10B.1 and their status notes of 2026-11-19; RELOADED_VS_GLEEC.md.
+- **A TRC20 withdrawal can send any amount the token balance holds.** The amount of a TRC20 transfer is now encoded
+  as a 256-bit value, so a token's whole balance can be sent whatever its decimals; a token of 18 decimals could send
+  at most about 18.4 whole tokens per withdrawal, and a larger amount answered `InternalError`. Transfers of smaller
+  amounts are built exactly as before. Detail: PR #442; CRD ch.21, the status note of 2026-11-20 after R21.10B.7.
+- **A TRC20 withdrawal the token contract refuses is no longer signed.** Before a TRC20 transfer is built, the TRON
+  node runs it as a trial to learn its energy. When that trial shows that the token contract would refuse the
+  transfer (a frozen or blacklisted address, a paused token, a balance that changed in the meantime), the withdrawal
+  now fails with `UnsupportedError` and the text "the token contract refused this transfer (its dry run reverted)",
+  followed by the node's reason. It used to return a signed transaction with a fee estimate, and broadcasting it
+  would have burned the fee without moving any token. Nothing is signed, and no other node is asked, because the
+  refusal is the contract's and not the node's. GLEEC KDF returns the signed transaction in this case.
+  The fee estimate of a TRC20 withdrawal counts all of the transfer's energy as the sender's. Some token contracts
+  let their deployer pay part of the energy; for such a token the estimate, and the TRX the withdrawal asks the
+  sender to hold, can be higher than what the chain then charges. Detail: PR #450; CRD ch.21 R21.10B.10 to R21.10B.13
+  and the status note of 2026-11-20 after T21.10B.18.
+- **TRON coins have a transaction history when a TronGrid API key is set.** With `tx_history: true` in the
+  activation request and a TronGrid node that has an API key (the node's own `TRON-PRO-API-KEY` header, or the
+  `MM2.json` key `tron_api_key`), TRX and TRC20 coins list their transactions through `my_tx_history`, in both the
+  legacy and the `mmrpc: "2.0"` form. The rows come from TronGrid's account listings, and those requests go to keyed
+  TronGrid hosts over HTTPS only. Addresses are shown in the form that starts with `T`. Under an HD wallet the history
+  covers every known address, and a transfer between two own addresses is one row. A TRX row carries the amount and
+  the fee; a TRC20 row carries the token amount, with the block and the TRX fee read once from a node; an own token
+  transfer also shows as a fee-only row of TRX, so nothing is counted twice. The fee details have the shape of a
+  withdraw result. Only confirmed transactions are listed and a chain reorganization is not followed; a TRC20 row has
+  an empty `tx_hex`; amounts moved by staking, TRC10 assets and internal transactions are not shown. Without a key
+  nothing changes: the legacy method answers an empty list with `NotEnabled` and the versioned one `NotSupportedFor`,
+  as GLEEC KDF does. GLEEC KDF has no TRON history and ignores `tx_history` for TRON. The key is never logged or
+  shown. In a browser build only the legacy method answers, and the keyed history has not been checked in a browser.
+  Detail: PR #440; CRD ch.21 §21.10C.
+- **Support code for gasless TRC20 transfers through GasFree was added; no transfer is submitted with it yet.** The
+  code derives a user's GasFree custody address and checks it against the GasFree contract, prepares and signs a
+  transfer authorization, and reads account and fee data from a GasFree provider. The two items below use it: the
+  address part in the reports, and the rest in the sign-only gasless withdraw. Detail: PR #433; CRD ch.63 §63.4 to
+  §63.7, R29.
+- **A GasFree provider can be configured when TRON is activated, and the balance answers show the GasFree deposit
+  address.** The platform activation takes a `tron_gasless_provider` object (the provider's URL as scheme and host,
+  its API key and secret, and the provider's address), and a TRC20 token activation takes a `gasless` block with an
+  optional fee cap. A request with these members on a coin that is not a TRON coin, a provider URL with a path, or a
+  fee cap the token cannot express is refused. With a provider configured, `my_balance`, the activation results and
+  the HD address methods show `gasfree_address` next to each address: the address to send a token to before it can be
+  moved without TRX. The address is checked against the GasFree contract first and is left out if the contract
+  disagrees. The API key and secret are never logged or shown. Both can be used now that TRON is switched on: the
+  provider is configured and the GasFree address is reported. **A gasless transfer is signed but not submitted yet**
+  (the next item), so this build alone cannot move a token that sits on the GasFree address. Detail: PR #441; CRD
+  ch.63 §63.3.1 to §63.3.3, R18, R29.
+- **A TRC20 token can be withdrawn without TRX through a GasFree provider; the result is a signed authorization that
+  is not submitted yet.** The withdraw request takes `fee_method` (`native`, `gasless` or `auto`) and a `gasless`
+  object (`max_fee`, `deadline_seconds`, `fallback_to_native`). With `gasless`, the fee is paid in the token from the
+  GasFree address, and the answer holds the signed authorization and the fee in the token instead of a
+  transaction: it has no `tx_hex` and no `tx_hash`. With `auto`, the ordinary TRX-paid transfer is tried first and
+  the gasless one only when it cannot be funded. Other coins refuse `gasless` and `auto`. On every coin, a request
+  that carries a `gasless` object without `fee_method` `gasless` or `auto` is now refused (`InvalidFeePolicy`, HTTP
+  400); until now an unknown `gasless` member was ignored. The new `MM2.json` setting
+  `tron_gasfree_guard_allows_fallback` (default `false`) decides whether a withdraw with `fallback_to_native` may use
+  the TRX-paid transfer when the GasFree contract check refuses. This can be used now that TRON is switched on.
+  **It only signs: KDF does not hand the signed authorization to the provider, and no RPC does it yet**, so a token
+  on the GasFree address moves only if you submit the signed authorization to the provider yourself. The way to move
+  tokens back from the GasFree address is a gasless withdraw to your own address; until KDF submits, that too gives
+  only a signed authorization. Detail: PR #445; CRD ch.63 §63.3.4 to §63.3.6, §63.8, §63.8A, R29;
+  RELOADED_VS_GLEEC.md.
 
 #### Tendermint (Cosmos) coins
 
@@ -182,13 +451,50 @@ the previous version used. The safe way:
   three times the computed fee (for the coin, not for a token), and the staking requests fail. A `memo` in the `withdraw` request is carried in the transaction: `memo` is now a typed member of every withdraw request: a `memo` that is not a string is refused as a malformed request for every coin (it was ignored before); only Tendermint coins and tokens read it. Placing an order with the coin or one
   of its tokens, message signing, private-key display, and every swap payment, claim and refund are
   refused (`PrivKeyNotAllowed::WatchOnlyCoin`). A malformed `activation_params` now fails request
-  parsing with `InvalidRequest`; the WalletConnect forms are still refused. Detail: PR #382; CRD ch.36
+  parsing with `InvalidRequest`. Detail: PR #382; CRD ch.36
   §36.14.3.
+- **A Tendermint coin can be activated with a WalletConnect wallet, and the wallet signs its
+  withdrawals.** `activation_params` of `enable_tendermint_with_assets` (and the task form) now accepts
+  `{"type": "WalletConnect", "params": {"session_topic": "..."}}` and the form the public docs show,
+  `{"priv_key_policy": {"type": "WalletConnect", "data": "..."}}`; both do the same. The node reads the
+  account and its public key for the coin's chain from the paired session: from the key record the wallet
+  delivered with the session when it has one for that chain, otherwise by asking the wallet once for its
+  accounts. When the key does not give the account the session granted for that chain, the activation
+  fails (`PlatformCoinCreationError`) instead of activating another account. The coin holds no private
+  key. `withdraw` and the delegation, undelegation and reward-claim requests are signed in the wallet (the
+  Ledger-backed account of a wallet signs the Amino form, which covers a plain send only, and a Ledger
+  `withdraw` costs three times the computed fee, for the coin and not for a token). A `withdraw` answers
+  the signed transaction (`tx_hex`, `tx_hash`) and broadcasts nothing; the staking requests broadcast the
+  signed transaction. The wallet's answer must carry the transaction body that was asked to be signed;
+  an echo of another body fails the request. A request the wallet refuses, does not answer within five
+  minutes, or cannot receive because the session is gone fails with the new error `SigningError` (HTTP
+  500) for `withdraw` and for the staking requests, where GLEEC KDF answers a general internal error.
+  Placing an order with such a coin or one of its tokens is refused, as for a watch-only coin, and swaps
+  do not sign through the wallet. The top-level `priv_key_policy` member of the request still refuses the
+  WalletConnect spelling. The fee and the gas limit of such a request come from the node's gas simulation
+  (gas limit = simulated gas x 1.5, fee = limit x gas price; an explicit gas limit is kept), because the fixed
+  limit of 125,000 ran out of gas for a real send and lost the fee; a failed simulation fails the request.
+  A test with a real wallet is still to be run. Detail: PR #393; CRD ch.36
+  R36.14.13--R36.14.15.
 
 ### Changed
 
 #### RPC interface
 
+- **A token or layer-two activation waits for a `disable_coin` of its platform, and the other way round.** The token
+  and layer-two activation methods (`enable_erc20`, `enable_nft`, `enable_slp`, `enable_tendermint_token`, the Solana
+  token method, the Lightning activation, and the task forms) now take the activation lock of the platform with the lock of
+  the token, and `disable_coin` takes the lock of the coin it disables, so a platform cannot be disabled in the
+  middle of the activation of its token. A token activation on a platform that is passive is refused with
+  `PlatformCoinIsNotActivated` naming the platform (the Lightning ticker for Lightning). Detail: PR #424; CRD ch.43 D43.1F.2;
+  ch.55 R55.1.12.
+- **A refused platform-with-tokens activation leaves none of its tokens on the platform's token list.** The list a
+  platform reports in its activation answer and its balance stream is now written only once the tokens are registered,
+  so a request that failed after its tokens were built no longer leaves them on the list of the platform. Detail: PR
+  #432; CRD ch.43 D43.1F.2.
+- **A standalone activation task for the ticker of a passive platform is refused at `init`.** `task::enable_utxo::init`
+  and the other standalone activation tasks answer `CoinIsAlreadyActivated` with HTTP 400, as for an active coin,
+  and build nothing. Detail: PR #424; CRD ch.43 R43.1F.9 and D43.1F.4.
 - **A transport failure of `withdraw` answers HTTP 502 instead of 500.** The versioned `withdraw`, `withdraw_nft` and the
   start of `task::withdraw::init` answer the error `Transport` (a node or server that does not answer, or answers
   unusably) with status 502, as the reference does; the token and the body are unchanged. A client that treats
@@ -213,9 +519,28 @@ the previous version used. The safe way:
   or `HardwareWalletInternal`; a device condition answers `HwError` (410) with the same words as above, and a
   device that does not answer in time answers `Timeout` with HTTP 408 instead of 500. Device failures without a word
   answer `Internal` (500). Detail: PR #386; CRD ch.05 §5.9B R35c.
+- **A disabled token no longer stays in its platform's token list.** After `disable_coin` of an ERC-20 or TRC20,
+  SLP or Tendermint token, its platform no longer reports or serves that token, as was already the case for SPL
+  tokens. A single SPL token enabled with `enable_spl` is now listed by its platform, as a token enabled together
+  with the platform already was. Disabling a platform that still has active tokens works as before: the platform
+  is removed and its tokens stay. Detail: PR #418; CRD ch.43 R43.1E.5 status note of 2026-11-18.
+
+- **RPC answers are sent as the handler produced them.** `<`, `>` and `&` in answer strings are no longer replaced
+  with `&lt;`, `&gt;` and `&amp;`, for every method including the `wc_*` ones. The visible effect: URLs with query
+  strings, memos, error texts and labels reach the client with their plain characters. A request body that
+  contains `<`, `>` or `&` is still refused, as before. Every answer now carries `X-Content-Type-Options: nosniff`, and
+  `Content-Type: application/json` where the method set no content type. Detail: PR #421; CRD ch.55 status note of 2026-11-18.
 
 #### Shielded coins
 
+- **The Zcash libraries are upgraded and no longer carry local patches.** ARRR and the other shielded coins now run on
+  the published releases of the Zcash wallet, transaction and proof libraries, unmodified; the three patched copies kept
+  in the source tree are gone. Transactions are built by the node's own assembler over the libraries' public interface.
+  A shielded transaction expires after the same 40 blocks as before, and the Zcash network upgrade NU7 is known to the
+  node, so a transparent-only Zcash transaction under its branch identifier is read by both of the node's readers. The
+  wallet database is migrated once; read "The shielded (ARRR, Pirate) wallet database is migrated irreversibly" under
+  "Breaking changes and upgrade notes" above.
+  Detail: PR #411; CRD ch.39 status notes of 2026-11-18, ch.34 ledger entry of 2026-11-18.
 - **The shielded coin's library stack now also builds with Orchard scanning enabled; no behavior
   change.** The way the transaction builder is asked for an output-only Ironwood bundle no longer
   changes a public type that the Zcash wallet library constructs itself, which kept that library from
@@ -278,8 +603,49 @@ the previous version used. The safe way:
   to close them first by activating under the previous `priv_key_policy`. Closed channels, and an empty or
   missing history of the other identity, allow the activation. Detail: PR #400; CRD ch.05 R46,
   status note of 2026-11-17.
+- **An ERC-20 withdraw accepts `from` under an HD wallet.** `withdraw` and `task::withdraw::init` of a token take
+  the address from the platform coin's HD wallet (address id or derivation path), check the token balance and the
+  nonce at that address, and sign with its key; `from` of the result is that address. A selector that does not
+  resolve is refused before any node request. A token on a single-key platform still refuses `from`. Under a
+  hardware wallet the task route signs at the selected path. Detail: PR #438; CRD ch.49 R49.34.
+- **The HD address methods answer an ERC-20 token ticker from its platform's HD wallet, with the token's balance
+  only.** `get_new_address`, `account_balance`, `task::account_balance::init` and `task::scan_for_new_addresses::init`
+  asked for a token ticker use the platform's accounts and known addresses, so an address found or created through
+  the token is listed by the platform as well. The scan counts an address as used when its nonce or that token's
+  balance is not zero. Detail: PR #438; CRD ch.49 R49.32.
+- **`task::scan_for_new_addresses::init` serves EVM coins under an HD wallet.** It was answered only for TRON coins
+  and UTXO coins; an EVM platform now answers it. Detail: PR #438; CRD ch.05 R54.
 
 #### Solana coins
+
+- **Solana nodes are checked before use and spread across users.** A Solana coin's nodes are now put
+  into a random order once when the coin is enabled, so users of one coins file spread over its
+  nodes; set the `MM2.json` string `solana_node_order` to `listed` to keep the listed order, as
+  GLEEC KDF does. A node is asked whether it is healthy (`getHealth`) before it is used when it has
+  not been checked in the last 30 seconds; a node that fails is skipped for 20 seconds, doubling up
+  to 12 hours, and a recovered node that ranks higher is used again. The reads of one withdraw go to
+  one node, and a sent transaction is never rebuilt: a failed broadcast is retried with the same
+  signed bytes, and the error names the transaction's signature. This applies to both Solana
+  activation surfaces. Solana stays switched off in this build. Detail: PR #426; CRD ch.40 R40.1.5.
+
+- **Solana withdraws send the right amounts and say what they cost.** An SPL withdraw with `max` now
+  sends the whole token balance (it used to move the requested amount while the answer showed the
+  whole balance). Creating the recipient's token account is paid in SOL: the rent is checked against
+  the SOL balance together with the fee, a short balance answers the new error
+  `NotSufficientPlatformBalanceForFee` naming SOL, and `fee_details` shows `fee_amount`,
+  `rent_amount` and `total_amount` for SOL and SPL withdraws alike, instead of a single `amount`.
+  A token balance is read from the wallet's own token account for that token, and is zero when the
+  wallet has none. A recipient that is a token account rather than a wallet address is refused. An
+  amount below the coin's minimum transaction amount answers `AmountTooLow`. Activation now checks
+  that the token's mint belongs to its token program, so a node failure while an inline token is
+  checked answers `Transport`; a Token-2022 token is refused at activation until it is supported.
+  Solana stays switched off in this build. Detail: PR #425; CRD ch.40 R40.6B.9-R40.6B.12,
+  D40.6B.2-D40.6B.6; ch.43 R43.1D.2.
+- **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
+  are removed and can be activated again; a removed token no longer stays in its platform's token
+  records. A platform with active tokens is handled as for every other family: the platform is
+  removed and its tokens stay. A Solana ticker that is not active answers the usual refusal. Solana
+  stays switched off in this build. Detail: PR #413; CRD ch.40 D40.6B.1, T40.6B.20; ch.43 §43.1E.
 
 - **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
   answer an error.** Message signing and verification, address validation, the confirmation settings
@@ -310,7 +676,80 @@ the previous version used. The safe way:
   answers with a signing error that names the output index and the case. Withdrawals and swaps never build
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
 
+#### ZEC
+
+- **ZEC pays the Zcash network's standard fee (ZIP 317).** With the version-5 ZEC coins entry (`txversion` 5 and the
+  branch id `77190ad9`), every ZEC transaction pays ZIP 317's conventional fee: 0.00005 ZEC per logical action, at
+  least two actions, where each transparent input of up to 150 bytes and each output of up to 34 bytes counts as one.
+  A withdrawal with up to two inputs and two outputs pays 0.0001 ZEC, a DEX fee or a swap payment with one input
+  0.0001 or 0.00015 ZEC, and a swap claim or refund 0.0001 ZEC instead of 0.0003472. The entry's `txfee` is no
+  longer used for ZEC; KMD, ZER, BTCZ, FLUX and the other Zcash-family coins keep their per-kilobyte fee.
+  - *Previews:* `trade_preimage` and `max_taker_vol` use the same fees, and `get_trade_fee` shows 0.0001 ZEC.
+  - *Explicit fee:* a `fee` given in a withdraw request is used as given. ZIP 317 expects at least the conventional
+    fee; a lower fee can delay the transaction or keep it out of blocks.
+  - *Lower minimum for ZEC orders:* ZEC's minimum trading volume, also the default minimum volume of a new ZEC order,
+    is 0.001 ZEC instead of 0.003472, ten times the new claim fee.
+  - *Version-2 swaps:* the spends and refunds of a resumed version-2 swap keep the earlier fee (0.0003472 ZEC),
+    because the other side of such a swap checks it against that figure.
+
+  Detail: PR #431; CRD ch.39 R39.11.4V.10 status note.
+
 ### Fixed
+
+#### EVM, BCH, Sia and Lightning coins
+
+- **EVM transaction history could fail to start after an activation with `tx_history`.** The history collection
+  started just before the platform was registered, and its first check for the registered coin could run before
+  the registration, which ended the collection. It now starts after the registration, and a failed activation no
+  longer leaves it running. Detail: PR #435; CRD ch.55 D55.8.
+- **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
+  abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
+  checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
+
+#### WalletConnect
+
+- **The pairing link of `wc_new_connection` is usable by a wallet.** Every `&` after the first was
+  returned as the text `&amp;`, so a wallet found no key in the link and refused it. The link now arrives
+  with plain `&` separators, as every RPC answer does (see "RPC answers are sent as the handler produced them"
+  under Changed). Detail: PR #393; CRD ch.22 §22.2.
+- **The node reconnects to the WalletConnect relay.** The relay closes the connection about every ten
+  minutes; the node did not reopen it, and a new connection request failed until a restart. It now
+  reconnects with a growing wait and subscribes again to its pairings and sessions. Detail: PR #393;
+  CRD ch.22 §22.5.2.
+- **A WalletConnect session keeps working after the relay reconnects or the node restarts.** The node now
+  keeps one relay client identity, stored with its sessions, instead of a new one for every connection.
+  Field-checked with a wallet after a relay reconnect and after a restart. Detail: PR #393; CRD ch.22 §22.5.2.
+- **A wallet lists each node as "KDF Reloaded" with a short identifier.** The wallet used to list every
+  paired node as "Komodo DeFi Framework", so nodes could not be told apart. The name is now
+  `KDF Reloaded <identifier>`, where the identifier is the first eight characters of the node's relay
+  client key, the one the connect log prints; it does not change between restarts. An operator can set a
+  name of their own with `walletconnect.app_name` in `MM2.json`. Detail: PR #393; CRD ch.22 §22.5.2.
+
+#### Tendermint (Cosmos) coins
+
+- **The fee reported for a transaction signed by a WalletConnect wallet is the fee of that transaction.**
+  `fee_details` of `withdraw` and the staking requests is read from the signed transaction; it showed the
+  computed fee even when the wallet signed another one. Detail: PR #393; CRD ch.36 R36.14.15.
+- **Sending a Tendermint transaction the node already holds answers its hash.** A repeated
+  `send_raw_transaction` was answered with an error ("tx already exists in cache") although the transaction
+  was included. Detail: PR #393; CRD ch.36 R36.14.15.
+
+#### ZEC
+
+- **ZEC can be sent again.** With the version-5 coins entry, withdrawals, DEX fees, swap payments, claims and
+  refunds of ZEC are built as version-5 transactions with the version-5 transaction id and signature, as the Zcash
+  network requires since NU7. A Trezor refuses a version-5 ZEC transaction with a clear error. Incoming version-5
+  transactions are read. Detail: PR #404; CRD ch.39 R39.11.15 and §39.11.4V status notes.
+- **Version-6 ZEC transactions are read.** The Zcash network accepts version 6 since NU7. The node now reads an
+  incoming version-6 transaction, with the transaction id of the Zcash library (version 5 stays on the node's own reader,
+  and a test checks that both readers give the same id and bytes). History rows, the input amounts of a transaction that
+  spends a version-6 output, validation of the counterparty's DEX fee and payments, spend detection and secret extraction
+  all work on it, where the transaction was skipped or the step failed before. A transaction that cannot be read by
+  either reader is still reported by the history. Detail: PR #422; CRD ch.39 D39.11.4V.3 status note of 2026-11-18.
+- **A resumed version-2 swap of a Zcash-family coin checks the counterparty's signature against the right data.**
+  The signature digest of a swap step received from the counterparty now commits to the amount, the network's branch id
+  and, for version 5, the script of the output it spends, for KMD, ZEC and the other Zcash-family coins. Version-2
+  swaps run only when a stored version-2 swap is resumed. Detail: PR #404.
 
 #### Browser (WASM) build
 
@@ -344,6 +783,18 @@ the previous version used. The safe way:
 
 #### Electrum servers
 
+- **A swap no longer times out waiting for confirmations on an Electrum server that has fallen behind or keeps
+  answering errors, and a taker whose payment the maker already claimed now finds that claim on any of the coin's
+  servers.** A swap's wait for its payment's confirmations polls one server. It used to stay with that server until
+  the wait's deadline unless a request to it failed outright, so a server that stayed connected but fell behind the
+  chain, or answered every request for the transaction with an error, made the swap step time out even when the
+  payment had long been confirmed. The wait now moves on to an up-to-date server when its server falls behind, and
+  after three error answers in a row; each move is logged at INFO level with both servers. When such a timeout sends
+  a taker into its refund chain, the chain looks for the maker's spend of the taker payment, which reveals the secret
+  needed to claim the maker payment. If that look finds nothing or fails, it now asks every server of the coin before
+  it goes on with the refund, so that the maker payment can still be claimed in time. Both apply to UTXO coins on
+  Electrum; the first only while `electrum_tip_checks` is `true` (the default). Detail: PR #461; CRD ch.38 R38.6.4o
+  item 6 and ch.51 R31a, status notes of 2026-11-21.
 - **An Electrum server is no longer marked as stuck just because the next block was slow.** A
   server counted as stuck when it had sent no new block for a while (at least 10 minutes) while
   another server had. After any long gap between blocks, every server except the first one to
@@ -356,6 +807,14 @@ the previous version used. The safe way:
   the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
 
 #### Transaction history
+
+- **The history of a UTXO coin says which transactions it skipped.** A transaction the node cannot read is left out of
+  the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
+  as if it were complete. `sync_status` now lists each skipped transaction in
+  `additional_info.unreadable_transactions`, with its `tx_hash` and a short `error`. This includes transactions skipped
+  because an input transaction cannot be read. When nothing is skipped, the answer is unchanged. The BCH and SLP
+  history also no longer pauses at a transaction that does not parse; it skips it and stores the rest. Detail: PR #415;
+  CRD ch.39 D39.11.4V.1.
 
 - **`my_tx_history` pages a stored history with the right totals.** For a coin whose history is
   served from the store (BCH and SLP tokens, and now Tendermint coins), the versioned method
@@ -373,6 +832,26 @@ the previous version used. The safe way:
   are unchanged. The SLP token rows rest on unit tests; no live SLP row is run, because the coins file
   the lab uses has no SLP token entry; the live store comparison covers BCH alone. Detail: PR #380;
   CRD ch.36 R36.14.23 -- R36.14.26.
+- **Stale history rows are removed, and changed heights are taken over.** A stored row whose transaction the servers
+  no longer list was kept forever in the history of UTXO coins, Qtum and QRC20 tokens, and kept once confirmed for BCH
+  and SLP. Now a row is removed when two successful listings in a row, at least one block apart, from servers that are
+  up to date, do not contain it. All rows of one transaction go together. A failed or cut-off listing, a listing from
+  a server that is behind, and any listing while the servers disagree about the chain remove nothing. One log line
+  reports each removal. A transaction listed at another height takes that height and its block's time. Detail: PR #408;
+  CRD ch.38 §38.5C, D38.5C.1 and D38.5C.2.
+- **The transaction history reacts to a reorganization of the chain at once.** Each coin's Electrum client now notices
+  when the chain its servers follow changes: on every new block it compares the recent block headers of an up-to-date
+  server with the ones it already holds. When they differ, the history collectors run at once instead of waiting for a
+  balance change, and one WARN line names the height from which the chain changed. At most one small request is made
+  per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
+
+#### EVM coins
+
+- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
+  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
+  transaction of another coin family. It now refuses the transaction with an error message. In the
+  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
+  Detail: PR #452.
 
 #### Kerrigan (KRGN)
 
@@ -390,6 +869,23 @@ the previous version used. The safe way:
   `task::enable_sia` is the per-account report under an HD login, but it listed account 0 with no
   address. It now lists account 0 with its single address, the one the coin uses, and that address's
   balance. Detail: PR #402; CRD ch.46 R46.2.4.
+
+#### Solana coins
+
+- **Solana balances are shown exactly.** `my_balance` and the activation results rounded a SOL balance to
+  nine significant digits, so a balance of 10 SOL or more lost its last decimals (12.345678901 SOL read
+  12.3456789) and a zero balance read `0.00000000`. SOL and token balances are now the exact amount
+  without trailing zeros (`0`, `1.5`, `12.345678901`); token balances are computed from the raw amount
+  the node reports. Withdraw values were never rounded; the text of their sums is in the next item.
+  Solana stays switched off in this beta.
+  Detail: PR #456; CRD ch.40 §40.2A (R40.2A.1, R40.2A.5), R40.2.3, R40.3A.2, T40.6B.7.
+- **Sums in Solana withdraw answers carry the coin's full decimals.** Members that add or subtract two
+  amounts (`spent_by_me` and `my_balance_change` of a SOL withdraw, `my_balance_change` of a token
+  withdraw, a token withdraw's `fee_details.total_amount`, and the `required` member of a SOL
+  `NotSufficientBalance` and of `NotSufficientPlatformBalanceForFee`) are written with 9 decimals for SOL
+  and the mint's decimals for a token, for example `1.000000000` or `-1.500000`. The values are unchanged;
+  single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
+  CRD ch.40 R40.2A.4, D40.2A.1.
 
 #### QTUM and QRC20
 
@@ -410,8 +906,71 @@ the previous version used. The safe way:
   `electrum_server_order` says, so they start at the same server. Their other reads still take turns,
   and other coins are unchanged. This narrows the gap and does not close it: a server can still
   answer before it has seen the send, and a token that lists other servers than QTUM does not share
-  its first server. A shared connection and a shared record of spent coins for QTUM and its tokens
-  are planned. Detail: PR #368; CRD ch.38 R38.6.4a.
+  its first server. QTUM and its tokens now also share one set of connections and one record of
+  spent coins; see the two items below. Detail: PR #368; CRD ch.38 R38.6.4a.
+- **A QRC20 token keeps working when one of its Electrum servers answers a contract request with an
+  error.** Some public QTUM servers answer the token balance, history and receipt requests with an
+  internal error. One such answer used to fail the activation, the balance read or the history
+  request, although another listed server would have answered. The request now moves on to the next
+  server, without dropping the connection, and fails only when every server tried has answered with
+  an error. These three requests now also take turns among the servers, as other reads do. Detail:
+  PR #417; CRD ch.38 D38.6.4Q.2.
+- **QRC20 token history no longer misses a transfer whose details a server failed to deliver.** Such
+  a transfer was left out, and the history was not asked for again until the token balance changed.
+  The history is now asked for again after a short delay, which grows while details keep failing.
+  Detail: PR #417; CRD ch.38 R38.6.4Q.6.
+- **QRC20 token history now stops with a clear status when no listed server serves it.** When three
+  history passes in a row get an error answer from every server tried, the token's history stops,
+  and `my_tx_history` reports it in `sync_status` with code `-2`. Activating the token again starts
+  it again. Passes that fail because a server cannot be reached never count, so a node that is
+  offline keeps its history. Detail: PR #417; CRD ch.38 amendment after R38.6.4Q.6.
+- **A QRC20 token's balance subscription is placed again after a reconnect.** With the balance
+  stream on, the token's subscription was lost when its server connection dropped, and the token
+  fell back to polling. It is now placed again once on the new connection; a server that refuses it
+  changes nothing else. Detail: PR #417; CRD ch.38 D38.6.4Q.3.
+- **Disabling a QRC20 token now ends its history work at once.** The token's history kept running
+  for up to about 40 s after `disable_coin`, and enabling the token again within that time left two
+  of them running. It now ends when the token is disabled, and exactly one runs after the token is
+  enabled again. Detail: PR #417; CRD ch.38 D38.6.4Q.5.
+- **QTUM and its QRC20 tokens now share one set of Electrum connections when their server settings
+  match.** Until now QTUM and each activated token opened their own connection to every server, so a
+  server held one session per instance. Instances that list the same servers in the same order and
+  have the same `min_connected`, `max_connected`, `listed_order_for_spends` and `block_interval` now
+  use one set of connections; any difference keeps a separate set, as before. A token still
+  activates without QTUM and keeps working after QTUM is disabled, and disabling one of them, or a
+  failed activation, closes no connection the others use. A subscription of a disabled instance is
+  no longer placed again after a reconnect unless another instance still uses it. A token that
+  would join a set whose servers disagree about the chain is refused with the same error as a new
+  activation. On a shared set, activation errors, transport error texts, log lines and transport
+  metrics name the platform (for example `QTUM`) also for a token, and `electrum_servers` for a token
+  reports the shared set. Detail: PR #427; CRD ch.38
+  D38.6.4Q.1 and its status note.
+- **QTUM and its QRC20 tokens no longer pick a coin that another of them has just spent.** QTUM and
+  each token kept their own record of the coins they had spent, and a token recorded nothing, so a
+  QTUM send right after a token send (a swap payment, a fee, a token withdraw that was broadcast) from
+  the same address could pick the same coin and be rejected; two token sends could do the same. QTUM
+  and its tokens now keep one record per address: every transaction the node built from that address
+  and the network accepted is entered, and the next one uses other coins or the change. Token
+  withdraws and QTUM delegations are entered when they are broadcast with `send_raw_tx`. A token
+  send, and a withdraw or delegation of QTUM or a token, no longer waits for the builds of other UTXO
+  coins, and theirs no longer wait for it. Under an
+  HD login, QTUM's enabled address and the tokens' address are different addresses with separate
+  records. Detail: PR #436; CRD ch.38 D38.6.4Q.4 and its status note.
+- **A spend right after another spend from the same address no longer fails when a server has not
+  yet seen the first one.** This applies to every UTXO coin that checks the maturity of its coins
+  (QRC20 tokens always, QTUM by default, other coins with `check_utxo_maturity`). The next spend uses the
+  change of the first transaction, and the maturity check fetched that transaction from one of the
+  servers; a server that had not seen it yet could answer with an error, and the spend then failed. The
+  node built that transaction itself, so it cannot be a coinbase output, and the check no longer
+  fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
+  after R38.5B.4.
+
+#### TRON coins
+
+- **A TRON withdrawal whose `fee` is `{"type":"Tron"}` is now refused with `InvalidFeePolicy`.** Before, such a
+  request failed parsing, for example when the `fee_details` of an earlier TRON result was sent back as `fee`.
+  TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
+  form that is not its own. Detail: PR #455; CRD ch.21 R-WP6.
 
 ### Tests
 
@@ -468,13 +1027,39 @@ the previous version used. The safe way:
   - delegation, and the lock that orders withdraws.
   Some of them wait in real time for the history collector's 30-second cycle. Detail: PR #406; CRD ch.38 §38.6.4Q.
 
+- **The node tests of `mm2_main` that need no public server now run in CI.** These tests start real nodes
+  on loopback addresses and talk to them over RPC; no CI job ran them as a group before. A new job runs 15 of
+  them: start-up, the RPC password, mmrpc 2.0 errors, batch requests, the passphrase forms, the public key,
+  swap status, the order book ticker rule, the bot start and stop, and the start on an old database folder.
+  Six of them needed a public server, a passphrase variable or a network id before and were changed to need
+  none; the nodes of the tests no longer ask a public time server at start. Nine tests were removed: three
+  exact copies, four that need a native ZOMBIE daemon, which no CI runner has, and two whose checks already run
+  offline in CI. The other node tests still need public servers and stay off by default; the two that were ignored
+  without a reason now state it. Only test code changed. Detail: PR #453.
+- **Two tests of the shared QTUM Electrum client no longer depend on the moment their holder count is taken.**
+  They compared the number of holders of the client right after activation with the number at the end. The
+  client's maintenance pass also holds it while it runs, so a count taken during the first pass could be one
+  too high. Both counts are now taken once they have stayed the same for 2 s and are compared for equality, so
+  a handle that a failed token activation keeps still fails the test. Only test code changed. Detail: PR #460.
+- **Tests of a repeated QTUM or QRC20 activation.** A second activation of an active QTUM or QRC20 token, one
+  after the other or started together, answers "already initialized" and starts no second connection,
+  subscription or history collector. Only test code changed. Detail: PR #462.
+
 ### Plans touched
 
+- [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
+  confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
+  PR #461; step 3, the lab row, is listed there.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P7, one record of spent coins
+  and one lock per address for QTUM and its tokens, in PR #436; Phase E items 1 and 2 are covered.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
+  QTUM and its tokens, in PR #427; the Phase C items it leaves open are named under Phase C.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)
   done in PRs #385 and #406; its gate is met; the balance stream's in-node subscription test skipped, with the reason in
   the plan.
 - [`hd-key-unification`](docs/plans/hd-key-unification.md) — the H7 row and Decision CB note now say that H7 applies to an absent
-  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family.
+  `priv_key_policy` or `ContextPrivKey` only, and that `IguanaPrivKey` stays on the internal key in every family;
+  shielded coins read `priv_key_policy` as well (H7 row note of 2026-11-18).
 - [`browser-build-gaps`](docs/plans/browser-build-gaps.md) — new, planning: the gaps of the browser (WASM)
   build outside the shielded coins — versioned history, wallet management, event delivery to the page and
   smaller items — in order of cost, and the limits a browser has by nature, also listed in
@@ -500,19 +1085,48 @@ the previous version used. The safe way:
   pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
-  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 part a in PR #401.
+  packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
+  S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
+  withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
-  store-served coin family (PR #380).
+  store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #393).
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
   (the activation route) is built, still switched off: the mmrpc 2.0 methods accept TRON and the legacy route stays
-  (PR #405).
+  (PR #405). The TRON HD wallet is built on the same route, still switched off.
+  The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
+  The transaction history (work package 4) is built with a TronGrid API key, still switched off (PR #440).
+  On 2026-11-20 TRON was switched on as a wallet-only coin family; swaps stay off.
+- [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
+  from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
+  controller; the support modules are built; the activation binding and the `gasfree_address` fields in the reports
+  are built and can be used, as TRON is switched on; the gasless withdraw is built as sign-only on 2026-11-20 and
+  can be used too: it returns a signed authorization that is not submitted; submission and settlement remain.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
-  the version-5 format and digests in the shared parser are in progress (PR #397).
+  the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
+  unreadable transactions (PR #415); ZEC fees under ZIP 317 (Z10, PR #431); the coins entry follows. Z1–Z8 done.
+
+### Known limitations (additions since 0.4.0-beta.1)
+
+- **TRON coins cannot be traded.** TRX and TRC20 tokens are wallet-only: activation, balances, addresses,
+  withdrawals and the transaction history work, and orders and swaps do not. `setprice`, `buy`, `sell` and
+  `start_swap` refuse a TRON coin with the "… is wallet only" answer. This replaces the item of 0.4.0-beta.1 that
+  says TRON cannot be activated. More in [`tron-support`](docs/plans/tron-support.md) and
+  [`tron-swap-support`](docs/plans/tron-swap-support.md). Detail: PR #451; CRD ch.21 R-D1, R21.B3.
+- **Gasless TRC20 transfers through GasFree are signed but not submitted.** A GasFree provider can be configured,
+  the GasFree address (`gasfree_address`) is shown, and a withdrawal with `fee_method` `gasless` returns a signed
+  authorization instead of a transaction. KDF does not hand it to the provider and no RPC does it yet, so this
+  build alone cannot move a token that sits on the GasFree address: you would have to submit the signed
+  authorization to the provider yourself. That also holds for moving tokens back with a gasless withdrawal to your
+  own address. A TRC20 withdrawal without `fee_method` pays its fee in TRX. More in
+  [`tron-gasfree`](docs/plans/tron-gasfree.md).
+- **The TRON transaction history needs a TronGrid API key.** Without a keyed TronGrid node, or without
+  `tx_history: true` in the activation request, `my_tx_history` answers as for a coin without a history. Detail:
+  CRD ch.21 §21.10C.
 
 ## [0.4.0-beta.1] — 2026-11-14
 

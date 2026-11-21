@@ -139,11 +139,27 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   `decimals`, `mint_address` and `program_id`), Reloaded reads its own older
   forms: `{"type": "SOLANA"}` without `protocol_data`, and `SPLTOKEN` with
   `platform`, `decimals` and `token_contract_address`, which means the SPL
-  Token program. The extra forms are additive and need no switch. Native
-  builds read all of these; browser (WASM) builds do not read Solana entries
-  yet. Solana stays switched off in this beta (see
+  Token program. The extra forms are additive and need no switch. Native and
+  browser (WASM) builds read all of these (browser builds since PR #430).
+  Solana stays switched off in this beta (see
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
+
+- **Solana compatibility activation methods.** `experimental::enable_solana_with_assets`
+  and `experimental::enable_solana_token` take GLEEC KDF's requests and answer its results
+  and errors. Where Reloaded differs, no switch exists: a request with `tx_history: true`
+  gets its normal answer (GLEEC KDF ends it without one); a wallet without a token account
+  activates the token with balance `"0"` (GLEEC KDF fails the activation); the platform
+  method also takes `hd_path_layout`, `path_to_address` and `priv_key_policy`; an inline
+  token `protocol` may also use Reloaded's `SPLTOKEN` form. Native and browser (WASM)
+  builds (browser builds since PR #430); Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
+
+- **Solana node selection.** GLEEC KDF asks the nodes `getHealth` in list order before every
+  request and uses the first healthy one. Reloaded draws a random node order once when the coin is
+  enabled (`solana_node_order: "listed"` keeps the listed order), asks a node `getHealth` at most
+  once per 30 seconds, sets a failing node aside for 20 seconds doubling up to 12 hours, and keeps
+  the reads of one withdraw on one node. A sent transaction is never rebuilt on another node. CRD
+  ch.40 R40.1.5; PR #426.
 
 - **Solana wallet methods answer.** On an active Solana coin or SPL token
   GLEEC KDF ends many requests without a JSON answer (`sign_message`,
@@ -157,6 +173,30 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   decimals, where GLEEC KDF states one lamport for every token; no peer sees
   it while Solana cannot trade. No switch: an abnormal end cannot be a
   compatibility target. CRD ch.40 D40.6B.1, R40.6B.14; PR #401.
+
+- **Solana withdraws and token balances.** The withdraw answers have GLEEC
+  KDF's shape, `fee_details` with `fee_amount`, `rent_amount` and
+  `total_amount` included, and a short SOL balance answers
+  `NotSufficientPlatformBalanceForFee` as there. Reloaded differs where GLEEC
+  KDF moves the wrong amount, fails or builds a wrong transaction:
+  - an SPL `max` sends the whole token balance;
+  - a wallet that holds no account for a token reads balance zero instead of
+    failing the activation or `my_balance`;
+  - a recipient that is a token account is refused with `InvalidAddress`;
+  - a Token-2022 token is refused at activation with a text that says so;
+  - `AmountTooLow` for an SPL token names one smallest unit of the token's
+    decimals as its threshold, not one lamport.
+  No switch: none of these is a compatibility target. CRD ch.40 D40.6B.2 to
+  D40.6B.6; PR #425.
+- **Sums in Solana withdraw answers.** Members that add or subtract two
+  amounts carry the coin's full decimals: `spent_by_me` and
+  `my_balance_change` of a SOL withdraw, `my_balance_change` of an SPL
+  withdraw, an SPL withdraw's `fee_details.total_amount`, and `required` of
+  `NotSufficientPlatformBalanceForFee` and of a SOL `NotSufficientBalance`.
+  Reloaded writes `"1.000000000"` where GLEEC KDF writes `"1.000000"` or
+  `"1"`; the values are equal. No switch: a client that reads them as
+  decimal numbers sees no difference. CRD ch.40 R40.2A.4, D40.2A.1;
+  PR #456.
 
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the
@@ -244,7 +284,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   of blocks, at least 1 and at most 20) behind the height two or more servers have reached, or one
   that sends no new block for three block times or ten minutes while another does, is tried after
   the others for reads and broadcasts, and logged once per change of state; a confirmation wait
-  polls one up-to-date server for the whole wait and moves on only when it fails. The read-only
+  polls one up-to-date server and moves on only when a request to it fails, when it falls out of
+  date, or when it answers the transaction request with an error three times in a row. The read-only
   request `electrum_servers` shows the servers' state. GLEEC KDF ranks by the list position and has
   none of this, so a lagging server keeps answering there. No peer observes it. To get GLEEC KDF's
   routing, set `electrum_tip_checks` to `false` (see the settings list below). Servers that disagree
@@ -308,7 +349,9 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **Trading methods under `mmrpc: "2.0"`.** `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface in the same way as the order-management methods above (legacy members inside `params`, legacy result under `result`, typed errors with HTTP statuses, unknown `params` members ignored; legacy forms and success bodies unchanged). `get_trade_fee` stays legacy-only, as the reference documentation marks it deprecated in favor of the versioned `trade_preimage`. Additive; no switch. CRD ch.43 §43.1R.
 - **Wallet and coin methods under `mmrpc: "2.0"`.** `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`, `set_required_confirmations` and `set_requires_notarization` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface as above; their typed errors follow the versioned `withdraw` as the reference answers it (an unknown coin 404, a transport failure 502), and `disable_coin` reports the blocking swaps or orders inside `error_data`. Legacy forms and success bodies unchanged. Additive; no switch. CRD ch.43 §43.1R.
 - **A refused legacy `disable_coin` names the blocking swaps twice.** When running swaps or orders being matched block the deactivation, or the coin is not active, the legacy error body carries the members the reference answers (`orders` with `matching` and `cancelled`, `active_swaps`) and in addition `swaps` with the same list as `active_swaps`, which the reference documentation names. Orders of the coin that can be cancelled are cancelled first, and `orders.cancelled` lists them, where GLEEC KDF cancels none before refusing. Additive members; no switch. CRD ch.43 D43.1E.1 status note.
+- **`disable_coin` and the passive platform: what still differs.** The legacy `disable_coin` of KDF Reloaded makes a platform coin with active tokens passive, answers `passivized`, and takes `force_disable`, as GLEEC KDF does. Six differences remain, and the sixth has a switch. (1) The `mmrpc: "2.0"` form of KDF Reloaded neither makes a platform passive nor reads `force_disable`: it removes the platform and its tokens stay registered; GLEEC KDF has no versioned form. (2) A forced removal checks the platform and every one of its tokens for running swaps and orders being matched, and refuses the whole call if any is in use; GLEEC KDF checks the platform's ticker only. (3) An EVM token whose platform is passive keeps working, including its orders and fee estimates; in GLEEC KDF its transactions and fee estimates fail until the platform is activated again. (4) A standalone activation task for the ticker of a passive platform is refused at `init` with `CoinIsAlreadyActivated`; GLEEC KDF accepts the task and ends it with that error after building the coin. (5) Removing a coin does not yet end its background work. (6) A platform-with-tokens activation that names a token registered for another platform keeps that token silently in GLEEC KDF; KDF Reloaded refuses it with `TokenIsAlreadyActivated` before building anything by default (a registered token of the same platform is kept in both). Set the `MM2.json` member `reactivation_registered_token` to `"keep"` to match GLEEC KDF; see [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). A passive platform is activated again by the platform-with-tokens methods, as in GLEEC KDF. CRD ch.43 §43.1E and §43.1F.
 - **Swap, daemon and network methods under `mmrpc: "2.0"`.** `all_swaps_uuids_by_filter`, `import_swaps`, `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys` and `unban_pubkeys` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface as above; the ban methods' typed errors (`InvalidParam` 400, `Internal` 500) are KDF Reloaded's own choice under the general convention, since the reference has no versioned sibling for them. Legacy forms and success bodies unchanged. `recover_funds_of_swap`, `stats_swap_status` and `get_trade_fee` stay legacy-only. Additive; no switch. CRD ch.43 §43.1R.
+- **ZEC version-5 transactions.** With a ZEC entry of `txversion` 5, KDF Reloaded builds and reads version-5 transactions in the ZIP 225 format with the ZIP 244 transaction id and signature, as the Zcash network requires since NU7. GLEEC KDF has no version-5 support: with that entry it builds a version-4 body that the network refuses. KDF Reloaded also refuses at activation a Zcash-family entry whose `txversion` it cannot build (not 4 or 5) and a version-5 entry without a branch id; GLEEC KDF accepts any `txversion`. No switch. CRD ch.39 §39.11.4V status notes.
 - **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `withdraw` and `task::withdraw` with no `from` sender spend from the coin's activated address, the address at `path_to_address` (by default account 0, external chain, index 0), instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, set the address on 2026-11-06, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`) on both methods. Until plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5 (PR #270), the fallback was always account 0, external chain, index 0, and the direct `withdraw` method refused an HD UTXO wallet. Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_withdraw.rs` (`resolve_withdraw_sender`), `utxo_common_helpers.rs` (`withdraw_with_hd_sender`, `validate_task_withdraw_sender`).
 - **An HD account number already in use.** `task::create_new_account` with an `account_id` that the wallet already holds ends the task with `AccountAlreadyExists` (with the `account_id`) before any key is derived; `task::create_new_account::status` reports it. GLEEC KDF derives the key first and then reports an internal error. Only a client that asks for an existing account sees the difference. The same task also serves Siacoin, which GLEEC KDF does not offer HD accounts for; that is a Reloaded extension (the maintainer's decision of 2026-11-04). Plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5.4 (PR #279); CRD ch.05 R35c. Code: `coins/hd_wallet.rs` (`choose_new_account_id`), `coins/rpc_command/init_create_account.rs`.
 - **`get_my_address` while a Trezor is initialized.** For an EVM coin that is not activated, KDF Reloaded derives the reported address from the login's key, also when a Trezor context exists. GLEEC KDF derives it from the device whenever a Trezor context exists. As on GLEEC KDF, each coin takes its keys and stores its accounts by its own key policy, and only a coin activated for the Trezor is refused key export. Two points still differ: a new address of a coin activated for the Trezor is not confirmed on the device, and the BCH activation task refuses the Trezor policy (CRD ch.05 §5.10B). Batch 4 item B4-2 (PR #293); CRD ch.05 §5.10B R57 and D7.e.
@@ -514,6 +557,81 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Contract: [CRD ch.37 §37.5.1](docs/reloaded-rewrite/37-utxo-spv-and-block-header-validation.md)
   (the key-absent row and the port note under §37.5.8). Code:
   `coins/utxo/header_layout_fallback.rs`, `coins/utxo/utxo_builder/utxo_conf_builder.rs`.
+- **QRC20 token history: an error answer moves on, and the collector can
+  end.** No switch. Three differences, all for QRC20 tokens:
+  - *Error answers.* An error answer to `blockchain.contract.call`,
+    `blockchain.contract.event.get_history` or
+    `blochchain.transaction.get_receipt` moves the request on to the coin's
+    next Electrum server; the session stays open and the server is not
+    demoted. The exact error `{"code": 1, "message": "history too large"}` and
+    unreadable answers stay final. The three reads are also spread over the
+    connected servers like other read-only queries. GLEEC KDF takes any error
+    answer as the final answer.
+  - *End state.* When three history passes in a row fail with an error answer
+    from every server tried, the collector stops and `my_tx_history` reports
+    `sync_status` with code `-2` and the message "No listed Electrum server
+    answers the contract-event history. History is not available". Activating
+    the token again starts it anew. A transport failure does not count, so a
+    node that is offline keeps retrying. GLEEC KDF repeats a failed history
+    request every 10 s without limit; its only end state is "history too
+    large", code `-1`, which is unchanged.
+  - *Incomplete pass.* A pass that left a listed transaction out, because its
+    details could not be read, asks for the history again after a retry delay
+    (10 s, doubling up to 300 s). GLEEC KDF asks again only when the balance
+    changes or the token is activated anew.
+
+  The contract-event subscription that KDF Reloaded's balance stream places for
+  a token is placed again after a reconnect, at most once per new session; GLEEC
+  KDF has no balance stream for tokens and places no such subscription.
+  Contract: [CRD ch.38 §38.6.4Q](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md)
+  (status notes after D38.6.4Q.2 and D38.6.4Q.3, and after the
+  code-quality finding of R38.6.4Q.6). Code: `coins/utxo/rpc_clients/electrum_pool.rs`,
+  `coins/utxo/rpc_clients/electrum_rpc_client.rs`, `coins/qrc20/history.rs`.
+- **QTUM and its QRC20 tokens share one Electrum client when their client
+  inputs match.** No switch. GLEEC KDF gives every activated instance its
+  own client, so each server holds one session for QTUM and one for each
+  token. KDF Reloaded gives instances of the QTUM family one client when the
+  platform, the server list (in order and per entry), `min_connected`,
+  `max_connected`, `listed_order_for_spends`, `block_interval` and the
+  builder arguments are all equal; any difference gives the instance its own
+  client, as in GLEEC KDF. What stays the same: a token activates without
+  QTUM and keeps working after QTUM is disabled, and disabling one instance
+  or a failed activation closes no session another instance uses. What
+  differs on a shared client:
+  - *Sessions.* Each server holds one session for all sharing instances.
+  - *Naming.* Activation errors, transport error texts, log lines and
+    `CoinTransportMetrics` name the platform ticker, also for a token's
+    requests, and `electrum_servers` for a token reports the shared client.
+  - *Disagreeing servers.* A token that would reuse a client whose servers
+    disagree is refused with `ElectrumServersDisagree`, as a fresh build is.
+  - *Subscriptions.* A disabled instance's remembered subscriptions are
+    not placed again after a reconnect unless another live instance
+    remembers them.
+  Contract: [CRD ch.38 §38.6.4Q](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md)
+  (status note after D38.6.4Q.1). Code:
+  `coins/utxo/rpc_clients/electrum_client_registry.rs`,
+  `coins/utxo/utxo_builder/utxo_coin_builder.rs`, `coins/lp_coins_ops.rs`.
+- **QTUM and its QRC20 tokens share one record of spent coins per address,
+  and their builds no longer wait for other UTXO coins.** No switch. GLEEC
+  KDF keeps a record of recently spent coins per coin instance, enters
+  nothing for a token's broadcast, and serializes token broadcasts and the
+  withdraw builds of every UTXO coin with one process-wide lock; a QTUM swap
+  send does not take it and a delegation does not hold it. So a QTUM send
+  right after a token send from the same address, or two token sends, can
+  select the same coin, and the second broadcast is rejected. KDF Reloaded
+  keeps one record per platform and address script for QTUM and its tokens.
+  Every transaction it
+  built from that address and the backend accepted is entered: QTUM's swap
+  sends and merges, every token broadcast, and the withdraws and delegations
+  promoted when they are broadcast. The record's own lock orders the builds
+  of that address, from the answered listing through the broadcast and the
+  entry, in place of the process-wide lock, which the other UTXO coins keep.
+  Under an HD login, QTUM's enabled address and the tokens' address have
+  separate records. Contract:
+  [CRD ch.38 §38.6.4Q](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md)
+  (status note after D38.6.4Q.4). Code:
+  `coins/utxo/spent_record_registry.rs`, `coins/qrc20/qrc20_helpers.rs`,
+  `coins/utxo/utxo_withdraw.rs`, `coins/utxo/qtum_delegation.rs`.
 - **A seed that is already connected is not dialed again.** A node short of relays dials each
   address at most once per 5 minutes, as GLEEC KDF does. GLEEC KDF also dials a seed that has
   connected to it by itself, because it compares addresses only, and the extra connection closes
@@ -644,7 +762,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); CRD ch.36 R36.3.5, ch.18 R18.6B, ch.49 R49.28 to
   R49.30, ch.35 R35.6.8, R35.6.9. PR #323.
 
-- **The TRON node client (TRON is still switched off) gives each node a time limit, fails over on bad answers and
+- **The TRON node client gives each node a time limit, fails over on bad answers and
   accepts request headers and an API key.** A TRON node that does not answer within 10 seconds is skipped, and so is a
   node that answers with an error status, with something that is not the expected JSON, or with the node's own
   error form; a rate-limit answer is never read as an empty account. The node that answers is asked first next time,
@@ -655,7 +773,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   needed because a request without them is served as before. The values are secrets and are never logged or shown.
   Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md); PR #394; CRD ch.21 §21.9 R-N3 to R-N9.
 
-- **TRON (still switched off) gets the standard platform-with-tokens activation route, and keeps the legacy one.**
+- **TRON gets the standard platform-with-tokens activation route, and keeps the legacy one.**
   `enable_eth_with_tokens`, `task::enable_eth::*`, `enable_erc20` and `task::enable_erc20::init` accept a TRX
   platform and TRC20 tokens, as GLEEC KDF `v3.0.0-beta` serves them; Reloaded also keeps TRX and TRC20 on the legacy
   `enable` and `electrum` methods, which GLEEC KDF refuses for them, as an extension a GLEEC client never reaches.
@@ -663,33 +781,127 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md): swap-contract members may also be written as
   base58check or `41...` hex on a TRON platform (a wider input; an EVM platform keeps `0x` only); the MetaMask
   policy and `rpc_mode` are refused for TRON at activation (the reference activates an address its withdraw then
-  refuses); a global-HD login is refused for now, until the TRON HD wallet is built in the next change, except that `IguanaPrivKey` under an HD login is honored with the node's single internal key; and a key in the
+  refuses); `IguanaPrivKey` under a global-HD login is honored with the node's single internal key; and a key in the
   query string of a node URL works. Entries of `nodes` may also carry a `headers` object and get `tron_api_key`.
   CRD ch.21 §21.4, R21.10B.2, R21.10B.4, D21.B1, D21.B7, D21.10B.3.
+
+- **TRON has an HD wallet on the standard methods; the legacy route keeps the internal key.**
+  Under a global-HD login `enable_eth_with_tokens` and `task::enable_eth::init` derive the TRX address under the
+  `derivation_path` of the coin config (coin type 195), as GLEEC KDF does; the HD methods (`get_new_address`,
+  `account_balance` and the task forms of `get_new_address`, `scan_for_new_addresses` and `account_balance`) answer
+  base58check addresses and a balance map (over TRX and the enabled TRC20 tokens for the TRX ticker, that token only for
+  a TRC20 ticker, as GLEEC KDF does), and `task::create_new_account::init` fails with `Internal`. An address counts as
+  used when the chain has created its account or an enabled TRC20 token has a balance there. For a scan asked for a
+  TRC20 ticker this differs from GLEEC KDF, which looks at the account only: receiving a TRC20 token does not create the
+  account, so GLEEC KDF's scan misses an address that holds only a token, and Reloaded's finds it (a superset, never
+  fewer addresses; not visible to peers). The legacy `enable` method keeps the node's internal key under a global-HD login, as Reloaded's
+  EVM and UTXO legacy routes do, so its TRON address differs from the HD route's address for the same seed; GLEEC KDF
+  refuses TRON on the legacy method, so a GLEEC client never reaches it. `withdraw` of a TRON coin takes an HD `from`
+  and signs with that key, and refuses `from` on a single-key coin (it was ignored before). A TRC20 withdraw under a global-HD login takes an HD `from` resolved in the platform's HD wallet (any activated address of the platform); this is a Reloaded extension for TRON. An EVM ERC-20 withdraw under a global-HD login resolves `from` in the platform's HD wallet in the same way, as GLEEC KDF does (CRD ch.49 R49.34). No switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R-A2, R21.10B.4.
+
+- **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.**
+  GLEEC KDF answers an EVM `0x` form for a TRX or TRC20 address. Reloaded takes `{"format": "base58"}` or
+  `{"format": "hex"}`, accepts `from` as base58check, `41...` or `0x41...`, and refuses an EVM `0x` address and the EVM
+  format values with the legacy error body; an EVM coin is unchanged. No switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R21.10B.8, D21.10B.2.
+- **TRON has a transaction history when a TronGrid API key is set.** GLEEC KDF has no TRON
+  history: its versioned `my_tx_history` answers `NotSupportedFor`, its legacy one an empty list, and it ignores
+  `tx_history` for TRON. Reloaded answers the same without a key. With `tx_history: true` and a keyed TronGrid node
+  (the node's own `TRON-PRO-API-KEY` header or `tron_api_key`), both methods list the transactions of TRX and TRC20
+  coins from TronGrid's account listings, over every known address of an HD wallet, with base58check addresses and the
+  fee details of a withdraw result. Only confirmed transactions; history requests go to keyed TronGrid hosts only. An
+  addition a GLEEC client does not meet unless it sets the key; no switch; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 §21.10C.
+
+- **The fee of a TRON withdrawal follows the node's bandwidth rule, and a TRC20 fee limit
+  has a margin and a maximum.** The withdraw estimate, its amounts, its errors and its fee details follow GLEEC KDF
+  `v3.0.0-beta` as the CRD records it, with three differences. (1) *Bandwidth.* GLEEC KDF charges only what the
+  sender's free and staked bandwidth, added together, do not cover. The TRON node takes a transaction's bandwidth from
+  the staked bandwidth as a whole, or from the free bandwidth as a whole, and otherwise charges TRX for all of it.
+  Reloaded estimates by the node's rule, so its estimate is never below what the node charges; for an account whose
+  two quotas only together reach the size it is higher than GLEEC KDF's, and `max` then sends less. (2) *Fee limit
+  margin.* GLEEC KDF sets a TRC20 transfer's `fee_limit` to the cost of the dry-run energy exactly. Reloaded adds 20%,
+  rounded up to whole SUN, so that a small change of the contract's state between the dry run and the block does not
+  fail the transfer; `total_fee` in the fee details stays the expected charge. (3) *Maximum.* Reloaded never sets a
+  `fee_limit` above 100 TRX and refuses, before signing, a transfer whose energy alone would cost more, with
+  `UnsupportedError` naming both figures. None of the three is visible to a peer and none changes the shape of an
+  answer, so no switch exists; rows in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.21 R21.10B.7, D21.10B.1.
+- **A TRC20 withdrawal whose dry run reverts is refused.** GLEEC KDF `v3.0.0-beta`, as
+  the CRD records it, judges the energy dry run of a TRC20 transfer only by its `energy_used`: when the token contract
+  would refuse the transfer, it still returns a signed transaction and a fee estimate, and broadcasting it burns the
+  fee. Reloaded reads the dry run's revert indication and refuses the withdrawal before anything is signed, with
+  `UnsupportedError` and the text "the token contract refused this transfer (its dry run reverted)" followed by the
+  node's reason; no other node is asked. The energy a contract's deployer may pay is not modeled in either, so the
+  estimate of a TRC20 fee can be above the chain's charge in both. No peer sees the check and a successful dry run
+  answers the same, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.21 R21.10B.10 to R21.10B.13.
+
+- **A TRON GasFree custody address is checked against the GasFree controller before it is shown or used.** No
+  released GLEEC KDF version that the CRD records carries GasFree; the reference's GasFree work is an open, unmerged
+  draft (as of 2026-05-04, CRD ch.63 §63.0), and this check is a KDF Reloaded addition.
+  Reloaded compares it with the answer of the controller contract's `getGasFreeAddress` and keeps a confirmation for
+  10 minutes. In the answers that carry `gasfree_address`, an address the controller contradicts is left out, with a
+  warning in the log; when the controller cannot be read, the derived address is shown. Before a gasless transfer is
+  signed, a contradicted address refuses the gasless rail and leaves the native one. A safety divergence: no switch;
+  row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.63 R29, §63.3.3.
+
+- **The result of a gasless TRON withdraw carries each member name once.** No released GLEEC KDF version that the
+  CRD records carries GasFree; the reference's GasFree work is an open, unmerged draft (as of 2026-05-04, CRD ch.63
+  §63.0). In that draft the result of a gasless TRC20 withdraw holds the names `coin` and
+  `from` twice in one JSON object: `from` once as the request's HD selector and once as the array of sending
+  addresses, so a client whose JSON reader keeps the last of two equal names never sees the selector. Reloaded
+  writes each name once: `coin` once, `from` always as the array with the sending address, and no selector. The
+  other members of the signed authorization's envelope (`relay_type`, `chain_id`, `from_address`,
+  `gasfree_address`, `verifying_contract`, `signed_authorization`, `created_at`) are the draft's, at the top level
+  of the result, and the result has no `tx_hex` and no `tx_hash`. It also has no `memo` member, where the draft
+  writes `null`: Reloaded omits an absent memo in every withdraw result outside the Tendermint family. A client that
+  needs the selector has it in its own request. No peer sees the result, so no switch exists. CRD ch.63 §63.8A,
+  D63.8.
 
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
-- **TRON (TRX, TRC20) and Solana (SOL, SPL tokens) are switched off in this
-  beta.** Their support is not finished, so Reloaded does not activate them at
-  all: the legacy `enable` / `electrum` answer "TRON support is not available
-  in this build" or "Solana support is not available in this build", and
-  `enable_solana_with_tokens` / `enable_spl` answer the Solana text. Nothing is
-  registered and the rest of the node is unaffected. Both families are planned
-  to return in the next beta. No switch exists: the build constants
-  `TRON_ACTIVATION_AVAILABLE` and `SOLANA_ACTIVATION_AVAILABLE`
-  (`coins/lp_coins_ops.rs`) are `false`. When TRON returns, Reloaded activates
-  TRX and TRC20 on the legacy methods as an extension, and, since the route of
-  the entry above, on the platform-with-tokens activation too. GLEEC KDF `v3.0.0-beta`
-  serves them only through the platform-with-tokens activation,
-  `enable_eth_with_tokens` and the `task::enable_eth::*` family, and refuses
-  them on the legacy methods, so a client written for GLEEC never sends such a
-  request (CRD ch.21 §21.4, ch.55 D55.5).
+- **Solana (SOL, SPL tokens) is switched off in this beta.** Its support is
+  not finished, so Reloaded does not activate it at all: the legacy `enable` /
+  `electrum`, `enable_solana_with_tokens` and `enable_spl` answer "Solana
+  support is not available in this build". Nothing is registered and the rest
+  of the node is unaffected. Solana is planned to return in the next beta. No
+  switch exists: the build constant `SOLANA_ACTIVATION_AVAILABLE`
+  (`coins/lp_coins_ops.rs`) is `false`.
+- **TRON (TRX, TRC20) coins are wallet-only.** Since 2026-11-20 TRON can be
+  activated again (0.4.0 refused it on every route): on the
+  platform-with-tokens activation, `enable_eth_with_tokens` and the
+  `task::enable_eth::*` family, where GLEEC KDF `v3.0.0-beta` serves it, and on
+  the legacy `enable` / `electrum` methods as a Reloaded extension, which GLEEC
+  KDF refuses for TRON, so a client written for GLEEC never sends such a
+  request (CRD ch.21 §21.4, ch.55 D55.5). Activation, balances, addresses,
+  `withdraw` and the transaction history work. Orders and swaps do not:
+  Reloaded has no TRON swap, and neither has a GLEEC KDF release. `setprice`,
+  `buy`, `sell` and `start_swap` refuse a TRON coin with the usual "… is wallet
+  only" answer, a TRON coin declines to match, an order with a TRON coin
+  saved earlier is cancelled at startup, and an unfinished saved swap that names
+  a TRON coin is not resumed at startup (its record is kept, with a line in the
+  log). This holds whatever the coins-file entry says. For an entry with
+  `"wallet_only": true`, which every published TRON entry has, the answer is
+  GLEEC KDF's. For an entry without it GLEEC KDF passes the wallet-only check
+  and refuses the order at its balance-and-fee check, with an answer of the same
+  form and no order; Reloaded refuses one check earlier, and its text names the
+  wallet-only ticker. No switch exists: the build constant
+  `TRON_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false` (CRD ch.21 R-D1,
+  R21.10B.9, R21.B3). Gasless TRC20 transfers through GasFree are signed but
+  not submitted yet: the provider setting of the activation, the
+  `gasfree_address` of the reports and the gasless withdraw are available, and
+  that withdraw returns a signed authorization the node does not hand to the
+  provider (CRD ch.63 §63.3.1 to §63.3.6, §63.8A).
 - **A Tendermint activation refuses a hardware key policy.** A request that names the `Trezor` `priv_key_policy`
   fails before any node is contacted, with a `PlatformCoinCreationError` (HTTP 500) that says the hardware key policy
   is not supported for Tendermint coins and to activate with the local key; GLEEC KDF ignores the member and activates
   with the local key. An absent value, `ContextPrivKey` and `IguanaPrivKey` activate as before. Any other value, such
-  as the WalletConnect form (not built yet), fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
+  as the WalletConnect form sent as this member (the WalletConnect forms of `activation_params` are built, see below),
+  fails request parsing with `InvalidRequest` (HTTP 400). No switch exists.
   CRD ch.36 §36.7. PR #358.
 - **A Tendermint activation under an HD login honors `priv_key_policy: IguanaPrivKey`.** GLEEC KDF accepts and ignores
   `priv_key_policy` for Tendermint coins; Reloaded activates the coin with the single internal key of the node, as the
@@ -710,6 +922,26 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   the account of the public Cosmos SDK rule for that key type, where GLEEC KDF applies the secp256k1 rule to it. A
   malformed key is `InvalidRequest`, where GLEEC KDF aborts the request. No switch exists. CRD ch.36 §36.14.3, D36.17,
   D36.18; ch.18 D18.11.10. PR #382.
+- **A Tendermint coin activated with a WalletConnect session is signed by the wallet, with a typed signing error
+  and a checked account.** Both forms (`{"type": "WalletConnect", "params": {"session_topic": ...}}` and the public
+  docs' `{"priv_key_policy": {"type": "WalletConnect", "data": ...}}`, which GLEEC KDF rejects) activate the coin of
+  the paired session; `withdraw` and the staking requests are signed in the wallet (Amino for a Ledger-backed account,
+  where the Ledger fee factor and the bank-send-only rule are as for the public-key form), and `withdraw` answers the
+  signed transaction without broadcasting it, as GLEEC KDF does. Where it differs: (1) a wallet that refuses, does not
+  answer, or a session that is gone or no longer grants the chain fails with the new `SigningError` (HTTP 500), where
+  GLEEC KDF answers `InternalError`; (2) the key record that supplies the public key and the Ledger flag is the one of
+  the coin's chain, where GLEEC KDF takes the first record whatever its chain, and when there is none the wallet is
+  asked for its accounts with no parameter, where GLEEC KDF sends the session's account address as the parameter;
+  (3) the address derived from the key must be one of the session's accounts for the chain, otherwise the activation
+  fails with `PlatformCoinCreationError`, where GLEEC KDF does not compare; (4) in the direct sign mode the
+  transaction body the wallet echoes must equal the one that was requested, where GLEEC KDF assembles the transaction
+  from the echo without comparing; (5) orders of such a coin and of its tokens are refused as wallet-only, where GLEEC
+  KDF accepts them (swaps are not signed through the wallet); (6) the fee and gas limit of a request the wallet signs
+  come from the node's gas simulation (gas limit = simulated gas x 1.5, fee = limit x gas price; an explicit gas limit
+  is kept), where GLEEC KDF uses a fixed assumed gas of 125,000, which ran out of gas for a real send and lost the
+  fee, and a failed simulation fails the request; `fee_details` reports the fee of the transaction the wallet signed.
+  A test with a real wallet is still to be run. No switch exists (a fixed limit that runs out of gas loses the fee).
+  CRD ch.36 §36.14.2, D36.15, D36.16; ch.18 D18.11.10.
 - **A Tendermint coin's transaction history differs from GLEEC KDF in three ways.** (1) While the first read of the
   chain runs, the history state is `InProgress` (with `{"transactions_left": n}`); GLEEC KDF reports `NotStarted`
   until the first read ends (§36.14.1 R36.14.11), and a failed first balance read ends its fetcher silently where KDF
@@ -933,6 +1165,8 @@ behavior, except for `swap_key_check`; the row of each switch in
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by measurement (`mixed`, the default since 2026-11-14; `random` gives the
   earlier default, a random draw).
+- `solana_node_order: "listed"` — a Solana coin's nodes are used in the order they are listed
+  instead of in a random order drawn once when the coin is enabled.
 - `electrum_tip_checks: false` — the node does not compare the block heights of a coin's Electrum
   servers, does not fail an activation or refuse trades when they disagree about the chain: a server
   that is behind the chain or stopped following it keeps its place in reads, broadcasts and a swap's
@@ -1081,11 +1315,34 @@ file over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal
 `<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start the older build. The older build then
 sees the wallet as it was before the upgrade.
 
+The upgrade of the Zcash libraries (wallet database `zcash_client_sqlite` 0.22 to 0.23) is such an upgrade: a wallet database
+of the earlier generation is backed up and migrated on the first activation, and the older build cannot open the migrated
+file. Put the backup back as described above to return to it.
+
 *How many backups stay:* after a successful upgrade the node keeps only the newest
 `.pre-upgrade` backup of that wallet and deletes older ones. The top-level `MM2.json` key
 `shielded_db_upgrade_backups` (a whole number, default `1`, lowest effective value `1`) changes the
 number; the backup just made is always kept. Other `.bak` files, such as `.upgrade-failed` and
 `.legacy-v2`, are never deleted by the node.
+
+#### Shielded wallet files per key, and `priv_key_policy`
+
+The shielded activation request accepts `priv_key_policy` in the shape the other coin families use. This is a
+KDF Reloaded addition: whether GLEEC KDF reads it for a shielded coin has not been established here, and the
+legacy/GLEEC database files are not involved either way. Under a global-HD login `IguanaPrivKey` selects the
+node's single internal key (shielded and transparent); leaving it out keeps the HD key.
+
+Each key keeps its own wallet. `<TICKER>_RELOADED_WALLET.db` (with `<TICKER>_RELOADED_COMPACT_BLOCKS.db` and
+`<TICKER>_RELOADED_TX_ADDRESSES.db`) stays with the key whose account it holds, so a wallet created by an
+earlier build is found unchanged. The default key (the single key, or the HD key of account 0) uses these
+names when no wallet exists yet; any other key uses the same three names with a 16-character fingerprint of
+its viewing key before `.db`, for example `ARRR_RELOADED_WALLET.0123456789abcdef.db`. The fingerprint is a hash;
+the viewing key is not in the name. Balance and history show the active key's wallet only. The backup before a
+schema upgrade (see above) covers every one of these files as it is opened.
+
+An activation is refused, with a message that names the swaps and says what to do, while swaps of the coin that
+are not finished were started with another key, and when a wallet file of the coin cannot be read while a swap
+still has to send its payment or fee. Changing the HD `account` alone is allowed.
 
 ## Forward-compatibility commitment
 

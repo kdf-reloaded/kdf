@@ -191,6 +191,26 @@ reference version at all. A malformed value in any of these five fields shall
 > are bound by [Chapter 63](63-tron-gasfree-fee-delegation.md)
 > §63.3.1–§63.3.2 (passed the KDF Dirty Gate on 2026-11-08).
 
+*Status note (2026-11-20), the two GasFree members.* Both are read now, for a
+TRON platform only (behind `TRON_ACTIVATION_AVAILABLE`, `false`):
+`tron_gasless_provider` on this request and on `task::enable_eth::init`, and
+`gasless` on each entry of `erc20_tokens_requests`, in the `activation_params`
+of `enable_erc20` (R35.2.1) and of `task::enable_erc20::init` (R35.3A.2). An EVM
+platform refuses `tron_gasless_provider`, and a token that is not a TRC20 token
+refuses an enabled `gasless` block, with `InvalidPayload` (HTTP 400); on
+`task::enable_erc20` the refusal is the `Transport` of R35.3A.6 in the task
+status. With a provider on the platform, the address entries of the results of
+R35.1.3, R35.2.3 and R35.3A.5 also carry `gasfree_address`. The two credentials
+of the object are credentials under R35.1.17. Chapter 63 §63.3.1 -- §63.3.3 and
+their status notes of 2026-11-20 govern.
+
+*Status note (2026-11-20, Reloaded-original), the two GasFree members with
+TRON switched on.* The note above names `TRON_ACTIVATION_AVAILABLE` as `false`.
+It is `true` in this tree (the status note of this date after the 2026-11-17
+TRON platform note below; chapter 21 D6), so both members are read on a route a
+request reaches, and the results carry `gasfree_address` as the note above
+states. The gasless withdraw of chapter 63 is not built.
+
 ### 35.1.B Activation flow and failure precedence
 
 R35.1.2 Activation shall proceed through the following phases, and when a
@@ -228,6 +248,12 @@ A failure in any phase shall leave neither the platform coin nor any of its
 tokens or NFT pseudo-coin registered (no partial activation). Activation shall
 succeed when, for every request it needs, at least one of the supplied nodes
 answers (multi-node failover); a subset of unresponsive nodes is not an error.
+
+*Pointer (2026-11-18).* A `ticker` that is registered but passive (chapter 43
+R43.1E.6), and a requested token that is already registered, are the
+subject of chapter 43 §43.1F (R43.1F.2 -- R43.1F.5; passed the KDF Dirty
+Gate on 2026-11-18); the token and NFT activations of §35.2 against a passive platform
+are its R43.1F.6 and R43.1F.8. This pointer binds nothing of its own.
 
 ### 35.1.C Success result
 
@@ -273,6 +299,15 @@ hierarchically: the daemon runs in HD (mnemonic) mode, or the `Trezor` policy
 In the HD shape `get_balances` has no effect (balances are always reported)
 (G: the reference shows no HD example with `get_balances: false`; the reference
 version ignores the flag in HD mode).
+
+> **Pointer (2026-11-19, Spec Reader round 0.5.0-15; travels with chapter 49
+> §49.2.1 for the KDF Dirty Gate).** After activation, the HD address
+> methods `get_new_address`, `account_balance`, `task::account_balance::init`
+> and `task::scan_for_new_addresses::init` carry the same per-address ticker
+> set as (b) for a platform ticker, and the token's ticker alone for a token
+> ticker. Their address form and the token `from` selector of a withdraw are
+> bound by [Chapter 49](49-withdrawal-task-path.md) R49.32 -- R49.34. This
+> note binds nothing of its own.
 
 The success HTTP status is 200.
 
@@ -468,6 +503,11 @@ does not sign requests; each entry also reads the optional `headers` object of
 chapter 21 R-N9 (the `tron_api_key` applies to its URL as well); and the
 swap-contract members take the base58check and hex forms of chapter 21 R21.B2
 besides the EVM `0x` form. Chapter 21 §21.4 and R21.10B.2 govern the rest.
+
+*Status note (2026-11-20), TRON switched on.* `TRON_ACTIVATION_AVAILABLE` is
+`true` and the "not available" refusal is gone: this route activates a `TRX`
+platform and its `TRC20` tokens. A TRON coin is wallet-only while
+`TRON_SWAPS_AVAILABLE` is `false` (chapter 21 D6, R21.B3).
 
 ---
 
@@ -2848,3 +2888,25 @@ is decided together with this item.
   decision of 2026-11-09 and this repository's code. They take no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
   is required.
+- *Pointer added 2026-11-18 (Spec Reader round 0.5.0-13) -- the note after
+  R35.1.2.* It names chapter 43 R43.1F.2 -- R43.1F.6 and R43.1F.8 and states
+  no behavior of its own; it travels with chapter 43 §43.1F for the KDF
+  Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
+  43's provenance footer.
+- *Pointer added 2026-11-19 (Spec Reader round 0.5.0-15) -- the note after
+  R35.1.3.* It names chapter 49 R49.32 -- R49.34 and restates their ticker
+  set in one sentence; it states no behavior of its own and travels with
+  chapter 49 §49.2.1 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
+  2026-11-19, measure 0.02, no findings**, as recorded for §49.2.1 in chapter
+  49's provenance footer.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status note of this date after the 2026-11-17 TRON platform note records
+  that `TRON_ACTIVATION_AVAILABLE` is `true` and that a TRON coin is
+  wallet-only while `TRON_SWAPS_AVAILABLE` is `false`. It rests on chapter
+  21 D6 and R21.B3 and on this repository's code. No cleared sentence was
+  edited.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  second status note of this date after the GasFree provider binding pointer
+  (the two GasFree members with TRON switched on) corrects the switch value
+  the note before it names. It rests on chapter 21 D6 and on this
+  repository's code. No cleared sentence was edited.

@@ -53,6 +53,10 @@ pub enum Erc20BuildError {
     /// non-negative integer (CRD R57.5.1, R57.6.1). Names the key.
     #[display(fmt = "{}", _0)]
     InvalidConfig(String),
+    /// The token's activation request holds a member the platform cannot serve: the `gasless` block of a TRC20
+    /// token (CRD ch.63 §63.3.2).
+    #[display(fmt = "{}", _0)]
+    InvalidPayload(String),
     /// The platform coin's context is gone.
     #[display(fmt = "{}", _0)]
     Internal(String),
@@ -855,6 +859,7 @@ pub(crate) async fn build_eth_coin(
         // ETH/ERC20 coins never use the TRON HTTP API; populated only by the
         // dedicated TRON activation path.
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract,
         swap_gas_fee_policy: Mutex::new(params.swap_gas_fee_policy.unwrap_or_default()),
         erc20_tokens_infos: Default::default(),
@@ -889,7 +894,8 @@ pub(crate) async fn build_eth_coin(
 pub async fn find_active_erc20_by_contract(ctx: &MmArc, platform: &str, token_addr: Address) -> Option<String> {
     let coins_ctx = CoinsContext::from_ctx(ctx).ok()?;
     let coins = coins_ctx.coins.lock().await;
-    coins.values().find_map(|coin| match coin {
+    // Any registered ticker counts, a passive platform's token included (CRD ch.43 R43.1F.4 case (d)).
+    let found = coins.registered().values().find_map(|coin| match coin {
         crate::MmCoinEnum::EthCoin(eth) => match &eth.coin_type {
             EthCoinType::Erc20 {
                 platform: token_platform,
@@ -898,7 +904,8 @@ pub async fn find_active_erc20_by_contract(ctx: &MmArc, platform: &str, token_ad
             _ => None,
         },
         _ => None,
-    })
+    });
+    found
 }
 
 #[cfg(test)]

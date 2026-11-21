@@ -70,7 +70,7 @@ impl SolanaConfirmedTransaction {
                     my_balance_change,
                     block_height: self.slot,
                     timestamp: self.block_time,
-                    fee_details: Some(SolanaFeeDetails { amount: fee }.into()),
+                    fee_details: Some(SolanaFeeDetails::new(fee, 0.into()).into()),
                     coin: solana_coin.ticker.clone(),
                     internal_id: Default::default(),
                     kmd_rewards: None,
