@@ -11,10 +11,6 @@ use std::str::FromStr;
 /// SOL for `lamports`: the exact value, normalized (see [`units_to_amount`]).
 pub fn lamports_to_sol(lamports: u64) -> BigDecimal { units_to_amount(lamports, LAMPORTS_DECIMALS) }
 
-pub fn amount_to_ui_amount(amount: u64, decimals: u8) -> BigDecimal {
-    BigDecimal::from(amount) / BigDecimal::from(10_u64.pow(decimals as u32))
-}
-
 /// The length in bytes of a Solana public key, and so of an address once base58-decoded.
 const SOLANA_PUBKEY_LEN: usize = 32;
 

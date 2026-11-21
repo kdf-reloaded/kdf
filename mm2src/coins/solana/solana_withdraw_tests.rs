@@ -1060,8 +1060,9 @@ fn sol_wire(lamports: u64) -> (String, String, String) {
 
 #[test]
 fn sol_balance_is_the_exact_normalized_value() {
-    let cases: [(u64, &str); 6] = [
+    let cases: [(u64, &str); 7] = [
         (0, "0"),
+        (10_000_000_000, "10"),
         (1, "0.000000001"),
         (1_500_000_000, "1.5"),
         (12_345_678_901, "12.345678901"),
@@ -1095,8 +1096,10 @@ fn token_wire(raw: u64, decimals: u8) -> (String, String) {
 
 #[test]
 fn token_balance_is_the_exact_normalized_value() {
-    let cases: [(u64, u8, &str); 6] = [
+    let cases: [(u64, u8, &str); 8] = [
         (0, 6, "0"),
+        (1_000_000, 6, "1"),
+        (100, 0, "100"),
         (12_345_678, 6, "12.345678"),
         (1_500_000, 6, "1.5"),
         (42, 0, "42"),
