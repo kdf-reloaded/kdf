@@ -174,6 +174,28 @@ async fn wait_until(what: &str, secs: f64, cond: impl Fn() -> bool) {
     }
 }
 
+/// The number of strong holders of a client once it has settled: the count stayed the same for 2 s. The maintenance
+/// loop of the client holds a strong handle for the length of a pass (activation pass, resubscription), a transient
+/// that comes and goes; a handle kept by a failed activation never goes. Both the baseline and the final count are
+/// taken settled and compared for equality, so a transient is waited out in either direction and a kept clone shows
+/// as one more holder at the end.
+async fn settled_strong_count<T>(weak: &std::sync::Weak<T>) -> usize {
+    let started = std::time::Instant::now();
+    let (mut last, mut since) = (weak.strong_count(), std::time::Instant::now());
+    while since.elapsed().as_secs_f64() < 2. {
+        assert!(
+            started.elapsed().as_secs_f64() < 60.,
+            "the holders of the client did not settle"
+        );
+        Timer::sleep(0.2).await;
+        let now = weak.strong_count();
+        if now != last {
+            (last, since) = (now, std::time::Instant::now());
+        }
+    }
+    last
+}
+
 fn balance_of(units: u64) -> BigDecimal { big_decimal_from_sat(units as i64, 8) }
 
 fn electrum_client_of(coin: &Qrc20Coin) -> ElectrumClient {
@@ -1581,7 +1603,7 @@ fn t38_6_4q_1_a_token_activation_that_fails_in_its_build_leaves_the_client_to_qt
         let client = qtum_client_of(&qtum);
         let weak = std::sync::Arc::downgrade(&client.0);
         drop(client);
-        let holders = weak.strong_count();
+        let holders = settled_strong_count(&weak).await;
 
         server.set_error(CALL, "stub contract error");
         let mut request = electrum_request(&[&server], false);
@@ -1591,7 +1613,7 @@ fn t38_6_4q_1_a_token_activation_that_fails_in_its_build_leaves_the_client_to_qt
         Timer::sleep(1.).await;
 
         // The failed activation holds no part of the client, and the session QTUM uses is open and answers.
-        assert_eq!(weak.strong_count(), holders);
+        assert_eq!(settled_strong_count(&weak).await, holders);
         assert_eq!((server.open_connections(), server.accepted()), (1, 1));
         assert_eq!(height_over(&qtum_client_of(&qtum)).await, 777);
     });
@@ -1641,7 +1663,7 @@ fn t38_6_4q_1_a_token_reusing_a_client_whose_servers_disagree_is_refused_and_lea
         wait_until("the disagreement state", 100., || client.chain_disagreement().is_some()).await;
         let weak = std::sync::Arc::downgrade(&client.0);
         drop(client);
-        let holders = weak.strong_count();
+        let holders = settled_strong_count(&weak).await;
 
         let mut request = electrum_request(&list, false);
         request["coin"] = json!(TICKER);
@@ -1657,7 +1679,7 @@ fn t38_6_4q_1_a_token_reusing_a_client_whose_servers_disagree_is_refused_and_lea
         Timer::sleep(1.).await;
 
         // The refused activation holds no handle, and no session of QTUM's changed.
-        assert_eq!(weak.strong_count(), holders);
+        assert_eq!(settled_strong_count(&weak).await, holders);
         for server in &servers {
             assert_eq!((server.open_connections(), server.accepted()), (1, 1));
         }
