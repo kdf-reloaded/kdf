@@ -568,6 +568,22 @@ reference implementation; it closes a path on which a taker otherwise
 depends on a manual `recover_funds_of_swap` within the maker payment's
 locktime.
 
+> **Status note (2026-11-21, Reloaded-original, clean side; maintainer
+> decision of 2026-11-21).** For a taker coin that reads its chain through
+> Electrum servers (a UTXO coin with an Electrum client), a look that ends
+> without a spend or a refund (the search failed, did not finish within its
+> bound, or found nothing) MUST repeat the search once on every usable
+> server of the coin's rank, with directed requests (ch.38 R38.6.4g), before
+> the chain continues. The servers are asked at the same time and share one
+> bound of 120 seconds, which begins when the first search has ended, so a
+> look can take up to two such bounds. The first spend or refund a server
+> finds is handled as this rule states for a found spend or refund; when
+> none is found, the chain continues exactly as R31 states. This applies at
+> all three points above. Other coins keep their single search. The reason
+> is a field report: a maker spent the taker payment a few seconds after its
+> fourth confirmation, and the taker's looks did not find that spend until
+> hours after the maker payment's locktime.
+
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
 stages.
@@ -2304,6 +2320,24 @@ that the test controls:
    shorter step), the total sleep and the refund decision are those of the
    unchanged wait, and the warning is written once the stall reaches 60 minutes.
 
+**T34.** *The refund chain's look asks every Electrum server (R31a, status
+note of 2026-11-21).* With a taker swap in its refund chain and an
+Electrum-backed taker coin whose spread search fails, or finds nothing,
+while another server of the coin's rank holds the maker's spend of the taker
+payment:
+
+1. the look on entry emits `TakerPaymentSpent` with the extracted secret
+   and continues at `STAGE-SPEND-MAKER-PAYMENT`; no refund is built;
+2. the same outcome follows from the look after a refund rejected for a
+   terminal reason, and the rejected refund is not published;
+3. a refund of the taker payment found on another server emits
+   `TakerPaymentRefunded` with that transaction and ends the chain;
+4. when every server fails, does not answer within the shared bound, or
+   finds nothing, the chain continues as R31 states;
+5. a taker coin that is not Electrum-backed makes its single search only.
+
+*(Added 2026-11-21 with the status note under R31a.)*
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -2555,6 +2589,12 @@ reference rows alike.
   taker refund chain and recovery code and from R30, R31 and R32 of this
   chapter; no reference input was consulted, the rule makes no parity
   claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-21: the status note under R31a and T34 are a
+  Reloaded addition written in a clean session from the maintainer's
+  decision of 2026-11-21, a field report, this project's own reads of public
+  LCC and RVN Electrum servers and this workspace's own refund chain and
+  Electrum client code; no reference input was consulted, the note makes no
+  parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-10-30: R50B, T30 and D6 are a Reloaded addition
   written in a clean session from this workspace's own transaction-helper
   sender and receiver and from R43 of this chapter, prompted by a Reloaded

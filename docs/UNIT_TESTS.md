@@ -768,3 +768,26 @@ first test below; the positive cases of T6 are unchanged.
 
 Not covered: the raw-transaction signing request end to end (a lab row on the wire covers the text); the four swap
 functions that pass the error on (it cannot occur for the outputs they build).
+
+## EVM HD address methods and ERC-20 `from` (10 tests)
+
+Location: `mm2src/coins_activation/src/evm_hd_p1_tests.rs` (names start with `evm_hd_p1_`). CRD: chapter 49, R49.32 (last
+paragraph), R49.33, R49.34, T49.31 and T49.32; chapter 05, R54. Run with `cargo test -p coins_activation --lib evm_hd_p1_`.
+The platform and the token are activated through the public routines against a scripted EVM node that answers per
+address and records every balance and nonce query.
+
+| Test | CRD | What is tested |
+|---|---|---|
+| `evm_hd_p1_get_new_address_answers_the_full_checksummed_address` | R49.33, R35.1.3 | `get_new_address` on an EVM HD platform answers the full 42-character EIP-55 address and the platform ticker only |
+| `evm_hd_p1_the_scan_task_for_an_evm_hd_platform_reaches_the_evm_scan` | ch.05 R54 | `task::scan_for_new_addresses::init` on an EVM HD platform runs the EVM scan, finds a used address and answers it in the full form |
+| `evm_hd_p1_get_new_address_with_a_token_ticker_answers_the_token_only_and_the_platform_lists_it` | R49.32, T49.31 | A token ticker answers a map with that token only; the platform's `account_balance` then lists the new address |
+| `evm_hd_p1_account_balance_with_a_token_ticker_answers_token_only_maps` | R49.32 | `account_balance` and the account balance of the task route answer token-only maps and token-only totals |
+| `evm_hd_p1_the_scan_with_a_token_ticker_finds_an_address_that_holds_only_that_token` | R49.32 | The token scan finds an address with nonce 0 and only the token; the platform ticker's scan still does not |
+| `evm_hd_p1_a_token_on_a_single_key_platform_keeps_its_current_answer` | R49.32 | A token on a single-key platform answers `CoinIsActivatedNotWithHDWallet` on the three methods |
+| `evm_hd_p1_a_token_withdraw_with_from_is_sent_from_the_selected_address_on_both_routes` | R49.34, T49.32 | Both selector forms on `withdraw` and `task::withdraw::init`: the selected address supplies balance and nonce, its key signs, `from` is that address |
+| `evm_hd_p1_a_token_withdraw_without_from_is_sent_from_the_activated_address` | R49.34 item 4 | Without `from` both routes send from the activated address |
+| `evm_hd_p1_a_token_selector_that_does_not_resolve_is_refused_before_any_query` | R49.34 item 3 | Address id at the known count, an unknown account and a path of another coin type are refused (HTTP 400 on the direct route) with no balance or nonce query, and the known count is unchanged |
+| `evm_hd_p1_a_token_on_a_single_key_platform_refuses_from_with_the_existing_text` | R49.3 | A token on a single-key platform refuses `from` with `UnexpectedFromAddress` on both routes |
+
+Not covered: the Trezor routes need a device emulator; `emulator_trezor_withdraw_erc20_with_from_path` (T49.9) now builds
+the token through its platform coin and runs only with the `trezor-emulator-tests` feature and a reachable emulator.

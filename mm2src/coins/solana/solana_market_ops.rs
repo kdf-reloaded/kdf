@@ -34,23 +34,16 @@ impl MarketCoinOps for SolanaCoin {
     }
 
     fn my_balance(&self) -> BalanceFut<CoinBalance> {
-        let decimals = self.decimals as u64;
         let fut = self.my_balance_impl().and_then(move |result| {
             Ok(CoinBalance {
-                spendable: result.with_prec(decimals),
+                spendable: result,
                 unspendable: 0.into(),
             })
         });
         Box::new(fut)
     }
 
-    fn base_coin_balance(&self) -> BalanceFut<BigDecimal> {
-        let decimals = self.decimals as u64;
-        let fut = self
-            .my_balance_impl()
-            .and_then(move |result| Ok(result.with_prec(decimals)));
-        Box::new(fut)
-    }
+    fn base_coin_balance(&self) -> BalanceFut<BigDecimal> { Box::new(self.my_balance_impl()) }
 
     fn platform_ticker(&self) -> &str { self.ticker() }
 

@@ -1,6 +1,7 @@
 use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, TradeFee, TransactionEnum, WatcherOps};
 use crate::solana::rpc_pool::SolanaRpcPool;
-use crate::solana::solana_common::{amount_to_units, parse_recipient, truncate_amount, units_to_amount};
+use crate::solana::solana_common::{amount_to_units, parse_recipient, truncate_amount, units_to_amount,
+                                   with_at_least_decimals};
 use crate::solana::{solana_common, swaps_unsupported, SolanaCoinSettings, SolanaCommonOps, SolanaFeeDetails};
 use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, RawTransactionError,
             RawTransactionFut, RawTransactionRequest, SignatureResult, SolanaCoin, TradePreimageError,
@@ -214,6 +215,8 @@ struct TokenWithdrawPlan {
     units: u64,
     fee: u64,
     rent: u64,
+    /// The decimals of the mint, from the token-account read of the same node.
+    mint_decimals: u8,
     blockhash: Hash,
     message: Message,
 }
@@ -313,13 +316,26 @@ async fn plan_withdraw_on_node(
         return Ok(Err(MmError::new(WithdrawError::NotSufficientPlatformBalanceForFee {
             coin: platform.ticker.clone(),
             available: units_to_amount(sol_balance, platform.decimals),
-            required: units_to_amount(sol_required, platform.decimals),
+            // R40.2A.4, error members: `required` is the exact sum of the fee and the rent, in the full decimals of
+            // SOL.
+            required: with_at_least_decimals(
+                units_to_amount(fee, platform.decimals) + units_to_amount(rent, platform.decimals),
+                platform.decimals,
+            ),
         })));
     }
+    // A withdraw that reaches here moves a positive amount the account holds, so the account exists and the node
+    // stated the mint's decimals.
+    let Some(mint_decimals) = balance.mint_decimals else {
+        return Ok(Err(MmError::new(WithdrawError::InternalError(
+            "The token account read carries no decimals".to_string(),
+        ))));
+    };
     Ok(Ok(TokenWithdrawPlan {
         units,
         fee,
         rent,
+        mint_decimals,
         blockhash,
         message,
     }))
@@ -359,6 +375,7 @@ async fn withdraw_impl(coin: SplToken, req: WithdrawRequest) -> WithdrawResult {
         units,
         fee,
         rent,
+        mint_decimals,
         blockhash,
         message,
     } = planned;
@@ -376,6 +393,13 @@ async fn withdraw_impl(coin: SplToken, req: WithdrawRequest) -> WithdrawResult {
 
     let amount = units_to_amount(units, decimals);
     let received_by_me = if recipient == wallet { amount.clone() } else { 0.into() };
+    // R40.2A.4 and D40.2A.1: the total is the sum of the fee and the rent, in the full decimals of SOL; the fee and
+    // the rent stay single figures.
+    let mut fee_details = SolanaFeeDetails::new(
+        units_to_amount(fee, platform.decimals),
+        units_to_amount(rent, platform.decimals),
+    );
+    fee_details.total_amount = with_at_least_decimals(fee_details.total_amount, platform.decimals);
     Ok(TransactionDetails {
         unsigned: None,
         tx_json: None,
@@ -386,17 +410,12 @@ async fn withdraw_impl(coin: SplToken, req: WithdrawRequest) -> WithdrawResult {
         to: vec![req.to],
         total_amount: amount.clone(),
         spent_by_me: amount.clone(),
-        my_balance_change: &received_by_me - &amount,
+        // R40.2A.4 and D40.2A.1: a sum member carries the mint's full decimals.
+        my_balance_change: with_at_least_decimals(&received_by_me - &amount, mint_decimals),
         received_by_me,
         block_height: 0,
         timestamp: now_ms() / 1000,
-        fee_details: Some(
-            SolanaFeeDetails::new(
-                units_to_amount(fee, platform.decimals),
-                units_to_amount(rent, platform.decimals),
-            )
-            .into(),
-        ),
+        fee_details: Some(fee_details.into()),
         coin: coin.conf.ticker.clone(),
         kmd_rewards: None,
         transaction_type: TransactionType::TokenTransfer(
