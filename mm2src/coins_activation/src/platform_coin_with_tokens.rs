@@ -102,6 +102,9 @@ pub enum InitTokensAsMmCoinsError {
     CustomTokenError(CustomTokenError),
     /// The nodes gave no usable answer while a token was being built (CRD R35.1.6).
     Transport(String),
+    /// A token entry of the request holds a member its platform cannot serve: the `gasless` block of a TRC20 token
+    /// (CRD ch.63 §63.3.2).
+    InvalidPayload(String),
 }
 
 impl From<CoinConfWithProtocolError> for InitTokensAsMmCoinsError {
@@ -234,8 +237,15 @@ pub trait PlatformWithTokensActivationOps: Into<MmCoinEnum> + TryPlatformCoinFro
     fn history_supported(&self) -> bool { true }
 
     /// Completes the registration of what the activation set up beside the coins, once the platform and its
-    /// tokens are registered.
-    fn on_platform_registered(_ctx: &MmArc, _ticker: &str, _activation_request: &Self::ActivationRequest) {}
+    /// tokens are registered. `reactivation` is true for the re-activation of a passive platform, which keeps
+    /// the processes the platform already runs (CRD ch.43 D43.1F.5 (a)).
+    fn on_platform_registered(
+        _ctx: &MmArc,
+        _ticker: &str,
+        _activation_request: &Self::ActivationRequest,
+        _reactivation: bool,
+    ) {
+    }
 
     fn start_history_background_fetching(
         &self,
@@ -389,6 +399,7 @@ impl From<InitTokensAsMmCoinsError> for EnablePlatformCoinWithTokensError {
             InitTokensAsMmCoinsError::PlatformCoinMismatch => EnablePlatformCoinWithTokensError::PlatformCoinMismatch,
             InitTokensAsMmCoinsError::CustomTokenError(e) => EnablePlatformCoinWithTokensError::CustomTokenError(e),
             InitTokensAsMmCoinsError::Transport(e) => EnablePlatformCoinWithTokensError::Transport(e),
+            InitTokensAsMmCoinsError::InvalidPayload(e) => EnablePlatformCoinWithTokensError::InvalidPayload(e),
         }
     }
 }
@@ -671,7 +682,7 @@ where
     if let Some(nft_ticker) = nft_ticker {
         coins_ctx.add_nft_dependent(ticker, &nft_ticker).await;
     }
-    Platform::on_platform_registered(&ctx, ticker, request);
+    Platform::on_platform_registered(&ctx, ticker, request, reactivation);
 
     // The history collector starts after the registry accepted the platform, so a failure before the registration
     // leaves no loop behind and the loop's first registration check finds the platform (CRD ch.55 D55.8). A

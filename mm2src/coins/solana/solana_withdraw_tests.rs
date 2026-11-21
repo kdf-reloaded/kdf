@@ -274,6 +274,9 @@ fn token_on(url: &str, program: Pubkey, decimals: u8) -> SplToken {
 fn request(coin: &str, to: &str, amount: &str, max: bool) -> WithdrawRequest {
     WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         coin: coin.to_string(),
         from: None,
         to: to.to_string(),

@@ -1198,6 +1198,16 @@ not a coinbase output counts as mature; only coinbase outputs are withheld
 until the configured maturity (R38.2). An unconfirmed change output is thus
 eligible as soon as the backend lists it.
 
+*Status note (2026-11-20, clean side; maintainer decision).* In this tree the
+maturity check of a listing does not fetch the transaction of an output that
+the record knows as an output of a transaction this node built, for every
+UTXO coin, whether step 2 added it or the backend listed it. Such an output
+belongs to a transaction this node built and signed, so it is never a
+coinbase or coinstake output and counts as mature. The fetch was a read
+spread over the servers whose error answer is final (R38.6.4f item 1), so a
+server that had not yet seen the fresh transaction could fail the next spend
+from the same address. Every other listed output keeps the check as before.
+
 R38.5B.5 **Serialization of own-address spends.** (Reference-bound at both
 rows; also the baseline's behaviour.) Two locks order concurrent spends from
 the coin's address. The listing of R38.5B.4 returns the record's lock to its
@@ -4447,6 +4457,50 @@ its inputs, and its change is offered, whichever of QTUM, a token or
 delegation built either one and whichever session answers the listing.
 *Recommendation:* (b). No peer observes it.
 
+*Status note (2026-11-15 and 2026-11-19, clean side; maintainer decisions).
+D38.6.4Q.4 is decided:* option (b), on 2026-11-15. Its key was decided on
+2026-11-19.
+
+1. *Key.* One recently-spent record per platform and address script: the
+   platform (a token's `protocol.protocol_data.platform`, QTUM's own ticker)
+   and the script of the address whose outputs are spent. QTUM and its
+   tokens use one record wherever they spend from the same address. Under an
+   HD login, QTUM's enabled address and the tokens' address are different
+   scripts, so each has its own record. Every other coin keeps its record
+   per instance, as before.
+2. *Lifetime.* The node keeps the shared records in a registry of its
+   context, by weak reference. An instance takes the record of its activated
+   address when it is built. A record lives as long as any instance holds
+   it; when the last one is disabled, the record ends, as an instance's own
+   record does today. A spend from another address of an HD wallet keeps the
+   behavior of an instance's own record: it is entered into the record of
+   the instance's activated address, and no lasting record is kept for that
+   other address.
+3. *What is entered.* Every transaction of the QTUM family that this node
+   built and the backend accepted, when it spends outputs of the address:
+   QTUM's swap sends and merges, every token broadcast (payments, fees,
+   spends and refunds, which pay their gas from the address), and the
+   withdraws and delegations promoted as in R38.5B.9. A refused broadcast
+   enters nothing.
+4. *Ordering.* The record's own lock is the lock of the address. Every build
+   of the QTUM family that spends outputs of the address takes it when the
+   unspent listing has been answered, filters the listing through the record
+   under it, and holds it through the broadcast and the entry, or, for a
+   build that is not broadcast at once (a withdraw or a delegation), through
+   signing and the pending entry of R38.5B.9. The listing request itself is
+   sent before the lock is taken, so two builds can ask at the same time;
+   their selections are made one after the other. It replaces the
+   process-wide lock for this family; the other UTXO coins keep the
+   process-wide lock. A withdraw holds the lock through signing; with a
+   hardware wallet that includes the wait for the device, during which the
+   listings of that address wait too. A pending entry
+   does not hide inputs: two builds made before either is broadcast can
+   select the same input, and the backend refuses the second broadcast.
+5. *Lock order.* The record's lock is a lock of the send path. It is never
+   taken while the activation locks of R55.1.12 (chapter 55), the client
+   build lock or a registry of the status note after D38.6.4Q.1 are held,
+   and `disable_coin` does not take it.
+
 D38.6.4Q.5 *(Open, 2026-11-15.)* **Ending a token's background work when it
 is disabled.** The reference ends it at once (R38.6.4Q.10 item 1); this tree
 does not, and a quick disable and enable leaves two collectors (the note
@@ -4865,6 +4919,18 @@ fixed for the life of an order and a swap. It first appears in this form
 at `v2.6.0-beta`. In the `v2.5.0-beta`, `v2.5.1-beta` and `v2.5.2-beta`
 releases the rule was `10 × D` for every UTXO coin; before `v2.5.0-beta`
 it was `10 × D` for every UTXO coin except the ticker `BTC` (R38.6.6f).
+
+> *Reloaded status (clean side, 2026-11-18):* by the maintainer's decisions of
+> 2026-11-18 a ZEC entry that is `overwintered`, has `txversion` 5 and names a
+> Zcash branch id from NU7 on pays ZIP 317's conventional fee instead of the
+> policies of R38.6.6a -- R38.6.6b ([Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> R39.11.4V.10 status note of 2026-11-18). For such an entry `F` in R38.6.6e is
+> the conventional fee of a version-1 HTLC claim, 10000 base units (two logical
+> actions), not an estimate over 496 bytes. With the default dust of 1,000 base
+> units ZEC's minimum trading volume is therefore 0.001 ZEC, which is also the
+> default minimum volume of a new ZEC order (chapter 60 R60.4.2); the value
+> stays independent of any fee estimate or network state. The ZEC row of
+> R38.6.6h keeps the per-kilobyte figures of a version-4 entry.
 
 R38.6.6f *No ticker exception.* Every ticker follows R38.6.6e, Bitcoin
 included. `BTC` and `BTC-segwit` are dynamic-fee coins without a `dust`
@@ -6434,3 +6500,20 @@ R38.8.6 **Tests (two-direction, observable).**
   read the forbidden corpus, from the maintainer's decisions and this
   repository's code. It takes no forbidden-class input, so chapter 01 R38 is
   not engaged and no gate pass is required.
+- *Status note added 2026-11-18 -- after R38.6.6e.* Reloaded-original, clean
+  side: it records the maintainer's decisions of 2026-11-18 on the ZIP 317 fee
+  for ZEC and its minimum trading volume, written from this repository's code
+  and the public ZIP 317; no forbidden-class input, chapter 01 R38 not engaged.
+- *Maintainer decision (2026-11-20), clean side -- status note after
+  R38.5B.4 (no maturity fetch for an output the record supplied, for every
+  UTXO coin).* Written by a session that never read the forbidden corpus,
+  from the maintainer's decision and this repository's code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
+- *Maintainer decisions (2026-11-15 and 2026-11-19), clean side -- status
+  note after D38.6.4Q.4 (one recently-spent record per platform and address
+  for the QTUM family: key, lifetime, what is entered, ordering, and lock
+  order).* Written by a session that never read the forbidden corpus, from
+  the maintainer's decisions and this repository's code. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.

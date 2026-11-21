@@ -189,7 +189,8 @@ impl EthCoin {
                 .await
             },
             // TRON HTLC payments use the dedicated TRON pipeline.
-            // Activation gating prevents this branch. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(TransactionErr::Plain(ERRL!(
                 "TRON taker funding v2 not yet wired (pending P10.2.5)"
             ))),
@@ -244,7 +245,8 @@ impl EthCoin {
                 verify_erc20_taker_calldata(&decoded, &inputs, function, token_addr)
             },
             // TRON validation uses the dedicated TRON pipeline.
-            // Activation gating prevents this branch. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(ValidateSwapV2TxError::InternalError(
                 "TRON taker funding validation not yet wired (pending P10.2.5)".to_owned(),
             )),

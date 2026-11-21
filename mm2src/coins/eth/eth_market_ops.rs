@@ -245,9 +245,8 @@ impl MarketCoinOps for EthCoin {
         let func_name = match self.coin_type {
             EthCoinType::Eth => "ethPayment",
             EthCoinType::Erc20 { .. } => "erc20Payment",
-            // V1 ETH-style HTLC swaps don't apply to TRON; activation gating
-            // prevents this code path from being reached. Real TRON swap
-            // wiring lands in P10.2.5.
+            // V1 ETH-style HTLC swaps don't apply to TRON. TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return Box::new(futures01::future::err(TransactionErr::Plain(
                     "TRON V1 swap spend watchers are not supported".to_string(),

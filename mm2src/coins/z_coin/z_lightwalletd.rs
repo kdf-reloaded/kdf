@@ -51,7 +51,7 @@ use mm2_err_handle::prelude::*;
 use parking_lot::Mutex;
 use prost_14::Message as _;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
-use serialization::{deserialize, serialize, CoinVariant};
+use serialization::{serialize, CoinVariant};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -2312,15 +2312,17 @@ impl UtxoRpcClientOps for LightwalletdClient {
             match this.0.detect_output_spend(&output, from, &log).await {
                 Ok(SpendOutcome::NotSpent(_)) => Ok(None),
                 Ok(SpendOutcome::Spent(spend)) => {
-                    // The shared UTXO transaction type cannot read version 6, so a ZHTLC coin's
-                    // swap path does not come through here (z_tx_read); this trait form is for the
-                    // shared callers and fails loudly rather than guessing at a transaction it cannot read.
-                    let spending_tx: UtxoTx = deserialize(spend.tx.as_slice()).map_err(|e| {
-                        format!(
-                            "the spend of the HTLC output was found, but the shared UTXO parser cannot read it ({:?})",
-                            e
-                        )
-                    })?;
+                    // This trait form is for the shared callers, which read the spend's inputs only: it reads
+                    // through the UTXO coins' entry point (version 6 included) and fails loudly rather than
+                    // guessing at a transaction it cannot read. A ZHTLC coin's own swap path does not come
+                    // through here (z_tx_read).
+                    let spending_tx: UtxoTx =
+                        crate::utxo::utxo_common::read_utxo_tx(spend.tx.as_slice()).map_err(|e| {
+                            format!(
+                                "the spend of the HTLC output was found, but it cannot be read ({:?})",
+                                e
+                            )
+                        })?;
                     let height = spend
                         .height
                         .ok_or_else(|| "the spending transaction has no mined height".to_owned())?;

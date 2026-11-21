@@ -571,6 +571,7 @@ fn build_trezor_coin(
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -743,6 +744,9 @@ fn emulator_trezor_withdraw_native_no_from() {
 
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -817,6 +821,9 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
 
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::DerivationPath {
             derivation_path: EVM_PATH.to_string(),
@@ -890,6 +897,9 @@ fn emulator_trezor_withdraw_tron_unsupported() {
 
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -935,6 +945,9 @@ fn emulator_trezor_withdraw_bad_from_selector() {
     // before any device exchange.
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::DerivationPath {
             derivation_path: "m/44'/0'/0'/0/0".to_string(),
@@ -1114,6 +1127,9 @@ fn emulator_trezor_withdraw_passphrase_user_action() {
 
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -1210,6 +1226,9 @@ fn emulator_trezor_withdraw_passphrase_action_mismatch() {
 
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -1381,6 +1400,9 @@ fn emulator_trezor_activate_eth_native() {
     // withdrawal on the device; the recovered sender must be the same address.
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),

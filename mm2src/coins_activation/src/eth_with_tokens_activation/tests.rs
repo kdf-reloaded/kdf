@@ -1790,10 +1790,21 @@ mod hd_accounts_at_index {
 
 mod reactivation {
     use super::*;
+
     use coins::nft::{Chain, NftCtx};
     use coins::{CoinsContext, TestCoin};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// D43.1F.5 (a): only a new activation that asks for `tx_history` starts the TRON history process; a
+    /// re-activation of a passive platform starts none, so the one the platform has is the only one.
+    #[test]
+    fn d43_1f_5_a_re_activation_starts_no_second_tron_history() {
+        assert!(starts_tron_history(true, false));
+        assert!(!starts_tron_history(true, true));
+        assert!(!starts_tron_history(false, false));
+        assert!(!starts_tron_history(false, true));
+    }
 
     /// A healthy node that counts the requests it answers.
     fn counting_node() -> (MockEvmNode, Arc<AtomicUsize>) {

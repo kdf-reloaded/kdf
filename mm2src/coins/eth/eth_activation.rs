@@ -53,6 +53,10 @@ pub enum Erc20BuildError {
     /// non-negative integer (CRD R57.5.1, R57.6.1). Names the key.
     #[display(fmt = "{}", _0)]
     InvalidConfig(String),
+    /// The token's activation request holds a member the platform cannot serve: the `gasless` block of a TRC20
+    /// token (CRD ch.63 §63.3.2).
+    #[display(fmt = "{}", _0)]
+    InvalidPayload(String),
     /// The platform coin's context is gone.
     #[display(fmt = "{}", _0)]
     Internal(String),
@@ -855,6 +859,7 @@ pub(crate) async fn build_eth_coin(
         // ETH/ERC20 coins never use the TRON HTTP API; populated only by the
         // dedicated TRON activation path.
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract,
         swap_gas_fee_policy: Mutex::new(params.swap_gas_fee_policy.unwrap_or_default()),
         erc20_tokens_infos: Default::default(),

@@ -1924,50 +1924,75 @@ async fn run_spend_pair(first: Spend, second: Spend) -> (UtxoTx, Vec<UtxoTx>) {
     (funding, txs)
 }
 
-/// Asserts what the pair is expected to show in this tree: two broadcasts, both spending the one funding output (the
-/// second does not avoid the first one's input).
-async fn assert_second_spends_the_input_of_the_first(first: Spend, second: Spend) {
+/// The outpoints the listing of `coin` offers for the one address, as the spend paths read it (the shared record
+/// replaces what it knows was spent).
+async fn listed_outpoints<T>(coin: &T) -> Vec<(String, u32)>
+where
+    T: crate::utxo::GetUtxoListOps + AsRef<UtxoCoinFields>,
+{
+    let address = coin.as_ref().derivation_method.iguana_or_err().unwrap().clone();
+    let (unspents, _guard) = coin.get_unspent_ordered_list(&address).await.unwrap();
+    unspents
+        .iter()
+        .map(|unspent| {
+            let hash = json::to_value(H256Json::from(unspent.outpoint.hash.reversed())).unwrap();
+            (hash.as_str().unwrap().to_owned(), unspent.outpoint.index)
+        })
+        .collect()
+}
+
+/// Runs `future`, and fails the test if it has not finished after `secs`.
+async fn completes_within<T>(what: &str, secs: f64, future: impl std::future::Future<Output = T>) -> T {
+    use futures::future::{select, Either};
+    futures::pin_mut!(future);
+    match select(future, Box::pin(Timer::sleep(secs))).await {
+        Either::Left((value, _)) => value,
+        Either::Right(_) => panic!("{what} did not finish in {secs} s"),
+    }
+}
+
+/// Asserts what D38.6.4Q.4 (b) requires of the pair: two broadcasts; the first spends the one funding output; the
+/// second does not select it, it spends the first's change.
+async fn assert_second_avoids_the_input_of_the_first(first: Spend, second: Spend) {
     let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let (funding, txs) = run_spend_pair(first, second).await;
     assert_eq!(txs.len(), 2, "{first:?} then {second:?}");
-    eprintln!(
-        "Q8 observed {first:?} then {second:?}: inputs {:?} then {:?}; funding {:?}",
-        inputs_of(&txs[0]),
-        inputs_of(&txs[1]),
-        outpoint(&funding, 0)
-    );
     assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
-    // Differs from R38.6.4Q.7 item 6 only if the second selects another input; here it is the same one.
-    assert_eq!(inputs_of(&txs[1]), [outpoint(&funding, 0)], "{first:?} then {second:?}");
+    // R38.6.4Q.7 item 6 (the reference) has the second select the same output; here it spends the first's change.
+    assert!(
+        inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])) && !inputs_of(&txs[1]).is_empty(),
+        "{first:?} then {second:?}: the second spent {:?}",
+        inputs_of(&txs[1])
+    );
 }
 
 #[test]
-fn t38_6_4q_8_token_broadcast_then_qtum_swap_send_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_token_broadcast_then_qtum_swap_send_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::Token(TICKER),
         Spend::QtumSwapSend,
     ));
 }
 
 #[test]
-fn t38_6_4q_8_qtum_swap_send_then_token_broadcast_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_qtum_swap_send_then_token_broadcast_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::QtumSwapSend,
         Spend::Token(TICKER),
     ));
 }
 
 #[test]
-fn t38_6_4q_8_token_a_broadcast_then_token_b_broadcast_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_token_a_broadcast_then_token_b_broadcast_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::Token(TICKER),
         Spend::Token(TOKEN_B_TICKER),
     ));
 }
 
 #[test]
-fn t38_6_4q_8_the_same_token_twice_selects_the_same_input() {
-    block_on(assert_second_spends_the_input_of_the_first(
+fn t38_6_4q_8_the_same_token_twice_avoids_the_input_and_spends_the_change() {
+    block_on(assert_second_avoids_the_input_of_the_first(
         Spend::Token(TICKER),
         Spend::Token(TICKER),
     ));
@@ -1979,12 +2004,6 @@ fn t38_6_4q_8_control_two_qtum_swap_sends_in_a_row_avoid_the_input_and_spend_the
         let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let (funding, txs) = run_spend_pair(Spend::QtumSwapSend, Spend::QtumSwapSend).await;
         assert_eq!(txs.len(), 2);
-        eprintln!(
-            "Q8 control observed: inputs {:?} then {:?}; first tx {}",
-            inputs_of(&txs[0]),
-            inputs_of(&txs[1]),
-            txid_of(&txs[0])
-        );
         assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
         // The QTUM record of the first send replaced the spent output with the first send's outputs: the second send
         // spends one of them (T38.5B.1), not the funding output.
@@ -1993,7 +2012,7 @@ fn t38_6_4q_8_control_two_qtum_swap_sends_in_a_row_avoid_the_input_and_spend_the
 }
 
 #[test]
-fn t38_6_4q_8_token_broadcast_and_qtum_swap_send_started_together_list_at_the_same_time_and_select_one_input() {
+fn t38_6_4q_8_token_broadcast_and_qtum_swap_send_started_together_do_not_share_an_input() {
     block_on(async {
         let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let env = family_env();
@@ -2025,29 +2044,439 @@ fn t38_6_4q_8_token_broadcast_and_qtum_swap_send_started_together_list_at_the_sa
                 .map(|_| ())
                 .map_err(|e| format!("{e:?}"))
         };
-        let watch = async {
-            Timer::sleep(0.75).await;
-            server.request_messages().iter().filter(|m| is_listing(m)).count()
-        };
-        let ((token_result, qtum_result), listings_halfway) =
-            futures::join!(futures::future::join(token_send, qtum_send), watch);
+        let (token_result, qtum_result) = futures::join!(token_send, qtum_send);
         token_result.unwrap();
         qtum_result.unwrap();
-        eprintln!("Q8 together observed: {listings_halfway} listing message(s) at 0.75 s");
-        // Different locks (R38.6.4Q.7 items 1 and 3): the token's build holds the process-wide lock, the QTUM send the
-        // lock of QTUM's own record. Both list while the delayed listings are pending, and both spend the one output.
-        assert_eq!(listings_halfway, 2);
+        // Both answers were delayed, so both builds were under way at once. One record and one lock: the one that
+        // took the guard second filtered its listing through the entry of the first (D38.6.4Q.4 status note, item 4).
         let txs = broadcast_txs(&server);
         assert_eq!(txs.len(), 2);
         assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
-        assert_eq!(inputs_of(&txs[1]), [outpoint(&funding, 0)]);
+        assert!(
+            inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])) && !inputs_of(&txs[1]).is_empty(),
+            "the second spent {:?}",
+            inputs_of(&txs[1])
+        );
+    });
+}
+
+// ---- D38.6.4Q.4 status note: the shared record and the lock of the address ----
+
+/// Item 1: under an iguana login QTUM and its tokens use one record; a coin that is not of the family keeps its own.
+#[test]
+fn t38_6_4q_4_qtum_and_its_tokens_share_one_record_under_an_iguana_login() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let doc_server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        let doc = init_doc(&env, &[&doc_server]).await;
+        let record = |coin: &UtxoCoinFields| coin.recently_spent_outpoints.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            &record(qtum.as_ref()),
+            &record(token_a.as_ref())
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &record(qtum.as_ref()),
+            &record(token_b.as_ref())
+        ));
+        assert!(!std::sync::Arc::ptr_eq(&record(qtum.as_ref()), &record(doc.as_ref())));
+        let qtum_fields: &UtxoCoinFields = qtum.as_ref();
+        let doc_fields: &UtxoCoinFields = doc.as_ref();
+        assert!(qtum_fields.spent_record_is_shared && !doc_fields.spent_record_is_shared);
+        // One record is kept by the registry; the standard coin's private one is not.
+        assert_eq!(
+            CoinsContext::from_ctx(&env.ctx).unwrap().spent_records.live_records(),
+            1
+        );
+    });
+}
+
+/// Item 3 (D38.6.4Q.4 status note) and item 4: a QTUM-family build does not wait for the process-wide lock.
+#[test]
+fn t38_6_4q_4_builds_of_the_family_do_not_wait_for_the_process_wide_lock() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let _funding = fund(&server, &script_of(qtum.as_ref()), 93, &[1_000_000_000]);
+
+        // The lock is held, as a withdraw of another UTXO coin would hold it.
+        let _held = crate::utxo::UTXO_LOCK.lock().await;
+        let call = token
+            .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+            .unwrap();
+        completes_within("the token's send", 20., token.send_contract_calls(vec![call]))
+            .await
+            .unwrap();
+        let output = TransactionOutput {
+            value: 100_000_000,
+            script_pubkey: script_of(qtum.as_ref()),
+        };
+        completes_within(
+            "QTUM's swap send",
+            20.,
+            utxo_common::send_outputs_from_my_address(qtum.clone(), vec![output]).compat(),
+        )
+        .await
+        .unwrap();
+        let request = |coin: &str, to: String| WithdrawRequest {
+            coin: coin.to_owned(),
+            from: None,
+            to,
+            amount: BigDecimal::from_str("0.000001").unwrap(),
+            max: false,
+            fee: None,
+            memo: None,
+            expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
+        };
+        let qtum_request = |to: String| WithdrawRequest {
+            amount: BigDecimal::from_str("0.1").unwrap(),
+            ..request(QTUM_TICKER, to)
+        };
+        completes_within(
+            "QTUM's withdraw",
+            20.,
+            qtum.withdraw(qtum_request(qtum.my_address().unwrap())).compat(),
+        )
+        .await
+        .unwrap();
+        completes_within(
+            "the token's withdraw",
+            20.,
+            token.withdraw(request(TICKER, token.my_address().unwrap())).compat(),
+        )
+        .await
+        .unwrap();
+        let delegation = QtumDelegationRequest {
+            address: "qcyBHeSct7Wr4mAw18iuQ1zW5mMFYmtmBE".to_owned(),
+            fee: Some(10),
+        };
+        completes_within("the delegation", 20., qtum.add_delegation(delegation).compat())
+            .await
+            .unwrap();
+        completes_within("the removal of a delegation", 20., qtum.remove_delegation().compat())
+            .await
+            .unwrap();
+    });
+}
+
+/// Item 4: the guard of the shared record is the lock of the address. While it is held, a token's send does not list
+/// into a build or broadcast, and neither does QTUM's swap send; each goes on once it is released.
+#[test]
+fn t38_6_4q_4_the_guard_of_the_shared_record_serializes_qtum_and_a_token() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 92, &[1_000_000_000]);
+
+        // A build of QTUM holds the guard (as its swap send does from the listing to the entry): the token waits.
+        let guard = qtum.as_ref().recently_spent_outpoints.lock().await;
+        let token_send = async {
+            let call = token
+                .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+                .unwrap();
+            token.send_contract_calls(vec![call]).await.map(|_| ())
+        };
+        let qtum_send = async {
+            let output = TransactionOutput {
+                value: 100_000_000,
+                script_pubkey: script_of(qtum.as_ref()),
+            };
+            utxo_common::send_outputs_from_my_address(qtum.clone(), vec![output])
+                .compat()
+                .await
+                .map(|_| ())
+        };
+        let both = futures::future::join(token_send, qtum_send);
+        futures::pin_mut!(both);
+        let held_for = async {
+            Timer::sleep(1.5).await;
+            server.requests(BROADCAST)
+        };
+        futures::pin_mut!(held_for);
+        let broadcasts_while_held = match futures::future::select(both.as_mut(), held_for).await {
+            futures::future::Either::Right((broadcasts, _)) => broadcasts,
+            futures::future::Either::Left(_) => panic!("a build finished while the guard of the address was held"),
+        };
+        assert_eq!(broadcasts_while_held, 0);
+        drop(guard);
+        let (token_result, qtum_result) = completes_within("the two builds", 20., both).await;
+        token_result.unwrap();
+        qtum_result.unwrap();
+        let txs = broadcast_txs(&server);
+        assert_eq!(txs.len(), 2);
+        // One after the other: the second spent the first's change, not the funding output.
+        assert_eq!(inputs_of(&txs[0]), [outpoint(&funding, 0)]);
+        assert!(inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])));
+    });
+}
+
+/// Follow-up of the decision (2026-11-20): the maturity check, which a token always runs, does not fetch the parent of
+/// an output the record supplied, the change of a transaction this node built and the backend accepted. The stub knows
+/// no transaction it was sent: it answers `blockchain.transaction.get` only for the funding transaction, as a server
+/// that has not indexed the broadcast. An output the server listed keeps the fetch.
+#[test]
+fn t38_6_4q_4_the_maturity_check_does_not_fetch_the_parent_of_an_output_the_record_supplied() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 86, &[1_000_000_000]);
+        let call = |token: &Qrc20Coin| {
+            token
+                .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+                .unwrap()
+        };
+        token_a.send_contract_calls(vec![call(&token_a)]).await.unwrap();
+        token_b.send_contract_calls(vec![call(&token_b)]).await.unwrap();
+        token_a.send_contract_calls(vec![call(&token_a)]).await.unwrap();
+
+        let txs = broadcast_txs(&server);
+        assert_eq!(txs.len(), 3);
+        // The second and third spent the change of the one before.
+        assert!(inputs_of(&txs[1]).iter().all(|(hash, _)| *hash == txid_of(&txs[0])));
+        assert!(inputs_of(&txs[2]).iter().all(|(hash, _)| *hash == txid_of(&txs[1])));
+        let fetched: Vec<String> = server
+            .request_params(GET_TX)
+            .iter()
+            .map(|params| params[0].as_str().unwrap().to_owned())
+            .collect();
+        // The listed funding output was fetched; nothing the node built was.
+        assert!(fetched.contains(&txid_of(&funding)), "{fetched:?}");
+        assert!(fetched.iter().all(|txid| *txid == txid_of(&funding)), "{fetched:?}");
+    });
+}
+
+/// Item 3 and the decision's observable requirement, `send_contract_calls`: the spend is entered before the guard is
+/// released; a broadcast the backend refused enters nothing.
+#[test]
+fn t38_6_4q_4_send_contract_calls_enters_its_spend_before_it_releases_the_guard_and_a_refusal_enters_nothing() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 91, &[1_000_000_000]);
+        let call = || {
+            token
+                .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+                .unwrap()
+        };
+
+        // A refused broadcast: the send fails and the next listing still offers the funding output.
+        server.set_error(BROADCAST, "stub refuses the broadcast");
+        assert!(token.send_contract_calls(vec![call()]).await.is_err());
+        assert_eq!(listed_outpoints(&qtum).await, [outpoint(&funding, 0)]);
+
+        // An accepted one: by the time the send has returned, whoever lists next (the next to take the guard) sees
+        // the spend entered, through QTUM's own handle as well.
+        server.clear_error(BROADCAST);
+        token.send_contract_calls(vec![call()]).await.unwrap();
+        let sent = broadcast_txs(&server).pop().unwrap();
+        let listed = listed_outpoints(&qtum).await;
+        assert!(!listed.is_empty());
+        assert!(listed.iter().all(|(hash, _)| *hash == txid_of(&sent)), "{listed:?}");
+        assert_eq!(listed_outpoints(&token).await, listed);
+    });
+}
+
+/// Items 3 and 4: the withdraw of a token and a delegation of QTUM note a pending entry; the broadcast of exactly
+/// their bytes through `send_raw_tx` of either coin is promoted into the one record. A refused broadcast promotes
+/// nothing. Two withdraws built before either is broadcast select the same input; the second one's broadcast is
+/// refused by the backend and enters nothing (pinned).
+#[test]
+fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx_and_a_refusal_enters_nothing() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 90, &[1_000_000_000]);
+        let token_withdraw = || async {
+            let request = WithdrawRequest {
+                coin: TICKER.to_owned(),
+                from: None,
+                to: token.my_address().unwrap(),
+                amount: BigDecimal::from_str("0.000001").unwrap(),
+                max: false,
+                fee: None,
+                memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
+            };
+            token.withdraw(request).compat().await.unwrap()
+        };
+        let spends_only_the_funding_output = |details: &crate::TransactionDetails| {
+            let tx: UtxoTx = deserialize(details.tx_hex.0.as_slice()).unwrap();
+            assert_eq!(inputs_of(&tx), [outpoint(&funding, 0)]);
+            tx
+        };
+        let only_outputs_of = |listed: &[(String, u32)], tx: &UtxoTx| {
+            assert!(!listed.is_empty());
+            assert!(listed.iter().all(|(hash, _)| *hash == txid_of(tx)), "{listed:?}");
+        };
+
+        // A token withdraw: pending, hides nothing; promoted by the token's own `send_raw_tx`.
+        let details = token_withdraw().await;
+        let tx = spends_only_the_funding_output(&details);
+        assert_eq!(listed_outpoints(&qtum).await, [outpoint(&funding, 0)]);
+        token
+            .send_raw_tx(&hex::encode(&details.tx_hex.0))
+            .compat()
+            .await
+            .unwrap();
+        only_outputs_of(&listed_outpoints(&qtum).await, &tx);
+        drop((tx, details));
+
+        // A delegation (a QTUM build): its bytes broadcast through the token's `send_raw_tx` are promoted too. Every
+        // earlier entry is gone: a new environment of the same shape.
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 89, &[1_000_000_000]);
+        let details = {
+            let request = QtumDelegationRequest {
+                address: "qcyBHeSct7Wr4mAw18iuQ1zW5mMFYmtmBE".to_owned(),
+                fee: Some(10),
+            };
+            qtum.add_delegation(request).compat().await.unwrap()
+        };
+        let tx: UtxoTx = deserialize(details.tx_hex.0.as_slice()).unwrap();
+        assert_eq!(inputs_of(&tx), [outpoint(&funding, 0)]);
+        assert_eq!(listed_outpoints(&token).await, [outpoint(&funding, 0)]);
+        // A refused broadcast promotes nothing.
+        server.set_error(BROADCAST, "stub refuses the broadcast");
+        assert!(token
+            .send_raw_tx(&hex::encode(&details.tx_hex.0))
+            .compat()
+            .await
+            .is_err());
+        assert_eq!(listed_outpoints(&token).await, [outpoint(&funding, 0)]);
+        server.clear_error(BROADCAST);
+        token
+            .send_raw_tx(&hex::encode(&details.tx_hex.0))
+            .compat()
+            .await
+            .unwrap();
+        only_outputs_of(&listed_outpoints(&qtum).await, &tx);
+
+        // Two withdraws built before either is broadcast select the same input.
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 88, &[1_000_000_000]);
+        let first = {
+            let request = WithdrawRequest {
+                coin: TICKER.to_owned(),
+                from: None,
+                to: token.my_address().unwrap(),
+                amount: BigDecimal::from_str("0.000001").unwrap(),
+                max: false,
+                fee: None,
+                memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
+            };
+            token.withdraw(request).compat().await.unwrap()
+        };
+        let second = {
+            let request = WithdrawRequest {
+                coin: QTUM_TICKER.to_owned(),
+                from: None,
+                to: qtum.my_address().unwrap(),
+                amount: BigDecimal::from_str("0.1").unwrap(),
+                max: false,
+                fee: None,
+                memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
+            };
+            qtum.withdraw(request).compat().await.unwrap()
+        };
+        let first_tx: UtxoTx = deserialize(first.tx_hex.0.as_slice()).unwrap();
+        let second_tx: UtxoTx = deserialize(second.tx_hex.0.as_slice()).unwrap();
+        assert_eq!(inputs_of(&first_tx), [outpoint(&funding, 0)]);
+        assert_eq!(inputs_of(&second_tx), [outpoint(&funding, 0)]);
+        // The first is accepted; the backend refuses the second, which spends the same input, and nothing is entered
+        // for it: the listing still offers the first's outputs only.
+        qtum.send_raw_tx(&hex::encode(&first.tx_hex.0)).compat().await.unwrap();
+        server.set_error(BROADCAST, "stub: input already spent");
+        assert!(token
+            .send_raw_tx(&hex::encode(&second.tx_hex.0))
+            .compat()
+            .await
+            .is_err());
+        only_outputs_of(&listed_outpoints(&qtum).await, &first_tx);
+    });
+}
+
+/// Item 2 (D38.6.4Q.4 status note), lifetime: the record ends with its last holder and starts empty again; disabling
+/// one instance leaves the record to the others.
+#[test]
+fn t38_6_4q_4_the_record_lives_until_the_last_instance_is_disabled_and_starts_empty_again() {
+    block_on(async {
+        let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token_a = init_token_named(&env, TICKER, &[&server], false).await;
+        let token_b = init_token_named(&env, TOKEN_B_TICKER, &[&server], false).await;
+        let funding = fund(&server, &script_of(qtum.as_ref()), 87, &[1_000_000_000]);
+        let live = || CoinsContext::from_ctx(&env.ctx).unwrap().spent_records.live_records();
+        assert_eq!(live(), 1);
+
+        // A spend of token A enters the one record.
+        let call = token_a
+            .transfer_output(H160::from([0x11; 20]), U256::from(1u64), 100_000, 40)
+            .unwrap();
+        token_a.send_contract_calls(vec![call]).await.unwrap();
+        let sent = broadcast_txs(&server).pop().unwrap();
+        drop((token_a, qtum));
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        disable_coin(&env.ctx, QTUM_TICKER).await.unwrap();
+        // Token B is left holding it: still one record, with the entry.
+        assert_eq!(live(), 1);
+        let listed = listed_outpoints(&token_b).await;
+        assert!(listed.iter().all(|(hash, _)| *hash == txid_of(&sent)) && !listed.is_empty());
+
+        // The last instance's disable ends the record; enabling again starts one that knows nothing.
+        drop(token_b);
+        disable_coin(&env.ctx, TOKEN_B_TICKER).await.unwrap();
+        wait_until("the record to end", 10., || live() == 0).await;
+        let again = init_qtum(&env, &[&server]).await;
+        assert_eq!(live(), 1);
+        assert_eq!(listed_outpoints(&again).await, [outpoint(&funding, 0)]);
     });
 }
 
 // ---- T38.6.4Q.11: the process-wide lock ----
 
 #[test]
-fn t38_6_4q_11_a_withdraw_of_another_coin_waits_for_the_pending_broadcast_of_a_token() {
+fn t38_6_4q_11_a_withdraw_of_another_coin_does_not_wait_for_the_pending_broadcast_of_a_token() {
     block_on(async {
         let _serial = LOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let env = family_env();
@@ -2079,22 +2508,20 @@ fn t38_6_4q_11_a_withdraw_of_another_coin_waits_for_the_pending_broadcast_of_a_t
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
             };
             let outcome = doc.withdraw(request).compat().await;
             (outcome.is_ok(), started, std::time::Instant::now())
         };
         let ((token_ok, token_done), (withdraw_ok, withdraw_started, withdraw_done)) =
             futures::join!(token_send, doc_withdraw);
-        eprintln!(
-            "Q11 observed: withdraw returned {:.2} s after it started, {:.2} s after the token's answer",
-            withdraw_done.duration_since(withdraw_started).as_secs_f64(),
-            withdraw_done.saturating_duration_since(token_done).as_secs_f64()
-        );
         assert!(token_ok && withdraw_ok);
-        // The withdraw of another coin, served by another stub, does not return before the token's broadcast has been
-        // answered (R38.6.4Q.7 item 6, last point): it waits for the process-wide build lock.
-        assert!(withdraw_done >= token_done);
-        assert!(withdraw_done.duration_since(withdraw_started) >= delay - Duration::from_millis(600));
+        // The token no longer takes the process-wide lock (D38.6.4Q.4 status note, item 4): the withdraw of another
+        // coin, served by another stub, returns while the token's broadcast is still unanswered.
+        assert!(withdraw_done < token_done);
+        assert!(withdraw_done.duration_since(withdraw_started) < delay - Duration::from_millis(600));
         // The withdraw did not broadcast anything, and the second stub saw its listing.
         assert_eq!(doc_server.requests(BROADCAST), 0);
         assert!(doc_server.requests(LIST_UNSPENT) >= 1);
@@ -2216,6 +2643,9 @@ fn t38_6_4q_9_delegation_and_withdraw_from_one_address_list_one_after_the_other(
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
             };
             qtum.withdraw(request).compat().await.map_err(|e| e.to_string())
         };
@@ -2254,15 +2684,15 @@ fn t38_6_4q_9_delegation_and_withdraw_from_one_address_list_one_after_the_other(
             "Q9b observed: together, {listings_halfway} listing(s) at 0.75 s, {listings_in_all} in all, {elapsed:.1} s"
         );
         let (delegation, withdraw) = (delegation.unwrap(), withdraw.unwrap());
-        // With the lock (PR #354) the second build lists only after the first has signed: one listing at 0.75 s, all of
-        // them one after the other (differs from the reference text of T38.6.4Q.9 (b), where both list at the same time).
-        assert_eq!(listings_halfway, 1);
+        // Both builds send their listing request at once: the guard of the one shared record of the address
+        // (D38.6.4Q.4 status note, item 4) is taken when the answer arrives, as it always was (the listing is read
+        // first and then filtered through the record under the guard). From there the builds are one after the other:
+        // the second filters, signs and notes its pending entry after the first has done so. A pending entry hides no
+        // input, so both still spend the one funding output.
+        assert_eq!(listings_halfway, 2);
         assert_eq!(listings_in_all, withdraw_listings + delegation_listings);
-        assert!(
-            elapsed >= (withdraw_listings + delegation_listings) as f64 * 1.5 * 0.9,
-            "{elapsed}"
-        );
-        // Neither build broadcasts, neither enters a record: both spend the one funding output.
+        let _ = elapsed;
+        // Neither build broadcasts: both spend the one funding output.
         assert_eq!(server.requests(BROADCAST), 0);
         let delegation_tx: UtxoTx = deserialize(delegation.tx_hex.0.as_slice()).unwrap();
         let withdraw_tx: UtxoTx = deserialize(withdraw.tx_hex.0.as_slice()).unwrap();
