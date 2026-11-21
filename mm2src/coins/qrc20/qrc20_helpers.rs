@@ -169,31 +169,34 @@ impl Qrc20Coin {
     }
 
     /// Generate and send a transaction with the specified UTXO outputs.
-    /// Note this function locks the `UTXO_LOCK`.
+    ///
+    /// The lock of the address, the shared recently-spent record's guard, is held from the listing through the
+    /// broadcast and the entry (CRD ch.38 D38.6.4Q.4 status note, items 3 and 4). A broadcast the backend refused
+    /// enters nothing. The process-wide `UTXO_LOCK` is not taken.
     pub async fn send_contract_calls(
         &self,
         outputs: Vec<ContractCallOutput>,
     ) -> Result<TransactionEnum, TransactionErr> {
-        // TODO: we need to somehow refactor it using RecentlySpentOutpoints cache
-        // Move over all QRC20 tokens should share the same cache with each other and base QTUM coin
-        let _utxo_lock = UTXO_LOCK.lock().await;
-
-        let GenerateQrc20TxResult { signed, .. } = self
+        let (GenerateQrc20TxResult { signed, spent, .. }, mut recently_spent) = self
             .generate_qrc20_transaction(outputs)
             .await
             .map_err(|e| TransactionErr::Plain(ERRL!("{}", e)))?;
         try_tx_s!(self.utxo.rpc_client.send_transaction(&signed).compat().await, signed);
+        recently_spent.add_spent(spent, signed.hash(), signed.outputs.clone());
         Ok(signed.into())
     }
 
     /// Generate Qtum UTXO transaction with contract calls.
-    /// Note: lock the UTXO_LOCK mutex before this function will be called.
+    ///
+    /// Returns the guard of the shared recently-spent record that the listing took. The caller holds it for as long
+    /// as the transaction is not yet entered: through the broadcast and the entry for a send, through the pending
+    /// entry for a withdraw.
     pub(crate) async fn generate_qrc20_transaction(
         &self,
         contract_outputs: Vec<ContractCallOutput>,
-    ) -> Result<GenerateQrc20TxResult, MmError<Qrc20GenTxError>> {
+    ) -> Result<(GenerateQrc20TxResult, RecentlySpentOutPointsGuard<'_>), MmError<Qrc20GenTxError>> {
         let my_address = self.utxo.derivation_method.iguana_or_err().mm_err(Into::into)?;
-        let (unspents, _) = self.get_unspent_ordered_list(my_address).await.mm_err(Into::into)?;
+        let (unspents, recently_spent) = self.get_unspent_ordered_list(my_address).await.mm_err(Into::into)?;
 
         let mut gas_fee = 0;
         let mut outputs = Vec::with_capacity(contract_outputs.len());
@@ -210,6 +213,16 @@ impl Qrc20Coin {
             .await
             .mm_err(Into::into)?;
 
+        let spent = unsigned
+            .inputs
+            .iter()
+            .map(|input| UnspentInfo {
+                outpoint: input.previous_output,
+                value: input.amount,
+                height: None,
+            })
+            .collect();
+
         let my_address = self.utxo.derivation_method.iguana_or_err().mm_err(Into::into)?;
         let key_pair = self.utxo.priv_key_policy.key_pair_or_err().mm_err(Into::into)?;
 
@@ -224,11 +237,15 @@ impl Qrc20Coin {
         .mm_err(Into::into)?;
 
         let miner_fee = data.fee_amount + data.unused_change.unwrap_or_default();
-        Ok(GenerateQrc20TxResult {
-            signed,
-            miner_fee,
-            gas_fee,
-        })
+        Ok((
+            GenerateQrc20TxResult {
+                signed,
+                spent,
+                miner_fee,
+                gas_fee,
+            },
+            recently_spent,
+        ))
     }
 
     pub(crate) fn transfer_output(

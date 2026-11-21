@@ -774,6 +774,7 @@ fn withdraw_with_any_fee_descriptor_is_refused_before_a_node_is_asked() {
                     gas_limit: 2_500_000,
                     gas_price: 40,
                 },
+                WithdrawFee::Tron,
             ];
             for fee in fees {
                 let req = withdraw_request(&coin, Some(fee));
@@ -784,6 +785,50 @@ fn withdraw_with_any_fee_descriptor_is_refused_before_a_node_is_asked() {
                     ),
                     Ok(_) => panic!("a TRON withdraw with a fee descriptor must be refused"),
                 }
+            }
+        }
+    });
+    assert!(
+        node.requests().is_empty(),
+        "the refusal must come before any node request"
+    );
+}
+
+/// CRD ch.21 R-WP6: a `fee` of the form a TRON result's `fee_details` has (`"type": "Tron"`, CRD ch.21 R-F2), with
+/// or without the other members of that object, parses as a fee descriptor, so the request reaches the withdraw
+/// and is refused there with `InvalidFeePolicy` instead of failing request parsing.
+#[test]
+fn withdraw_request_with_a_tron_fee_descriptor_parses_and_is_refused() {
+    let node = funded_node();
+    block_on(async {
+        let (_ctx, coin) = trx_coin(&node.url()).await;
+        let fees = [
+            json!({"type": "Tron"}),
+            json!({
+                "type": "Tron",
+                "coin": "TRX",
+                "bandwidth_used": 267,
+                "energy_used": 0,
+                "bandwidth_fee": "0.267",
+                "energy_fee": "0",
+                "total_fee": "0.267"
+            }),
+        ];
+        for fee in fees {
+            let req: WithdrawRequest = serde_json::from_value(json!({
+                "coin": coin.ticker.clone(),
+                "to": "TNPeeaaFB7K9cmo4uQpcU32zGK8G1NYqeL",
+                "amount": "1",
+                "fee": fee,
+            }))
+            .expect("a withdraw request with a Tron fee descriptor must parse");
+            assert_eq!(req.fee, Some(WithdrawFee::Tron));
+            match withdraw_tron(coin.clone(), req, EvmWithdrawSender::activated(&coin)).await {
+                Err(e) => assert!(
+                    matches!(e.get_inner(), WithdrawError::InvalidFeePolicy(_)),
+                    "a Tron fee descriptor must answer InvalidFeePolicy"
+                ),
+                Ok(_) => panic!("a TRON withdraw with a Tron fee descriptor must be refused"),
             }
         }
     });

@@ -982,6 +982,13 @@ observable and is not bound.
 >   typed-data encoder takes integers up to 128 bits; within that range its
 >   hash is required to equal the rail's own before anything is signed.
 
+> *Status note (2026-11-21), submission and trace at the reference row.*
+> What the reference row has of the submission flow, and what it does not
+> implement, is stated point by point in §63.8B (R30-R35, the finding,
+> D63.9, T18-T20). In short: no RPC of the reference row submits or traces;
+> the flow that D63.6 defers takes no reference input beyond §63.4 and
+> R31-R33. §63.8B passed the KDF Dirty Gate on 2026-11-21.
+
 ## 63.8A The Sign-Only Result: Members Around the Signed Authorization
 
 *(Added 2026-11-19 by the KDF Spec Reader; reference facts at the
@@ -1149,6 +1156,199 @@ T16. **One member per name (conditional on D63.8).** Under D63.8
     `from`, on the direct method and on the task route. They also check that
     the signature recovers to the sending address for the typed-data hash.
 
+## 63.8B Submission and Trace: What the Reference Row Has and What It Does Not
+
+*(Added 2026-11-21 by the KDF Spec Reader, round 0.5.0-19; reference
+facts at the rows of chapter 02 §2.15A named below; passed the KDF
+Dirty Gate on 2026-11-21, measure 0.02, attestation in §63.15. It adds to
+§63.8, §63.8A and D63.6 and replaces none of their sentences.)*
+
+**Reference states.** The row `feat/tron-gasfree (as of 2026-05-04)`
+is the only tabled state that has the gasless rail. The rows `dev (as
+of 2026-03-27)`, `staging (as of 2026-03-27)`, `v3.0.0-beta`, `main
+(as of 2026-10-07)` and `feat/tron-swap-support (as of 2026-04-23)`
+were searched whole-tree on 2026-11-21 and carry no GasFree code at
+all. The branch tips of the historical record were listed on the same
+day: the tip of the GasFree branch is still the tabled one, and no
+other branch carries the feature. Every statement below is therefore
+the row `feat/tron-gasfree (as of 2026-05-04)`, and "not implemented"
+means not implemented at that row, with no later state to consult.
+The facts were established by reading; no test at that row submits or
+traces a transfer.
+
+R30. **No RPC submits and no RPC traces (reference fact).** The
+    direct `withdraw` method and the `task::withdraw::*` methods end
+    at the sign-only result of §63.8A; neither makes a submit or a
+    trace request, automatically or on a later call. There is no
+    additional method for submitting a signed authorization and none
+    for tracing a `trace_id`. The raw-transaction broadcast method
+    (`send_raw_transaction`) does not take the off-chain payload: for
+    a Tron coin it accepts hexadecimal transaction text only, and a
+    `tx_json` object is refused as text that is not hexadecimal,
+    before any node or provider request. The provider client offers
+    the submit and trace operations of §63.4.1 as two operations that
+    nothing in the tree calls.
+
+R31. **The two uncalled client operations (reference fact).** These
+    are the only flow-related properties the row has; a caller built
+    on top of them would observe:
+
+    - *One attempt each.* Submit is one `POST`, trace is one `GET`,
+      each under the per-call timeout of §63.3.1. Neither is repeated
+      after a failed connection, a timeout or a 5xx answer; there is
+      no retry count and no back-off.
+    - *Refused before sending.* A submit payload whose `version` is
+      not 1 is not sent. A trace identifier that does not read as a
+      UUID is not sent. Both are the "request the client could not
+      form" condition of §63.9.3.
+    - *`requestId`.* The member is optional in the submit payload and
+      is left out of the body when no value is given (§63.4.6). Nothing
+      at the row generates a value, so there is no rule for how one is
+      made or whether a repeated submit reuses it.
+    - *No payload is built.* Nothing at the row turns the nested
+      signed authorization of §63.8A into the submit payload of
+      §63.4.6; the two documents exist side by side.
+    - *Answer checks.* A submit or trace answer is checked while it
+      is decoded, as §63.4.7 and §63.9.3 state (the envelope, the
+      lifecycle sets, `version` 1, the hash and signature forms), and
+      in no other way. Its `nonce`, addresses and amount are not
+      compared with what was signed, and its `state` is not acted on.
+    - *A 404.* A 404 status, or an envelope `code` of 404, from
+      either operation falls under "a 4xx other than 401, 403 or 429"
+      of §63.9.3, so it would be `ProviderRejected` (502).
+
+R32. **Two declared errors that nothing raises (reference fact).**
+    `TraceNotFound` (404) and `QuoteExpired` (400) are members of the
+    family of §63.9.1 with the statuses stated there. No condition at
+    the row produces either: no request path, no provider answer and
+    no elapsed deadline leads to them. In particular the signed
+    `deadline` is not looked at again after signing.
+
+R33. **Three declared phases that nothing reports (reference fact).**
+    `SubmittingGaslessAuthorization`, `WaitingForGaslessProvider` and
+    `WaitingForGaslessSettlement` are part of the task status
+    vocabulary and are never set. Their wire form follows from how
+    the vocabulary is declared, in the place where
+    `task::withdraw::status` carries the phase of a task in progress
+    ([Chapter 49](49-withdrawal-task-path.md)):
+
+    | Phase | Wire form |
+    | --- | --- |
+    | `SubmittingGaslessAuthorization` | the bare string, like the phases without members |
+    | `WaitingForGaslessProvider` | an object with that one member name, whose value is an object with `trace_id` (string) and `provider_state` (string) |
+    | `WaitingForGaslessSettlement` | an object with that one member name, whose value is an object with `trace_id` (string) and `tx_hash` (string, or `null` when there is none; the member is always present) |
+
+    Which provider `state` or `txnState` value leads to which of the
+    two waiting phases is not implemented, and neither is the text
+    `provider_state` would carry or the form of `tx_hash`.
+
+R34. **Lock and result at the row (reference fact).** The per-sender
+    lock of §63.8 step 3 is taken before the preflight and held until
+    the sign-only result is assembled; it is released when the
+    withdraw returns. Nothing is submitted, so it is never held
+    across a provider submit. The result is always the one §63.8A
+    states: `trace_id` is `null`, there is no `tx_hash`, and no
+    provider `state` or `txnState` appears at the top level or in the
+    fee details. The terminal `Ok` payload of the task is that same
+    result.
+
+R35. **Not implemented at the row (reference fact).** Each of the
+    following has no behavior at the row `feat/tron-gasfree (as of
+    2026-05-04)`, so Reloaded decides it without reference input:
+
+    - when a submitting call returns, and any bound on a wait (a
+      count, a time, or the authorization deadline);
+    - the result after a submission, and what the task's final `Ok`
+      status carries beyond §63.8A;
+    - which provider values count as settled;
+    - how the failure endings map to errors: `state` `FAILED`,
+      `txnState` `ON_CHAIN_FAILED`, a deadline that passes while
+      waiting, a wait bound that is used up;
+    - when `QuoteExpired` and `TraceNotFound` are raised (R32);
+    - a trace of an existing `trace_id` outside the withdraw;
+    - generation and reuse of `requestId`, and any retry (R31);
+    - whether the lock is held through submission (R34);
+    - what a submit answer in `state` `FAILED`, or one whose `nonce`,
+      `version` or addresses differ from what was signed, leads to
+      (R31 states the only existing check: `version` 1 at decoding);
+    - cancellation during submit or wait: `task::withdraw::cancel` is
+      the shared cancel of Chapter 49 R49.24 with no gasless-specific
+      part, and with nothing submitted it can only stop a quote or a
+      signature;
+    - any record: a gasless withdraw writes nothing to the
+      transaction history or to any store, `my_tx_history` gains no
+      row from it, and the GasFree code of the row writes no log line
+      at any level;
+    - any use of `status_poll_interval_ms`: the value is read at
+      activation (§63.3.1) and consumed by nothing.
+
+> **Code-quality finding (informative; trigger: apparent while
+> reading the error family and the client's status classification
+> side by side).** The family declares `TraceNotFound` with HTTP 404
+> for a trace identifier the provider does not know (§63.9.1), while
+> the client classifies a 404 from the trace request with every other
+> 4xx, which the collapse of §63.9.3 reports as `ProviderRejected`
+> (502). Wired together as they stand, the two would never produce
+> `TraceNotFound`. Reloaded's trace path should single out the 404 of
+> the trace request (the HTTP status or the envelope `code`) and
+> report it as `TraceNotFound`; D63.9 item 5.
+
+D63.9. **The submission flow in Reloaded (for the maintainer; open;
+    Reloaded-original, takes no reference input).** That the node
+    submits and traces is decided. R35 lists what the reference
+    leaves open. The points below follow from text of this chapter
+    that is already cleared, or from the reason a cleared rule gives;
+    they are recommendations of the author, not reference facts:
+
+    1. *Lock.* Hold the per-sender lock of §63.8 step 3 until the
+       submit answer is in. The lock exists so that the provider
+       nonce bound into the authorization is not raced (§63.8 step
+       3), and the provider's nonce moves only with a submission.
+    2. *Submit payload.* Build it from the signed values themselves,
+       so that every member of §63.4.6 equals the corresponding
+       member of the nested signed authorization (R5, R6).
+    3. *Submit answer.* Compare the answer's `nonce`, `version`,
+       sender, receiver, token and amount with what was signed and
+       report a difference as `InvalidProviderResponse` (502), the
+       member §63.9.1 gives an answer that cannot be trusted.
+    4. *`QuoteExpired`.* Raise it when the signed `deadline` has
+       passed before the submit request is sent, the meaning §63.9.1
+       states; R7 already requires an expired deadline to be refused.
+    5. *`TraceNotFound`.* Raise it for a 404 of the trace request
+       (the finding above).
+    6. *`trace_id`.* Fill the fee details' `trace_id` (§63.3.5) with
+       the `id` of the submit answer.
+    7. *Wait bound.* Bound every wait; the signed `deadline` is the
+       one bound the authorization itself carries.
+
+    Left without a recommendation, for the maintainer: which call
+    submits and when it returns; the settled rule and the mapping of
+    the provider's values to the two waiting phases; the errors of
+    the failure endings; `requestId` and retries (how the provider
+    treats a repeated `requestId` has to be read from its public
+    documentation, §63.14, first); cancellation; what is recorded and
+    logged; whether a trace method exists outside the withdraw.
+
+T18. **Client attempts and pre-send refusals.** Against a loopback
+    provider: a submit and a trace are one request each; a failed
+    connection, a timeout and a 5xx answer are followed by exactly as
+    many further requests as Reloaded's decision under D63.9 states
+    (none at the reference row, R31); a submit payload with a
+    `version` other than 1 and a trace identifier that is not a UUID
+    are refused with no request made to the provider.
+
+T19. **Phase wire form.** If Reloaded reports the three phases, the
+    task status carries them in the forms of R33: the bare string for
+    `SubmittingGaslessAuthorization`; `trace_id` and `provider_state`
+    as strings for `WaitingForGaslessProvider`; `trace_id` as a
+    string and `tx_hash` as a string or `null`, never omitted, for
+    `WaitingForGaslessSettlement`.
+
+T20. **Trace 404 (conditional on D63.9 item 5).** A 404 from the
+    trace request, as an HTTP status and as an envelope `code`,
+    reaches the caller as `Gasless`/`TraceNotFound` with HTTP 404,
+    and a 404 from the submit request stays `ProviderRejected` (502).
+
 ## 63.9 Error Taxonomy and Status Codes
 
 *(This section was re-established on 2026-11-08: at the reference
@@ -1177,6 +1377,11 @@ gasless family, and `error_data` is an object whose own
 The outer family name at the reference row is `Gasless`. Whether
 Reloaded adopts the outer and inner wire values exactly is decision
 D63.2 (§63.12A); the statuses are binding regardless.
+
+> *Status note (2026-11-21).* At the reference row `TraceNotFound` and
+> `QuoteExpired` are declared with these statuses and raised by nothing
+> (§63.8B R32); when each is raised is Reloaded's to decide (D63.9 items 4
+> and 5).
 
 ### 63.9.2 Preflight outcome to error (binding)
 
@@ -1605,6 +1810,10 @@ D63.6. **Submission and settlement tracking.** Wire the signed
     in the fee details and status. Today's withdraw is sign-only
     (§63.8).
 
+    *Status note (2026-11-21).* The reference row implements none of this
+    flow; §63.8B (R30-R35) records what it has and what it leaves open, and
+    D63.9 lists the points Reloaded decides.
+
 D63.7. **Return path for tokens held at the custody address
     (Reloaded-only deferral).** What is deferred is a way for the
     user to move tokens out of the custody address other than by a
@@ -1897,3 +2106,48 @@ V2. The baseline withdraw request has no fee-rail selector and no
   D6 and this repository's code, what the notes before them say about the
   switch and about the withdraw rail not being built, and take no reference
   input. No cleared sentence was edited.
+- *Scoped addition (2026-11-21, Spec Reader round 0.5.0-19) -- §63.8B
+  (R30 -- R35, the code-quality finding, D63.9, T18 -- T20) and the three
+  status notes of this date (before §63.8A, after §63.9.1, under D63.6),
+  with the pointer after the sign-only pointer of chapter 49; no other text
+  of this chapter was changed and no cleared sentence was edited.*
+  **KDF Dirty Gate: PASS on 2026-11-21, measure 0.02, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* the forbidden corpus
+  at the row `feat/tron-gasfree (as of
+  2026-05-04)` of chapter 02 §2.15A, read read-only and consulted **only**
+  to establish whether and how a signed authorization is submitted and
+  traced: the gasless withdraw flow, the provider client's submit and trace
+  operations and its status classification, the submit and answer payload
+  declarations, the gasless error family, the task status vocabulary, the
+  raw-transaction broadcast entry for a Tron coin, and whole-tree searches
+  for callers of the submit and trace operations, for the two unraised
+  errors and the three unreported phases, and for log and history writes;
+  the rows `dev (as of 2026-03-27)`, `staging (as of 2026-03-27)`,
+  `v3.0.0-beta`, `main (as of 2026-10-07)` and `feat/tron-swap-support (as
+  of 2026-04-23)`, searched whole-tree, to establish that they carry no
+  GasFree code; and the historical record's branch list (reference
+  metadata, chapter 01 R6). D63.9 and T18 -- T20 are original to this
+  section. No row was added to chapter 02 §2.15A: every state read already
+  has a row.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-21, measure
+  0.02, no findings, in a single pass. *Extent:* the TRON GasFree
+  fee-delegation subsystem as this chapter scopes it -- the gasless
+  withdraw flow, the provider client with its submit and trace operations
+  and its status classification, the submit and answer payload
+  declarations, the gasless error family, the long-running withdraw task
+  status vocabulary and the raw-transaction broadcast entry -- at the row
+  `feat/tron-gasfree (as of 2026-05-04)`: six source files of that row
+  read, four whole or nearly whole and two in the relevant part, and
+  whole-tree searches of that row for callers of the submit and trace
+  operations, the two unraised errors, the three unreported phases, the
+  lock and the poll-interval setting; the rows `dev (as of 2026-03-16)`,
+  `dev (as of 2026-03-27)`, `staging (as of 2026-03-27)`, `v3.0.0-beta`,
+  `main (as of 2026-10-07)` and `feat/tron-swap-support (as of
+  2026-04-23)` searched whole-tree for the feature only; on the candidate
+  side, all 238 added lines of this chapter and chapter 49. *Method:*
+  reading plus mechanical comparison (every identifier-shaped token of
+  the additions searched in the compared row and judged forced or free,
+  and a probe of the additions for private-name patterns); the
+  repository's clean-room gate tool was not run because the additions
+  embed no code blocks. *Measure:* 0.02, on the discretionary-expression
+  basis (dictated-interop and public-surface tokens excluded).

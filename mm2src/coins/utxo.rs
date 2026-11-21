@@ -31,6 +31,8 @@ mod header_time_only;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod slp;
+#[path = "utxo/spent_record_registry.rs"]
+pub(crate) mod spent_record_registry;
 pub mod swap_proto_v2_scripts;
 pub mod utxo_block_header_storage;
 pub mod utxo_builder;
@@ -599,6 +601,12 @@ impl RecentlySpentOutPoints {
         }
     }
 
+    /// Whether `unspent` is an output of a transaction this node built and signed, which the record entered after
+    /// the backend accepted it: the outputs [`Self::replace_spent_outputs_with_cache`] supplies as replacements.
+    pub(crate) fn supplies(&self, unspent: &UnspentInfo) -> bool {
+        self.output_to_input_map.contains_key(&unspent.clone().into())
+    }
+
     pub fn replace_spent_outputs_with_cache(&self, mut outputs: HashSet<UnspentInfo>) -> HashSet<UnspentInfo> {
         let mut replacement_unspents = HashSet::new();
         outputs = outputs
@@ -792,7 +800,13 @@ pub struct UtxoCoinFields {
     /// The cache of recently send transactions used to track the spent UTXOs and replace them with new outputs
     /// The daemon needs some time to update the listunspent list for address which makes it return already spent UTXOs
     /// This cache helps to prevent UTXO reuse in such cases
-    pub recently_spent_outpoints: AsyncMutex<RecentlySpentOutPoints>,
+    ///
+    /// QTUM and its QRC20 tokens hold one record per platform and address script, shared through the registry of
+    /// the node's context (CRD ch.38 D38.6.4Q.4 status note); every other coin holds a private one.
+    pub recently_spent_outpoints: Arc<AsyncMutex<RecentlySpentOutPoints>>,
+    /// `true` when [`Self::recently_spent_outpoints`] is the shared record of the QTUM family. Its lock then replaces
+    /// [`UTXO_LOCK`] for the builds of this coin (D38.6.4Q.4 status note, item 4).
+    pub spent_record_is_shared: bool,
     pub tx_hash_algo: TxHashAlgo,
     /// The flag determines whether to use mature unspent outputs *only* to generate transactions.
     /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
