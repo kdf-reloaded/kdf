@@ -2001,16 +2001,15 @@ error, never another value.
 >
 > D37.5.11.2 stays deferred: activation refuses a `"KRGN"` coin whose entry
 > enables `enable_spv_proof` or carries a `spv_conf`, with an error that names
-> the key. The header hash Reloaded computes is a double-SHA256, not the
-> chain's X11 identity; besides SPV, the only other use is the WalletConnect
-> chain identifier on an Electrum connection, which is therefore not the
-> chain's for this coin (a native-daemon connection takes the node's genesis
-> hash and is not affected). Lock-time
-> and sequence of claims and refunds are unchanged (R37.5.11.6): with the
-> median readable, Kerrigan follows the rule of every UTXO coin. The tests
-> cover T37.5.11.1, T37.5.11.2 and T37.5.11.5 with real headers of all four
-> algorithms, and T37.5.11.4 for the four legacy claim and refund rows; the
-> version-two rows are not driven for Kerrigan.
+> the key. The header hash Reloaded computes is a double-SHA256, not the chain's
+> X11 identity; besides SPV, the only other use is the WalletConnect chain
+> identifier on an Electrum connection, which is therefore not the chain's for
+> this coin (a native-daemon connection takes the node's genesis hash and is not
+> affected). Lock-time and sequence of claims and refunds are unchanged
+> (R37.5.11.6): with the median readable, Kerrigan follows the rule of every
+> UTXO coin. The tests cover T37.5.11.1, T37.5.11.2 and T37.5.11.5 with real
+> headers of all four algorithms, and T37.5.11.4 for the four legacy claim and
+> refund rows; the version-two rows are not driven for Kerrigan.
 
 ## 37.6 Use in swap confirmation & current MTP
 
