@@ -778,7 +778,7 @@ the previous version used. The safe way:
 - **A TRON withdrawal whose `fee` is `{"type":"Tron"}` is now refused with `InvalidFeePolicy`.** Before, such a
   request failed parsing, for example when the `fee_details` of an earlier TRON result was sent back as `fee`.
   TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
-  form that is not its own. Detail: CRD ch.21 R-WP6.
+  form that is not its own. Detail: PR #455; CRD ch.21 R-WP6.
 
 ### Tests
 
