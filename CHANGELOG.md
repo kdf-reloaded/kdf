@@ -116,7 +116,7 @@ or undo, and every change that needs a step from you.
   follow the same lock-time rule as those of any UTXO coin. A KRGN entry with
   `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
   - *What you see:* a KRGN entry without the value still activates, but its claims and refunds keep failing.
-  - Detail: PR #NNN; CRD ch.37 status note of 2026-11-18.
+  - Detail: PR #468; CRD ch.37 status note of 2026-11-18.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -861,7 +861,7 @@ the previous version used. The safe way:
   standard header. The node could not read them, so the median block time a claim or refund needs was almost
   always unknown, and KRGN claims and refunds failed with an error, including refunds through
   `recover_funds_of_swap`. With `"chain_variant": "KRGN"` in the coin's entry, each header is now read by its
-  algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #NNN; CRD ch.37
+  algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #468; CRD ch.37
   §37.5.11.
 
 #### Siacoin
