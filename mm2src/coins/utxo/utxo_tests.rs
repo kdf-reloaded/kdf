@@ -7762,7 +7762,9 @@ pub(crate) mod header_read_path_tests {
     const MEWC_ALL_AUXPOW: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124789_x6_all_auxpow.hex");
     const MEWC_ALL_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_x11_all_native.hex");
     /// Real Kerrigan chain data (see `kdf_chain/src/test_data/README.md`): heights 188818 to 188828.
-    const KRGN_WINDOW: &str = include_str!("../../kdf_chain/src/test_data/krgn_188818_x11_mixed_sizes.hex");
+    const KRGN_WINDOW: &str = include_str!("../../kdf_chain/src/test_data/krgn_188818_mixed_sizes.hex");
+    /// Real Kerrigan chain data: heights 191181 to 191191, all four header sizes in one window.
+    const KRGN_WINDOW_ALL_SIZES: &str = include_str!("../../kdf_chain/src/test_data/krgn_191181_window11.hex");
     const KRGN_LONE_X11: &str = include_str!("../../kdf_chain/src/test_data/krgn_188629_lone_x11.hex");
     const KRGN_LONE_KAWPOW: &str = include_str!("../../kdf_chain/src/test_data/krgn_188823_lone_kawpow.hex");
     const KRGN_LONE_EQUIHASH_200_9: &str =
@@ -8653,6 +8655,21 @@ pub(crate) mod header_read_path_tests {
         assert_eq!(fx.median(), KRGN_WINDOW_MEDIAN);
         assert_eq!(path_median(&coin, &fx), Ok(KRGN_WINDOW_MEDIAN));
         // The layout of step 1 read it: neither the structural fallback nor the time-only steps ran.
+        assert!(!logged(&coin));
+        assert!(!coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
+    }
+
+    /// CRD ch.37 T37.5.11.1: a `"KRGN"` coin reads the real window of all four sizes (80, 124, 543 and 1487
+    /// bytes, 7085 bytes in all) to the median of its eleven times, read from the chain bytes (the times of
+    /// the window rise from header to header, so the median is the sixth).
+    #[test]
+    fn krgn_chain_variant_reads_the_window_of_all_four_sizes_to_the_chains_median() {
+        let mut fx = Fixture::kerrigan();
+        fx.list = served(KRGN_WINDOW_ALL_SIZES);
+        assert_eq!(fx.list.len(), 7085);
+        let coin = coin_from_protocol(utxo(json!("KRGN")), None);
+        assert_eq!(fx.median(), 1_795_296_411);
+        assert_eq!(path_median(&coin, &fx), Ok(1_795_296_411));
         assert!(!logged(&coin));
         assert!(!coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
     }

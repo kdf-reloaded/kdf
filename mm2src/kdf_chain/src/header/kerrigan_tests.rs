@@ -7,7 +7,8 @@
 use super::*;
 use hex::FromHex;
 
-const WINDOW: &str = include_str!("../test_data/krgn_188818_x11_mixed_sizes.hex");
+const WINDOW: &str = include_str!("../test_data/krgn_188818_mixed_sizes.hex");
+const WINDOW_ALL_SIZES: &str = include_str!("../test_data/krgn_191181_window11.hex");
 const LONE_X11: &str = include_str!("../test_data/krgn_188629_lone_x11.hex");
 const LONE_KAWPOW: &str = include_str!("../test_data/krgn_188823_lone_kawpow.hex");
 const LONE_EQUIHASH_200_9: &str = include_str!("../test_data/krgn_188818_lone_equihash_200_9.hex");
@@ -108,6 +109,42 @@ fn the_window_reads_header_by_header_at_the_true_boundaries() {
     assert_eq!(times, pieces.iter().map(|p| time_of(p)).collect::<Vec<_>>());
     assert_eq!(median_of(times), 1_794_970_885);
     assert_eq!(reencode(&headers), served);
+}
+
+/// CRD ch.37 T37.5.11.1: a real window of heights 191181 to 191191 holds all four sizes (80, 124, 543, 1487).
+#[test]
+fn the_window_of_all_four_sizes_reads_at_the_true_boundaries() {
+    let served = fixture(WINDOW_ALL_SIZES);
+    assert_eq!(served.len(), 7085);
+    let sizes = [124, 124, 1487, 80, 543, 543, 543, 124, 543, 1487, 1487];
+    let pieces = split(&served);
+    assert_eq!(pieces.iter().map(|p| p.len()).collect::<Vec<_>>(), sizes);
+    let headers = BlockHeader::list_from_served_bytes(&served, 11, CoinVariant::Kerrigan).unwrap();
+    assert_eq!(headers.len(), 11);
+    for (index, (header, piece)) in headers.iter().zip(&pieces).enumerate() {
+        let bits = (header.version & 0x0F00) as usize;
+        let expected = match bits {
+            0x0000 => 80,
+            0x0200 => 124,
+            0x0400 => 1487,
+            0x0600 => 543,
+            other => panic!("header {index}: not a Kerrigan algorithm: {other:#x}"),
+        };
+        assert_eq!(
+            piece.len(),
+            expected,
+            "header {index}: the algorithm bits match the size"
+        );
+        assert_eq!(
+            &header.raw()[..],
+            *piece,
+            "header {index}: re-encoding reproduces the served bytes"
+        );
+        assert_eq!(header.time, time_of(piece), "header {index}");
+    }
+    assert_eq!(reencode(&headers), served);
+    // The list read consumes the bytes exactly: one more header is not there to be read.
+    assert!(BlockHeader::list_from_served_bytes(&served, 12, CoinVariant::Kerrigan).is_err());
 }
 
 #[test]

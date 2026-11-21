@@ -1985,8 +1985,11 @@ error, never another value.
 > set of R37.5.1 has nine values in Reloaded from this change. There is no
 > `header_layout` value for Kerrigan, nothing is added to the structural
 > fallback of R37.5.9e (option (b) not chosen), and the time-only read of
-> R37.5.10 is unchanged (option (c) not chosen). A Kerrigan entry without the
-> value keeps failing loudly as R37.5.11.9 describes; the user adds the value.
+> R37.5.10 is unchanged (option (c) not chosen). The node switch of R37.5.9e
+> accepts `KRGN` as its ninth spelling; naming it there changes nothing, since a
+> `"KRGN"` coin reads its own layout and never falls back. A Kerrigan entry
+> without the value keeps failing loudly as R37.5.11.9 describes; the user adds
+> the value.
 >
 > Under `"KRGN"` each header is read by the algorithm in bits 8 to 11 of its
 > version, with the sizes and time offsets of the table above; any other value
@@ -3381,4 +3384,4 @@ before the wait is deferred.
   side: it records the maintainer's resolution of D37.5.11.1 and what this
   repository builds for it, from the cleared section, the chain's published
   source and public chain data; no forbidden-class input, chapter 01 R38 not
-  engaged.
+  engaged. Built in PR #468.
