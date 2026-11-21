@@ -26,6 +26,20 @@
 > Whether the move happens in the 0.5.0 cycle is an open maintainer decision;
 > `solana-support.md` lists it as package S5.
 
+> **State (2026-11-22): the move is built (PR #XXX).** Every `solana-*` crate
+> the coin uses is on the 3.x line, `spl-token` on 9, and the associated
+> token address comes from `spl-associated-token-account-interface` 2.0.0,
+> the successor crate. Regression vectors written before the move (keypair
+> and address for a single key and the HD path, a signature, a SOL and an SPL
+> transfer, the associated token address under both token programs) pass
+> unchanged after it, native and wasm32. `cargo tree -i ed25519-dalek@1.0.1`
+> is empty, so RUSTSEC-2022-0093 leaves `deny.toml`. `cargo tree -i
+> curve25519-dalek@3.2.0` is not: the remaining path is the libp2p fork's
+> Noise stack (`libp2p-noise` 0.43 -> `x25519-dalek` 1.1), so
+> RUSTSEC-2024-0344 stays ignored with its comment naming that path. The
+> Solana side of this plan is complete; the second advisory belongs to the
+> libp2p fork's modernization. The Status line is the maintainer's to change.
+
 ## Goal
 
 Clear `RUSTSEC-2022-0093` (ed25519-dalek 1.x double-public-key signing

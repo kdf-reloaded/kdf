@@ -88,10 +88,10 @@ ignore = [
     "RUSTSEC-2024-0019", # mio (crossterm / signal-hook-mio)
     "RUSTSEC-2023-0018", # remove_dir_all (tempfile 3.3.0)
 
-    # --- Solana SDK (via solana-keypair) ---
-    # Old ed25519/curve25519 persist through the Solana SDK, independent of
-    # libp2p; cleared only by an upstream Solana SDK bump.
-    "RUSTSEC-2022-0093", # ed25519-dalek 1.x (double public key signing oracle)
+    # --- curve25519-dalek 3.2.0 (via the libp2p fork's Noise stack) ---
+    # The Solana crates moved to the 3.x line and no longer pull it; the only
+    # remaining path is libp2p-noise 0.43 -> x25519-dalek 1.1 (see
+    # `cargo tree -i curve25519-dalek@3.2.0`).
     "RUSTSEC-2024-0344", # curve25519-dalek (timing variability)
 
     # --- EC stack (crypto-bigint 0.5.5 via elliptic-curve 0.13) ---
@@ -147,7 +147,7 @@ ignore = [
     # - RUSTSEC-2026-0002 / GHSA-rhfx-m35p-ff5j: lru 0.7.5 <- parity-util-mem 0.11
     #   <- the sp-* (Substrate 6.0) stack; lru 0.10.1 <- the fork's libp2p-identify.
     # - RUSTSEC-2026-0097 / GHSA-cq8v-f236-94qc: rand 0.7.3 <- the fork's
-    #   cuckoofilter, the Solana SDK's ed25519-dalek 1.x, and tiny-bip39 0.8.2 --
+    #   cuckoofilter and tiny-bip39 0.8.2 --
     #   the same upstream roots already accepted above.
     #
     # - RUSTSEC-2022-0041 / GHSA-qc84-gqf4-9926: crossbeam-utils 0.7.2
@@ -242,19 +242,19 @@ exceptions = [
     { allow = ["Apache-2.0"], crate = "scale-info" },
     { allow = ["Apache-2.0"], crate = "scale-info-derive" },
     { allow = ["Apache-2.0"], crate = "solana-account-info" },
+    { allow = ["Apache-2.0"], crate = "solana-address" },
     { allow = ["Apache-2.0"], crate = "solana-atomic-u64" },
-    { allow = ["Apache-2.0"], crate = "solana-bincode" },
     { allow = ["Apache-2.0"], crate = "solana-clock" },
     { allow = ["Apache-2.0"], crate = "solana-commitment-config" },
     { allow = ["Apache-2.0"], crate = "solana-cpi" },
-    { allow = ["Apache-2.0"], crate = "solana-decode-error" },
     { allow = ["Apache-2.0"], crate = "solana-define-syscall" },
     { allow = ["Apache-2.0"], crate = "solana-epoch-rewards" },
     { allow = ["Apache-2.0"], crate = "solana-epoch-schedule" },
     { allow = ["Apache-2.0"], crate = "solana-fee-calculator" },
+    { allow = ["Apache-2.0"], crate = "solana-get-sysvar" },
     { allow = ["Apache-2.0"], crate = "solana-hash" },
     { allow = ["Apache-2.0"], crate = "solana-instruction" },
-    { allow = ["Apache-2.0"], crate = "solana-instructions-sysvar" },
+    { allow = ["Apache-2.0"], crate = "solana-instruction-error" },
     { allow = ["Apache-2.0"], crate = "solana-keypair" },
     { allow = ["Apache-2.0"], crate = "solana-last-restart-slot" },
     { allow = ["Apache-2.0"], crate = "solana-message" },
@@ -271,7 +271,6 @@ exceptions = [
     { allow = ["Apache-2.0"], crate = "solana-sdk-ids" },
     { allow = ["Apache-2.0"], crate = "solana-sdk-macro" },
     { allow = ["Apache-2.0"], crate = "solana-seed-phrase" },
-    { allow = ["Apache-2.0"], crate = "solana-serialize-utils" },
     { allow = ["Apache-2.0"], crate = "solana-sha256-hasher" },
     { allow = ["Apache-2.0"], crate = "solana-short-vec" },
     { allow = ["Apache-2.0"], crate = "solana-signature" },
@@ -279,7 +278,6 @@ exceptions = [
     { allow = ["Apache-2.0"], crate = "solana-slot-hashes" },
     { allow = ["Apache-2.0"], crate = "solana-slot-history" },
     { allow = ["Apache-2.0"], crate = "solana-stable-layout" },
-    { allow = ["Apache-2.0"], crate = "solana-stake-interface" },
     { allow = ["Apache-2.0"], crate = "solana-system-interface" },
     { allow = ["Apache-2.0"], crate = "solana-system-transaction" },
     { allow = ["Apache-2.0"], crate = "solana-sysvar" },
@@ -295,8 +293,9 @@ exceptions = [
     { allow = ["Apache-2.0"], crate = "sp-tracing" },
     { allow = ["Apache-2.0"], crate = "sp-trie" },
     { allow = ["Apache-2.0"], crate = "sp-wasm-interface" },
-    { allow = ["Apache-2.0"], crate = "spl-associated-token-account-client" },
+    { allow = ["Apache-2.0"], crate = "spl-associated-token-account-interface" },
     { allow = ["Apache-2.0"], crate = "spl-token" },
+    { allow = ["Apache-2.0"], crate = "spl-token-interface" },
     { allow = ["Apache-2.0"], crate = "ss58-registry" },
     { allow = ["Apache-2.0"], crate = "sync_wrapper" },
     { allow = ["Apache-2.0"], crate = "tendermint" },
