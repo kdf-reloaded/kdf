@@ -3521,7 +3521,6 @@ pub(crate) fn orderbook_address(
                 _ => MmError::err(OrderbookAddrErr::InvalidPlatformCoinProtocol(platform)),
             }
         },
-        #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. } => {
             MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned()))
         },
