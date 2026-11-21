@@ -323,7 +323,7 @@ R40.2.3 **Success result** (HTTP 200):
 
 All balances are decimal strings.
 
-> *Status note (Spec Reader round 0.5.0-20, 2026-11-21; pending the KDF
+> *Status note (Spec Reader round 0.5.0-20, 2026-11-21; passed the KDF
 > Dirty Gate with §40.2A):* the form of these strings — zero, trailing
 > zeros, large values, a token with 0 decimals — and the form of the amounts
 > in a withdraw answer are stated in §40.2A. No sentence of R40.2.3 is
@@ -384,8 +384,9 @@ proceed as with `false`.
 
 ## 40.2A The string form of balances and amounts (reference behavior)
 
-> *Status note (Spec Reader round 0.5.0-20, 2026-11-21; pending the KDF
-> Dirty Gate):* this section was written by the KDF Spec Reader under the
+> *Status note (Spec Reader round 0.5.0-20, 2026-11-21; passed the KDF
+> Dirty Gate on 2026-11-21, measure 0.00; attestation in §40.12):* this
+> section was written by the KDF Spec Reader under the
 > two-team procedure of chapter 01 §1.4A, from four inputs: (1) the
 > reference at the rows `v3.0.0-beta`, `v2.6.0-beta` and
 > `main (as of 2026-10-07)` of chapter 02 §2.15A, which agree on everything
@@ -2058,3 +2059,23 @@ with the shapes listed in §40.6 items 3-5.
   D40.3 record this repository's own code and the maintainer's decisions of
   2026-11-15, 2026-11-18 and 2026-11-19. They take no forbidden-class input
   beyond the cleared rules they cite.
+- *Scoped addition (2026-11-21, Spec Reader round 0.5.0-20) -- §40.2A
+  (the shortest form, R40.2A.1 -- R40.2A.5, the error members, D40.2A.1,
+  T40.2A.1 -- T40.2A.4) and the status note after R40.2.3; the section's
+  own head note is its provenance record, and this item carries the
+  clearance only.* **KDF Dirty Gate: PASS on 2026-11-21, measure 0.00, no
+  findings** (chapter 01 R40; the attestation closes this item).
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-21, measure
+  0.00, no findings, in a main pass and a delta pass after one
+  informative note was deleted (the main pass measured 0.03, from that
+  note only; the delta pass compared bytes: the status note after R40.2.3
+  identical, §40.2A equal to the first-passed text without that note and
+  one blank line). *Extent:* the Solana coin subsystem -- the SOL and SPL
+  balance reads, the SOL and SPL withdraw amount and fee formation, the
+  withdraw error members and the two Solana activation surfaces -- at the
+  rows `v3.0.0-beta`, `v2.6.0-beta` and `main (as of 2026-10-07)`, seven
+  files per state; on the candidate side, the two additions only.
+  *Method:* reading plus mechanical comparison (every identifier-shaped
+  token of the additions judged forced or free); the repository's
+  clean-room gate tool was not applicable because the additions embed no
+  code blocks. *Measure:* 0.00, on the discretionary-expression basis.
