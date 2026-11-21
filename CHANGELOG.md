@@ -932,6 +932,9 @@ the previous version used. The safe way:
   client's maintenance pass also holds it while it runs, so a count taken during the first pass could be one
   too high. Both counts are now taken once they have stayed the same for 2 s and are compared for equality, so
   a handle that a failed token activation keeps still fails the test. Only test code changed. Detail: PR #460.
+- **Tests of a repeated QTUM or QRC20 activation.** A second activation of an active QTUM or QRC20 token, one
+  after the other or started together, answers "already initialized" and starts no second connection,
+  subscription or history collector. Only test code changed. Detail: PR #462.
 
 ### Plans touched
 
