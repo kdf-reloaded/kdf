@@ -131,9 +131,7 @@ impl TokenAsMmCoinInitializer for SlpTokenInitializer {
             })
             .collect();
 
-        for token in tokens.iter() {
-            self.platform_coin.register_token_info(token);
-        }
+        // The platform's token record is written at registration, not here (CRD ch.43 D43.1F.2 (b)).
         Ok(tokens.into_iter().map(Into::into).collect())
     }
 }
@@ -361,6 +359,14 @@ impl PlatformWithTokensActivationOps for BchCoin {
         Ok(platform_coin)
     }
 
+    fn record_token(&self, token: &MmCoinEnum) {
+        if let MmCoinEnum::SlpToken(token) = token {
+            self.register_token_info(token);
+        }
+    }
+
+    fn forget_token_record(&self, ticker: &str) { self.remove_slp_token_info(ticker); }
+
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
         activation_request
             .slp_tokens_requests
@@ -451,13 +457,13 @@ impl PlatformWithTokensActivationOps for BchCoin {
         initial_balance: BigDecimal,
     ) -> AbortHandle {
         let ticker = self.ticker().to_owned();
-        let (fut, abort_handle) = abortable(bch_and_slp_history_loop(
+        let (fut, abort_handle) = abortable(coins::coin_work::carry_current_scope(bch_and_slp_history_loop(
             self.clone(),
             ctx,
             storage,
             metrics,
             initial_balance,
-        ));
+        )));
         spawn(async move {
             if let Err(e) = fut.await {
                 info!("bch_and_slp_history_loop stopped for {}, reason {}", ticker, e);

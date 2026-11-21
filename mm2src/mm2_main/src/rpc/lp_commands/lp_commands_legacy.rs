@@ -18,8 +18,9 @@
 //
 
 use coins::utxo::rpc_clients::with_call_budget;
-use coins::{disable_coin as disable_coin_impl, lp_coinfind, lp_coininit, CoinBalance, CoinsContext, DisableCoinError,
-            MmCoinEnum, MyBalanceRpcError};
+use coins::{disable_coin as disable_coin_impl, disable_coin_of_instance, disable_platform_with_dependents,
+            lp_coinfind, lp_coinfind_registered, lp_coininit, CoinBalance, CoinsContext, DisableCoinError, MmCoinEnum,
+            MyBalanceRpcError};
 use common::custom_futures::FutureTimerExt;
 use common::executor::{spawn, Timer};
 use common::log::{error, warn};
@@ -44,21 +45,106 @@ use crate::mm2::MmVersionResult;
 use mm2_err_handle::prelude::*;
 use uuid::Uuid;
 
-/// The request of `disable_coin` (legacy members, unchanged).
+/// The request of the versioned `disable_coin` (legacy members, unchanged). The versioned form does not read
+/// `force_disable` (the maintainer's decision of 2026-11-18; CRD ch.43 §43.1E, second status note).
 #[derive(Deserialize)]
 pub struct DisableCoinRequest {
     pub coin: String,
 }
 
-/// The success of `disable_coin`: the content that the legacy body carries under `result`.
+/// The success of the versioned `disable_coin`: the content that the legacy body carries under `result`, without
+/// `passivized`, which only the legacy form answers.
 #[derive(Serialize)]
 pub struct DisableCoinResponse {
     pub coin: String,
     pub cancelled_orders: Vec<Uuid>,
 }
 
-/// The typed core of `disable_coin`: cancels the orders of the coin and removes the coin, unless a running swap uses
-/// the coin or one of its orders is being matched.
+/// The success of the legacy `disable_coin`, the three members of CRD ch.43 R43.1E.2.
+#[derive(Serialize)]
+pub struct LegacyDisableCoinResponse {
+    pub coin: String,
+    pub cancelled_orders: Vec<Uuid>,
+    /// True when the coin was made passive instead of being removed (R43.1E.5 item 3).
+    pub passivized: bool,
+}
+
+/// What a `disable_coin` call does to the requested coin once its checks have passed.
+enum DisableCoinPlan {
+    /// Remove the requested coin only: a token, a coin without dependents, or the versioned form.
+    RemoveOne,
+    /// Make the platform passive; nothing is removed (R43.1E.5 item 3).
+    Passivize,
+    /// Remove the platform and every dependent in one step (R43.1E.5 item 4).
+    RemoveWithDependents,
+}
+
+/// The swaps that use any of `tickers`, each once.
+fn active_swaps_using_any_coin(ctx: &MmArc, tickers: &[String]) -> Result<Vec<Uuid>, MmError<DisableCoinError>> {
+    let mut swaps = Vec::new();
+    for ticker in tickers {
+        for swap in active_swaps_using_coin(ctx, ticker).map_to_mm(DisableCoinError::InternalError)? {
+            if !swaps.contains(&swap) {
+                swaps.push(swap);
+            }
+        }
+    }
+    Ok(swaps)
+}
+
+/// The checks and the order cancellation of a `disable_coin` call over `tickers`, in the order of CRD ch.43
+/// R43.1E.3 and R43.1E.4: a running swap of any of them refuses the call before anything changes; then the orders of
+/// all of them are cancelled, and an order that is being matched refuses the call after the cancellation (the
+/// documented cancel-first behavior of D43.1E.1 (c)). `requested` names the ticker in the refusals. Returns the
+/// identifiers of the orders cancelled.
+async fn check_and_cancel_orders(
+    ctx: &MmArc,
+    requested: &str,
+    tickers: &[String],
+) -> Result<Vec<Uuid>, MmError<DisableCoinError>> {
+    let swaps = active_swaps_using_any_coin(ctx, tickers)?;
+    if !swaps.is_empty() {
+        return MmError::err(DisableCoinError::ActiveSwapsBlockDeactivation {
+            coin: requested.to_owned(),
+            swaps: swaps.iter().map(Uuid::to_string).collect(),
+        });
+    }
+    let mut cancelled: Vec<Uuid> = Vec::new();
+    let mut still_matching: Vec<Uuid> = Vec::new();
+    for ticker in tickers {
+        let (cancelled_now, matching_now) = cancel_orders_by(ctx, CancelBy::Coin { ticker: ticker.clone() })
+            .await
+            .map_to_mm(DisableCoinError::InternalError)?;
+        for uuid in cancelled_now {
+            if !cancelled.contains(&uuid) {
+                cancelled.push(uuid);
+            }
+        }
+        for uuid in matching_now {
+            if !still_matching.contains(&uuid) {
+                still_matching.push(uuid);
+            }
+        }
+    }
+    if !still_matching.is_empty() {
+        return MmError::err(DisableCoinError::MatchingOrdersBlockDeactivation {
+            coin: requested.to_owned(),
+            matching: still_matching.iter().map(Uuid::to_string).collect(),
+            cancelled: cancelled.iter().map(Uuid::to_string).collect(),
+        });
+    }
+    Ok(cancelled)
+}
+
+/// The versioned `disable_coin` (CRD ch.43 §43.1R; the maintainer's decision of 2026-11-18): cancels the orders of
+/// the coin and removes the coin, unless a running swap uses the coin or one of its orders is being matched. It
+/// neither passivizes a platform nor reads `force_disable`: a platform with dependents is removed, its dependents
+/// stay registered, and its dependent set is dropped. A passive platform is not an active coin here and answers
+/// `NoSuchCoin`.
+///
+/// The call takes the activation lock of the requested ticker (CRD ch.55 R55.1.12, ch.43 D43.1F.2 (b)). The removal
+/// ends the removed instance's background work and its event streams, through `disable_coin_impl` (CRD ch.43
+/// R43.1E.5 item 4).
 ///
 /// # Errors
 ///
@@ -69,35 +155,122 @@ pub async fn disable_coin_core(
     req: DisableCoinRequest,
 ) -> Result<DisableCoinResponse, MmError<DisableCoinError>> {
     let ticker = req.coin;
+    let coins_ctx = CoinsContext::from_ctx(&ctx).map_to_mm(DisableCoinError::InternalError)?;
+    let _activation_guard = coins_ctx
+        .lock_activation(&[&ticker])
+        .await
+        .map_to_mm(DisableCoinError::InternalError)?;
     match lp_coinfind(&ctx, &ticker).await {
         Ok(Some(_)) => (),
         Ok(None) => return MmError::err(DisableCoinError::NoSuchCoin { coin: ticker }),
         // The text is the one of the dev handler, which did not name the ticker.
         Err(err) => return MmError::err(DisableCoinError::InternalError(format!("!lp_coinfind({}): ", err))),
     };
-    let swaps = active_swaps_using_coin(&ctx, &ticker).map_to_mm(DisableCoinError::InternalError)?;
-    if !swaps.is_empty() {
-        return MmError::err(DisableCoinError::ActiveSwapsBlockDeactivation {
-            coin: ticker,
-            swaps: swaps.iter().map(Uuid::to_string).collect(),
-        });
-    }
-    let (cancelled, still_matching) = cancel_orders_by(&ctx, CancelBy::Coin { ticker: ticker.clone() })
-        .await
-        .map_to_mm(DisableCoinError::InternalError)?;
-    if !still_matching.is_empty() {
-        return MmError::err(DisableCoinError::MatchingOrdersBlockDeactivation {
-            coin: ticker,
-            matching: still_matching.iter().map(Uuid::to_string).collect(),
-            cancelled: cancelled.iter().map(Uuid::to_string).collect(),
-        });
-    }
+    let cancelled = check_and_cancel_orders(&ctx, &ticker, std::slice::from_ref(&ticker)).await?;
     disable_coin_impl(&ctx, &ticker)
         .await
         .map_to_mm(DisableCoinError::InternalError)?;
     Ok(DisableCoinResponse {
         coin: ticker,
         cancelled_orders: cancelled,
+    })
+}
+
+/// The typed core of the legacy `disable_coin` (CRD ch.43 §43.1E): the versioned form's checks, plus the passive
+/// state and `force_disable`.
+///
+/// The call takes the activation locks of the requested ticker and, when forced, of every dependent of it, in one
+/// `lock_activation` call (R55.1.12, D43.1F.2 (b)); the state is read after the locks are held. Then:
+///
+/// 1. a ticker that is not registered, or a passive platform that is not forced, is `NoSuchCoin`;
+/// 2. an unforced active platform with at least one dependent is made passive after the swap check and the order
+///    cancellation of its own ticker (R43.1E.3, R43.1E.4, R43.1E.5 item 3), and the answer is `passivized: true`;
+/// 3. a forced platform with at least one dependent, active or passive, is removed with all its dependents after
+///    the swap check and the order cancellation have covered the platform and every dependent, and the whole call
+///    is refused if any of them is in use (D43.1E.2 (b), R43.1E.5 item 4);
+/// 4. anything else (a token, a coin without dependents) is removed as before (R43.1E.5 items 2 and 5).
+///
+/// The removal ends the background work of each removed instance and its event streams, through
+/// `disable_platform_with_dependents` and `disable_coin_impl` (CRD ch.43 R43.1E.5 item 4).
+///
+/// # Errors
+///
+/// A [`DisableCoinError`], as [`disable_coin_core`].
+pub async fn legacy_disable_coin_core(
+    ctx: MmArc,
+    ticker: String,
+    force_disable: bool,
+) -> Result<LegacyDisableCoinResponse, MmError<DisableCoinError>> {
+    let coins_ctx = CoinsContext::from_ctx(&ctx).map_to_mm(DisableCoinError::InternalError)?;
+
+    // A forced call locks the dependents too. A dependent can join or leave between the read that names the
+    // locks and the moment the locks are held, so the set is read again, and the locks are taken again when it
+    // changed. A token activation of this platform holds the platform's lock, so once ours is held the set can
+    // only shrink.
+    let (_activation_guard, dependents) = loop {
+        let named = if force_disable {
+            coins_ctx.dependents_of(&ticker).await
+        } else {
+            Default::default()
+        };
+        let mut tickers: Vec<&str> = vec![ticker.as_str()];
+        tickers.extend(named.iter().map(String::as_str));
+        let guard = coins_ctx
+            .lock_activation(&tickers)
+            .await
+            .map_to_mm(DisableCoinError::InternalError)?;
+        let dependents = coins_ctx.dependents_of(&ticker).await;
+        if !force_disable || dependents == named {
+            break (guard, dependents);
+        }
+    };
+
+    match lp_coinfind_registered(&ctx, &ticker).await {
+        Ok(Some(_)) => (),
+        Ok(None) => return MmError::err(DisableCoinError::NoSuchCoin { coin: ticker }),
+        // The text is the one of the dev handler, which did not name the ticker.
+        Err(err) => return MmError::err(DisableCoinError::InternalError(format!("!lp_coinfind({}): ", err))),
+    };
+    let passive = coins_ctx.is_passive(&ticker).await;
+    if passive && !force_disable {
+        return MmError::err(DisableCoinError::NoSuchCoin { coin: ticker });
+    }
+
+    let plan = match (dependents.is_empty(), force_disable) {
+        (false, true) => DisableCoinPlan::RemoveWithDependents,
+        (false, false) => DisableCoinPlan::Passivize,
+        (true, _) => DisableCoinPlan::RemoveOne,
+    };
+    let checked: Vec<String> = match plan {
+        DisableCoinPlan::RemoveWithDependents => std::iter::once(ticker.clone()).chain(dependents).collect(),
+        DisableCoinPlan::RemoveOne | DisableCoinPlan::Passivize => vec![ticker.clone()],
+    };
+    let cancelled = check_and_cancel_orders(&ctx, &ticker, &checked).await?;
+
+    let passivized = match plan {
+        // The set can have emptied since it was read: a dependent token is disabled under its own lock only. The
+        // platform then has no dependent, and is removed like any coin without one.
+        DisableCoinPlan::Passivize => coins_ctx.make_passive(&ticker).await,
+        DisableCoinPlan::RemoveOne | DisableCoinPlan::RemoveWithDependents => false,
+    };
+    if !passivized {
+        match plan {
+            DisableCoinPlan::RemoveWithDependents => {
+                disable_platform_with_dependents(&ctx, &ticker)
+                    .await
+                    .map_to_mm(DisableCoinError::InternalError)?;
+            },
+            DisableCoinPlan::RemoveOne | DisableCoinPlan::Passivize => {
+                disable_coin_impl(&ctx, &ticker)
+                    .await
+                    .map_to_mm(DisableCoinError::InternalError)?;
+            },
+        }
+    }
+    Ok(LegacyDisableCoinResponse {
+        coin: ticker,
+        cancelled_orders: cancelled,
+        passivized,
     })
 }
 
@@ -152,7 +325,9 @@ pub(crate) fn legacy_disable_coin_refusal(error: MmError<DisableCoinError>) -> R
 /// Attempts to disable the coin
 pub async fn disable_coin(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let coin = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
-    match disable_coin_core(ctx, DisableCoinRequest { coin }).await {
+    // Only the JSON value `true` forces; absent, `false` and any other value do not (CRD ch.43 R43.1E.1).
+    let force_disable = req["force_disable"].as_bool() == Some(true);
+    match legacy_disable_coin_core(ctx, coin, force_disable).await {
         Ok(response) => legacy_result_body(&response),
         Err(error) => legacy_disable_coin_refusal(error),
     }
@@ -225,8 +400,10 @@ where
     result
 }
 
-async fn deregister_coin_after_failed_balance_read(ctx: &MmArc, ticker: &str) {
-    if let Err(e) = disable_coin_impl(ctx, ticker).await {
+/// Removes the coin whose balance read failed, if the registered instance of its ticker is `instance` (CRD ch.55
+/// R55.4.9). Another instance of the ticker stays registered. `None` removes whatever is registered.
+async fn deregister_coin_after_failed_balance_read(ctx: &MmArc, ticker: &str, instance: Option<u64>) {
+    if let Err(e) = disable_coin_of_instance(ctx, ticker, instance).await {
         warn!("Cannot deregister '{}' after its balance read failed: {}", ticker, e);
     }
 }
@@ -238,6 +415,9 @@ async fn legacy_activation_response(
     keep_coin_on_failure: bool,
 ) -> Result<Response<Vec<u8>>, String> {
     let ticker = coin.ticker().to_owned();
+    // The instance the activation registered: the cleanup of a failed read removes this one only (CRD ch.55 R55.4.9).
+    // The activation lock of the ticker is held, so the registered instance is the one that was just built.
+    let instance = try_s!(CoinsContext::from_ctx(ctx)).instance_id(&ticker).await;
     // The caller's bound is also the budget of the Electrum calls of the read, so that an Electrum client fails over
     // from a server that does not answer inside that bound (CRD ch.38 R38.6.4j item 1). Other clients ignore it.
     let call_budget = bound_secs.map_or(std::time::Duration::MAX, std::time::Duration::from_secs_f64);
@@ -247,7 +427,7 @@ async fn legacy_activation_response(
         }),
         bound_secs,
         keep_coin_on_failure,
-        || deregister_coin_after_failed_balance_read(ctx, &ticker),
+        || deregister_coin_after_failed_balance_read(ctx, &ticker, instance),
     )
     .await?;
     let res = CoinInitResponse {
@@ -751,7 +931,7 @@ mod tests {
             async { failed_balance() },
             None,
             false,
-            || deregister_coin_after_failed_balance_read(&ctx, "AAA"),
+            || deregister_coin_after_failed_balance_read(&ctx, "AAA", None),
         ));
         assert!(result.is_err());
         assert!(block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_none());
@@ -771,10 +951,50 @@ mod tests {
             async { failed_balance() },
             None,
             true,
-            || deregister_coin_after_failed_balance_read(&ctx, "AAA"),
+            || deregister_coin_after_failed_balance_read(&ctx, "AAA", None),
         ));
         assert!(result.is_err());
         assert!(block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_some());
+    }
+
+    /// CRD ch.55 R55.4.9: the cleanup of a failed activation removes the instance that activation registered, and
+    /// leaves a different instance of the same ticker registered.
+    #[test]
+    fn the_cleanup_of_a_failed_read_leaves_another_instance_of_the_ticker_registered() {
+        let ctx = MmCtxBuilder::new().with_conf(json!({})).into_mm_arc();
+        let register = |ctx: &MmArc| {
+            block_on(lp_register_coin(ctx, TestCoin::new("AAA").into(), RegisterCoinParams {
+                ticker: "AAA".to_owned(),
+                tx_history: false,
+            }))
+            .expect("AAA is registered")
+        };
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+
+        register(&ctx);
+        let failed_activation = block_on(coins_ctx.instance_id("AAA")).expect("the first instance is registered");
+        // The first instance is removed by someone else, and a second instance registers under the same ticker.
+        block_on(disable_coin_impl(&ctx, "AAA")).unwrap();
+        register(&ctx);
+        let second = block_on(coins_ctx.instance_id("AAA")).expect("the second instance is registered");
+        assert_ne!(failed_activation, second);
+
+        block_on(deregister_coin_after_failed_balance_read(
+            &ctx,
+            "AAA",
+            Some(failed_activation),
+        ));
+        assert!(
+            block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_some(),
+            "the other instance stays"
+        );
+        assert_eq!(block_on(coins_ctx.instance_id("AAA")), Some(second));
+
+        block_on(deregister_coin_after_failed_balance_read(&ctx, "AAA", Some(second)));
+        assert!(
+            block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_none(),
+            "its own instance is removed"
+        );
     }
 
     /// A Sia-protocol coin goes through the legacy `enable` leg (CRD ch.46 R46.6.3): its Sia members are read

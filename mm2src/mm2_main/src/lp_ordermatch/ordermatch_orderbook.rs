@@ -742,7 +742,7 @@ pub(crate) async fn request_and_fill_orderbook(ctx: &MmArc, base: &str, rel: &st
 /// Note this function locks the [`OrdermatchContext::orderbook`] mutex.
 pub(crate) fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) {
     let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).expect("from_ctx failed");
-    let p2p_item = OrderbookP2PItem::from(item.clone());
+    let event_item = item.clone();
     let topic = orderbook_topic_from_base_rel(&item.base, &item.rel);
 
     // Phase 1: index under Orderbook lock; Phase 2: the trie ops are queued before the guard is
@@ -756,11 +756,26 @@ pub(crate) fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) {
         orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
     }
 
-    let _ = ctx
-        .event_stream_manager
-        .send_fn(&StreamerId::OrderbookUpdate { topic }, || {
-            orderbook_events::OrderbookItemChangeEvent::NewOrUpdatedItem(Box::new(p2p_item))
+    // CRD ch.59 R59.4C.3: no event for an order that is not presentable.
+    let streamer_id = StreamerId::OrderbookUpdate { topic };
+    if peer_order_change_is_streamed(ctx, &ordermatch_ctx, &streamer_id, &event_item) {
+        let _ = ctx.event_stream_manager.send_fn(&streamer_id, || {
+            orderbook_events::OrderbookItemChangeEvent::NewOrUpdatedItem(Box::new(event_item.into()))
         });
+    }
+}
+
+/// Whether a change of the peer's order `order` goes to the order-book event stream `streamer_id`: the
+/// streamer is running and the order is presentable (CRD ch.59 R59.4C.3). The required sets are read only
+/// while somebody listens.
+fn peer_order_change_is_streamed(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    streamer_id: &StreamerId,
+    order: &OrderbookItem,
+) -> bool {
+    ctx.event_stream_manager.is_active(streamer_id)
+        && capability_presentation::listed_in_event_stream(ctx, ordermatch_ctx, order)
 }
 
 /// Insert or update our own maker order, tracking per-order P2P pubkeys (ZHTLC).
@@ -791,7 +806,7 @@ pub(crate) fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
     let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).expect("from_ctx failed");
 
     // Phase 1: update index and queue the trie op under the same guard (CRD ch.32 R-T3b item 1)
-    let maybe_topic = {
+    let maybe_removed = {
         let mut orderbook = ordermatch_ctx.orderbook.lock();
 
         // Record this UUID so that a late-arriving create message won't resurrect the order.
@@ -800,10 +815,10 @@ pub(crate) fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
         if let Some(order) = orderbook.order_set.get(&uuid) {
             if order.pubkey == pubkey {
                 let topic = orderbook_topic_from_base_rel(&order.base, &order.rel);
-                orderbook.index_remove(uuid).map(|(_removed, op)| {
+                orderbook.index_remove(uuid).map(|(removed, op)| {
                     ordermatch_ctx.mismatch_watch.note_order_ops(std::slice::from_ref(&op));
                     orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, vec![op]);
-                    topic
+                    (topic, removed)
                 })
             } else {
                 None
@@ -813,13 +828,14 @@ pub(crate) fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
         }
     };
 
-    // Phase 2: emit SSE event
-    if let Some(topic) = maybe_topic {
-        let _ = ctx
-            .event_stream_manager
-            .send_fn(&StreamerId::OrderbookUpdate { topic }, || {
+    // Phase 2: emit SSE event. CRD ch.59 R59.4C.3: none for an order that is not presentable.
+    if let Some((topic, removed)) = maybe_removed {
+        let streamer_id = StreamerId::OrderbookUpdate { topic };
+        if peer_order_change_is_streamed(ctx, &ordermatch_ctx, &streamer_id, &removed) {
+            let _ = ctx.event_stream_manager.send_fn(&streamer_id, || {
                 orderbook_events::OrderbookItemChangeEvent::RemovedItem(uuid)
             });
+        }
     }
 }
 
@@ -1544,6 +1560,21 @@ pub(crate) enum OrderbookRequestingState {
     Requested,
     /// We subscribed to a topic at `subscribed_at` time, but the orderbook was not requested.
     NotRequested { subscribed_at: u64 },
+}
+
+impl OrderbookRequestingState {
+    /// Whether the order book of the topic counts as filled at `now_sec`.
+    pub(crate) fn is_filled_at(&self, now_sec: u64) -> bool {
+        match self {
+            // We are subscribed to the topic and the orderbook was requested already
+            OrderbookRequestingState::Requested => true,
+            // We are subscribed to the topic. Also we didn't request the orderbook,
+            // True if enough time has passed for the orderbook to fill by OrdermatchRequest::SyncPubkeyOrderbookState.
+            OrderbookRequestingState::NotRequested { subscribed_at } => {
+                *subscribed_at + ORDERBOOK_REQUESTING_TIMEOUT < now_sec
+            },
+        }
+    }
 }
 
 pub(crate) type H64 = [u8; 8];
@@ -3258,17 +3289,7 @@ pub(crate) async fn subscribe_to_orderbook_topic(
                 // orderbook is not filled
                 false
             },
-            Entry::Occupied(e) => match e.get() {
-                OrderbookRequestingState::Requested => {
-                    // We are subscribed to the topic and the orderbook was requested already
-                    true
-                },
-                OrderbookRequestingState::NotRequested { subscribed_at } => {
-                    // We are subscribed to the topic. Also we didn't request the orderbook,
-                    // True if enough time has passed for the orderbook to fill by OrdermatchRequest::SyncPubkeyOrderbookState.
-                    *subscribed_at + ORDERBOOK_REQUESTING_TIMEOUT < current_timestamp
-                },
-            },
+            Entry::Occupied(e) => e.get().is_filled_at(current_timestamp),
         }
     };
 
@@ -3277,6 +3298,20 @@ pub(crate) async fn subscribe_to_orderbook_topic(
     }
 
     Ok(())
+}
+
+/// Whether the node's own order book of (`base`, `rel`) counts as filled, as [`subscribe_to_orderbook_topic`]
+/// judges it. A request for the full order book that no relay answered leaves the book unfilled although the
+/// request itself reports no error.
+pub(crate) fn orderbook_is_filled(ctx: &MmArc, base: &str, rel: &str) -> bool {
+    let Ok(ordermatch_ctx) = OrdermatchContext::from_ctx(ctx) else {
+        return false;
+    };
+    let topic = orderbook_topic_from_base_rel(base, rel);
+    let subscriptions = ordermatch_ctx.orderbook_subscriptions.read();
+    subscriptions
+        .get(&topic)
+        .is_some_and(|state| state.is_filled_at(now_ms() / 1000))
 }
 
 /// Records the subscription to `topic` as "subscribed, not yet requested" when no record exists and
@@ -3521,7 +3556,6 @@ pub(crate) fn orderbook_address(
                 _ => MmError::err(OrderbookAddrErr::InvalidPlatformCoinProtocol(platform)),
             }
         },
-        #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. } => {
             MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned()))
         },

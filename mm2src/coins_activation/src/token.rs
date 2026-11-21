@@ -1,6 +1,6 @@
 /// Contains token activation traits and their implementations for various coins
 ///
-use crate::context::lock_activation;
+use crate::context::lock_activation_under;
 use crate::platform_coin_with_tokens::CustomTokenError;
 use crate::prelude::*;
 use async_trait::async_trait;
@@ -167,7 +167,8 @@ where
 
 /// [`enable_token`] with the token's protocol resolved by `resolve`: the coins configuration for the generic
 /// activation, a request-supplied protocol where the request may carry one (CRD ch.40 R40.3.2). `resolve` runs after
-/// the already-activated check, before the platform coin is looked up.
+/// a first already-activated check and before the activation locks are taken, since the locks need the platform
+/// ticker that the protocol names.
 pub(crate) async fn enable_token_resolving<Token, Resolve>(
     ctx: MmArc,
     ticker: String,
@@ -179,17 +180,25 @@ where
     EnableTokenError: From<Token::ActivationError>,
     Resolve: FnOnce(&MmArc, &str, &Token::ActivationParams) -> Result<Token::ProtocolInfo, MmError<EnableTokenError>>,
 {
-    // R55.1.12: the lock is held through registration; the check below is the one that follows the wait.
-    let _activation_guard = lock_activation(&ctx, &[&ticker])
+    // The lock needs the platform ticker, which the token's protocol names, so the protocol is resolved first. A
+    // registered ticker keeps the refusal it has always had, before any other check.
+    if let Ok(Some(_)) = lp_coinfind(&ctx, &ticker).await {
+        return MmError::err(EnableTokenError::TokenIsAlreadyActivated(ticker));
+    }
+    let token_protocol = resolve(&ctx, &ticker, &activation_params)?;
+    let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
+
+    // R55.1.12 with D43.1F.2 (b): the lock of the token (exclusive) and the lock of its platform (shared) are held
+    // together through registration, so a `disable_coin` of the platform cannot run in between. The checks below
+    // follow the wait.
+    let _activation_guard = lock_activation_under(&ctx, &platform_ticker, &[&ticker])
         .await
         .map_to_mm(EnableTokenError::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &ticker).await {
         return MmError::err(EnableTokenError::TokenIsAlreadyActivated(ticker));
     }
 
-    let token_protocol = resolve(&ctx, &ticker, &activation_params)?;
-
-    let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
+    // The platform must be active: a passive platform counts as not activated (CRD ch.43 R43.1F.6).
     let platform_coin = lp_coinfind_or_err(&ctx, &platform_ticker)
         .await
         .mm_err(|_| EnableTokenError::PlatformCoinIsNotActivated(token_protocol.platform_coin_ticker().to_owned()))?;
@@ -201,14 +210,22 @@ where
         }
     })?;
 
-    let (token, activation_result) =
-        Token::enable_token(ticker, platform_coin.clone(), activation_params, token_protocol)
-            .await
-            .mm_err(Into::into)?;
+    // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD ch.43
+    // R43.1E.5 item 4, §43.1E not-established item (1)).
+    let work = coins::coin_work::PendingCoinWork::new();
+    let (token, activation_result) = work
+        .scope(Token::enable_token(
+            ticker,
+            platform_coin.clone(),
+            activation_params,
+            token_protocol,
+        ))
+        .await
+        .mm_err(Into::into)?;
 
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx
-        .add_token(&platform_ticker, token.clone().into())
+        .add_token_with_work(&platform_ticker, token.clone().into(), work)
         .await
         .mm_err(|e| EnableTokenError::TokenIsAlreadyActivated(e.ticker))?;
     Token::on_token_registered(&platform_coin, &token);

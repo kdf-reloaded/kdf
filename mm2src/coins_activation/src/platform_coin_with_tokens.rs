@@ -2,11 +2,12 @@ use crate::context::lock_activation;
 use crate::prelude::*;
 use async_trait::async_trait;
 use coins::activation_locks::ActivationGuard;
+use coins::coin_work::PendingCoinWork;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use coins::sql_tx_history_storage::SqliteTxHistoryStorage;
-use coins::{lp_coinfind, CoinProtocol, CoinsContext, MmCoinEnum};
+use coins::{lp_coinfind_registered, CoinProtocol, CoinsContext, MmCoinEnum, RegisteredTokenPolicy};
 use common::mm_number::BigDecimal;
 use common::{log, HttpStatusCode, StatusCode};
 use derive_more::Display;
@@ -161,10 +162,8 @@ where
             .collect::<Result<Vec<_>, _>>()
             .mm_err(Into::into)?;
 
+        // The platform's token record is written at registration, not here (CRD ch.43 D43.1F.2 (b)).
         let tokens = self.enable_tokens(token_params).await.mm_err(Into::into)?;
-        for token in tokens.iter() {
-            self.platform_coin().register_token_info(token);
-        }
         Ok(tokens.into_iter().map(Into::into).collect())
     }
 }
@@ -175,7 +174,7 @@ pub trait GetPlatformBalance {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait PlatformWithTokensActivationOps: Into<MmCoinEnum> {
+pub trait PlatformWithTokensActivationOps: Into<MmCoinEnum> + TryPlatformCoinFromMmCoinEnum {
     type ActivationRequest: Clone + Send + Sync + TxHistory;
     type PlatformProtocolInfo: TryFromCoinProtocol;
     type ActivationResult: GetPlatformBalance + CurrentBlock;
@@ -194,6 +193,19 @@ pub trait PlatformWithTokensActivationOps: Into<MmCoinEnum> {
     fn token_initializers(
         &self,
     ) -> Vec<Box<dyn TokenAsMmCoinInitializer<PlatformCoin = Self, ActivationRequest = Self::ActivationRequest>>>;
+
+    /// Records `token`, a coin built by one of this platform's token initializers, on the token record the
+    /// platform instance keeps for its balance reports (CRD ch.43 R43.1F.3 item 6, D43.1F.2 (b)). A coin of
+    /// another kind is ignored.
+    fn record_token(&self, token: &MmCoinEnum);
+
+    /// Forgets the token recorded for `ticker` by [`Self::record_token`]; a ticker that is not recorded is
+    /// ignored.
+    fn forget_token_record(&self, ticker: &str);
+
+    /// The ticker of the NFT chain that the request activates beside the platform coin, if any (CRD ch.43
+    /// R43.1F.8). Only an EVM platform has one.
+    fn requested_nft_ticker(&self, _activation_request: &Self::ActivationRequest) -> Option<String> { None }
 
     /// The tickers of the tokens that the request registers beside the platform coin. The activation locks them
     /// together with the platform ticker, so no other activation builds or registers one of them meanwhile
@@ -226,8 +238,15 @@ pub trait PlatformWithTokensActivationOps: Into<MmCoinEnum> {
     fn history_supported(&self) -> bool { true }
 
     /// Completes the registration of what the activation set up beside the coins, once the platform and its
-    /// tokens are registered.
-    fn on_platform_registered(_ctx: &MmArc, _ticker: &str, _activation_request: &Self::ActivationRequest) {}
+    /// tokens are registered. `reactivation` is true for the re-activation of a passive platform, which keeps
+    /// the processes the platform already runs (CRD ch.43 D43.1F.5 (a)).
+    fn on_platform_registered(
+        _ctx: &MmArc,
+        _ticker: &str,
+        _activation_request: &Self::ActivationRequest,
+        _reactivation: bool,
+    ) {
+    }
 
     fn start_history_background_fetching(
         &self,
@@ -271,6 +290,9 @@ pub enum CustomTokenError {
 #[serde(tag = "error_type", content = "error_data")]
 pub enum EnablePlatformCoinWithTokensError {
     PlatformIsAlreadyActivated(String),
+    /// A requested token is registered and is not a dependent of the platform being activated (CRD ch.43
+    /// R43.1F.4).
+    TokenIsAlreadyActivated(String),
     #[display(fmt = "Platform {} config is not found", _0)]
     PlatformConfigIsNotFound(String),
     #[display(fmt = "{}", _0)]
@@ -396,6 +418,7 @@ impl HttpStatusCode for EnablePlatformCoinWithTokensError {
             | EnablePlatformCoinWithTokensError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             EnablePlatformCoinWithTokensError::Transport(_) => StatusCode::BAD_GATEWAY,
             EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(_)
+            | EnablePlatformCoinWithTokensError::TokenIsAlreadyActivated(_)
             | EnablePlatformCoinWithTokensError::PlatformConfigIsNotFound(_)
             | EnablePlatformCoinWithTokensError::AtLeastOneNodeRequired(_)
             | EnablePlatformCoinWithTokensError::TokenConfigIsNotFound(_)
@@ -429,6 +452,68 @@ where
         .map_to_mm(EnablePlatformCoinWithTokensError::Internal)
 }
 
+/// What a platform-with-tokens request names (CRD ch.43 R43.1F.2).
+pub(crate) enum RequestedPlatform<Platform> {
+    /// The ticker is not registered: a first activation builds the platform.
+    New,
+    /// The ticker is a passive platform of the method's family: the request re-activates this instance.
+    Passive(Platform),
+}
+
+/// Decides what the platform ticker of a request names, before the platform's configuration is read (CRD ch.43
+/// R43.1F.2): an active ticker, and a passive ticker of another family, answer `PlatformIsAlreadyActivated`; a
+/// passive ticker of the method's family is re-activated. The activation locks of the ticker make the answer
+/// stable for the rest of the activation; `init` of a task asks without them.
+pub(crate) async fn requested_platform<Platform>(
+    ctx: &MmArc,
+    ticker: &str,
+) -> Result<RequestedPlatform<Platform>, MmError<EnablePlatformCoinWithTokensError>>
+where
+    Platform: PlatformWithTokensActivationOps,
+{
+    let registered = match lp_coinfind_registered(ctx, ticker).await {
+        Ok(Some(coin)) => coin,
+        _ => return Ok(RequestedPlatform::New),
+    };
+    let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(EnablePlatformCoinWithTokensError::Internal)?;
+    if coins_ctx.is_passive(ticker).await {
+        if let Some(platform) = Platform::try_from_mm_coin(registered) {
+            return Ok(RequestedPlatform::Passive(platform));
+        }
+    }
+    MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
+        ticker.to_owned(),
+    ))
+}
+
+/// The policy for a requested token that is already registered (CRD ch.43 R43.1F.4, D43.1F.1): the
+/// `reactivation_registered_token` member of the startup configuration, which the node start has validated.
+fn registered_token_policy(ctx: &MmArc) -> RegisteredTokenPolicy {
+    RegisteredTokenPolicy::from_conf(&ctx.conf).unwrap_or(RegisteredTokenPolicy::DEFAULT)
+}
+
+/// Refuses a requested token that is registered for another platform, before anything is built (CRD ch.43
+/// R43.1F.4); a registered token of this platform is kept and joins it again. Runs with the activation locks held,
+/// in a first activation and in a re-activation.
+async fn check_requested_tokens<Platform>(
+    ctx: &MmArc,
+    ticker: &str,
+    request: &Platform::ActivationRequest,
+) -> Result<(), MmError<EnablePlatformCoinWithTokensError>>
+where
+    Platform: PlatformWithTokensActivationOps,
+{
+    let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(EnablePlatformCoinWithTokensError::Internal)?;
+    coins_ctx
+        .check_requested_tokens(
+            ticker,
+            &Platform::requested_token_tickers(request),
+            registered_token_policy(ctx),
+        )
+        .await
+        .mm_err(|e| EnablePlatformCoinWithTokensError::TokenIsAlreadyActivated(e.ticker))
+}
+
 pub async fn enable_platform_coin_with_tokens<Platform>(
     ctx: MmArc,
     req: EnablePlatformCoinWithTokensReq<Platform::ActivationRequest>,
@@ -440,31 +525,46 @@ where
     Platform::check_one_shot_request(&req.request).mm_err(Into::into)?;
 
     // R55.1.12: the platform and every token the request registers are locked until the registration is done.
-    // The check below is the one that follows the wait.
+    // The checks below are the ones that follow the wait.
     let _activation_guard = lock_platform_activation::<Platform>(&ctx, &req.ticker, &req.request).await?;
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
-        return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
-            req.ticker,
-        ));
-    }
+    let requested = requested_platform::<Platform>(&ctx, &req.ticker).await?;
+    check_requested_tokens::<Platform>(&ctx, &req.ticker, &req.request).await?;
 
-    let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
+    let (platform_coin, reactivation, work) = match requested {
+        RequestedPlatform::Passive(platform_coin) => (platform_coin, true, None),
+        RequestedPlatform::New => {
+            let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
 
-    let priv_key = &*ctx.legacy_passphrase_key_pair().private().secret;
+            let priv_key = &*ctx.legacy_passphrase_key_pair().private().secret;
 
-    let platform_coin = Platform::enable_platform_coin(
-        ctx.clone(),
-        req.ticker.clone(),
-        platform_conf,
-        req.request.clone(),
-        platform_protocol,
-        priv_key,
+            // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD
+            // ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+            let work = PendingCoinWork::new();
+            let platform_coin = work
+                .scope(Platform::enable_platform_coin(
+                    ctx.clone(),
+                    req.ticker.clone(),
+                    platform_conf,
+                    req.request.clone(),
+                    platform_protocol,
+                    priv_key,
+                ))
+                .await
+                .mm_err(Into::into)?;
+            (platform_coin, false, Some(work))
+        },
+    };
+
+    finalize_platform_coin_activation::<Platform, NoXPubExtractor>(
+        ctx,
+        &req.ticker,
+        platform_coin,
+        reactivation,
+        work,
+        &req.request,
+        None,
     )
     .await
-    .mm_err(Into::into)?;
-
-    finalize_platform_coin_activation::<Platform, NoXPubExtractor>(ctx, &req.ticker, platform_coin, &req.request, None)
-        .await
 }
 
 /// The extended public keys of a hardware wallet are unavailable: the one-shot call has no device to ask.
@@ -494,10 +594,25 @@ impl HDXPubExtractor for NoXPubExtractor {
 /// balances, start any background history fetch, and register the platform coin
 /// with its tokens. Used by both the one-shot activation routine and the
 /// long-running task path (CRD ch. 48) so the two produce identical results.
+///
+/// `reactivation` is true when `platform_coin` is the passive instance of a re-activation (CRD ch.43 R43.1F.3):
+/// no history collector is started for it (D43.1F.5), and its registration makes the registered entry active
+/// instead of inserting one.
+///
+/// `work` is the background work that the build of a new platform instance spawned; it is `None` for a re-activation.
+/// The registry keeps it when the platform is registered, and it ends when this call fails first (CRD ch.43 R43.1E.5
+/// item 4, §43.1E not-established item (1)).
+///
+/// The token record of the platform instance is written once the tokens are built and before the answer is
+/// assembled, which reads it. Every token this call added to the record is removed again when the call fails, so
+/// a refused request leaves no token of its own on the record (D43.1F.2 (b)). The activation locks are held
+/// throughout.
 pub(crate) async fn finalize_platform_coin_activation<Platform, XPubExtractor>(
     ctx: MmArc,
     ticker: &str,
     platform_coin: Platform,
+    reactivation: bool,
+    work: Option<PendingCoinWork>,
     request: &Platform::ActivationRequest,
     xpub_extractor: Option<&XPubExtractor>,
 ) -> Result<Platform::ActivationResult, MmError<EnablePlatformCoinWithTokensError>>
@@ -515,31 +630,131 @@ where
         mm_tokens.extend(tokens);
     }
 
-    let activation_result = platform_coin
-        .get_activation_result(&ctx, request, xpub_extractor)
-        .await
-        .mm_err(Into::into)?;
-    log::info!("{} current block {}", ticker, activation_result.current_block());
+    // A token that is already a dependent keeps its instance and its record (CRD ch.43 R43.1F.4). A registered token
+    // of this platform that is not a dependent keeps its instance too and is recorded from that instance; the others
+    // are recorded from the built tokens. What is recorded now is forgotten again if the call fails.
+    let dependents = CoinsContext::from_ctx(&ctx)
+        .map_to_mm(EnablePlatformCoinWithTokensError::Internal)?
+        .dependents_of(ticker)
+        .await;
+    let mut recorded: Vec<String> = Vec::new();
+    for token in &mm_tokens {
+        let token_ticker = token.ticker();
+        if dependents.contains(token_ticker) || recorded.iter().any(|t| t == token_ticker) {
+            continue;
+        }
+        match lp_coinfind_registered(&ctx, token_ticker).await {
+            Ok(Some(registered)) => platform_coin.record_token(&registered),
+            _ => platform_coin.record_token(token),
+        }
+        recorded.push(token_ticker.to_owned());
+    }
 
+    // The answer lists every token on the record, so it is assembled after the record is written.
+    let answer = async {
+        let activation_result = platform_coin
+            .get_activation_result(&ctx, request, xpub_extractor)
+            .await
+            .mm_err(Into::into)?;
+        log::info!("{} current block {}", ticker, activation_result.current_block());
+
+        Ok::<_, MmError<EnablePlatformCoinWithTokensError>>(activation_result)
+    }
+    .await;
+    let activation_result = match answer {
+        Ok(activation_result) => activation_result,
+        Err(error) => {
+            forget_recorded_tokens(&platform_coin, &recorded);
+            return Err(error);
+        },
+    };
+
+    let nft_ticker = platform_coin.requested_nft_ticker(request);
+    let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+    if reactivation {
+        // The activation locks keep `disable_coin` from removing the passive entry meanwhile, so this refusal is
+        // not reached; it changes nothing (CRD ch.43 R43.1F.3 item 5, D43.1F.2 (b)).
+        if let Err(e) = coins_ctx.reactivate_platform_with_tokens(ticker, mm_tokens).await {
+            forget_recorded_tokens(&platform_coin, &recorded);
+            return MmError::err(EnablePlatformCoinWithTokensError::Internal(format!(
+                "The passive platform {} is not registered any more",
+                e.get_inner().ticker
+            )));
+        }
+    } else {
+        // The platform instance is new and dropped with the refusal, together with its token record.
+        coins_ctx
+            .add_platform_with_tokens_and_work(platform_coin.into(), work.unwrap_or_default(), mm_tokens)
+            .await
+            .mm_err(|e| EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(e.ticker))?;
+    }
+    // The NFT chain of an inline `nft_req` is a dependent of the platform, not a token on its record (CRD ch.43
+    // R43.1F.8 item 1).
+    if let Some(nft_ticker) = nft_ticker {
+        coins_ctx.add_nft_dependent(ticker, &nft_ticker).await;
+    }
+    // The hook runs in the scope of the registered instance, so a process it starts (the TRON history) is work of that
+    // instance: removing the platform aborts it (CRD ch.43 R43.1E.5 item 4, ch.55 R55.4.9). A re-activation runs it in
+    // the scope of the passive platform's existing record; no process starts then, and the NFT marking does not spawn.
+    match coins_ctx.coin_work(ticker).await {
+        Some(work) => work.run_in_scope(|| Platform::on_platform_registered(&ctx, ticker, request, reactivation)),
+        None => Platform::on_platform_registered(&ctx, ticker, request, reactivation),
+    }
+
+    // The history collector starts after the registry accepted the platform, so a failure before the registration
+    // leaves no loop behind and the loop's first registration check finds the platform (CRD ch.55 D55.8). A
+    // re-activation starts none; the passive platform keeps the one it had (CRD ch.43 D43.1F.5 (a)).
     #[cfg(not(target_arch = "wasm32"))]
-    if request.tx_history() && platform_coin.history_supported() {
-        let abort_handler = platform_coin.start_history_background_fetching(
+    if !reactivation && request.tx_history() {
+        start_history_collector::<Platform>(&ctx, ticker, &activation_result).await;
+    }
+
+    Ok(activation_result)
+}
+
+/// Starts the transaction-history collector of the platform that has just been registered (CRD ch.55 D55.8).
+#[cfg(not(target_arch = "wasm32"))]
+async fn start_history_collector<Platform>(ctx: &MmArc, ticker: &str, activation_result: &Platform::ActivationResult)
+where
+    Platform: PlatformWithTokensActivationOps,
+{
+    let registered = match lp_coinfind_registered(ctx, ticker).await {
+        Ok(Some(coin)) => Platform::try_from_mm_coin(coin),
+        _ => None,
+    };
+    let Some(platform_coin) = registered else {
+        log::warn!("{ticker}: the registered platform was not found, no history collector was started");
+        return;
+    };
+    if !platform_coin.history_supported() {
+        return;
+    }
+    // The collector is work of the registered instance: removing the platform aborts it (CRD ch.43 R43.1E.5 item 4),
+    // and it runs in the instance's scope, where it reads its instance id (CRD ch.55 R55.4.9).
+    let work = match CoinsContext::from_ctx(ctx) {
+        Ok(coins_ctx) => coins_ctx.coin_work(ticker).await,
+        Err(_) => None,
+    };
+    let Some(work) = work else {
+        log::warn!("{ticker}: the registered platform has no background work record, no history collector was started");
+        return;
+    };
+    let abort_handler = work.run_in_scope(|| {
+        platform_coin.start_history_background_fetching(
             ctx.clone(),
             ctx.metrics.clone(),
             SqliteTxHistoryStorage(ctx.sqlite_connection.as_option().unwrap().clone()),
             activation_result.get_platform_balance(),
-        );
-        ctx.abort_handlers.lock().unwrap().push(abort_handler);
+        )
+    });
+    work.add(abort_handler);
+}
+
+/// Removes the tokens a failed activation call added to the token record of the platform instance.
+fn forget_recorded_tokens<Platform: PlatformWithTokensActivationOps>(platform_coin: &Platform, recorded: &[String]) {
+    for token_ticker in recorded {
+        platform_coin.forget_token_record(token_ticker);
     }
-
-    let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
-    coins_ctx
-        .add_platform_with_tokens(platform_coin.into(), mm_tokens)
-        .await
-        .mm_err(|e| EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(e.ticker))?;
-    Platform::on_platform_registered(&ctx, ticker, request);
-
-    Ok(activation_result)
 }
 
 /// Task-driven platform activation (CRD ch. 48): identical to
@@ -566,33 +781,40 @@ where
     use crypto::CryptoCtx;
 
     // R55.1.12: the platform and every token the request registers are locked until the registration is done.
-    // The check below is the one that follows the wait.
+    // The checks below are the ones that follow the wait.
     let _activation_guard = lock_platform_activation::<Platform>(&ctx, &req.ticker, &req.request).await?;
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
-        return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
-            req.ticker,
-        ));
-    }
+    let requested = requested_platform::<Platform>(&ctx, &req.ticker).await?;
+    check_requested_tokens::<Platform>(&ctx, &req.ticker, &req.request).await?;
 
-    let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
+    let (platform_coin, reactivation, work) = match requested {
+        RequestedPlatform::Passive(platform_coin) => (platform_coin, true, None),
+        RequestedPlatform::New => {
+            let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
 
-    let priv_key = &*ctx.legacy_passphrase_key_pair().private().secret;
+            let priv_key = &*ctx.legacy_passphrase_key_pair().private().secret;
 
-    task_handle
-        .update_in_progress_status(InitPlatformCoinWithTokensInProgressStatus::ActivatingCoin)
-        .mm_err(rpc_task_error)?;
+            task_handle
+                .update_in_progress_status(InitPlatformCoinWithTokensInProgressStatus::ActivatingCoin)
+                .mm_err(rpc_task_error)?;
 
-    let platform_coin = Platform::enable_platform_coin_with_task(
-        ctx.clone(),
-        req.ticker.clone(),
-        platform_conf,
-        req.request.clone(),
-        platform_protocol,
-        priv_key,
-        task_handle,
-    )
-    .await
-    .mm_err(Into::into)?;
+            // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD
+            // ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+            let work = PendingCoinWork::new();
+            let platform_coin = work
+                .scope(Platform::enable_platform_coin_with_task(
+                    ctx.clone(),
+                    req.ticker.clone(),
+                    platform_conf,
+                    req.request.clone(),
+                    platform_protocol,
+                    priv_key,
+                    task_handle,
+                ))
+                .await
+                .mm_err(Into::into)?;
+            (platform_coin, false, Some(work))
+        },
+    };
 
     if Platform::REPORTS_BALANCE_AND_FINISHING_PROGRESS {
         task_handle
@@ -607,6 +829,14 @@ where
     let xpub_extractor = RpcTaskXPubExtractor::new_unchecked(&ctx, task_handle, xpub_extractor_rpc_statuses());
     let xpub_extractor = crypto_ctx.hw_ctx().map(|_| &xpub_extractor);
 
-    finalize_platform_coin_activation::<Platform, _>(ctx, &req.ticker, platform_coin, &req.request, xpub_extractor)
-        .await
+    finalize_platform_coin_activation::<Platform, _>(
+        ctx,
+        &req.ticker,
+        platform_coin,
+        reactivation,
+        work,
+        &req.request,
+        xpub_extractor,
+    )
+    .await
 }

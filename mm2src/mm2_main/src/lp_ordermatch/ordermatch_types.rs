@@ -180,8 +180,9 @@ fn is_untradable_coin(coin: &MmCoinEnum) -> bool {
     )
 }
 
+// Lightning does not exist on WASM; Solana and SPL are as untradable there as on native.
 #[cfg(target_arch = "wasm32")]
-fn is_untradable_coin(_coin: &MmCoinEnum) -> bool { false }
+fn is_untradable_coin(coin: &MmCoinEnum) -> bool { matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)) }
 
 /// CRD ch.05 R40: the MM2.json boolean `swap_key_check`, default `true`. Only an explicit JSON `false` turns the
 /// refusal of R36-R39 off, which restores the behavior of earlier builds.

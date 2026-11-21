@@ -6,7 +6,7 @@
 //! (R48.11.5) and the registration and cancel rules (R48.11.7). A token family supplies only what is specific
 //! to it through [`InitTokenActivationOps`].
 
-use crate::context::{lock_activation, CoinsActivationContext};
+use crate::context::{lock_activation_under, CoinsActivationContext};
 use crate::platform_coin_with_tokens::CustomTokenError;
 use crate::prelude::*;
 use crate::token::TokenProtocolParams;
@@ -227,24 +227,37 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
-        // R55.1.12: activations of one ticker run one at a time. The lock is held through registration, and the
-        // ticker is checked again once it is ours, because the activation that held it may have registered the token.
-        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker])
+        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the token
+        // (exclusive) is taken together with the platform's shared lock, so a `disable_coin` of the platform cannot
+        // run while the token is registered. The lock is held through registration, and the ticker and the platform
+        // are checked again once it is ours.
+        let platform_ticker = self.protocol_info.platform_coin_ticker().to_owned();
+        let _activation_guard = lock_activation_under(&self.ctx, &platform_ticker, &[&self.ticker])
             .await
             .map_to_mm(InitTokenError::Internal)?;
         if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {
             return MmError::err(InitTokenError::TokenIsAlreadyActivated { ticker: self.ticker });
         }
+        // The platform that was active at `init` may have been disabled, or made passive, while the task waited.
+        match lp_coinfind(&self.ctx, &platform_ticker).await {
+            Ok(Some(_)) => (),
+            Ok(None) => return MmError::err(InitTokenError::PlatformCoinIsNotActivated(platform_ticker)),
+            Err(e) => return MmError::err(InitTokenError::Internal(e)),
+        }
 
-        let (token, result) = Token::init_token(
-            &self.ctx,
-            &self.ticker,
-            &self.platform_coin,
-            &self.request,
-            &self.protocol_info,
-            task_handle,
-        )
-        .await?;
+        // The work the build spawns belongs to the instance, and ends with this task if the instance is not
+        // registered (CRD ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+        let work = coins::coin_work::PendingCoinWork::new();
+        let (token, result) = work
+            .scope(Token::init_token(
+                &self.ctx,
+                &self.ticker,
+                &self.platform_coin,
+                &self.request,
+                &self.protocol_info,
+                task_handle,
+            ))
+            .await?;
 
         task_handle
             .update_in_progress_status(InitTokenInProgressStatus::Finishing)
@@ -253,7 +266,7 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
         // Registering is the last step (CRD R48.11.7): a concurrent registration of the same ticker ends the task.
         let coins_ctx = CoinsContext::from_ctx(&self.ctx).map_to_mm(InitTokenError::Internal)?;
         coins_ctx
-            .add_token(self.protocol_info.platform_coin_ticker(), token.clone().into())
+            .add_token_with_work(self.protocol_info.platform_coin_ticker(), token.clone().into(), work)
             .await
             .mm_err(|e| InitTokenError::TokenIsAlreadyActivated { ticker: e.ticker })?;
         self.registered_by_task.store(true, Ordering::SeqCst);

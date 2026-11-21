@@ -308,9 +308,7 @@ impl TokenAsMmCoinInitializer for TendermintTokenInitializer {
             tokens.push(token);
         }
 
-        for token in tokens.iter() {
-            self.platform_coin.register_token_info(token);
-        }
+        // The platform's token record is written at registration, not here (CRD ch.43 D43.1F.2 (b)).
         Ok(tokens.into_iter().map(Into::into).collect())
     }
 }
@@ -503,6 +501,14 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         Ok(coin)
     }
 
+    fn record_token(&self, token: &MmCoinEnum) {
+        if let MmCoinEnum::TendermintToken(token) = token {
+            self.register_token_info(token);
+        }
+    }
+
+    fn forget_token_record(&self, ticker: &str) { self.remove_activated_token_info(ticker); }
+
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
         activation_request
             .tokens_params
@@ -522,7 +528,7 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
     async fn get_activation_result<XPubExtractor>(
         &self,
         _ctx: &MmArc,
-        _activation_request: &Self::ActivationRequest,
+        activation_request: &Self::ActivationRequest,
         _xpub_extractor: Option<&XPubExtractor>,
     ) -> Result<TendermintActivationResult, MmError<TendermintActivationError>>
     where
@@ -538,7 +544,9 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         };
         let current_block = self.current_block().compat().await.map_to_mm(creation_error)?;
 
-        let (balance, tokens_balances, tokens_tickers) = if self.activation_get_balances() {
+        // The request's `get_balances` shapes the answer (CRD ch.43 R43.1F.2); at a first activation it equals the
+        // flag the coin was built with.
+        let (balance, tokens_balances, tokens_tickers) = if activation_request.get_balances {
             let balance = self
                 .my_balance()
                 .compat()
@@ -575,7 +583,9 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let ticker = self.ticker().to_owned();
-            let (fut, abort_handle) = abortable(coins::tendermint::start_tendermint_history(self.clone(), storage));
+            let (fut, abort_handle) = abortable(coins::coin_work::carry_current_scope(
+                coins::tendermint::start_tendermint_history(self.clone(), storage),
+            ));
             common::executor::spawn(async move {
                 if let Ok(Err(e)) = fut.await {
                     common::log::info!("the Tendermint history fetcher stopped for {}, reason {}", ticker, e);

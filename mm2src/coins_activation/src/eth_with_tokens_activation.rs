@@ -483,9 +483,7 @@ impl TokenAsMmCoinInitializer for Erc20TokenInitializer {
             tokens.push(token);
         }
 
-        for token in tokens.iter() {
-            self.platform_coin.register_token_info(token);
-        }
+        // The platform's token record is written at registration, not here (CRD ch.43 D43.1F.2 (b)).
         Ok(tokens.into_iter().map(Into::into).collect())
     }
 }
@@ -789,6 +787,22 @@ impl PlatformWithTokensActivationOps for EthCoin {
         }
     }
 
+    fn record_token(&self, token: &coins::MmCoinEnum) {
+        if let coins::MmCoinEnum::EthCoin(token) = token {
+            self.register_token_info(token);
+        }
+    }
+
+    fn forget_token_record(&self, ticker: &str) { self.remove_erc20_token_info(ticker); }
+
+    /// An inline `nft_req` activates the NFT chain of this platform (CRD ch.43 R43.1F.8).
+    fn requested_nft_ticker(&self, activation_request: &Self::ActivationRequest) -> Option<String> {
+        activation_request.nft_req.as_ref()?;
+        Chain::from_coin_ticker(self.ticker())
+            .ok()
+            .map(|chain| chain.nft_ticker().to_owned())
+    }
+
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
         activation_request
             .erc20_tokens_requests
@@ -868,10 +882,17 @@ impl PlatformWithTokensActivationOps for EthCoin {
     /// so it is started in [`Self::on_platform_registered`] (CRD ch.21 §21.10C).
     fn history_supported(&self) -> bool { !self.is_tron_platform_coin() }
 
-    fn on_platform_registered(ctx: &MmArc, ticker: &str, activation_request: &Self::ActivationRequest) {
+    fn on_platform_registered(
+        ctx: &MmArc,
+        ticker: &str,
+        activation_request: &Self::ActivationRequest,
+        reactivation: bool,
+    ) {
         // The TRON history starts here, once the platform and its tokens are registered. It runs only for a TRX
-        // platform whose history is enabled: `tx_history` asked and a keyed TronGrid node configured.
-        if activation_request.tx_history() {
+        // platform whose history is enabled: `tx_history` asked and a keyed TronGrid node configured. A
+        // re-activation of a passive platform starts none: the platform keeps the one it had (CRD ch.43
+        // D43.1F.5 (a)).
+        if starts_tron_history(activation_request.tx_history(), reactivation) {
             coins::eth::tron::spawn_platform_history(ctx, ticker);
         }
         if activation_request.nft_req.is_none() {
@@ -891,7 +912,9 @@ impl PlatformWithTokensActivationOps for EthCoin {
     ) -> AbortHandle {
         let ticker = self.ticker().to_owned();
         let coin = self.clone();
-        let (fut, abort_handle) = abortable(async move { coin.process_eth_history_loop().await });
+        let (fut, abort_handle) = abortable(coins::coin_work::carry_current_scope(async move {
+            coin.process_eth_history_loop().await
+        }));
         spawn(async move {
             if fut.await.is_err() {
                 info!("eth history loop stopped for {}", ticker);
@@ -900,6 +923,11 @@ impl PlatformWithTokensActivationOps for EthCoin {
         abort_handle
     }
 }
+
+/// Whether the activation starts the TRON history process: when `tx_history` is asked and the platform is newly
+/// activated. The re-activation of a passive platform starts none; the platform keeps the one it had (CRD ch.43
+/// D43.1F.5 (a)).
+fn starts_tron_history(tx_history: bool, reactivation: bool) -> bool { tx_history && !reactivation }
 
 /// The inline NFT activation of the platform (CRD R35.1.4b): the same initial owned-inventory fetch as
 /// `enable_nft`, for the single address of the platform. The NFT pseudo-coin is marked active once the

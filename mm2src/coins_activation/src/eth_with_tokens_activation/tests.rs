@@ -658,6 +658,12 @@ fn every_platform_error_serializes_with_the_bound_shape_and_status() {
             StatusCode::BAD_REQUEST,
         ),
         (
+            ActivationErr::TokenIsAlreadyActivated("USDT-ERC20".into()),
+            "TokenIsAlreadyActivated",
+            Some(json!("USDT-ERC20")),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
             ActivationErr::PlatformConfigIsNotFound("ETH".into()),
             "PlatformConfigIsNotFound",
             Some(json!("ETH")),
@@ -1774,5 +1780,675 @@ mod hd_accounts_at_index {
             error
         );
         assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Re-activation of a passive platform (CRD ch.43 §43.1F: R43.1F.2 -- R43.1F.5, R43.1F.8, D43.1F.1, D43.1F.2,
+// D43.1F.5; T43.1F.1 -- T43.1F.6, T43.1F.8)
+// ---------------------------------------------------------------------------
+
+mod reactivation {
+    use super::*;
+
+    use coins::nft::{Chain, NftCtx};
+    use coins::{CoinsContext, TestCoin};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// D43.1F.5 (a): only a new activation that asks for `tx_history` starts the TRON history process; a
+    /// re-activation of a passive platform starts none, so the one the platform has is the only one.
+    #[test]
+    fn d43_1f_5_a_re_activation_starts_no_second_tron_history() {
+        assert!(starts_tron_history(true, false));
+        assert!(!starts_tron_history(true, true));
+        assert!(!starts_tron_history(false, false));
+        assert!(!starts_tron_history(false, true));
+    }
+
+    /// A healthy node that counts the requests it answers.
+    fn counting_node() -> (MockEvmNode, Arc<AtomicUsize>) {
+        let count = Arc::new(AtomicUsize::new(0));
+        let counter = count.clone();
+        let node = spawn_node(move |method, params| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            healthy_node_reply(method, params, 1_500_000_000_000_000_000, 2_000_000)
+        });
+        (node, count)
+    }
+
+    /// A healthy node whose native balance read fails while `fail` is set.
+    fn failing_node(fail: Arc<AtomicBool>) -> MockEvmNode {
+        spawn_node(move |method, params| {
+            if method == "eth_getBalance" && fail.load(Ordering::SeqCst) {
+                return Reply::RpcError;
+            }
+            healthy_node_reply(method, params, 1_500_000_000_000_000_000, 2_000_000)
+        })
+    }
+
+    fn coins_ctx(ctx: &MmArc) -> Arc<CoinsContext> { CoinsContext::from_ctx(ctx).unwrap() }
+
+    /// Activates the platform on `node` with the token entries `token_requests`, then makes it passive as an
+    /// unforced `disable_coin` does.
+    fn passive_platform(ctx: &MmArc, node: &MockEvmNode, token_requests: Json) {
+        activate(
+            ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": token_requests }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the first activation failed: {}", e));
+        assert!(
+            block_on(coins_ctx(ctx).make_passive(PLATFORM)),
+            "the platform has a dependent"
+        );
+    }
+
+    fn is_passive(ctx: &MmArc) -> bool { block_on(coins_ctx(ctx).is_passive(PLATFORM)) }
+
+    fn dependents(ctx: &MmArc) -> Vec<String> { block_on(coins_ctx(ctx).dependents_of(PLATFORM)).into_iter().collect() }
+
+    /// The platform instance of the registry, active or passive.
+    fn registered_instance(ctx: &MmArc) -> EthCoin {
+        match block_on(coins::lp_coinfind_registered(ctx, PLATFORM)).unwrap().unwrap() {
+            coins::MmCoinEnum::EthCoin(coin) => coin,
+            other => panic!("not an EVM coin: {}", other.ticker()),
+        }
+    }
+
+    fn token_instance(ctx: &MmArc, ticker: &str) -> EthCoin {
+        match block_on(coins::lp_coinfind_registered(ctx, ticker)).unwrap().unwrap() {
+            coins::MmCoinEnum::EthCoin(coin) => coin,
+            other => panic!("not an EVM coin: {}", other.ticker()),
+        }
+    }
+
+    fn recorded_tickers(ctx: &MmArc) -> Vec<String> {
+        let mut tickers: Vec<String> = registered_instance(ctx).get_erc20_tokens_infos().into_keys().collect();
+        tickers.sort();
+        tickers
+    }
+
+    /// The token balances of a single-address answer.
+    fn token_balances(result: &EthWithTokensActivationResult) -> Vec<String> {
+        let result = serde_json::to_value(result).unwrap();
+        let (address, _) = result["eth_addresses_infos"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap();
+        let mut tickers: Vec<String> = result["erc20_addresses_infos"][address]["balances"]
+            .as_object()
+            .expect("the token balances")
+            .keys()
+            .cloned()
+            .collect();
+        tickers.sort();
+        tickers
+    }
+
+    /// T43.1F.1: the passive instance is reused; the request's nodes are not contacted; the answer lists the
+    /// tokens of the record and the request.
+    #[test]
+    fn t43_1f_1_a_re_activation_reuses_the_passive_instance_and_its_nodes() {
+        let ctx = iguana_ctx();
+        let (first_node, first_count) = counting_node();
+        passive_platform(&ctx, &first_node, tokens(&["USDT-ERC20"]));
+        let before = registered_instance(&ctx);
+        assert!(block_on(coins::lp_coinfind(&ctx, PLATFORM)).unwrap().is_none());
+        let first_requests = first_count.load(Ordering::SeqCst);
+
+        let (second_node, second_count) = counting_node();
+        let result = activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&second_node.url),
+                json!({ "erc20_tokens_requests": tokens(&["DAI-ERC20"]) }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+
+        assert_eq!(token_balances(&result), vec![
+            "DAI-ERC20".to_owned(),
+            "USDT-ERC20".to_owned()
+        ]);
+        assert_eq!(
+            second_count.load(Ordering::SeqCst),
+            0,
+            "the request's nodes were contacted"
+        );
+        assert!(
+            first_count.load(Ordering::SeqCst) > first_requests,
+            "the first nodes answer"
+        );
+        let after = match block_on(coins::lp_coinfind(&ctx, PLATFORM)).unwrap() {
+            Some(coins::MmCoinEnum::EthCoin(coin)) => coin,
+            _ => panic!("the platform is active again"),
+        };
+        assert!(std::ptr::eq(&*before, &*after), "the instance was replaced");
+        assert!(!is_passive(&ctx));
+        assert_eq!(dependents(&ctx), vec!["DAI-ERC20".to_owned(), "USDT-ERC20".to_owned()]);
+        for ticker in ["USDT-ERC20", "DAI-ERC20"] {
+            assert!(
+                block_on(coins::lp_coinfind(&ctx, ticker)).unwrap().is_some(),
+                "{}",
+                ticker
+            );
+        }
+        assert_eq!(recorded_tickers(&ctx), vec![
+            "DAI-ERC20".to_owned(),
+            "USDT-ERC20".to_owned()
+        ]);
+    }
+
+    /// T43.1F.2: the task form re-activates and ends `Ok` with the one-shot answer shape.
+    #[test]
+    fn t43_1f_2_the_task_form_re_activates_a_passive_platform() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        passive_platform(&ctx, &node, tokens(&["USDT-ERC20"]));
+
+        let response = block_on(init_platform_coin_with_tokens::<EthCoin>(
+            ctx.clone(),
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["DAI-ERC20"]) }),
+            ),
+        ))
+        .unwrap_or_else(|e| panic!("init must hand out a task id: {}", e));
+        let status = poll_terminal(&ctx, response.task_id);
+
+        assert_eq!(status["status"], "Ok", "{}", status);
+        let details = &status["details"];
+        let (address, _) = details["eth_addresses_infos"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap();
+        let mut listed: Vec<String> = details["erc20_addresses_infos"][address]["balances"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        listed.sort();
+        assert_eq!(listed, vec!["DAI-ERC20".to_owned(), "USDT-ERC20".to_owned()]);
+        assert!(!is_passive(&ctx));
+    }
+
+    /// T43.1F.3 with D43.1F.1 (b): a request naming its own dependent keeps the registered instance and its
+    /// required confirmations.
+    #[test]
+    fn t43_1f_3_a_dependent_named_again_stays_the_registered_instance() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        passive_platform(
+            &ctx,
+            &node,
+            json!([{ "ticker": "USDT-ERC20", "required_confirmations": 7 }]),
+        );
+        let before = token_instance(&ctx, "USDT-ERC20");
+        assert_eq!(before.required_confirmations(), 7);
+
+        let result = activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": [{ "ticker": "USDT-ERC20", "required_confirmations": 9 }] }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+
+        assert_eq!(token_balances(&result), vec!["USDT-ERC20".to_owned()], "reported once");
+        let after = token_instance(&ctx, "USDT-ERC20");
+        assert!(std::ptr::eq(&*before, &*after), "the registered token was replaced");
+        assert_eq!(after.required_confirmations(), 7);
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+    }
+
+    /// T43.1F.4: a passive platform of another family is refused as an active one is, by the one-shot call and
+    /// by `init`; nothing changes.
+    #[test]
+    fn t43_1f_4_a_passive_platform_of_another_family_is_platform_is_already_activated() {
+        let ctx = iguana_ctx();
+        let node = healthy_node();
+        let coins_ctx = coins_ctx(&ctx);
+        block_on(coins_ctx.add_platform_with_tokens(TestCoin::new(PLATFORM).into(), vec![TestCoin::new("T1").into()]))
+            .unwrap();
+        assert!(block_on(coins_ctx.make_passive(PLATFORM)));
+
+        let wire = failure(&ctx, request(std::slice::from_ref(&node.url), json!({})));
+        assert_string_error(&wire, "PlatformIsAlreadyActivated", StatusCode::BAD_REQUEST);
+        assert_eq!(wire.0["error_data"], PLATFORM);
+        let init_error = error_of(
+            block_on(init_platform_coin_with_tokens::<EthCoin>(
+                ctx.clone(),
+                request(std::slice::from_ref(&node.url), json!({})),
+            )),
+            "init must fail synchronously",
+        );
+        assert_string_error(
+            &wire_of(&init_error),
+            "PlatformIsAlreadyActivated",
+            StatusCode::BAD_REQUEST,
+        );
+        assert!(is_passive(&ctx), "the refusal changes nothing");
+    }
+
+    fn wire_of(error: &MmError<EnablePlatformCoinWithTokensError>) -> (Json, StatusCode) { wire(error) }
+
+    /// T43.1F.5 (c'), first activation: a token registered for another platform is refused before anything is
+    /// built, and nothing is registered.
+    #[test]
+    fn t43_1f_5_a_token_registered_for_another_platform_is_refused_in_a_first_activation() {
+        let ctx = iguana_ctx();
+        let (node, count) = counting_node();
+        // The test coin is its own platform, so it is registered for a platform other than ETH.
+        block_on(coins_ctx(&ctx).add_coin(TestCoin::new("USDT-ERC20").into())).unwrap();
+
+        let wire = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20"]) }),
+            ),
+        );
+
+        assert_string_error(&wire, "TokenIsAlreadyActivated", StatusCode::BAD_REQUEST);
+        assert_eq!(wire.0["error_data"], "USDT-ERC20");
+        assert_eq!(count.load(Ordering::SeqCst), 0, "something was built");
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+        assert!(block_on(coins_ctx(&ctx).dependents_of(PLATFORM)).is_empty());
+    }
+
+    /// A context of the EVM tests with the `extra` top-level `MM2.json` settings merged in, an Iguana key and an
+    /// in-memory database (the history collector writes to it).
+    fn iguana_ctx_with_conf(extra: Json) -> MmArc {
+        let mut conf = json!({ "coins": coins_conf() });
+        conf.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().expect("an object").clone());
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "evm activation test passphrase")
+            .expect("initialize the crypto context");
+        let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().expect("in-memory database");
+        let _ = ctx.sqlite_connection.pin(Arc::new(std::sync::Mutex::new(connection)));
+        ctx
+    }
+
+    /// T43.1F.5 (c') under `reactivation_registered_token: "keep"` (CRD ch.43 D43.1F.1): a token registered for
+    /// another platform and named in a first activation is kept, joins the dependent set, the activation answers,
+    /// and an unforced `disable_coin` of the platform then passivizes it.
+    #[test]
+    fn t43_1f_5_keep_a_token_registered_for_another_platform_is_kept_in_a_first_activation() {
+        let ctx = iguana_ctx_with_conf(json!({ "reactivation_registered_token": "keep" }));
+        let (node, _) = counting_node();
+        block_on(coins_ctx(&ctx).add_coin(TestCoin::new("USDT-ERC20").into())).unwrap();
+
+        activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20"]) }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert!(
+            block_on(coins::lp_coinfind_registered(&ctx, "USDT-ERC20"))
+                .unwrap()
+                .is_some(),
+            "the registered token stays"
+        );
+        assert!(
+            block_on(coins_ctx(&ctx).make_passive(PLATFORM)),
+            "the platform has a dependent, so an unforced disable passivizes it"
+        );
+        assert!(is_passive(&ctx));
+    }
+
+    /// Under `"keep"` a token whose configuration names another platform is still `PlatformCoinMismatch` (CRD ch.43
+    /// D43.1F.1, case c), and nothing is registered.
+    #[test]
+    fn t43_1f_6_keep_a_configuration_mismatch_is_still_refused() {
+        let ctx = iguana_ctx_with_conf(json!({ "reactivation_registered_token": "keep" }));
+        let (node, _) = counting_node();
+
+        let (wire, status) = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["DAI-ERC20", "OTHER-ERC20"]) }),
+            ),
+        );
+
+        assert_eq!(wire["error_type"], "PlatformCoinMismatch", "{:?}", wire);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+        assert!(dependents(&ctx).is_empty());
+    }
+
+    /// CRD ch.55 D55.8: a first activation with `tx_history` starts the history collector after the registration
+    /// (the collector is built from the registered platform), and a failure before the registration leaves no
+    /// collector behind.
+    #[test]
+    fn d55_8_the_history_collector_follows_the_registration() {
+        let ctx = iguana_ctx_with_conf(json!({}));
+        let fail = Arc::new(AtomicBool::new(true));
+        let node = failing_node(fail.clone());
+        let collectors = ctx.abort_handlers.lock().unwrap().len();
+
+        failure(
+            &ctx,
+            request(std::slice::from_ref(&node.url), json!({ "tx_history": true })),
+        );
+        assert_eq!(
+            ctx.abort_handlers.lock().unwrap().len(),
+            collectors,
+            "a failed activation left a collector"
+        );
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+
+        fail.store(false, Ordering::SeqCst);
+        activate(
+            &ctx,
+            request(std::slice::from_ref(&node.url), json!({ "tx_history": true })),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_some());
+        // The collector is work of the registered instance (CRD ch.43 R43.1E.5 item 4): it is on the instance's
+        // record, not on the node's list.
+        assert_eq!(ctx.abort_handlers.lock().unwrap().len(), collectors);
+        let work = block_on(coins_ctx(&ctx).coin_work(PLATFORM)).expect("the platform is registered");
+        assert_eq!(work.len(), 1);
+
+        // Removing the platform ends the collector.
+        block_on(coins::disable_platform_with_dependents(&ctx, PLATFORM)).unwrap();
+        assert!(work.is_ended());
+        assert_eq!(work.len(), 0);
+    }
+
+    /// T43.1F.5 with the decision of 2026-11-19: after the versioned `disable_coin` of a platform its tokens stay
+    /// registered and its dependent set is dropped. A later activation naming a token that is registered for this
+    /// platform is accepted: the registered instance is kept, joins the set and the token list, and is reported.
+    #[test]
+    fn t43_1f_5_a_token_of_this_platform_left_registered_rejoins_in_a_later_activation() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": [{ "ticker": "USDT-ERC20", "required_confirmations": 7 }] }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the first activation failed: {}", e));
+        let token = token_instance(&ctx, "USDT-ERC20");
+        block_on(coins::disable_coin(&ctx, PLATFORM)).unwrap();
+        assert!(dependents(&ctx).is_empty(), "the dependent set is dropped");
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+
+        let result = activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": [{ "ticker": "USDT-ERC20", "required_confirmations": 9 }] }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the later activation failed: {}", e));
+
+        assert_eq!(token_balances(&result), vec!["USDT-ERC20".to_owned()]);
+        let after = token_instance(&ctx, "USDT-ERC20");
+        assert!(std::ptr::eq(&*token, &*after), "the registered token was replaced");
+        assert_eq!(after.required_confirmations(), 7, "the request's setting was applied");
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert_eq!(recorded_tickers(&ctx), vec!["USDT-ERC20".to_owned()]);
+    }
+
+    /// The same refusal in a re-activation: the platform stays passive and the record is unchanged.
+    #[test]
+    fn a_registered_token_that_is_no_dependent_is_refused_in_a_re_activation() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        passive_platform(&ctx, &node, tokens(&["USDT-ERC20"]));
+        block_on(coins_ctx(&ctx).add_coin(TestCoin::new("DAI-ERC20").into())).unwrap();
+
+        let wire = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20", "DAI-ERC20"]) }),
+            ),
+        );
+
+        assert_string_error(&wire, "TokenIsAlreadyActivated", StatusCode::BAD_REQUEST);
+        assert_eq!(wire.0["error_data"], "DAI-ERC20");
+        assert!(is_passive(&ctx));
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert_eq!(recorded_tickers(&ctx), vec!["USDT-ERC20".to_owned()]);
+    }
+
+    /// T43.1F.6: a token whose configuration names another platform is `PlatformCoinMismatch`; the platform stays
+    /// passive.
+    #[test]
+    fn t43_1f_6_a_configuration_mismatch_leaves_the_platform_passive() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        passive_platform(&ctx, &node, tokens(&["USDT-ERC20"]));
+
+        let (wire, status) = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["DAI-ERC20", "OTHER-ERC20"]) }),
+            ),
+        );
+
+        assert_eq!(wire["error_type"], "PlatformCoinMismatch", "{:?}", wire);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(is_passive(&ctx));
+        assert_eq!(recorded_tickers(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, "DAI-ERC20"))
+            .unwrap()
+            .is_none());
+    }
+
+    /// D43.1F.2 (b): a re-activation that fails after its tokens were built leaves none of them on the token
+    /// record, and the platform passive.
+    #[test]
+    fn a_refused_re_activation_leaves_none_of_its_tokens_on_the_record() {
+        let ctx = iguana_ctx();
+        let fail = Arc::new(AtomicBool::new(false));
+        let node = failing_node(fail.clone());
+        passive_platform(&ctx, &node, tokens(&["USDT-ERC20"]));
+        fail.store(true, Ordering::SeqCst);
+
+        let wire = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20", "DAI-ERC20"]) }),
+            ),
+        );
+
+        assert_string_error(&wire, "Transport", StatusCode::BAD_GATEWAY);
+        assert!(is_passive(&ctx));
+        assert_eq!(recorded_tickers(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, "DAI-ERC20"))
+            .unwrap()
+            .is_none());
+
+        // The same request succeeds once the nodes answer, and then lists both tokens.
+        fail.store(false, Ordering::SeqCst);
+        let result = activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["DAI-ERC20"]) }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+        assert_eq!(token_balances(&result), vec![
+            "DAI-ERC20".to_owned(),
+            "USDT-ERC20".to_owned()
+        ]);
+    }
+
+    /// A first activation that fails after its tokens were built registers nothing.
+    #[test]
+    fn a_refused_first_activation_registers_nothing() {
+        let ctx = iguana_ctx();
+        let fail = Arc::new(AtomicBool::new(true));
+        let node = failing_node(fail);
+
+        let wire = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20"]) }),
+            ),
+        );
+
+        assert_string_error(&wire, "Transport", StatusCode::BAD_GATEWAY);
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, "USDT-ERC20"))
+            .unwrap()
+            .is_none());
+    }
+
+    /// The same ticker twice in one request is registered once, set once and reported once (R43.1F.4 case e).
+    #[test]
+    fn the_same_token_twice_in_one_request_is_registered_and_reported_once() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+
+        let result = activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20", "USDT-ERC20"]) }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(token_balances(&result), vec!["USDT-ERC20".to_owned()]);
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+    }
+
+    /// D43.1F.5 (a): a re-activation starts no history collector although the request sets `tx_history`.
+    #[test]
+    fn a_re_activation_starts_no_history_collector() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        passive_platform(&ctx, &node, tokens(&["USDT-ERC20"]));
+        let collectors = ctx.abort_handlers.lock().unwrap().len();
+        let work = block_on(coins_ctx(&ctx).coin_work(PLATFORM)).expect("the passive platform is registered");
+        let (instance, started) = (work.id(), work.len());
+
+        activate(
+            &ctx,
+            request(std::slice::from_ref(&node.url), json!({ "tx_history": true })),
+        )
+        .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+
+        assert_eq!(ctx.abort_handlers.lock().unwrap().len(), collectors);
+        // The re-activation keeps the instance and its work (CRD ch.43 R43.1F.10 item 2).
+        let after = block_on(coins_ctx(&ctx).coin_work(PLATFORM)).unwrap();
+        assert_eq!((after.id(), after.len()), (instance, started));
+    }
+
+    /// R43.1F.3 item 6: a token disabled while the platform was passive is not listed after the re-activation.
+    #[test]
+    fn a_disabled_token_is_not_listed_after_the_re_activation() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20", "DAI-ERC20"]) }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the first activation failed: {}", e));
+        block_on(coins::disable_coin(&ctx, "DAI-ERC20")).unwrap();
+        assert!(block_on(coins_ctx(&ctx).make_passive(PLATFORM)));
+
+        let result = activate(&ctx, request(std::slice::from_ref(&node.url), json!({})))
+            .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+
+        assert_eq!(token_balances(&result), vec!["USDT-ERC20".to_owned()]);
+    }
+
+    /// T43.1F.8 (registry part): the NFT chain is a dependent of its platform and not a token on the record; a
+    /// platform whose only dependent is the NFT chain becomes passive; a re-activation without `nft_req` keeps
+    /// the chain; one whose NFT build fails changes nothing; a forced removal deactivates the chain.
+    #[test]
+    fn t43_1f_8_the_nft_chain_is_a_dependent_of_its_platform() {
+        let ctx = iguana_ctx();
+        let (node, _) = counting_node();
+        activate(&ctx, request(std::slice::from_ref(&node.url), json!({}))).unwrap();
+        let nft_ctx = NftCtx::from_mm_ctx(&ctx).unwrap();
+        // What `enable_nft` and the inline `nft_req` do at their registration.
+        assert!(nft_ctx.mark_activated(Chain::Eth));
+        assert!(block_on(coins_ctx(&ctx).add_nft_dependent(PLATFORM, "NFT_ETH")));
+        assert_eq!(dependents(&ctx), vec!["NFT_ETH".to_owned()]);
+        assert!(
+            recorded_tickers(&ctx).is_empty(),
+            "the NFT chain is not a token on the record"
+        );
+
+        assert!(
+            block_on(coins_ctx(&ctx).make_passive(PLATFORM)),
+            "the NFT chain is the platform's only dependent"
+        );
+        assert!(
+            nft_ctx.is_activated(Chain::Eth),
+            "the NFT chain stays while the platform is passive"
+        );
+
+        // An NFT request whose provider is unreachable fails the re-activation; nothing changes.
+        let provider = json!({ "type": "Moralis", "info": { "url": refusing_url() } });
+        let wire = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "nft_req": { "provider": provider } }),
+            ),
+        );
+        assert_string_error(&wire, "Transport", StatusCode::BAD_GATEWAY);
+        assert!(is_passive(&ctx));
+        assert!(nft_ctx.is_activated(Chain::Eth));
+
+        // Without `nft_req` the registered NFT chain is kept, and the answer carries no NFT.
+        let result = activate(&ctx, request(std::slice::from_ref(&node.url), json!({})))
+            .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+        assert_eq!(serde_json::to_value(&result).unwrap()["nfts_infos"], json!({}));
+        assert!(!is_passive(&ctx));
+        assert!(nft_ctx.is_activated(Chain::Eth));
+        assert_eq!(dependents(&ctx), vec!["NFT_ETH".to_owned()]);
+
+        // A forced removal takes the NFT chain with the other dependents.
+        let removed = block_on(coins::disable_platform_with_dependents(&ctx, PLATFORM)).unwrap();
+        assert_eq!(removed, vec!["NFT_ETH".to_owned(), PLATFORM.to_owned()]);
+        assert!(!nft_ctx.is_activated(Chain::Eth));
+        assert!(dependents(&ctx).is_empty());
     }
 }

@@ -282,6 +282,8 @@ pub async fn process_history_loop(coin: SiaCoin, ctx: MmArc) {
 
     let mut last_balance: Option<CoinBalance> = None;
     let mut missing_coin_attempts = 0u32;
+    // The instance this loop serves (CRD ch.55 R55.4.9).
+    let own_instance = crate::coin_work::CoinWork::current_id();
 
     loop {
         if ctx.is_stopping() {
@@ -298,7 +300,11 @@ pub async fn process_history_loop(coin: SiaCoin, ctx: MmArc) {
                     break;
                 },
             };
-            let registered = coins_ctx.coins.lock().await.contains_key(&ticker);
+            // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
+            let registered = crate::coin_work::is_same_instance(
+                coins_ctx.coins.lock().await.registered().instance_id(&ticker),
+                own_instance,
+            );
             if registered {
                 missing_coin_attempts = 0;
             } else {

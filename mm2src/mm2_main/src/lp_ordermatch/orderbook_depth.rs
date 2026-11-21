@@ -1,6 +1,9 @@
-use super::{orderbook_topic_from_base_rel, OrderbookDepthError, OrdermatchContext, OrdermatchRequest};
+use super::capability_presentation::{log_left_out, CapabilityFilter};
+use super::{is_my_order, mm2_internal_pubkey_hex, orderbook_topic_from_base_rel, Orderbook, OrderbookDepthError,
+            OrdermatchContext, OrdermatchRequest};
 use crate::mm2::lp_network::{request_any_relay, P2PRequest};
 use crate::mm2::rpc::legacy_adapter::legacy_result;
+use coins::coin_protocol_capability::required_counterparty_capabilities;
 use coins::is_wallet_only_ticker;
 use common::log;
 use http::Response;
@@ -41,7 +44,7 @@ pub struct PairWithDepth {
 /// # Errors
 ///
 /// An [`OrderbookDepthError`]: a pair holds a wallet-only coin, the relay request fails, or the node's order-matching
-/// context cannot be had.
+/// context or its own key cannot be had.
 pub async fn orderbook_depth_core(
     ctx: MmArc,
     req: OrderbookDepthReq,
@@ -64,6 +67,22 @@ pub async fn orderbook_depth_core(
 
     let mut result = Vec::with_capacity(req.pairs.len());
 
+    // CRD ch.59 R59.4C.3: the counts taken from the node's own book cover presentable orders only. The
+    // required sets are read here, once per coin, before the locks below are taken.
+    let my_pubsecp = mm2_internal_pubkey_hex(&ctx).map_to_mm(OrderbookDepthError::Internal)?;
+    let mut required_of_coin: HashMap<String, Vec<&'static str>> = HashMap::new();
+    for coin in req.pairs.iter().flat_map(|pair| [&pair.0, &pair.1]) {
+        if !required_of_coin.contains_key(coin) {
+            let required = required_counterparty_capabilities(&ctx, coin).await;
+            required_of_coin.insert(coin.clone(), required);
+        }
+    }
+    let capability_filter = |pair: &(String, String)| {
+        // Every coin of the request was read above.
+        let required = |coin: &String| required_of_coin.get(coin).cloned().unwrap_or_default();
+        CapabilityFilter::from_required(&ctx, [&pair.0, &pair.1], [required(&pair.0), required(&pair.1)])
+    };
+
     // the Iter::filter uses &Self::Item, which is undesirable, we need owned pair
     #[allow(clippy::unnecessary_filter_map)]
     let mut to_request_from_relay: Vec<_> = {
@@ -75,12 +94,18 @@ pub async fn orderbook_depth_core(
                 let orderbook_pair = ordermatch_ctx.orderbook_pair_bypass(&original_pair);
                 let topic = orderbook_topic_from_base_rel(&orderbook_pair.0, &orderbook_pair.1);
                 if subscriptions.contains_key(&topic) {
-                    let asks = orderbook
-                        .unordered
-                        .get(&orderbook_pair)
-                        .map_or(0, |orders| orders.len());
+                    let capability_filter = capability_filter(&original_pair);
+                    let (asks, asks_left_out) =
+                        presentable_depth(&orderbook, &orderbook_pair, &capability_filter, &my_pubsecp);
                     let reversed = (orderbook_pair.1, orderbook_pair.0);
-                    let bids = orderbook.unordered.get(&reversed).map_or(0, |orders| orders.len());
+                    let (bids, bids_left_out) =
+                        presentable_depth(&orderbook, &reversed, &capability_filter, &my_pubsecp);
+                    log_left_out(
+                        "orderbook_depth",
+                        &original_pair.0,
+                        &original_pair.1,
+                        asks_left_out + bids_left_out,
+                    );
                     result.push(PairWithDepth {
                         pair: original_pair,
                         depth: PairDepth { asks, bids },
@@ -135,6 +160,31 @@ pub async fn orderbook_depth_core(
 pub async fn orderbook_depth_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let req: OrderbookDepthReq = try_s!(json::from_value(req));
     legacy_result(orderbook_depth_core(ctx, req).await)
+}
+
+/// The number of presentable orders the own book holds for `pair`, and the number left out
+/// (CRD ch.59 R59.4C.2, R59.4C.3).
+fn presentable_depth(
+    orderbook: &Orderbook,
+    pair: &(String, String),
+    capability_filter: &CapabilityFilter,
+    my_pubsecp: &Option<String>,
+) -> (usize, usize) {
+    let Some(uuids) = orderbook.unordered.get(pair) else {
+        return (0, 0);
+    };
+    if capability_filter.requires_nothing() {
+        return (uuids.len(), 0);
+    }
+    let left_out = uuids
+        .iter()
+        .filter_map(|uuid| orderbook.order_set.get(uuid))
+        .filter(|order| {
+            let is_mine = is_my_order(&order.pubkey, my_pubsecp, &orderbook.my_p2p_pubkeys);
+            !capability_filter.is_presentable(order, is_mine)
+        })
+        .count();
+    (uuids.len() - left_out, left_out)
 }
 
 pub fn process_orderbook_depth_p2p_request(

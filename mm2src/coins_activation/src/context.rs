@@ -74,3 +74,15 @@ impl CoinsActivationContext {
 pub(crate) async fn lock_activation(ctx: &MmArc, tickers: &[&str]) -> Result<ActivationGuard, String> {
     CoinsContext::from_ctx(ctx)?.lock_activation(tickers).await
 }
+
+/// Like [`lock_activation`], for a token or layer-two activation: `tickers` are locked exclusively and the lock of
+/// its `platform` shared (CRD ch.43 D43.1F.2 (b)).
+pub(crate) async fn lock_activation_under(
+    ctx: &MmArc,
+    platform: &str,
+    tickers: &[&str],
+) -> Result<ActivationGuard, String> {
+    CoinsContext::from_ctx(ctx)?
+        .lock_activation_under(platform, tickers)
+        .await
+}

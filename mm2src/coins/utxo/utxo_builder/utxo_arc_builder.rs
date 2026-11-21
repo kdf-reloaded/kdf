@@ -1,3 +1,4 @@
+use crate::coin_work::CoinWork;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::utxo_builder::{UtxoCoinBuildError, UtxoCoinBuilder, UtxoCoinBuilderCommonOps,
                                 UtxoFieldsWithGlobalHDBuilder, UtxoFieldsWithHardwareWalletBuilder,
@@ -100,7 +101,11 @@ where
             &result_coin.as_ref().block_headers_storage,
             self.constructor.clone(),
         ) {
-            self.ctx.abort_handlers.lock().unwrap().push(abort_handler);
+            // The loop is work of the instance being built: removing the coin aborts it (CRD ch.43 R43.1E.5 item 4).
+            // A build that no activation scope surrounds keeps the handle with the node's.
+            if let Some(abort_handler) = CoinWork::register_with_current(abort_handler) {
+                self.ctx.abort_handlers.lock().unwrap().push(abort_handler);
+            }
         }
         Ok(result_coin)
     }

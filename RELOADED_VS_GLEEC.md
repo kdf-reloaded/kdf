@@ -132,9 +132,9 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   `decimals`, `mint_address` and `program_id`), Reloaded reads its own older
   forms: `{"type": "SOLANA"}` without `protocol_data`, and `SPLTOKEN` with
   `platform`, `decimals` and `token_contract_address`, which means the SPL
-  Token program. The extra forms are additive and need no switch. Native
-  builds read all of these; browser (WASM) builds do not read Solana entries
-  yet. Solana stays switched off in this beta (see
+  Token program. The extra forms are additive and need no switch. Native and
+  browser (WASM) builds read all of these (browser builds since PR #430).
+  Solana stays switched off in this beta (see
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
   R40.1.2, R40.1.3; PR #361.
 
@@ -144,8 +144,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   gets its normal answer (GLEEC KDF ends it without one); a wallet without a token account
   activates the token with balance `"0"` (GLEEC KDF fails the activation); the platform
   method also takes `hd_path_layout`, `path_to_address` and `priv_key_policy`; an inline
-  token `protocol` may also use Reloaded's `SPLTOKEN` form. Native builds only for now;
-  Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
+  token `protocol` may also use Reloaded's `SPLTOKEN` form. Native and browser (WASM)
+  builds (browser builds since PR #430); Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
 
 - **Solana node selection.** GLEEC KDF asks the nodes `getHealth` in list order before every
   request and uses the first healthy one. Reloaded draws a random node order once when the coin is
@@ -277,7 +277,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   of blocks, at least 1 and at most 20) behind the height two or more servers have reached, or one
   that sends no new block for three block times or ten minutes while another does, is tried after
   the others for reads and broadcasts, and logged once per change of state; a confirmation wait
-  polls one up-to-date server for the whole wait and moves on only when it fails. The read-only
+  polls one up-to-date server and moves on only when a request to it fails, when it falls out of
+  date, or when it answers the transaction request with an error three times in a row. The read-only
   request `electrum_servers` shows the servers' state. GLEEC KDF ranks by the list position and has
   none of this, so a lagging server keeps answering there. No peer observes it. To get GLEEC KDF's
   routing, set `electrum_tip_checks` to `false` (see the settings list below). Servers that disagree
@@ -314,7 +315,10 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   counterparty without it before any swap starts (CRD ch.61 R61.5A, ch.59
   §59.4A); nodes that predate the word, and the reference builds, are declined.
   Set `require_suffix_counterparty` to `false` in the coin entry to admit them;
-  a swap with them still cannot complete when they have to spend BC2. This
+  a swap with them still cannot complete when they have to spend BC2. From
+  v0.4.1 the order book does not list the BC2 orders of such a node (see
+  "From v0.4.1, orders that cannot be matched are not listed" below; this
+  setting lists them again). This
   check is temporary and will be removed as soon as the other implementations
   support suffix signing. A coins file from before 2026-11-14 may lack the
   `sighash_suffix` key on the `BC2` and `BC2-segwit` entries: add it, or use
@@ -341,7 +345,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **Trading methods under `mmrpc: "2.0"`.** `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface in the same way as the order-management methods above (legacy members inside `params`, legacy result under `result`, typed errors with HTTP statuses, unknown `params` members ignored; legacy forms and success bodies unchanged). `get_trade_fee` stays legacy-only, as the reference documentation marks it deprecated in favor of the versioned `trade_preimage`. Additive; no switch. CRD ch.43 §43.1R.
 - **Wallet and coin methods under `mmrpc: "2.0"`.** `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`, `set_required_confirmations` and `set_requires_notarization` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface as above; their typed errors follow the versioned `withdraw` as the reference answers it (an unknown coin 404, a transport failure 502), and `disable_coin` reports the blocking swaps or orders inside `error_data`. Legacy forms and success bodies unchanged. Additive; no switch. CRD ch.43 §43.1R.
 - **A refused legacy `disable_coin` names the blocking swaps twice.** When running swaps or orders being matched block the deactivation, or the coin is not active, the legacy error body carries the members the reference answers (`orders` with `matching` and `cancelled`, `active_swaps`) and in addition `swaps` with the same list as `active_swaps`, which the reference documentation names. Orders of the coin that can be cancelled are cancelled first, and `orders.cancelled` lists them, where GLEEC KDF cancels none before refusing. Additive members; no switch. CRD ch.43 D43.1E.1 status note.
-- **`disable_coin` of a platform coin with active tokens removes the platform.** GLEEC KDF keeps such a platform coin registered as passive and answers `passivized: true`, and its tokens stay active; with `force_disable: true` it removes the platform and its tokens and answers `passivized: false`. KDF Reloaded removes the platform coin and leaves its tokens registered; `force_disable` is not read and `passivized` is not answered. CRD ch.43 §43.1E compatibility note item 2.
+- **`disable_coin` and the passive platform: what still differs.** The legacy `disable_coin` of KDF Reloaded makes a platform coin with active tokens passive, answers `passivized`, and takes `force_disable`, as GLEEC KDF does. Six differences remain, and the sixth has a switch. (1) The `mmrpc: "2.0"` form of KDF Reloaded neither makes a platform passive nor reads `force_disable`: it removes the platform and its tokens stay registered; GLEEC KDF has no versioned form. (2) A forced removal checks the platform and every one of its tokens for running swaps and orders being matched, and refuses the whole call if any is in use; GLEEC KDF checks the platform's ticker only. (3) An EVM token whose platform is passive keeps working, including its orders and fee estimates; in GLEEC KDF its transactions and fee estimates fail until the platform is activated again. (4) A standalone activation task for the ticker of a passive platform is refused at `init` with `CoinIsAlreadyActivated`; GLEEC KDF accepts the task and ends it with that error after building the coin. (5) Removing a coin ends its background work, except that of a Lightning coin, which goes on until the node stops. (6) A platform-with-tokens activation that names a token registered for another platform keeps that token silently in GLEEC KDF; KDF Reloaded refuses it with `TokenIsAlreadyActivated` before building anything by default (a registered token of the same platform is kept in both). Set the `MM2.json` member `reactivation_registered_token` to `"keep"` to match GLEEC KDF; see [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). A passive platform is activated again by the platform-with-tokens methods, as in GLEEC KDF. CRD ch.43 §43.1E and §43.1F.
 - **Swap, daemon and network methods under `mmrpc: "2.0"`.** `all_swaps_uuids_by_filter`, `import_swaps`, `version`, `stop`, `metrics`, `get_my_peer_id`, `get_directly_connected_peers`, `get_gossip_mesh`, `get_gossip_peer_topics`, `get_gossip_topic_peers`, `get_relay_mesh`, `ban_pubkey`, `list_banned_pubkeys` and `unban_pubkeys` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface as above; the ban methods' typed errors (`InvalidParam` 400, `Internal` 500) are KDF Reloaded's own choice under the general convention, since the reference has no versioned sibling for them. Legacy forms and success bodies unchanged. `recover_funds_of_swap`, `stats_swap_status` and `get_trade_fee` stay legacy-only. Additive; no switch. CRD ch.43 §43.1R.
 - **ZEC version-5 transactions.** With a ZEC entry of `txversion` 5, KDF Reloaded builds and reads version-5 transactions in the ZIP 225 format with the ZIP 244 transaction id and signature, as the Zcash network requires since NU7. GLEEC KDF has no version-5 support: with that entry it builds a version-4 body that the network refuses. KDF Reloaded also refuses at activation a Zcash-family entry whose `txversion` it cannot build (not 4 or 5) and a version-5 entry without a branch id; GLEEC KDF accepts any `txversion`. No switch. CRD ch.39 §39.11.4V status notes.
 - **Withdraw with an omitted HD `from`.** For an HD-mode UTXO wallet, `withdraw` and `task::withdraw` with no `from` sender spend from the coin's activated address, the address at `path_to_address` (by default account 0, external chain, index 0), instead of failing. GLEEC KDF rejects an omitted `from` with `FromAddressNotFound`. This makes the shipped Komodo DeFi wallet's withdraw-preview flow (which omits `from`) work against a reloaded node; the maintainer kept it deliberately on 2026-11-04, set the address on 2026-11-06, and no switch is planned. An explicit but invalid `from` is still rejected (`UnknownAccount` / `UnexpectedFromAddress`) on both methods. Until plan [`hd-key-unification`](docs/plans/hd-key-unification.md) item H5 (PR #270), the fallback was always account 0, external chain, index 0, and the direct `withdraw` method refused an HD UTXO wallet. Code: `coins/utxo/utxo_common/utxo_common_hd.rs` (`get_withdraw_hd_sender`), `utxo_withdraw.rs` (`resolve_withdraw_sender`), `utxo_common_helpers.rs` (`withdraw_with_hd_sender`, `validate_task_withdraw_sender`).
@@ -1088,6 +1092,21 @@ ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
 `false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
 still cannot complete. The capability check is temporary: it will be removed once
 version 6 is generally supported.
+
+**From v0.4.1, orders that cannot be matched are not listed.** GLEEC KDF lists every order
+of a pair. KDF Reloaded leaves out an order whose maker does not declare a capability this
+node requires for one of the order's coins: version-6 capability for ARRR, suffix signing
+for BC2 (CRD ch.59 §59.4C). This applies to `orderbook` and `best_orders` (legacy and
+mmrpc 2.0), to the order-book event stream and to the `orderbook_depth` counts the node
+takes from its own book; counts and volume totals cover the listed orders. `best_orders`
+reads the pair's full book when the best-priced orders are left out, and `buy` or `sell`
+that names only such orders in `match_by` fails at once instead of timing out. Such an
+order used to be listed, often at the best price, and a taker that picked it got no swap.
+`require_v6_counterparty: false` and `require_suffix_counterparty: false` list the orders
+again, together with admitting those counterparties; while a requirement is on there is no
+request that lists them. Other nodes are not affected: no message changes, and a KDF
+Reloaded relay still passes every order on. Counts that `orderbook_depth` gets from a relay
+still include such orders.
 
 Three coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):

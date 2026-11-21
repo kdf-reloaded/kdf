@@ -43,6 +43,9 @@ counterparty must have before a swap starts. It was added on 2026-11-04
 so that a shielded-coin swap never starts with a node that cannot build
 the transaction format the network now requires.
 
+A fifth section, also Reloaded-original (§59.4C, 2026-11-20), keeps the
+orders of such a node out of what the order book shows.
+
 ## 59.1 Reference designations
 
 | Designation | Role |
@@ -608,6 +611,138 @@ states.* The rows this chapter can read give this picture:
 > nothing at a reference relay (R59.4B.6), so it cannot be used to make
 > such a relay filter its answer.
 
+## 59.4C Orders that lack a required capability are not listed
+
+*Reloaded-original (2026-11-20, by the maintainer's decisions of that day);
+no forbidden-class input.*
+
+§59.4A lets a coin decline, at the two match messages, a counterparty that
+lacks a capability. The order book kept listing that counterparty's orders,
+because the order-book answer showed no capability flag (D5). A user who
+picked such an order got no swap: the reservation was declined (R59.4A.5),
+the taker order timed out, and a good-till-cancelled order then became a
+maker order (R59.4.1). This section removes such orders from what the node
+shows, with the knowledge the node already has: the order's own protocol
+information, which the order book stores with every order
+([Chapter 32](32-orderbook-p2p-and-trie.md) R-W2a). What a reference relay
+returns of that information is recorded in §59.4B.
+
+**R59.4C.1** *Required set.* For a coin, the node's **required set** is the
+set of capability keys (R59.4A.4) whose absence makes the coin's acceptance
+check decline a counterparty at this moment:
+
+- for a shielded coin, `tx_v6` while the requirement of
+  [Chapter 39](39-zcash---z_coin-shielded-coin.md) R39.6.4f(b) applies and
+  its switch (R39.6.4f(c)) is on;
+- for a coin with a non-zero sighash suffix, `sighash_suffix` while the
+  switch of [Chapter 61](61-utxo-sighash-suffix.md) R61.5A.4 is on;
+- for every other coin, nothing.
+
+The set is read from the activated coin when the coin is activated, and from
+the coin's configuration entry otherwise, by the same rules. Only the
+activated coin knows an Ironwood height the node discovered at run time
+(Chapter 39 R39.6.4e(a)). A configuration entry whose protocol or capability
+keys do not parse requires nothing; such a coin cannot be activated. Where a
+coin trades under another order-book ticker, the set is that of the coin the
+caller names, and that of the order's own ticker where the caller names none
+(the event stream, and the counterpart coin in `best_orders`). Reading the
+set has no side effect and writes no log line. The acceptance check and this
+section read one source, so they cannot disagree.
+
+**R59.4C.2** *Presentable.* An order is **presentable** exactly when, for
+each of its two coins, every key of that coin's required set is declared in
+the order's protocol information for that coin, read as R59.4A.2 reads it.
+Absent, empty or malformed information declares nothing, so an order whose
+information for such a coin is missing is not presentable. A coin with an
+empty required set never makes an order unpresentable, whatever its bytes.
+An order of the node's own is always presentable.
+
+**R59.4C.3** *Where it applies.* The node shall list only presentable orders
+in:
+
+- the legacy and the mmrpc-2.0 `orderbook`;
+- the legacy and the mmrpc-2.0 `best_orders`;
+- the order-book event stream: no "new or updated" event for an order that
+  is not presentable, and no "removed" event for one either. The order is
+  judged at the moment the event would be sent. If a coin's required set
+  changes between an order's arrival and its removal, which can happen
+  where the window of Chapter 39 R39.6.4f(b) opens while the node runs, or
+  where it rests on an Ironwood height that only the activated coin knows,
+  a stream client can keep an entry whose removal it never receives, or
+  receive the removal of an entry it never saw;
+- the pair counts that `orderbook_depth` takes from the node's own book.
+
+Counts, totals and running sums in these answers shall be computed over the
+listed orders.
+
+**R59.4C.4** *What is unchanged.* The stored order book, the trie,
+synchronization and gossip propagation are unchanged: the node keeps and
+forwards an order that is not presentable like any other (R59.4A.7). Every
+answer the node gives to a peer -- the full order book, a synchronization
+answer, best orders, depth -- is unchanged, so a relay serves all orders to
+every node. The matching rules of R59.3.2 and R59.4.3 are unchanged. The
+counts `orderbook_depth` obtains from a relay are not filtered, so for a
+pair the node does not hold they can exceed what `orderbook` lists.
+
+**R59.4C.5** *`best_orders` refill.* A relay selects the best orders by
+price before this node can apply R59.4C.2, so the answer for a pair can lose
+orders while presentable ones exist deeper in the book. When the relay's
+answer for a pair loses at least one order under R59.4C.2, the node shall
+fetch that pair's full order book once, with the request `orderbook` makes,
+and shall build the pair's part of the answer from its own book: the
+selection this node applies when it answers a best-orders request as a
+relay, by volume or by number as requested, over presentable orders only. If
+the fetch fails, or no relay answers it, the pair's part is the relay's
+answer without the orders that are not presentable, and one warning is
+logged. After the fetch the node stays subscribed to the pair, as it does
+after `orderbook`. The books of at most four pairs are fetched at a time.
+
+**R59.4C.6** *Early refusal.* When `buy` or `sell` names orders in
+`match_by`, the node's own book holds every named order, and none of them is
+presentable, the node shall refuse the request at once. No taker order is
+created. The error text is `None of the orders named in match_by can be
+matched: <coin> requires a counterparty that declares <capability>`. It names
+the coin and the missing capability of the named order with the lowest
+identifier (`match_by` carries the orders as a set), and within that order
+the order's base coin is judged before its rel coin. On a surface with typed
+errors the error type is `OrderNotMatchableMissingCapability`, with the
+members `coin`, `capability` and `orders`; on a surface without them it is
+the error text alone. Only an order the request could match by its coins is
+judged: an order on the request's pair and on the side the request takes. In
+every other case -- no `match_by`, `match_by` by public key, a named order
+the node does not hold, a named order of the node's own, a named order of
+another pair or of the side the request cannot match, or at least one named
+order that is presentable -- the request proceeds as before.
+
+**R59.4C.7** *Switch and logs.* There is no new switch. A requirement's own
+switch removes its key from the required set (R59.4C.1), and with it the
+effects of R59.4C.3, R59.4C.5 and R59.4C.6. A call that leaves out at least
+one order logs one debug line for each pair concerned, naming the pair and
+the number left out. No line is logged per order, and the event stream logs
+none.
+
+**R59.4C.8** *Coins that opt in later.* A coin that binds a capability under
+R59.4A.4 supplies its required set through the source of R59.4C.1. This
+section then applies to it without a change to the order-book code.
+
+Rationale: the capability word is the only statement about a maker that
+reaches a node before a swap, and it arrives with the order. Leaving the
+order out where it is shown costs no message and needs nothing from the
+maker. Dropping the order from the stored book instead would change the
+maker's trie root on this node and start a synchronization that can never
+succeed, so the rule acts on answers only.
+
+> **Compatibility.** No message, trie leaf or relay answer changes, so a
+> Komodo DeFi Framework 2.6.0-beta or GLEEC KDF node is not affected and
+> cannot observe the rule. The answers of R59.4C.3 list fewer
+> entries than the reference would for the same book; setting the
+> requirement's switch to `false` (`require_v6_counterparty`,
+> `require_suffix_counterparty`) restores the full list together with the
+> matching behavior, and there is no way to list the left-out orders while
+> the requirement is on. A node of another implementation still lists a
+> Reloaded maker's order for such a coin, and its request still times out
+> (R59.4A, compatibility note).
+
 ## 59.5 Bound peer-penalty contract
 
 > **Clearance (chapter 01 T1, R40).** The forbidden-class-sourced
@@ -1021,6 +1156,49 @@ obligations on the reference facts of that section.)*
   `BestOrdersByNumber` request, each with one more member appended, are
   answered exactly as the same requests without it.
 
+**T16.** *Orders that lack a required capability are not listed (§59.4C).*
+
+- (a) *Required set (R59.4C.1).* A shielded coin inside the window of
+  Chapter 39 R39.6.4f(b) requires {`tx_v6`}, and nothing with its switch
+  off or without an Ironwood upgrade. A coin with a non-zero sighash
+  suffix requires {`sighash_suffix`}, and nothing with its switch off. A
+  plain UTXO coin and a coin of another family require nothing. For a
+  coin whose Ironwood time or height is configured or built in, the
+  activated coin and its configuration entry give the same set.
+- (b) *Presentable (R59.4C.2).* For a coin with a required key: the first
+  value followed by the word is presentable; the first value alone, empty
+  information and a malformed word are not. For a pair whose coins require
+  nothing, all four inputs are presentable. An order of the node's own is
+  presentable with empty information.
+- (c) *Parity with the acceptance check.* Over one table of coins and
+  protocol-information values, an order is not presentable exactly when
+  the coin's acceptance check declines that value for a capability cause.
+- (d) *Surfaces (R59.4C.3).* With one presentable and two unpresentable
+  orders on each side of a pair, the legacy and the mmrpc-2.0 `orderbook`
+  list one ask and one bid, and their counts, totals and running sums are
+  those of the listed orders. `best_orders` of both generations lists the
+  presentable order only. The event stream emits nothing for the other
+  two, on arrival, update and removal. `orderbook_depth` counts one ask
+  and one bid for a pair the node holds.
+- (e) *Unchanged (R59.4C.4).* For the same book, the answers to a peer's
+  full-order-book, best-orders (by volume and by number) and depth
+  requests contain all three orders, and the pair's trie root is the root
+  of all three.
+- (f) *Refill (R59.4C.5).* A relay answer that holds only unpresentable
+  orders for a pair, while the node's book after the fetch holds a
+  presentable one at a worse price, yields that order, by volume and by
+  number. A relay answer that loses nothing triggers no fetch. A failed
+  fetch yields the filtered relay answer.
+- (g) *Early refusal (R59.4C.6).* `match_by` naming one held, unpresentable
+  order is refused, and no taker order exists afterwards. It proceeds when
+  the named order is not held, when it is the node's own, when it is an
+  order of another pair or of the side the request cannot match, when one
+  of two named orders is presentable, with `match_by` by public key, and
+  without `match_by`. With two named orders that lack different
+  capabilities, the refusal names those of the lower identifier.
+- (h) *Switch (R59.4C.7).* With the requirement's switch off, (d), (f) and
+  (g) give the results of a node without this section.
+
 ## 59.8 Deferred Work
 
 **D1.** *Amount-and-lock-time-aware protocol support.* The finding under
@@ -1067,6 +1245,26 @@ order-book answer (Decision BO, 2026-11-04). If capabilities keep being
 needed, a node-level or message-level flag that holds for every coin is
 the question to take up then, with its own analysis. The framing of
 §59.4A is not meant to grow into that flag.
+
+> **Status (2026-11-20).** The maintainer revised the decision on the
+> order-book answer. The answer still carries no capability flag, but it no
+> longer lists an order that lacks a capability the node requires (§59.4C).
+> The universal flag stays the open question of this item.
+
+**D6.** *Capability-aware best-orders request.* Under R59.4C.5 the node
+repairs a thinned `best_orders` answer by fetching the pair's full book.
+Letting the request itself carry the required capabilities, so that a relay
+selects among presentable orders, would save that fetch. It changes a
+peer-to-peer request, so it needs an established answer on how the
+reference release rows treat the longer request, and is left for a later
+release.
+
+> **Status (2026-11-20, development line).** R59.4B.6 gives that answer: a
+> relay at the reference rows ignores a member appended at the end of a
+> best-orders request and answers as without it. A reference relay can
+> therefore not be made to select among presentable orders, and the refill
+> of R59.4C.5 stays necessary behind such a relay. What remains open is
+> whether a Reloaded relay should honor such a member.
 
 ## 59.9 Baseline Verifications
 
@@ -1479,3 +1677,20 @@ its gating is not.*
   and it needs no Dirty Gate pass.
 - *Reloaded-original addition (2026-11-05) -- the pointer to ch. 32 R-GH14
   under R59.6.4.* No forbidden-class input; it needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-20, by the maintainer's decisions of
+  that day): §59.4C (R59.4C.1–R59.4C.8), T16, D6, the status note under D5
+  and the sentence in §59.0.* Orders that lack a capability the node
+  requires are left out of the order-book answers, with the requirement's
+  own switch as the opt-back. *Inputs:* this repository's own order-book,
+  best-orders, event-stream and taker-order code, its acceptance checks, a
+  lab run of this project's own node against a reference binary as a black
+  box (reported as the node's own log lines), and the maintainer's
+  decisions.
+  The forbidden corpus was not consulted for this item. Its compatibility
+  note states no reference fact beyond §59.4A. It needs no Dirty Gate pass.
+- *Reloaded-original additions on the development line (2026-11-20): the
+  status note under D6, the sentence on a changed required set in R59.4C.3,
+  the pointer to §59.4B in the introduction of §59.4C, and the wording "the
+  answers of R59.4C.3" in the compatibility note of §59.4C.* Written from
+  this repository's own code and from the cleared R59.4B.6. No further
+  forbidden-class input; they need no Dirty Gate pass.

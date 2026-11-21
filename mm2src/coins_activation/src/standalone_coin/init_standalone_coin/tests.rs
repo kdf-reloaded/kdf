@@ -9,7 +9,7 @@ use crate::activation_serialization_tests::{case_a_second_waits_and_the_coin_is_
                                             outcome_of_status, scripted_build, Family, L2OneShot, PlatformOneShot,
                                             Running, TokenOneShot, TokenTask};
 use crate::prelude::CurrentBlock;
-use coins::{CoinProtocol, RegisterCoinError, TestCoin};
+use coins::{lp_coinfind, lp_register_coin, CoinProtocol, RegisterCoinError, TestCoin};
 use common::{block_on, HttpStatusCode, StatusCode};
 use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use futures::future::pending;
@@ -502,3 +502,31 @@ fn t55_21_d_different_tickers_do_not_wait() { case_d_different_tickers_do_not_wa
 
 #[test]
 fn t55_21_e_cancel_while_waiting() { case_e_cancel_while_waiting::<StandaloneTask>(); }
+
+/// CRD ch.43 R43.1F.9 item 3 with D43.1F.4 (b): `init` refuses the ticker of a passive platform as it refuses an
+/// active one, with `CoinIsAlreadyActivated` and HTTP 400. Nothing is built and no task is created.
+#[test]
+fn init_refuses_a_passive_ticker_without_building_anything() {
+    let ctx = test_ctx();
+    block_on(register_test_coin(&ctx));
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+    block_on(coins_ctx.add_token(TICKER, TestCoin::new("TOK").into())).expect("a dependent of the platform");
+    assert!(block_on(coins_ctx.make_passive(TICKER)), "the platform has a dependent");
+
+    // The script `pending` would never finish, so a task that was created would be left running.
+    let error = expect_err(block_on(init_standalone_coin::<TestCoin>(
+        ctx.clone(),
+        init_request("pending"),
+    )));
+
+    assert_eq!(
+        serde_json::to_value(&error).unwrap(),
+        json!({ "error_type": "CoinIsAlreadyActivated", "error_data": { "ticker": TICKER } })
+    );
+    assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+    // `init` answered the refusal itself: a created task would have answered its `task_id`.
+    assert!(
+        block_on(coins_ctx.is_passive(TICKER)),
+        "the passive platform is untouched"
+    );
+}

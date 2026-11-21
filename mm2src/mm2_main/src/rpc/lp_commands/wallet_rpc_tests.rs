@@ -29,6 +29,7 @@ use mm2_core::mm_ctx::MmCtxBuilder;
 use mocktopus::mocking::*;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use uuid::Uuid;
 
 fn bd(s: &str) -> BigDecimal { s.parse().unwrap() }
 
@@ -1401,14 +1402,16 @@ fn coins_needed_for_kick_start_answers_the_legacy_body_and_the_versioned_result(
 // ----- `disable_coin` -----
 
 /// A coin without orders or swaps is disabled; the answer lists the orders the call cancelled. The legacy body is the
-/// one of the dev `lp_commands_legacy::disable_coin`: `json!({ "result": { "coin": ticker, "cancelled_orders":
-/// cancelled } })`.
+/// one of the dev `lp_commands_legacy::disable_coin`, `json!({ "result": { "coin": ticker, "cancelled_orders":
+/// cancelled } })`, with the third member `passivized` of CRD ch.43 R43.1E.2 (false: the coin was removed, T43.1E.1).
 #[test]
 fn disable_coin_answers_the_legacy_body() {
     let node = Node::new();
     let ctx = &node.ctx;
     let order = node.add_order(true, true);
-    let expected = json::to_string(&json!({ "result": { "coin": "DYN", "cancelled_orders": [order.uuid] } })).unwrap();
+    let expected =
+        json::to_string(&json!({ "result": { "coin": "DYN", "cancelled_orders": [order.uuid], "passivized": false } }))
+            .unwrap();
     same(
         &legacy_success(ctx, "disable_coin", json!({ "coin": "DYN" })),
         &expected,
@@ -1501,6 +1504,514 @@ fn disable_coin_is_blocked_by_an_order_that_is_being_matched() {
         block_on(coins::lp_coinfind(ctx, "ETH")).unwrap().is_some(),
         "the coin stays activated"
     );
+}
+
+// ----- `disable_coin`: the passive platform state (CRD ch.43 §43.1E and §43.1F) -----
+
+/// Registers `platform` with `tokens` as dependents, as a platform-with-tokens activation does.
+fn register_platform(ctx: &MmArc, platform: &str, tokens: &[&str]) {
+    block_on(
+        CoinsContext::from_ctx(ctx).unwrap().add_platform_with_tokens(
+            MmCoinEnum::Test(TestCoin::new(platform)),
+            tokens
+                .iter()
+                .map(|token| MmCoinEnum::Test(TestCoin::new(token)))
+                .collect(),
+        ),
+    )
+    .expect("the platform is registered");
+}
+
+/// A node with the platform `PLAT` and its dependent token `TOK` besides the `DYN` and `KMD` of the order tests.
+fn node_with_platform() -> Node {
+    let node = Node::new();
+    register_platform(&node.ctx, "PLAT", &["TOK"]);
+    TestCoin::my_balance.mock_safe(|_| {
+        MockResult::Return(Box::new(futures01::future::ok(CoinBalance {
+            spendable: bd("1"),
+            unspendable: bd("0"),
+        })))
+    });
+    TestCoin::my_address.mock_safe(|coin| MockResult::Return(Ok(format!("{}-address", coin.ticker()))));
+    node
+}
+
+/// The legacy `disable_coin` answer for `ticker`, with the members of `extra` added to the request.
+fn legacy_disable(ctx: &MmArc, ticker: &str, extra: Json) -> Result<Response<Vec<u8>>, String> {
+    let mut params = json!({ "coin": ticker });
+    for (key, value) in extra.as_object().expect("the extra members are an object") {
+        params[key.as_str()] = value.clone();
+    }
+    run(ctx, legacy_request("disable_coin", params))
+}
+
+/// The `result` of a successful legacy `disable_coin`.
+fn legacy_disable_result(ctx: &MmArc, ticker: &str, extra: Json) -> Json {
+    let answer = match legacy_disable(ctx, ticker, extra) {
+        Ok(answer) => answer,
+        Err(_) => panic!("a legacy success was expected"),
+    };
+    assert_eq!(answer.status().as_u16(), 200, "legacy success status");
+    let body: Json = json::from_slice(answer.body()).unwrap();
+    body["result"].clone()
+}
+
+/// The legacy refusal of `disable_coin`: HTTP 500 and the extended body, as a JSON value.
+fn legacy_disable_refusal(ctx: &MmArc, ticker: &str, extra: Json) -> Json {
+    let answer = match legacy_disable(ctx, ticker, extra) {
+        Ok(answer) => answer,
+        Err(_) => panic!("the legacy refusal is a response"),
+    };
+    assert_eq!(answer.status().as_u16(), 500, "legacy refusal status");
+    json::from_slice(answer.body()).unwrap()
+}
+
+/// The refusal for a coin that is not active: the extended body with empty lists (CRD ch.43 R43.1E.3).
+fn assert_not_active_refusal(body: &Json) {
+    assert!(body["error"].is_string(), "the error member");
+    assert_eq!(body["orders"], json!({ "matching": [], "cancelled": [] }));
+    assert_eq!(body["active_swaps"], json!([]));
+    assert_eq!(body["swaps"], json!([]));
+}
+
+fn is_passive(ctx: &MmArc, ticker: &str) -> bool { block_on(CoinsContext::from_ctx(ctx).unwrap().is_passive(ticker)) }
+
+fn dependents_of(ctx: &MmArc, ticker: &str) -> Vec<String> {
+    block_on(CoinsContext::from_ctx(ctx).unwrap().dependents_of(ticker))
+        .into_iter()
+        .collect()
+}
+
+fn versioned_enabled_tickers(ctx: &MmArc, id: usize) -> Vec<String> {
+    let result = versioned_result(versioned(ctx, "get_enabled_coins", None, id), id);
+    let mut tickers: Vec<String> = result["coins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["ticker"].as_str().unwrap().to_owned())
+        .collect();
+    tickers.sort();
+    tickers
+}
+
+fn tickers(list: &[&str]) -> Vec<String> { list.iter().map(|ticker| (*ticker).to_owned()).collect() }
+
+/// T43.1E.7: an unforced call for a platform with a dependent token makes the platform passive and answers
+/// `passivized` true. Afterwards the token answers, the platform is not an active coin, both forms of
+/// `get_enabled_coins` list both, and a second unforced call is the coin-not-active refusal.
+#[test]
+fn t43_1e_7_an_unforced_disable_of_a_platform_with_a_dependent_makes_it_passive() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+
+    let expected =
+        json::to_string(&json!({ "result": { "coin": "PLAT", "cancelled_orders": [], "passivized": true } })).unwrap();
+    same(
+        &legacy_success(ctx, "disable_coin", json!({ "coin": "PLAT" })),
+        &expected,
+        "the passivized body",
+    );
+    assert!(is_passive(ctx, "PLAT"));
+
+    // The token answers.
+    let balance: Json = json::from_str(&legacy_success(ctx, "my_balance", json!({ "coin": "TOK" }))).unwrap();
+    assert_eq!(balance["coin"], json!("TOK"));
+    // The platform is not an active coin: the versioned `withdraw` answers `NoSuchCoin`, the legacy `my_balance`
+    // the legacy error (CRD ch.43 R43.1E.6 item 1, R43.1F.10 item 1).
+    let answer = versioned(
+        ctx,
+        "withdraw",
+        Some(json!({ "coin": "PLAT", "to": "address", "amount": "1" })),
+        301,
+    );
+    assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 301);
+    same(
+        &legacy_refusal(ctx, "my_balance", json!({ "coin": "PLAT" }), "lp_commands_legacy"),
+        &"No such coin: PLAT".to_owned(),
+        "the passive platform's legacy my_balance",
+    );
+    // Both forms of `get_enabled_coins` list both (R43.1E.6 item 2); the legacy form reports the address of the
+    // passive platform as for an active coin.
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD", "PLAT", "TOK"]));
+    assert_eq!(
+        versioned_enabled_tickers(ctx, 302),
+        tickers(&["DYN", "KMD", "PLAT", "TOK"])
+    );
+    let listed: Json = json::from_str(&legacy_success(ctx, "get_enabled_coins", json!({}))).unwrap();
+    let platform_entry = listed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["ticker"] == json!("PLAT"))
+        .expect("the passive platform is listed")
+        .clone();
+    assert_eq!(platform_entry["address"], json!("PLAT-address"));
+
+    // A second unforced call is the coin-not-active refusal with empty lists (R43.1E.6 item 4).
+    assert_not_active_refusal(&legacy_disable_refusal(ctx, "PLAT", json!({})));
+    assert!(is_passive(ctx, "PLAT"), "the refusal changes nothing");
+    assert_eq!(dependents_of(ctx, "PLAT"), tickers(&["TOK"]));
+}
+
+/// T43.1E.8: from the passive state, a forced call removes the platform and the token and answers `passivized` false.
+#[test]
+fn t43_1e_8_a_forced_disable_removes_the_passive_platform_and_its_token() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    assert_eq!(legacy_disable_result(ctx, "PLAT", json!({}))["passivized"], json!(true));
+
+    let result = legacy_disable_result(ctx, "PLAT", json!({ "force_disable": true }));
+    assert_eq!(
+        result,
+        json!({ "coin": "PLAT", "cancelled_orders": [], "passivized": false })
+    );
+
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD"]));
+    assert!(!is_passive(ctx, "PLAT"));
+    assert!(dependents_of(ctx, "PLAT").is_empty());
+    // Neither coin is registered any more.
+    assert_not_active_refusal(&legacy_disable_refusal(ctx, "TOK", json!({})));
+}
+
+/// A forced call for an active platform with a dependent removes both at once.
+#[test]
+fn a_forced_disable_of_an_active_platform_removes_the_platform_and_its_dependents() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+
+    let result = legacy_disable_result(ctx, "PLAT", json!({ "force_disable": true }));
+
+    assert_eq!(
+        result,
+        json!({ "coin": "PLAT", "cancelled_orders": [], "passivized": false })
+    );
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD"]));
+}
+
+/// CRD ch.43 R43.1E.1: only the JSON value `true` forces.
+#[test]
+fn force_disable_is_read_as_a_boolean_and_only_true_forces() {
+    let not_forcing = [
+        json!({}),
+        json!({ "force_disable": false }),
+        json!({ "force_disable": "true" }),
+        json!({ "force_disable": 1 }),
+        json!({ "force_disable": null }),
+    ];
+    for extra in not_forcing {
+        let node = node_with_platform();
+        let result = legacy_disable_result(&node.ctx, "PLAT", extra);
+        assert_eq!(result["passivized"], json!(true), "a value that does not force");
+        assert!(is_passive(&node.ctx, "PLAT"));
+    }
+    let node = node_with_platform();
+    let result = legacy_disable_result(&node.ctx, "PLAT", json!({ "force_disable": true }));
+    assert_eq!(result["passivized"], json!(false), "the value true forces");
+    assert!(!is_passive(&node.ctx, "PLAT"));
+}
+
+/// R43.1E.5 items 2 and 5: a token, and a coin without dependents even when forced, are removed as before, with
+/// `passivized` false.
+#[test]
+fn a_token_and_a_coin_without_dependents_are_removed_with_passivized_false() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+
+    let token = legacy_disable_result(ctx, "TOK", json!({}));
+    assert_eq!(
+        token,
+        json!({ "coin": "TOK", "cancelled_orders": [], "passivized": false })
+    );
+    assert!(dependents_of(ctx, "PLAT").is_empty(), "the token left the set");
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD", "PLAT"]));
+
+    // The platform has no dependent now, so a forced call is a plain removal, and so is an unforced one.
+    let forced = legacy_disable_result(ctx, "KMD", json!({ "force_disable": true }));
+    assert_eq!(
+        forced,
+        json!({ "coin": "KMD", "cancelled_orders": [], "passivized": false })
+    );
+    let platform = legacy_disable_result(ctx, "PLAT", json!({}));
+    assert_eq!(
+        platform,
+        json!({ "coin": "PLAT", "cancelled_orders": [], "passivized": false })
+    );
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN"]));
+}
+
+/// R43.1E.6 item 5: disabling the last dependent of a passive platform leaves it registered and passive, and an empty
+/// set does not drop the flag.
+#[test]
+fn disabling_the_last_dependent_of_a_passive_platform_leaves_it_passive() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    legacy_disable_result(ctx, "PLAT", json!({}));
+
+    let token = legacy_disable_result(ctx, "TOK", json!({}));
+
+    assert_eq!(token["passivized"], json!(false));
+    assert!(dependents_of(ctx, "PLAT").is_empty());
+    assert!(is_passive(ctx, "PLAT"), "the platform stays passive");
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD", "PLAT"]));
+    // It still answers the coin-not-active refusal unless forced; forced, it is a plain removal.
+    assert_not_active_refusal(&legacy_disable_refusal(ctx, "PLAT", json!({})));
+    let removed = legacy_disable_result(ctx, "PLAT", json!({ "force_disable": true }));
+    assert_eq!(
+        removed,
+        json!({ "coin": "PLAT", "cancelled_orders": [], "passivized": false })
+    );
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD"]));
+}
+
+/// R43.1E.4 and R43.1E.5 item 3: the orders of the platform are cancelled when it is made passive.
+#[test]
+fn an_unforced_disable_cancels_the_orders_of_the_platform_only() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    // DYN becomes a platform whose dependent is a token with no order of its own.
+    block_on(coins::disable_coin(ctx, "DYN")).unwrap();
+    register_platform(ctx, "DYN", &["DYN-TOKEN"]);
+    let order = node.add_order(true, true);
+
+    let result = legacy_disable_result(ctx, "DYN", json!({}));
+
+    assert_eq!(
+        result,
+        json!({ "coin": "DYN", "cancelled_orders": [order.uuid], "passivized": true })
+    );
+    assert!(
+        !node.in_container(&order.uuid),
+        "the order of the platform is cancelled"
+    );
+    assert!(is_passive(ctx, "DYN"));
+}
+
+/// D43.1E.2 (b): a forced call cancels the orders of the platform and of every dependent, each once.
+#[test]
+fn a_forced_disable_cancels_the_orders_of_the_platform_and_its_dependents_once() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    // The order DYN/KMD has the platform on one side and its dependent on the other.
+    block_on(coins::disable_coin(ctx, "DYN")).unwrap();
+    block_on(coins::disable_coin(ctx, "KMD")).unwrap();
+    register_platform(ctx, "DYN", &["KMD"]);
+    let order = node.add_order(true, true);
+
+    let result = legacy_disable_result(ctx, "DYN", json!({ "force_disable": true }));
+
+    assert_eq!(
+        result,
+        json!({ "coin": "DYN", "cancelled_orders": [order.uuid], "passivized": false })
+    );
+    assert!(!node.in_container(&order.uuid));
+    assert!(enabled_tickers(ctx).is_empty());
+}
+
+/// R43.1E.3: the swap check of an unforced call covers the platform's ticker only; a running swap of the platform
+/// refuses the call.
+#[test]
+fn an_unforced_disable_looks_at_the_swaps_of_the_platform_only() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    let token_swap = Uuid::new_v4();
+    crate::mm2::lp_swap::add_active_swap_v2_for_test(ctx, token_swap, "TOK", "KMD");
+
+    // A running swap of the dependent token does not stop the platform from becoming passive.
+    assert_eq!(legacy_disable_result(ctx, "PLAT", json!({}))["passivized"], json!(true));
+
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    let platform_swap = Uuid::new_v4();
+    crate::mm2::lp_swap::add_active_swap_v2_for_test(ctx, platform_swap, "PLAT", "KMD");
+    let body = legacy_disable_refusal(ctx, "PLAT", json!({}));
+    assert_eq!(body["active_swaps"], json!([platform_swap]));
+    assert_eq!(body["swaps"], json!([platform_swap]));
+    assert!(!is_passive(ctx, "PLAT"), "the refusal changes nothing");
+}
+
+/// D43.1E.2 (b): a forced call is refused while a dependent token has a running swap, and nothing is removed.
+#[test]
+fn a_forced_disable_is_refused_while_a_dependent_has_a_running_swap() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    let swap = Uuid::new_v4();
+    crate::mm2::lp_swap::add_active_swap_v2_for_test(ctx, swap, "TOK", "KMD");
+
+    // The second round runs from the passive state, which an unforced call reaches: the swap of the dependent does
+    // not stop it (R43.1E.3).
+    for round in 0..2 {
+        let body = legacy_disable_refusal(ctx, "PLAT", json!({ "force_disable": true }));
+        assert_eq!(body["active_swaps"], json!([swap]));
+        assert_eq!(body["swaps"], json!([swap]));
+        assert_eq!(body["orders"], json!({ "matching": [], "cancelled": [] }));
+        assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD", "PLAT", "TOK"]));
+        assert_eq!(dependents_of(ctx, "PLAT"), tickers(&["TOK"]));
+        if round == 0 {
+            assert_eq!(legacy_disable_result(ctx, "PLAT", json!({}))["passivized"], json!(true));
+        }
+    }
+}
+
+/// D43.1E.2 (b): a forced call is refused while an order of a dependent token is being matched; the order stays and
+/// nothing is removed.
+#[test]
+fn a_forced_disable_is_refused_while_an_order_of_a_dependent_is_being_matched() {
+    let node = Node::new();
+    let ctx = &node.ctx;
+    // The order with an ongoing match is ETH/JST.
+    register_platform(ctx, "PLAT", &["ETH"]);
+    let matching = node.add_order_with_an_ongoing_match();
+
+    let body = legacy_disable_refusal(ctx, "PLAT", json!({ "force_disable": true }));
+
+    assert_eq!(body["orders"], json!({ "matching": [matching.uuid], "cancelled": [] }));
+    assert_eq!(body["active_swaps"], json!([]));
+    assert!(node.in_container(&matching.uuid), "the order stays");
+    assert_eq!(dependents_of(ctx, "PLAT"), tickers(&["ETH"]));
+    assert!(block_on(coins::lp_coinfind(ctx, "PLAT")).unwrap().is_some());
+    assert!(block_on(coins::lp_coinfind(ctx, "ETH")).unwrap().is_some());
+    // An unforced call looks at the platform's own orders only, so it passivizes.
+    assert_eq!(legacy_disable_result(ctx, "PLAT", json!({}))["passivized"], json!(true));
+}
+
+/// The versioned `disable_coin` is unchanged (the maintainer's decision of 2026-11-18): it has no `passivized`,
+/// ignores `force_disable`, and removes a platform with dependents, which stay registered; its dependent set is
+/// dropped.
+#[test]
+fn the_versioned_disable_coin_removes_a_platform_with_dependents_and_has_no_passivized() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+
+    let result = versioned_result(
+        versioned(
+            ctx,
+            "disable_coin",
+            Some(json!({ "coin": "PLAT", "force_disable": false })),
+            311,
+        ),
+        311,
+    );
+
+    same(
+        &result,
+        &json!({ "coin": "PLAT", "cancelled_orders": [] }),
+        "the versioned result has no passivized member",
+    );
+    assert_eq!(enabled_tickers(ctx), tickers(&["DYN", "KMD", "TOK"]));
+    assert!(dependents_of(ctx, "PLAT").is_empty(), "the platform's set is dropped");
+    assert!(!is_passive(ctx, "PLAT"));
+}
+
+/// A passive platform is not an active coin for the versioned `disable_coin`: it answers `NoSuchCoin`.
+#[test]
+fn the_versioned_disable_coin_answers_no_such_coin_for_a_passive_platform() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    legacy_disable_result(ctx, "PLAT", json!({}));
+
+    let answer = versioned(
+        ctx,
+        "disable_coin",
+        Some(json!({ "coin": "PLAT", "force_disable": true })),
+        312,
+    );
+
+    assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 312);
+    assert!(
+        is_passive(ctx, "PLAT"),
+        "the refusal changes nothing, and the unknown member is ignored"
+    );
+}
+
+/// R43.1E.6 item 6: the legacy `enable` and `electrum` refuse the ticker of a passive platform as already activated.
+#[test]
+fn the_legacy_enable_and_electrum_refuse_a_passive_ticker_as_already_activated() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    legacy_disable_result(ctx, "PLAT", json!({}));
+
+    for method in ["enable", "electrum"] {
+        let error = match run(ctx, legacy_request(method, json!({ "coin": "PLAT" }))) {
+            Ok(_) => panic!("{method}: a legacy refusal was expected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("already initialized"), "{method}: the legacy refusal");
+    }
+    assert!(is_passive(ctx, "PLAT"), "the refusals change nothing");
+}
+
+/// T43.1F.10: the methods that need an active coin answer a passive platform as not active.
+#[test]
+fn t43_1f_10_a_passive_platform_is_not_an_active_coin_for_the_wallet_methods() {
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    legacy_disable_result(ctx, "PLAT", json!({}));
+
+    let answer = versioned(ctx, "my_tx_history", Some(json!({ "coin": "PLAT" })), 321);
+    assert_typed_refusal(&answer, 404, "CoinIsNotActive", Some("string"), 321);
+    let answer = versioned(
+        ctx,
+        "task::account_balance::init",
+        Some(json!({ "coin": "PLAT", "account_index": 0 })),
+        322,
+    );
+    assert_typed_refusal(&answer, 400, "NoSuchCoin", Some("object"), 322);
+    let answer = versioned(ctx, "my_balance", Some(json!({ "coin": "PLAT" })), 323);
+    assert_typed_refusal(&answer, 404, "NoSuchCoin", Some("object"), 323);
+}
+
+/// D43.1F.2 (b): `disable_coin` takes the activation lock of the requested ticker, and a forced call also those of
+/// the dependents. An activation that holds a lock makes the call wait.
+#[test]
+fn disable_coin_waits_for_the_activations_of_the_platform_and_of_a_forced_dependent() {
+    use common::custom_futures::FutureTimerExt;
+    use futures::FutureExt;
+
+    for (held, force_disable, waits) in [
+        ("PLAT", false, true),
+        ("PLAT", true, true),
+        ("TOK", true, true),
+        ("TOK", false, false),
+    ] {
+        let node = node_with_platform();
+        let ctx = &node.ctx;
+        let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+        let guard = block_on(coins_ctx.lock_activation(&[held])).unwrap();
+        let mut call = Box::pin(crate::mm2::rpc::lp_commands_legacy::legacy_disable_coin_core(
+            ctx.clone(),
+            "PLAT".to_owned(),
+            force_disable,
+        ));
+        if waits {
+            assert!(call.as_mut().now_or_never().is_none(), "the call waits for {held}");
+        }
+        drop(guard);
+        let answered =
+            block_on(call.timeout_secs(30.)).unwrap_or_else(|_| panic!("the call finishes once the lock is free"));
+        let response = answered.unwrap_or_else(|_| panic!("the call is a success"));
+        assert_eq!(response.passivized, !force_disable, "the call took effect");
+    }
+}
+
+/// The versioned form takes the activation lock of the requested ticker as well.
+#[test]
+fn the_versioned_disable_coin_waits_for_an_activation_of_its_ticker() {
+    use common::custom_futures::FutureTimerExt;
+    use futures::FutureExt;
+
+    let node = node_with_platform();
+    let ctx = &node.ctx;
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    let guard = block_on(coins_ctx.lock_activation(&["TOK"])).unwrap();
+    let mut call = Box::pin(crate::mm2::rpc::lp_commands_legacy::disable_coin_core(
+        ctx.clone(),
+        crate::mm2::rpc::lp_commands_legacy::DisableCoinRequest { coin: "TOK".to_owned() },
+    ));
+    assert!(call.as_mut().now_or_never().is_none(), "the call waits for TOK");
+    drop(guard);
+    let answered =
+        block_on(call.timeout_secs(30.)).unwrap_or_else(|_| panic!("the call finishes once the lock is free"));
+    assert!(answered.is_ok(), "the call is a success");
 }
 
 // ----- The envelope -----
@@ -1598,7 +2109,8 @@ fn t40_6b_20_disable_coin_on_an_spl_token_answers_on_both_surfaces() {
     platform.add_spl_token_info("USDC".to_owned(), token.get_info());
     assert_eq!(enabled_tickers(&ctx), vec!["SOL".to_owned(), "USDC".to_owned()]);
 
-    let expected = json::to_string(&json!({ "result": { "coin": "USDC", "cancelled_orders": [] } })).unwrap();
+    let expected =
+        json::to_string(&json!({ "result": { "coin": "USDC", "cancelled_orders": [], "passivized": false } })).unwrap();
     same(
         &legacy_success(&ctx, "disable_coin", json!({ "coin": "USDC" })),
         &expected,
@@ -1631,7 +2143,8 @@ fn t40_6b_20_disable_coin_on_a_solana_platform_without_tokens_answers_on_both_su
     let ctx = bare_node();
     register_in(&ctx, platform.clone().into());
 
-    let expected = json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [] } })).unwrap();
+    let expected =
+        json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [], "passivized": false } })).unwrap();
     same(
         &legacy_success(&ctx, "disable_coin", json!({ "coin": "SOL" })),
         &expected,
@@ -1652,8 +2165,9 @@ fn t40_6b_20_disable_coin_on_a_solana_platform_without_tokens_answers_on_both_su
     assert!(enabled_tickers(&ctx).is_empty());
 }
 
-/// T40.6B.20 under the current rule (CRD ch.43 §43.1E "Compatibility" item 2, ch.55 D55.6 open): the platform answers
-/// and is removed as for the other families, the token stays registered, and the platform can be registered again.
+/// T40.6B.20: a token registered by `add_coin` (the legacy route) is not a dependent of its platform (CRD ch.43
+/// R43.1E.5 item 1), so the platform is a coin without dependents: it answers and is removed as for the other
+/// families, the token stays registered, and the platform can be registered again.
 #[test]
 fn t40_6b_20_disable_coin_on_a_solana_platform_with_a_token_follows_the_other_families() {
     let (platform, token) = offline_solana_and_token();
@@ -1662,7 +2176,8 @@ fn t40_6b_20_disable_coin_on_a_solana_platform_with_a_token_follows_the_other_fa
     register_in(&ctx, token.clone().into());
     platform.add_spl_token_info("USDC".to_owned(), token.get_info());
 
-    let expected = json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [] } })).unwrap();
+    let expected =
+        json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [], "passivized": false } })).unwrap();
     same(
         &legacy_success(&ctx, "disable_coin", json!({ "coin": "SOL" })),
         &expected,
@@ -1778,7 +2293,8 @@ fn t40_6b_20_disable_coin_on_coins_activated_through_the_compatibility_surface()
         "the token is recorded"
     );
 
-    let expected = json::to_string(&json!({ "result": { "coin": "USDC", "cancelled_orders": [] } })).unwrap();
+    let expected =
+        json::to_string(&json!({ "result": { "coin": "USDC", "cancelled_orders": [], "passivized": false } })).unwrap();
     same(
         &legacy_success(&ctx, "disable_coin", json!({ "coin": "USDC" })),
         &expected,
@@ -1790,7 +2306,8 @@ fn t40_6b_20_disable_coin_on_coins_activated_through_the_compatibility_surface()
         "the platform no longer records the token"
     );
 
-    let expected = json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [] } })).unwrap();
+    let expected =
+        json::to_string(&json!({ "result": { "coin": "SOL", "cancelled_orders": [], "passivized": false } })).unwrap();
     same(
         &legacy_success(&ctx, "disable_coin", json!({ "coin": "SOL" })),
         &expected,

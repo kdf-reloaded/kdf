@@ -1982,6 +1982,134 @@ names.
 >    collector (chapter 55 D55.8); the reference's EVM platform-with-tokens
 >    activation never does, at a first activation or a re-activation.
 
+> *Reloaded status (clean side, 2026-11-18; Reloaded-original, its own code):*
+> the passive platform state is built for the legacy `disable_coin`, with the
+> re-activation, the token record timing and the NFT chain of this section;
+> the node setting of D43.1F.1 and ending background work are not built yet.
+>
+> 1. *Legacy `disable_coin`.* It reads `force_disable` (R43.1E.1) and answers
+>    `passivized` (R43.1E.2). An unforced call for a platform with at least one
+>    dependent cancels the platform's own orders and makes it passive
+>    (R43.1E.5 item 3); a forced call removes the platform and every dependent
+>    (item 4), and under D43.1E.2 (b) it first checks the platform and every
+>    dependent for running swaps and orders being matched, and refuses the whole
+>    call if any is in use. A passive platform is registered, listed by
+>    `get_enabled_coins` in both forms, and not active for any other look-up
+>    (R43.1E.6, R43.1F.10 item 1); its history collection goes on, the TRON
+>    platform history included (its process finds its platform and its tokens
+>    on the registered view, R43.1E.6 item 3). The EVM and TRON history
+>    processes check their registration on each pass and end at their next
+>    pass once their coin is removed.
+> 2. *Versioned form.* The `disable_coin` of §43.1R is as it was (the
+>    maintainer's decision on its scope): it does not read `force_disable`, has
+>    no `passivized`, removes the requested coin, and answers `NoSuchCoin` for a
+>    passive platform. A platform it removes leaves its dependents registered.
+> 3. *Locks (D43.1F.2 (b)).* `disable_coin`, in both forms, takes the
+>    activation lock of the requested ticker (chapter 55 R55.1.12), the legacy
+>    forced call that of every dependent too, and the token and layer-two
+>    activations, one-shot and task forms, take the lock of their platform with
+>    their own, and check the platform again once the locks are held. Each
+>    ticker's lock is a shared/exclusive lock: the token and layer-two
+>    activations take their platform's lock shared (so several tokens of one
+>    platform activate in parallel), and `disable_coin` and each ticker's own
+>    activation take it exclusively.
+> 4. *Token and layer-two activations on a passive platform (R43.1F.6).* They
+>    answer `PlatformCoinIsNotActivated`, naming the platform, and for the
+>    Lightning task `init` naming the Lightning ticker; a legacy `enable` of an
+>    ERC20 token is accepted and does not join the set.
+> 5. *Token look-ups (D43.1F.3 (b)).* A Reloaded EVM token keeps its swap
+>    gas-fee policy in its own instance and looks its platform up by no ticker,
+>    so a token's orders, swaps and fee estimates work while its platform is
+>    passive; nothing changed in the EVM token code for it. A TRC20 or ERC-20
+>    token looks its platform up by ticker for its HD methods and `withdraw`,
+>    and a TRC20 token also for its GasFree address and a gasless `withdraw`;
+>    that look-up is the token's own and finds a passive platform.
+> 6. *Standalone tasks (D43.1F.4 (b)).* The `init` of a standalone activation
+>    task refuses the ticker of a passive platform with `CoinIsAlreadyActivated`
+>    and builds nothing.
+> 7. *Re-activation (R43.1F.2, R43.1F.3).* A platform-with-tokens method, in
+>    its one-shot and its task form, whose ticker is a passive platform of the
+>    method's family re-activates the passive instance; `init` of the task form
+>    answers a `task_id` for it. The decision is taken under the activation
+>    locks and before the platform's configuration is read; an active ticker
+>    and a passive ticker of another family answer `PlatformIsAlreadyActivated`.
+>    No platform instance is built. The request's nodes, signing policy,
+>    swap-contract settings, required confirmations and `tx_history` are not
+>    applied, and no history collector is started (D43.1F.5 (a)); `get_balances`
+>    and, for an HD wallet, the address-scan settings and `path_to_address`
+>    shape the answer. One registry step, under the registry lock, makes the
+>    entry active, registers each requested token that is not registered and
+>    adds every requested ticker to the dependent set; if the entry is no longer
+>    registered and passive then, the call answers `Internal` and changes
+>    nothing (the locks keep `disable_coin` out, so this is not reached).
+> 8. *A requested token that is already registered (R43.1F.4, D43.1F.1).* In a
+>    first activation and in a re-activation, under the locks and before
+>    anything is built: a ticker that is already a dependent of this very
+>    platform is kept (the built instance is discarded, the request's token
+>    members are not applied, the ticker is reported once); a registered
+>    ticker of another platform is refused with `TokenIsAlreadyActivated`
+>    (string: the ticker, HTTP 400); cases (c), (d) and (e) of the table are
+>    as stated there. This is the `"refuse"` behavior; the check is one
+>    function with a policy argument, so the `"keep"` value of the setting
+>    selects the other
+>    branch at that one place later. By the decision of 2026-11-19 (D43.1F.1),
+>    "refuse" refuses only a registered ticker whose instance belongs to
+>    another platform (case c'): a registered token of this very platform that
+>    is not a dependent, for example one left by the versioned `disable_coin`
+>    of the platform or activated by the legacy `enable`, is kept, joins the
+>    dependent set and is recorded from the registered instance; the request's
+>    token members are not applied to it.
+> 9. *Token record (D43.1F.2 (b)).* In every family (EVM including TRC20, BCH
+>    with SLP, Tendermint, Solana) the token initializers write nothing to the
+>    platform's token record. The activation writes the tokens it built that
+>    were not registered before the answer is assembled, because the answer
+>    lists every token on the record, and removes exactly those tokens again if
+>    the call fails before registration. After a refusal the record holds no
+>    token of the refused request.
+> 10. *NFT chain (R43.1F.8).* An NFT chain activated by `enable_nft` or by an
+>     inline `nft_req` is a dependent of its platform: its pseudo-ticker is a
+>     member of the platform's dependent set and has no coin entry, so a
+>     platform whose only dependent is its NFT chain becomes passive on an
+>     unforced `disable_coin`. A forced removal deactivates the chain with the
+>     other dependents. A re-activation without `nft_req` keeps the chain; with
+>     `nft_req` the chain is built anew. A chain that is already active
+>     answers `TokenIsAlreadyActivated` to `enable_nft` whatever the state of
+>     its platform (R43.1F.7). Reloaded has no method that disables an NFT
+>     chain by itself, so item 5 of R43.1F.8 has no caller yet. After the
+>     versioned `disable_coin` of the platform the chain stays active but is in
+>     no dependent set, and a later `enable_nft` answers
+>     `TokenIsAlreadyActivated` without putting it back, so the platform can
+>     then be removed by an unforced `disable_coin` while its NFT chain is
+>     active.
+> 11. *Background work of a removed coin (R43.1E.5 item 4).* Each registered
+>     instance has a record of its background work, kept in the registry beside
+>     the coin, and an instance identity (R55.4.9). Removing a coin, by
+>     `disable_coin` of a coin or token, by the forced removal of a platform
+>     and each of its dependents, or by the clean-up of a failed or cancelled
+>     activation, aborts the work of that instance: the history collector of
+>     every family that has one (UTXO, BCH and SLP, QTUM, QRC20, EVM, TRON,
+>     Sia, Tendermint) and the block-header loop of the UTXO family. The event
+>     streams of the removed ticker (balance, fee estimate, transaction
+>     history) end for every client, as after the last unsubscribe. A passive
+>     platform keeps its work; only removal ends it (R43.1F.10 item 2), and a
+>     re-activation keeps the instance and its record. Work that holds the
+>     instance only weakly (the UTXO merge loop, the Electrum client loops,
+>     Zcash loops) ends when the last strong handle is dropped. The work of a
+>     Lightning coin (graph and scorer persistence, peer listener, reconnect,
+>     announcement and best-block loops) is not on the record and goes on
+>     until the node stops; ending it is a separate change.
+> 12. *The `reactivation_registered_token` setting (D43.1F.1).* The node reads
+>     the top-level startup-configuration member `reactivation_registered_token`
+>     when it starts: `"refuse"` (also when the member is absent or `null`) or
+>     `"keep"`; any other value, including a value that is not a string,
+>     stops the node with an error that names the member and the two values.
+>     The policy argument of the check in item 8 is the setting's value.
+>     Under `"refuse"` item 8 applies. Under `"keep"` any registered requested
+>     token is kept silently, whatever platform it was registered for, and
+>     joins the platform's dependent set and token list, case c' included; a
+>     token whose configuration names another platform is still refused with
+>     `PlatformCoinMismatch` (case c), and cases d and e are unchanged.
+
 **D43.1F.1** *(Open, 2026-11-18.)* **A requested token that is already
 registered.** Options: (a) reproduce the reference: keep the registered
 instance silently, case by case as R43.1F.4; (b) keep it when it is already
@@ -2011,6 +2139,15 @@ turns the silent adoption into an answer.
 > Under either value a token whose configuration names another platform is
 > still refused with `PlatformCoinMismatch` (case c). Option (c), replacing
 > the registered instance, is not offered.
+
+> *Reloaded status (clean side, 2026-11-19):* by the maintainer's decision of
+> 2026-11-19, under `"refuse"` a registered token whose instance belongs to
+> the platform being activated is kept and joins the platform's dependent set
+> and token record, as option (a) does, although it was not a dependent (the
+> cases (a) and (b) of R43.1F.4, for example a token left registered by the
+> versioned `disable_coin` of its platform, or one activated by the legacy
+> `enable`). Only a token registered for another platform (case c') is refused
+> with `TokenIsAlreadyActivated`.
 
 **D43.1F.2** *(Open, 2026-11-18.)* **Failed re-activations and the
 forced-removal race (the second code-quality finding).** Options: (a)
@@ -2083,6 +2220,12 @@ examined. (4) Nothing was measured against a running reference binary.
 > or when an instance built for an activation is discarded, is built as a
 > separate change, the fifth of the passive-state work. Item (1) above and
 > item (1) of the not-established paragraph of §43.1E stay open until then.
+
+> *Reloaded status (clean side, 2026-11-20):* the change is built. The
+> background work of an instance that was built and then discarded (a refused,
+> failed or cancelled activation) is ended, and so is the work of a removed
+> coin, except that of a Lightning coin, which goes on until the node stops.
+> See item 11 of the status note of §43.1E and §43.1F.
 
 *Acceptance rows.* Each row runs against a node with mock backends; *parity*
 is the reference behavior above. Rows that need a passive platform apply to
@@ -2293,6 +2436,7 @@ several legacy texts; the text is not part of the contract.
 | `TradingNotSupported` | object `{coin}` | 400 | coin cannot trade | setprice, buy, sell |
 | `SwapKeyMismatch` | object `{coin, reason}` | 400 | coin cannot be swapped under this login | setprice, update_maker_order, buy, sell |
 | `ChainDisagreement` | string | 400 | Electrum servers disagree about the chain (chapter 38) | setprice, buy, sell |
+| `OrderNotMatchableMissingCapability` | object `{coin, capability, orders}` | 400 | every order named in `match_by` is held by the node and lacks a capability the node requires of a counterparty (chapter 59 R59.4C.6) | buy, sell |
 | `BaseEqualRel` | none | 400 | same coin on both sides | setprice, buy, sell |
 | `CoinsNotActivated` | object `{base, rel}` | 400 | order's coins not activated | update_maker_order |
 | `VolumeTooLow` | object (volume, threshold; coin where known) | 400 | max, min, rel, base or spend-safety volume below floor; amount below minimum | setprice, update_maker_order, buy, sell |
@@ -2924,3 +3068,7 @@ shall be wound down as part of shutdown rather than abandoned.
   §43.1F.* Reloaded-original, clean side: they record the maintainer's
   decisions of 2026-11-18 on those items; no cleared sentence was changed
   and no forbidden-class input was used, chapter 01 R38 not engaged.
+- *Reloaded-original addition (2026-11-20) -- the row
+  `OrderNotMatchableMissingCapability` of the table under R43.1R.4.* The
+  typed form of the refusal of chapter 59 R59.4C.6. No forbidden-class input;
+  it needs no Dirty Gate pass.

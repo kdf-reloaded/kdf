@@ -2,7 +2,7 @@
 //! Async JSON-RPC 2.0 client for the Solana HTTP API.
 //!
 //! # Public exports
-//! - [`SolanaRpcClient`] — async, cloneable client over `mm2_net::native_http`.
+//! - [`SolanaRpcClient`] — async, cloneable client over `mm2_net::transport` (the same code on native and WASM).
 //! - [`RpcError`], [`RpcErrorKind`] — `From`-convertible into `BalanceError`
 //!   and `WithdrawError`.
 //! - Response shapes for the seven endpoints we exercise:
@@ -35,7 +35,7 @@ use derive_more::Display;
 use futures::future::{select, Either};
 use futures::FutureExt;
 use mm2_err_handle::prelude::*;
-use mm2_net::native_http::slurp_post_json;
+use mm2_net::transport::slurp_post_json;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value as Json};
@@ -166,8 +166,7 @@ impl SolanaRpcClient {
         // Bound every round-trip with a hard timeout so a single dead
         // endpoint cannot wedge an entire coin operation. Using
         // `common::executor::Timer` keeps the wait portable across
-        // native and WASM (we are native-only here, but the helper is
-        // already part of the workspace's runtime abstraction).
+        // native and WASM: the one code path serves both targets.
         let req_fut = Box::pin(slurp_post_json(&self.inner.url, body).fuse());
         let timeout = Timer::sleep(REQUEST_TIMEOUT_SECS);
         let (status, _headers, bytes) = match select(req_fut, timeout).await {
@@ -624,6 +623,7 @@ mod tests {
     }
 
     /// T40.10 (R40.5A.1): a request to a closed port and the debug forms name the node host-only.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn t40_10_a_node_is_named_host_only_in_errors_and_debug_forms() {
         let url = "http://user:secret@127.0.0.1:1/v1/APIKEY?token=X";

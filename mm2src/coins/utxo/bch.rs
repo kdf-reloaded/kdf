@@ -618,6 +618,26 @@ impl SwapOps for BchCoin {
         .await
     }
 
+    async fn search_for_swap_tx_spend_my_on_every_server(
+        &self,
+        time_lock: u32,
+        my_pub: &[u8],
+        other_pub: &[u8],
+        secret_hash: &[u8],
+        tx: &[u8],
+    ) -> Option<FoundSwapTxSpend> {
+        utxo_common::search_for_swap_tx_spend_my_on_every_server(
+            &self.utxo_arc,
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            tx,
+            utxo_common::DEFAULT_SWAP_VOUT,
+        )
+        .await
+    }
+
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
@@ -881,6 +901,10 @@ impl MmCoin for BchCoin {
 
     fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool {
         utxo_common::is_coin_protocol_supported(self, info)
+    }
+
+    fn required_counterparty_capabilities(&self) -> Vec<&'static str> {
+        utxo_common::required_counterparty_capabilities(self)
     }
 }
 

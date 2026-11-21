@@ -10,7 +10,12 @@
 //! - [`CAPABILITY_TX_V6`] and [`CAPABILITY_SIGHASH_SUFFIX`], the keys in use (R59.4A.4);
 //! - [`append_capability_word`], the writer (R59.4A.1);
 //! - [`declared_capabilities`], [`DeclaredCapabilities`] and [`declares_capability`], the fail-closed
-//!   reader (R59.4A.2).
+//!   reader (R59.4A.2);
+//! - [`missing_capabilities`], the keys of a required set that a value does not declare (§59.4C,
+//!   R59.4C.2);
+//! - [`required_counterparty_capabilities`], [`required_counterparty_capabilities_now`] and
+//!   [`required_capabilities_from_conf`], the required set of a coin (R59.4C.1): from the activated
+//!   coin when the coin is activated, and from its configuration entry otherwise.
 //!
 //! The layout is a wire format that deployed peers read; the bytes of the first value are never
 //! changed, and every reader of the first value ignores what follows it (R59.4A.3).
@@ -21,7 +26,13 @@
 //! allocated from it. Any failure yields "nothing declared"; it is never an error and never a
 //! panic.
 
+use crate::utxo::utxo_common;
+use crate::z_coin;
+use crate::{coin_conf, CoinProtocol, CoinsContext, MmCoinEnum};
 use common::msgpack_bounds::check_msgpack_bounds;
+use common::now_ms;
+use mm2_core::mm_ctx::MmArc;
+use serde_json::Value as Json;
 use std::collections::BTreeSet;
 
 /// Capability key: this node builds and spends the version-6 transaction format of the Ironwood
@@ -146,6 +157,85 @@ fn push_str(out: &mut Vec<u8>, s: &str) {
 /// that requires a capability can call it from its acceptance check (R59.4A.5). Fail-closed.
 pub fn declares_capability(info: &Option<Vec<u8>>, key: &str) -> bool {
     declared_capabilities(info.as_deref()).declares(key)
+}
+
+/// The keys of `required` that `info` does not declare, in the order of `required` (CRD ch.59 R59.4C.2).
+///
+/// `info` is read as [`declared_capabilities`] reads it, so the result fails closed: absent, empty or
+/// malformed information declares nothing and every required key is missing. An empty `required` is
+/// never missing anything, whatever `info` holds. A coin's acceptance check and the order book's
+/// presentation both decide through this function, so they cannot disagree (R59.4C.1).
+pub fn missing_capabilities(required: &[&'static str], info: Option<&[u8]>) -> Vec<&'static str> {
+    if required.is_empty() {
+        return Vec::new();
+    }
+    let declared = declared_capabilities(info);
+    required.iter().copied().filter(|key| !declared.declares(key)).collect()
+}
+
+/// The required set of the coin `ticker` at this moment (CRD ch.59 R59.4C.1): the capability keys whose
+/// absence makes the coin's acceptance check decline a counterparty.
+///
+/// It is read from the activated coin when the coin is activated
+/// ([`crate::MmCoin::required_counterparty_capabilities`]), and from the coin's configuration entry
+/// otherwise ([`required_capabilities_from_conf`]). Reading it has no side effect and writes no log line.
+pub async fn required_counterparty_capabilities(ctx: &MmArc, ticker: &str) -> Vec<&'static str> {
+    let activated = match CoinsContext::from_ctx(ctx) {
+        Ok(coins_ctx) => coins_ctx.coins.lock().await.active().get(ticker).cloned(),
+        Err(_) => None,
+    };
+    required_of(ctx, ticker, activated)
+}
+
+/// As [`required_counterparty_capabilities`], for a caller that cannot wait. When the registry of activated
+/// coins is in use by another task at that instant, the set is read from the configuration entry, which
+/// gives the same set unless the requirement rests on a fact only the activated coin knows (an Ironwood
+/// height discovered at run time).
+pub fn required_counterparty_capabilities_now(ctx: &MmArc, ticker: &str) -> Vec<&'static str> {
+    let activated = match CoinsContext::from_ctx(ctx) {
+        Ok(coins_ctx) => coins_ctx
+            .coins
+            .try_lock()
+            .and_then(|coins| coins.active().get(ticker).cloned()),
+        Err(_) => None,
+    };
+    required_of(ctx, ticker, activated)
+}
+
+fn required_of(ctx: &MmArc, ticker: &str, activated: Option<MmCoinEnum>) -> Vec<&'static str> {
+    match activated {
+        Some(coin) => coin.required_counterparty_capabilities(),
+        None => required_capabilities_from_conf(&coin_conf(ctx, ticker), ticker, now_ms() / 1000),
+    }
+}
+
+/// The required set of a coin that is not activated, from its configuration entry `conf` as of `now_sec`
+/// (CRD ch.59 R59.4C.1), by the rules the activated coin applies:
+///
+/// - a shielded coin: `tx_v6` while the window of CRD ch.39 R39.6.4f(b) is open for the
+///   `consensus_params` of the entry and its switch is on;
+/// - a UTXO-family coin, shielded coins included: `sighash_suffix` when the entry sets a non-zero
+///   `sighash_suffix` and `require_suffix_counterparty` is not `false` (CRD ch.61 R61.5A.2);
+/// - every other coin, and an entry that is absent or whose protocol does not parse: nothing.
+pub fn required_capabilities_from_conf(conf: &Json, ticker: &str, now_sec: u64) -> Vec<&'static str> {
+    let Ok(protocol) = CoinProtocol::from_conf_json(conf["protocol"].clone()) else {
+        return Vec::new();
+    };
+    match protocol {
+        CoinProtocol::ZHTLC(protocol_info) => {
+            let mut required = utxo_common::required_capabilities_from_conf(conf);
+            required.extend(z_coin::v6_required_capabilities_from_params(
+                &protocol_info.consensus_params,
+                ticker,
+                now_sec,
+            ));
+            required
+        },
+        CoinProtocol::UTXO | CoinProtocol::QTUM | CoinProtocol::BCH { .. } | CoinProtocol::QRC20 { .. } => {
+            utxo_common::required_capabilities_from_conf(conf)
+        },
+        _ => Vec::new(),
+    }
 }
 
 /// Reads the capability word of a protocol-information value (R59.4A.2).
@@ -729,5 +819,232 @@ mod tests {
         use crate::{MmCoin, TestCoin};
 
         assert_eq!(TestCoin::default().coin_protocol_info(), Vec::<u8>::new());
+    }
+
+    // --- CRD ch.59 §59.4C, T16: orders that lack a required capability are not listed ---
+
+    /// A time inside the window of CRD ch.39 R39.6.4f(b) for ARRR on the main network (the built-in
+    /// activation time lies before it).
+    const INSIDE_THE_ARRR_WINDOW: u64 = 2_000_000_000;
+
+    /// The configuration entry of a shielded coin with ARRR's main-network parameters; `extra` is merged into
+    /// its `consensus_params`.
+    fn shielded_conf(ticker: &str, extra: Json) -> Json {
+        let mut params = serde_json::json!({
+            "overwinter_activation_height": 152855,
+            "sapling_activation_height": 152855,
+            "blossom_activation_height": null,
+            "heartwood_activation_height": null,
+            "canopy_activation_height": null,
+            "coin_type": 133,
+            "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+            "hrp_sapling_extended_full_viewing_key": "zxviews",
+            "hrp_sapling_payment_address": "zs",
+            "b58_pubkey_address_prefix": [0x1c, 0xb8],
+            "b58_script_address_prefix": [0x1c, 0xbd]
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        serde_json::json!({
+            "coin": ticker,
+            "protocol": { "type": "ZHTLC", "protocol_data": { "consensus_params": params } }
+        })
+    }
+
+    /// The configuration entry of a coin of `protocol`; `extra` is merged into the entry.
+    fn conf_of(ticker: &str, protocol: Json, extra: Json) -> Json {
+        let mut conf = serde_json::json!({ "coin": ticker, "protocol": protocol });
+        for (key, value) in extra.as_object().unwrap() {
+            conf[key] = value.clone();
+        }
+        conf
+    }
+
+    fn utxo_family_protocols() -> Vec<Json> {
+        vec![
+            serde_json::json!({ "type": "UTXO" }),
+            serde_json::json!({ "type": "QTUM" }),
+            serde_json::json!({ "type": "BCH", "protocol_data": { "slp_prefix": "simpleledger" } }),
+            serde_json::json!({ "type": "QRC20", "protocol_data": {
+                "platform": "QTUM", "contract_address": "0xd362e096e873eb7907e205fadc6175c6fec7bc44"
+            } }),
+        ]
+    }
+
+    #[test]
+    fn t16_b_missing_capabilities_reads_as_the_reader_does() {
+        let first = address_formats().remove(0);
+        let word = tx_v6_word();
+        let required = [CAPABILITY_TX_V6];
+        // The first value followed by the word: nothing is missing.
+        assert!(missing_capabilities(&required, Some(&with_word(&first, &word))).is_empty());
+        // The first value alone, empty and absent information, and a malformed word: the key is missing.
+        let not_declared: Vec<Option<Vec<u8>>> = vec![
+            Some(first.clone()),
+            Some(Vec::new()),
+            None,
+            Some(with_word(&first, &word[..word.len() - 1])),
+            Some(with_word(&first, &[0x01])),
+            Some(with_word(&first, &[0x81, 0xa5, b't', b'x', b'_', b'v', b'6', 0xc2])),
+            Some(vec![0xc1]),
+        ];
+        for info in &not_declared {
+            assert_eq!(
+                missing_capabilities(&required, info.as_deref()),
+                vec![CAPABILITY_TX_V6],
+                "{info:?}"
+            );
+            // A coin that requires nothing misses nothing, whatever the bytes.
+            assert!(missing_capabilities(&[], info.as_deref()).is_empty(), "{info:?}");
+        }
+        // Several keys: the missing ones, in the order of the required set.
+        let both = [CAPABILITY_TX_V6, CAPABILITY_SIGHASH_SUFFIX];
+        assert_eq!(missing_capabilities(&both, Some(&with_word(&first, &word))), vec![
+            CAPABILITY_SIGHASH_SUFFIX
+        ]);
+        assert_eq!(missing_capabilities(&both, Some(&first)), both.to_vec());
+        let all = append_capability_word(first, &both);
+        assert!(missing_capabilities(&both, Some(&all)).is_empty());
+    }
+
+    #[test]
+    fn t16_a_configuration_entry_of_a_coin_with_a_sighash_suffix() {
+        for protocol in utxo_family_protocols() {
+            let conf = |extra: Json| conf_of("XYZ", protocol.clone(), extra);
+            let required = |extra: Json| required_capabilities_from_conf(&conf(extra), "XYZ", 0);
+            // A non-zero suffix requires the word; the switch off, a zero suffix and no suffix require nothing.
+            assert_eq!(
+                required(serde_json::json!({ "sighash_suffix": "0x01324342" })),
+                vec![CAPABILITY_SIGHASH_SUFFIX],
+                "{protocol}"
+            );
+            assert_eq!(
+                required(serde_json::json!({ "sighash_suffix": "0x01324342", "require_suffix_counterparty": true })),
+                vec![CAPABILITY_SIGHASH_SUFFIX],
+                "{protocol}"
+            );
+            let nothing = [
+                serde_json::json!({ "sighash_suffix": "0x01324342", "require_suffix_counterparty": false }),
+                serde_json::json!({ "sighash_suffix": "0x00000000" }),
+                serde_json::json!({ "sighash_suffix": null }),
+                serde_json::json!({}),
+                // An entry whose keys do not parse cannot be activated.
+                serde_json::json!({ "sighash_suffix": "01324342" }),
+                serde_json::json!({ "sighash_suffix": "0x01324342", "require_suffix_counterparty": "no" }),
+            ];
+            for extra in nothing {
+                assert!(required(extra.clone()).is_empty(), "{protocol} {extra}");
+            }
+        }
+    }
+
+    #[test]
+    fn t16_a_configuration_entry_of_a_shielded_coin() {
+        let required = |ticker: &str, extra: Json, now_sec: u64| {
+            required_capabilities_from_conf(&shielded_conf(ticker, extra), ticker, now_sec)
+        };
+        let none = serde_json::json!({});
+        // ARRR on the main network: the built-in activation time opens the window.
+        assert_eq!(required("ARRR", none.clone(), INSIDE_THE_ARRR_WINDOW), vec![
+            CAPABILITY_TX_V6
+        ]);
+        assert!(required("ARRR", none.clone(), 0).is_empty());
+        // Its switch off, and a coin without an Ironwood upgrade: nothing.
+        let off = serde_json::json!({ "require_v6_counterparty": false });
+        assert!(required("ARRR", off, INSIDE_THE_ARRR_WINDOW).is_empty());
+        assert!(required("OTHER", none, INSIDE_THE_ARRR_WINDOW).is_empty());
+        // A configured time or height is an upgrade too; the height opens the window at any time.
+        let time = serde_json::json!({ "ironwood_activation_time": 1_000_000_000u32 });
+        assert_eq!(required("OTHER", time.clone(), INSIDE_THE_ARRR_WINDOW), vec![
+            CAPABILITY_TX_V6
+        ]);
+        assert!(required("OTHER", time, 0).is_empty());
+        let height = serde_json::json!({ "ironwood_activation_height": 100u32 });
+        assert_eq!(required("OTHER", height, 0), vec![CAPABILITY_TX_V6]);
+        let height_off = serde_json::json!({ "ironwood_activation_height": 100u32, "require_v6_counterparty": false });
+        assert!(required("OTHER", height_off, 0).is_empty());
+        // `ironwood_gate_disabled` has no effect on the requirement.
+        let gate = serde_json::json!({ "ironwood_gate_disabled": true });
+        assert_eq!(required("ARRR", gate, INSIDE_THE_ARRR_WINDOW), vec![CAPABILITY_TX_V6]);
+    }
+
+    #[test]
+    fn t16_a_a_coin_of_another_family_and_an_unknown_coin_require_nothing() {
+        use crate::{MmCoin, TestCoin};
+
+        let suffix = serde_json::json!({ "sighash_suffix": "0x01324342" });
+        let other_families = [
+            serde_json::json!({ "type": "ETH" }),
+            serde_json::json!({ "type": "ERC20", "protocol_data": {
+                "platform": "ETH", "contract_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+            } }),
+            serde_json::json!({ "type": "TENDERMINT", "protocol_data": {
+                "decimals": 6, "denom": "uiris", "account_prefix": "iaa", "chain_id": "irishub-1"
+            } }),
+            serde_json::json!({ "type": "SIA" }),
+        ];
+        for protocol in other_families {
+            let conf = conf_of("XYZ", protocol.clone(), suffix.clone());
+            assert!(
+                required_capabilities_from_conf(&conf, "XYZ", INSIDE_THE_ARRR_WINDOW).is_empty(),
+                "{protocol}"
+            );
+        }
+        // A plain UTXO coin, an entry without a protocol, an entry with a protocol that does not parse, no entry.
+        let plain = conf_of("XYZ", serde_json::json!({ "type": "UTXO" }), serde_json::json!({}));
+        assert!(required_capabilities_from_conf(&plain, "XYZ", INSIDE_THE_ARRR_WINDOW).is_empty());
+        let without_protocol = serde_json::json!({ "coin": "XYZ", "sighash_suffix": "0x01324342" });
+        assert!(required_capabilities_from_conf(&without_protocol, "XYZ", 0).is_empty());
+        let bad_protocol = conf_of("XYZ", serde_json::json!({ "type": "ZHTLC" }), suffix);
+        assert!(required_capabilities_from_conf(&bad_protocol, "XYZ", 0).is_empty());
+        assert!(required_capabilities_from_conf(&Json::Null, "XYZ", 0).is_empty());
+        // An activated coin of a family without a requirement: the default of the coin trait.
+        assert!(TestCoin::default().required_counterparty_capabilities().is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn t16_a_the_set_is_read_from_the_activated_coin_first_and_from_the_configuration_otherwise() {
+        use crate::{MmCoin, TestCoin};
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use mocktopus::mocking::{MockResult, Mockable};
+
+        let suffix = serde_json::json!({ "sighash_suffix": "0x01324342" });
+        let conf = serde_json::json!({ "coins": [
+            conf_of("SFX", serde_json::json!({ "type": "UTXO" }), suffix.clone()),
+            conf_of("PLAIN", serde_json::json!({ "type": "UTXO" }), serde_json::json!({})),
+            conf_of("ACTIVE", serde_json::json!({ "type": "UTXO" }), suffix),
+        ] });
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        let both = |ticker: &str| {
+            let waited = block_on(required_counterparty_capabilities(&ctx, ticker));
+            assert_eq!(waited, required_counterparty_capabilities_now(&ctx, ticker), "{ticker}");
+            waited
+        };
+        // Not activated: the configuration entry decides, and a coin without an entry requires nothing.
+        assert_eq!(both("SFX"), vec![CAPABILITY_SIGHASH_SUFFIX]);
+        assert!(both("PLAIN").is_empty());
+        assert!(both("UNKNOWN").is_empty());
+        assert_eq!(both("ACTIVE"), vec![CAPABILITY_SIGHASH_SUFFIX]);
+
+        // Activated: the coin decides, whatever its entry says.
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new("ACTIVE")))).unwrap();
+        assert!(both("ACTIVE").is_empty());
+        TestCoin::required_counterparty_capabilities.mock_safe(|_| MockResult::Return(vec![CAPABILITY_TX_V6]));
+        assert_eq!(both("ACTIVE"), vec![CAPABILITY_TX_V6]);
+        assert_eq!(both("SFX"), vec![CAPABILITY_SIGHASH_SUFFIX]);
+
+        // Without waiting, while the registry of activated coins is in use: the configuration entry.
+        let held = block_on(coins_ctx.coins.lock());
+        assert_eq!(required_counterparty_capabilities_now(&ctx, "ACTIVE"), vec![
+            CAPABILITY_SIGHASH_SUFFIX
+        ]);
+        drop(held);
+        assert_eq!(required_counterparty_capabilities_now(&ctx, "ACTIVE"), vec![
+            CAPABILITY_TX_V6
+        ]);
     }
 }

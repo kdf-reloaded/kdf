@@ -74,6 +74,29 @@ or undo, and every change that needs a step from you.
   - *Browser (WASM) builds:* the WalletConnect store in the browser is upgraded to a new format at the first start.
     An earlier version can no longer open it. To go back to an earlier version, clear this site's WalletConnect data
     in the browser first, then pair again.
+- **`disable_coin` of a platform coin that has active tokens no longer removes it.** The legacy `disable_coin`
+  now makes such a platform coin passive and answers `passivized: true`: its tokens stay active, and every
+  method that needs an active coin answers as if the platform were not activated. Before, the call removed the
+  platform and left its tokens registered. A script or wallet that disabled a platform to remove it, then
+  activated it again, now finds it still registered, and its `enable` or `electrum` is refused as already
+  activated.
+  - *What to do:* to remove the platform and its tokens, send `"force_disable": true`.
+  - *Versioned form:* the `mmrpc: "2.0"` `disable_coin` does not change. It neither makes a platform passive nor
+    reads `force_disable`: it removes the platform, and its tokens stay registered.
+  - *Activating it again:* `enable_eth_with_tokens` and the other platform-with-tokens methods activate a passive
+    platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
+    Disabling a coin now ends its background work (see "Changed" below).
+  - Detail: PR #424; CRD ch.43 §43.1E and §43.1F.
+- **A platform-with-tokens activation that names a token registered for another platform is now refused.**
+  Before, `enable_eth_with_tokens`, `enable_bch_with_tokens`, `enable_tendermint_with_assets`,
+  `experimental::enable_solana_with_assets` and the task forms replaced a registered token of the same ticker by a new
+  one built from the request. Now a token that is registered for this same platform is kept as it is and joins the
+  platform again, for example after the versioned `disable_coin` of the platform or after a token was activated by
+  the legacy `enable`; the request's settings for it are not applied. A token registered for another platform is
+  refused with `TokenIsAlreadyActivated` (HTTP 400) before anything is built.
+  - *What to do:* disable the token first, leave it out of the request, or set `reactivation_registered_token` to
+    `"keep"` in `MM2.json` (see "Added" below).
+  - Detail: PR #432; CRD ch.43 §43.1F R43.1F.4.
 
 - **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
   handler produced them. A client that decoded those entities itself to get the original text must stop doing so,
@@ -115,9 +138,44 @@ the previous version used. The safe way:
   servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
   on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
   Detail: PR #348; CRD ch.45 §45.6C.
+- **A setting that keeps a registered token named in a platform-with-tokens activation.** The `MM2.json` member
+  `reactivation_registered_token` is `"refuse"` (default, also when absent or `null`) or `"keep"`. With `"keep"`, a token that is already
+  registered for another platform and is named in `enable_eth_with_tokens` or another platform-with-tokens method is
+  kept silently and joins the platform, as in GLEEC KDF; a token whose coin configuration names another platform is
+  still refused with `PlatformCoinMismatch`. With `"refuse"` it is refused with `TokenIsAlreadyActivated`. Any other
+  value stops the node at start with an error that names the member. Detail: PR #435; CRD ch.43 §43.1F D43.1F.1.
 
 #### RPC interface
 
+- **The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized`, and takes
+  `force_disable`.** A platform coin (an EVM, BCH, Tendermint, Solana or standard UTXO coin) that has at least one
+  active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens
+  activation, is not removed by `disable_coin`. The call cancels the platform's own orders, keeps the platform
+  registered but passive, and answers `{"coin", "cancelled_orders", "passivized": true}`. A passive platform is
+  listed by `get_enabled_coins`, its tokens stay active (a TRC20 or ERC-20 token's `withdraw` and HD methods
+  included, and a TRC20 token's GasFree address), and its history collection goes on, TRON's included; every other
+  method answers as if it were not activated, and a second `disable_coin` for it is refused like one for an unknown
+  coin.
+  With `"force_disable": true` the call removes the platform and all its tokens and answers `passivized: false`;
+  unlike in GLEEC KDF it first checks the platform and every token, and refuses the whole call if any of them has a
+  running swap or an order that is being matched. Every other successful call now also answers `passivized: false`.
+  Only the JSON value `true` forces. A node restart makes every coin inactive, as before. Detail: PR #424; CRD ch.43 §43.1E
+  and §43.1F.
+- **A passive platform coin is activated again by the platform-with-tokens methods.** `enable_eth_with_tokens`,
+  `enable_bch_with_tokens`, `enable_tendermint_with_assets`, `experimental::enable_solana_with_assets` and the task
+  forms `task::enable_eth::init` and `task::enable_tendermint::init`, given the ticker of a passive platform of their
+  own family, make it active again with the instance it already has. The request's nodes, signing policy, swap-contract
+  settings, required confirmations and `tx_history` are not applied, and no history collection is started (a
+  platform first activated without `tx_history` gets none until it is removed and activated again);
+  `get_balances` and, for an HD wallet, the address-scan settings and `path_to_address` shape the answer. The requested
+  tokens are activated, and the answer lists every token the platform was activated with and not disabled since, plus
+  the request's tokens. An active platform, and a passive platform of another family, still answer
+  `PlatformIsAlreadyActivated`. A refused request leaves the platform passive and its token list as it was. Detail: PR
+  #432; CRD ch.43 §43.1F R43.1F.2 to R43.1F.5.
+- **An EVM platform's NFT chain counts as its dependent.** An NFT chain activated by `enable_nft`, or inline by
+  `nft_req`, now keeps its platform from being removed by an unforced `disable_coin`: a platform whose only dependent
+  is its NFT chain becomes passive, and a forced `disable_coin` deactivates the NFT chain with the platform's tokens. A
+  re-activation without `nft_req` keeps the NFT chain. Detail: PR #432; CRD ch.43 R43.1F.8.
 - **The order-management methods `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`,
   `my_orders` and `order_status` accept `mmrpc: "2.0"` requests.** A versioned request carries the legacy
   members unchanged inside `params`, gets the legacy result under `result` with the request's `id` echoed,
@@ -151,6 +209,14 @@ the previous version used. The safe way:
   `stats_swap_status`, `get_trade_fee`, `electrum`, `enable`, `help` and `show_priv_key`, which stay legacy-only on
   purpose, and the test-only `sim_panic`. Detail: PR #387; CRD ch.43 §43.1R.
 
+- **`buy` and `sell` that name only orders the node cannot match fail with a typed error.** From
+  0.4.1 the order book leaves out an order whose maker lacks a capability the node requires (ARRR
+  version 6, BC2 suffix signing), and a `buy` or `sell` whose `match_by` names only such orders is
+  refused at once (see the 0.4.1-beta.1 entry below). On the versioned surface the refusal now has
+  the error type `OrderNotMatchableMissingCapability`, HTTP 400, with the members `coin`,
+  `capability` and `orders`; the legacy surface answers the same text as in 0.4.1. Detail: PR
+  #448; CRD ch.59 R59.4C.6.
+
 #### Shielded coins
 
 - **ARRR and the other shielded coins accept `priv_key_policy`, and each key gets a wallet of its own.**
@@ -167,6 +233,12 @@ the previous version used. The safe way:
   Detail: PR #414; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
 
 #### Solana coins
+
+- **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
+  entries in both forms and route `enable_solana_with_tokens`, `enable_spl` and the two
+  `experimental::` methods as native builds do, with the same node pool. While Solana is switched
+  off they answer the same refusal as native builds instead of an unknown method. A Solana coin
+  cannot be traded in browser builds either. Detail: PR #430; CRD ch.40 R40.1.1, T40.1.
 
 - **The Solana activation methods of GLEEC KDF are routed.** `experimental::enable_solana_with_assets`
   activates a Solana platform with its tokens and `experimental::enable_solana_token` a single SPL
@@ -412,6 +484,29 @@ the previous version used. The safe way:
 
 #### RPC interface
 
+- **Disabling a coin now ends its background work.** When `disable_coin` removes a coin (a coin, a token, a platform
+  with its tokens by `force_disable`, or the clean-up of a failed or cancelled activation), the transaction-history
+  collection of that coin and the block-header sync of a UTXO coin stop, and the balance, fee-estimate and
+  transaction-history streams of the removed ticker end for every client: a client that was subscribed sees the stream
+  stop, as after its own unsubscribe, and subscribes again after the coin is enabled again. Before, history collection
+  of BCH, EVM and Tendermint platforms ran until the node stopped, and a removed coin stayed alive in its streams. A
+  passive platform keeps its work. A removed Lightning coin keeps its background work (graph persistence, peer
+  listener, reconnect and announcement loops) until the node stops; that is a known limitation of this release. Detail:
+  PR #439; CRD ch.43 R43.1E.5 item 4.
+- **A token or layer-two activation waits for a `disable_coin` of its platform, and the other way round.** The token
+  and layer-two activation methods (`enable_erc20`, `enable_nft`, `enable_slp`, `enable_tendermint_token`, the Solana
+  token method, the Lightning activation, and the task forms) now take the activation lock of the platform with the lock of
+  the token, and `disable_coin` takes the lock of the coin it disables, so a platform cannot be disabled in the
+  middle of the activation of its token. A token activation on a platform that is passive is refused with
+  `PlatformCoinIsNotActivated` naming the platform (the Lightning ticker for Lightning). Detail: PR #424; CRD ch.43 D43.1F.2;
+  ch.55 R55.1.12.
+- **A refused platform-with-tokens activation leaves none of its tokens on the platform's token list.** The list a
+  platform reports in its activation answer and its balance stream is now written only once the tokens are registered,
+  so a request that failed after its tokens were built no longer leaves them on the list of the platform. Detail: PR
+  #432; CRD ch.43 D43.1F.2.
+- **A standalone activation task for the ticker of a passive platform is refused at `init`.** `task::enable_utxo::init`
+  and the other standalone activation tasks answer `CoinIsAlreadyActivated` with HTTP 400, as for an active coin,
+  and build nothing. Detail: PR #424; CRD ch.43 R43.1F.9 and D43.1F.4.
 - **A transport failure of `withdraw` answers HTTP 502 instead of 500.** The versioned `withdraw`, `withdraw_nft` and the
   start of `task::withdraw::init` answer the error `Transport` (a node or server that does not answer, or answers
   unusably) with status 502, as the reference does; the token and the body are unchanged. A client that treats
@@ -613,7 +708,7 @@ the previous version used. The safe way:
 
 ### Fixed
 
-#### EVM coins
+#### EVM, BCH, Sia and Lightning coins
 
 - **The HD address methods of an EVM platform list its tokens.** `get_new_address`, `account_balance`,
   `task::account_balance::init` and `task::scan_for_new_addresses::init` asked for the platform coin now answer, per
@@ -626,6 +721,15 @@ the previous version used. The safe way:
   transaction count, its platform balance or the balance of any activated token is not zero, so an address that only
   received a token is found. The unused addresses between the known range and a newly found address are listed with
   an empty balance map. The scan made during activation is unchanged. Detail: PR #463; CRD ch.49 R49.32.
+- **A quick disable and re-enable no longer leaves the old history loop running, and a failed legacy activation no
+  longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
+  of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at
+  once when the same ticker is enabled again. The clean-up of a failed `enable` or `electrum` balance read removes only the
+  coin that call registered. Detail: PR #439; CRD ch.55 R55.4.9.
+- **EVM transaction history could fail to start after an activation with `tx_history`.** The history collection
+  started just before the platform was registered, and its first check for the registered coin could run before
+  the registration, which ended the collection. It now starts after the registration, and a failed activation no
+  longer leaves it running. Detail: PR #435; CRD ch.55 D55.8.
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
@@ -707,6 +811,18 @@ the previous version used. The safe way:
 
 #### Electrum servers
 
+- **A swap no longer times out waiting for confirmations on an Electrum server that has fallen behind or keeps
+  answering errors, and a taker whose payment the maker already claimed now finds that claim on any of the coin's
+  servers.** A swap's wait for its payment's confirmations polls one server. It used to stay with that server until
+  the wait's deadline unless a request to it failed outright, so a server that stayed connected but fell behind the
+  chain, or answered every request for the transaction with an error, made the swap step time out even when the
+  payment had long been confirmed. The wait now moves on to an up-to-date server when its server falls behind, and
+  after three error answers in a row; each move is logged at INFO level with both servers. When such a timeout sends
+  a taker into its refund chain, the chain looks for the maker's spend of the taker payment, which reveals the secret
+  needed to claim the maker payment. If that look finds nothing or fails, it now asks every server of the coin before
+  it goes on with the refund, so that the maker payment can still be claimed in time. Both apply to UTXO coins on
+  Electrum; the first only while `electrum_tip_checks` is `true` (the default). Detail: PR #461; CRD ch.38 R38.6.4o
+  item 6 and ch.51 R31a, status notes of 2026-11-21.
 - **An Electrum server is no longer marked as stuck just because the next block was slow.** A
   server counted as stuck when it had sent no new block for a while (at least 10 minutes) while
   another server had. After any long gap between blocks, every server except the first one to
@@ -946,9 +1062,19 @@ the previous version used. The safe way:
 - **Tests of a repeated QTUM or QRC20 activation.** A second activation of an active QTUM or QRC20 token, one
   after the other or started together, answers "already initialized" and starts no second connection,
   subscription or history collector. Only test code changed. Detail: PR #462.
+- **Tests of a maker restart before the outcome of its claim is saved.** A maker swap restored at the step that
+  claims the taker payment claims again; when that send fails, or when the claim time is over and nothing is sent,
+  the refund step still looks at the taker payment first and does not refund once it finds the maker's own
+  confirmed claim. When nothing spent the taker payment, the refund goes ahead as before. The design chapter
+  also states why a recorded but lost claim is answered differently by the automatic refund and by the manual
+  recovery. Only test code and docs changed. Detail: PR #464; CRD ch.51, status notes of 2026-11-21 after
+  R82 and R83, T35.
 
 ### Plans touched
 
+- [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
+  confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
+  PR #461; step 3, the lab row, is listed there.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P7, one record of spent coins
   and one lock per address for QTUM and its tokens, in PR #436; Phase E items 1 and 2 are covered.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
@@ -985,8 +1111,8 @@ the previous version used. The safe way:
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S6 in PR #425, S7 in PR #426; new package S6c (a rent-exempt guard for SOL withdraws); switch-on
-  lab rows for `disable_coin` and the Token-2022 refusal.
+  S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
+  withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
@@ -1026,6 +1152,60 @@ the previous version used. The safe way:
 - **The TRON transaction history needs a TronGrid API key.** Without a keyed TronGrid node, or without
   `tx_history: true` in the activation request, `my_tx_history` answers as for a coin without a history. Detail:
   CRD ch.21 §21.10C.
+
+## [0.4.1-beta.1] — 2026-11-21
+
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
+<!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
+
+### Upgrade note: a shielded wallet database already migrated by a development build
+
+**0.4.1-beta.1 cannot open a shielded (ARRR, Pirate) wallet database that a newer development
+build has already migrated.** This concerns only a data directory that a development build of
+the next version has run on. A data directory that only ran 0.4.0-beta.1 is not affected.
+
+To use such a wallet with 0.4.1-beta.1, stop the node, copy the
+`<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak` file that the development build wrote next to
+the wallet database over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal`
+and `<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start 0.4.1-beta.1. Anything the wallet
+recorded after the migration is not in the backup; the node scans it again. The changelog of the
+development line describes the migration and its backup under "Breaking changes and upgrade
+notes".
+
+### Changed
+
+#### Order book and peer-to-peer network
+
+- **The order book no longer shows ARRR or BC2 orders from nodes that cannot complete such a
+  swap.** Since v0.4.0 KDF Reloaded declines an ARRR swap with a node that does not state that it
+  builds version-6 transactions, and a BC2 swap with a node that does not state that it signs
+  with the BC2 suffix. The orders of those nodes were still listed, often at the best price, and a
+  taker that picked one got no swap: the request timed out after 30 seconds, and a
+  good-till-cancelled order was then turned into a maker order. Now `orderbook` and `best_orders`
+  (legacy and mmrpc 2.0), the order-book event stream and the `orderbook_depth` counts the node
+  takes from its own book leave such orders out, and the counts and volume totals cover the listed
+  orders only. `best_orders` reads the pair's full book when the best-priced orders are left out,
+  so it still returns the best orders the node can trade with. `buy` and `sell` that name only
+  such orders in `match_by` fail at once with an error that names the coin and the missing
+  capability, and no order is created. The same rule covers any coin that requires a capability
+  of its counterparty later.
+  - *Switching it off:* the existing settings `require_v6_counterparty` (ARRR, in the coin's
+    `consensus_params`) and `require_suffix_counterparty` (BC2, in the coin entry) list the orders
+    again, together with admitting those counterparties. While a setting is on, no request lists
+    the hidden orders.
+  - *Other nodes:* nothing changes for them. No message changes, and a KDF Reloaded relay still
+    passes every order on.
+  - *Limits:* counts that `orderbook_depth` gets from a relay still include such orders. A node of
+    another implementation still lists a KDF Reloaded maker's ARRR or BC2 order, and its request
+    times out.
+
+  Detail: PRs #446, #447; CRD ch.59 §59.4C.
+
+### Plans touched
+
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — planning: the
+  decision that the order-book answer shows no capability flag was revised; the order book now
+  leaves out orders that lack a capability the node requires (PRs #446, #447).
 
 ## [0.4.0-beta.1] — 2026-11-14
 

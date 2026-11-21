@@ -17,7 +17,8 @@ use crate::utxo::qtum::{QtumBasedCoin, QtumCoin, QtumDelegationOps, QtumDelegati
 use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
 use crate::utxo::rpc_clients::with_call_budget;
 use crate::utxo::UtxoCoinFields;
-use crate::{disable_coin, lp_coinfind, lp_coininit, MmCoinEnum, StakingInfosDetails, WithdrawRequest};
+use crate::{disable_coin, disable_platform_with_dependents, lp_coinfind, lp_coininit, CoinsContext, MmCoinEnum,
+            StakingInfosDetails, WithdrawRequest};
 use chain::{OutPoint, TransactionInput};
 use common::block_on;
 use crypto::CryptoCtx;
@@ -3160,6 +3161,67 @@ fn t38_6_4q_1_after_qtum_is_disabled_its_script_hash_subscription_is_not_placed_
             "{placed_again:?}"
         );
         assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+    });
+}
+
+/// D38.6.4Q.1 status note, item 6, on the forced removal of CRD ch.43 R43.1E.5 item 4: QTUM and its QRC20 dependent,
+/// removed in one step, both forget their Electrum subscriptions, as each does through a single `disable_coin`.
+#[test]
+fn t38_6_4q_1_the_forced_removal_of_qtum_with_a_token_makes_both_forget_their_subscriptions() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = electrum_client_of(&token);
+        let (qtum_owner, token_owner) = (
+            AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner,
+            token.utxo.electrum_owner,
+        );
+        let address = contract_addr_into_rpc_format(&token.my_addr_as_contract_addr().unwrap());
+        let contract = contract_addr_into_rpc_format(&token.contract_address);
+
+        // QTUM alone remembers the first hash, the token alone the third; both remember the second, and the token a
+        // contract event.
+        client
+            .subscribe_scripthash(qtum_owner, "aa11".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(qtum_owner, "bb22".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(token_owner, "bb22".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(token_owner, "cc33".to_owned())
+            .await
+            .unwrap();
+        client
+            .blockchain_contract_event_subscribe(token_owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await
+            .unwrap();
+        assert_eq!(client.contract_event_subscriptions(), 1);
+
+        // The token is a dependent of QTUM, as a token of the platform-with-tokens activation is.
+        let coins_ctx = CoinsContext::from_ctx(&env.ctx).unwrap();
+        {
+            let mut coins = coins_ctx.coins.lock().await;
+            let (registered, _) = coins.remove(TICKER).expect("the token is registered");
+            coins.insert_dependent(QTUM_TICKER, TICKER.to_owned(), registered);
+        }
+        drop((qtum, token));
+
+        let removed = disable_platform_with_dependents(&env.ctx, QTUM_TICKER).await.unwrap();
+        assert_eq!(removed, vec![TICKER.to_owned(), QTUM_TICKER.to_owned()]);
+        for hash in ["aa11", "bb22", "cc33"] {
+            assert_eq!(client.script_hash_owners(hash), None, "{hash}");
+        }
+        assert_eq!(client.contract_event_subscriptions(), 0);
     });
 }
 

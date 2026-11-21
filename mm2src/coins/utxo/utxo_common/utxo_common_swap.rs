@@ -969,6 +969,71 @@ pub async fn search_for_swap_tx_spend_my(
     .await
 }
 
+/// CRD ch.51 R31a, status note of 2026-11-21: [`search_for_swap_tx_spend_my`] on every usable server of an
+/// Electrum client at the same time, with the classification of [`search_for_swap_output_spend_of`]. `None` for a
+/// coin without an Electrum client, for a payment that does not pay the HTLC, and when no server finds a spend or
+/// a refund.
+pub async fn search_for_swap_tx_spend_my_on_every_server(
+    coin: &UtxoCoinFields,
+    time_lock: u32,
+    my_pub: &[u8],
+    other_pub: &[u8],
+    secret_hash: &[u8],
+    tx: &[u8],
+    output_index: usize,
+) -> Option<FoundSwapTxSpend> {
+    let UtxoRpcClientEnum::Electrum(client) = &coin.rpc_client else {
+        return None;
+    };
+    let search = || -> Result<_, String> {
+        let first_pub = Public::from_slice(my_pub).map_err(|e| ERRL!("{:?}", e))?;
+        let second_pub = Public::from_slice(other_pub).map_err(|e| ERRL!("{:?}", e))?;
+        let mut tx: UtxoTx = read_utxo_tx(tx).map_err(|e| ERRL!("{:?}", e))?;
+        tx.tx_hash_algo = coin.tx_hash_algo;
+        let payment = PaymentOutputs {
+            tx_hash: tx.hash(),
+            output0_script_pubkey: tx
+                .outputs
+                .first()
+                .ok_or_else(|| ERRL!("the payment has no outputs"))?
+                .script_pubkey
+                .clone(),
+            spent_script_pubkey: tx
+                .outputs
+                .get(output_index)
+                .ok_or_else(|| ERRL!("the payment has no output {}", output_index))?
+                .script_pubkey
+                .clone(),
+        };
+        ensure_payment_pays_htlc(time_lock, &first_pub, &second_pub, secret_hash, &payment)?;
+        Ok(payment)
+    };
+    let payment = match search() {
+        Ok(payment) => payment,
+        Err(e) => {
+            warn!("{}: no search for a spend on every server: {}", coin.conf.ticker, e);
+            return None;
+        },
+    };
+    let tx_hash_algo = coin.tx_hash_algo;
+    client
+        .find_output_spend_on_every_server(
+            payment.tx_hash,
+            &payment.spent_script_pubkey,
+            output_index,
+            move |spent_output_info| {
+                let mut tx = spent_output_info.spending_tx;
+                tx.tx_hash_algo = tx_hash_algo;
+                let script: Script = tx.inputs.first()?.script_sig.clone().into();
+                match classify_swap_spend(&script)? {
+                    SwapSpendKind::Spent => Some(FoundSwapTxSpend::Spent(tx.into())),
+                    SwapSpendKind::Refunded => Some(FoundSwapTxSpend::Refunded(tx.into())),
+                }
+            },
+        )
+        .await
+}
+
 pub async fn search_for_swap_tx_spend_other(
     coin: &UtxoCoinFields,
     time_lock: u32,

@@ -1,6 +1,6 @@
 /// Task-based L2 activation framework. Long-running L2 activations
 /// run as background RPC tasks with progress and cancellation support.
-use crate::context::{lock_activation, CoinsActivationContext};
+use crate::context::{lock_activation_under, CoinsActivationContext};
 use crate::l2::enable_l2::L2ProtocolParams;
 use crate::l2::l2_activation_errors::{CancelL2ActivationError, L2ActivationError, L2ActivationStatusError,
                                       L2ActivationUserActionError};
@@ -118,9 +118,12 @@ where
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
-        // R55.1.12: activations of one ticker run one at a time. The lock is held through registration, and the
-        // ticker is checked again once it is ours, because the activation that held it may have registered the coin.
-        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker])
+        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the layer-two
+        // coin is taken together with the platform's shared lock, so a `disable_coin` of the platform cannot run
+        // while the coin is registered. The lock is held through registration, and the ticker and the platform are
+        // checked again once it is ours.
+        let platform_ticker = self.protocol_conf.platform_coin_ticker().to_owned();
+        let _activation_guard = lock_activation_under(&self.ctx, &platform_ticker, &[&self.ticker])
             .await
             .map_err(|e| MmError::new(L2::ActivationError::from(RegisterCoinError::Internal(e))))?;
         if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {
@@ -128,27 +131,39 @@ where
                 RegisterCoinError::CoinIsInitializedAlready { coin: self.ticker },
             )));
         }
-
-        let platform_ticker = self.protocol_conf.platform_coin_ticker().to_owned();
-        let (coin, result) = L2::init_l2(
-            &self.ctx,
-            self.platform_coin,
-            self.validated_params,
-            self.protocol_conf,
-            self.coin_conf,
-            task_handle,
-        )
-        .await?;
+        // The platform that was active at `init` may have been disabled, or made passive, while the task waited.
+        // The status-level error set of a layer-two task has no platform member, so the text names it.
+        if !matches!(lp_coinfind(&self.ctx, &platform_ticker).await, Ok(Some(_))) {
+            return Err(MmError::new(L2::ActivationError::from(RegisterCoinError::Internal(
+                format!("Platform coin {} is not activated", platform_ticker),
+            ))));
+        }
+        // The work the build spawns belongs to the instance, and ends with this task if the instance is not
+        // registered (CRD ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+        let work = coins::coin_work::PendingCoinWork::new();
+        let (coin, result) = work
+            .scope(L2::init_l2(
+                &self.ctx,
+                self.platform_coin,
+                self.validated_params,
+                self.protocol_conf,
+                self.coin_conf,
+                task_handle,
+            ))
+            .await?;
 
         let c_ctx = CoinsContext::from_ctx(&self.ctx)
             .map_to_mm(RegisterCoinError::Internal)
             .map_mm_err()?;
-        c_ctx.add_token(&platform_ticker, coin.into()).await.map_err(|e| {
-            let reg_err = RegisterCoinError::CoinIsInitializedAlready {
-                coin: e.into_inner().ticker,
-            };
-            MmError::new(L2::ActivationError::from(reg_err))
-        })?;
+        c_ctx
+            .add_token_with_work(&platform_ticker, coin.into(), work)
+            .await
+            .map_err(|e| {
+                let reg_err = RegisterCoinError::CoinIsInitializedAlready {
+                    coin: e.into_inner().ticker,
+                };
+                MmError::new(L2::ActivationError::from(reg_err))
+            })?;
         self.registered_by_task.store(true, Ordering::SeqCst);
 
         Ok(result)

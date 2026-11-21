@@ -361,6 +361,9 @@ where
     // request backs the loop off (CRD ch.38 R38.6.5 decision 8). The two sources are independent.
     let mut balance_failures = FailureThrottle::default();
     let mut history_failures = FailureThrottle::default();
+    // The instance this loop serves; the loop ends when another instance, or none, is registered under the ticker
+    // (CRD ch.55 R55.4.9).
+    let own_instance = crate::coin_work::CoinWork::current_id();
     loop {
         if ctx.is_stopping() {
             break;
@@ -368,7 +371,9 @@ where
         {
             let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
             let coins = coins_ctx.coins.lock().await;
-            if !coins.contains_key(&coin.as_ref().conf.ticker) {
+            // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
+            let registered_instance = coins.registered().instance_id(&coin.as_ref().conf.ticker);
+            if !crate::coin_work::is_same_instance(registered_instance, own_instance) {
                 log_tag!(ctx, "", "tx_history", "coin" => coin.as_ref().conf.ticker; fmt = "Loop stopped");
                 if let Some(ref script_hash) = watched_script_hash {
                     wake_rx.close();
