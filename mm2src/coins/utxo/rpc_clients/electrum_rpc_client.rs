@@ -1003,9 +1003,14 @@ impl ElectrumClient {
                 self.pool
                     .log_wait_server_change(&tx_text, Some(&polled), &next, "out of date");
                 // A server that failed earlier and is up to date again is back in the choice.
+                let was_failed = failed.contains(&next);
                 failed.retain(|failed_addr| *failed_addr != next);
                 server = Some(next);
                 error_answers = 0;
+                if was_failed {
+                    // Back on a server that failed: keep the pace of the polls.
+                    Timer::sleep(check_every as f64).await;
+                }
                 continue;
             }
 

@@ -38,8 +38,8 @@ While `electrum_tip_checks` is `true` (the default):
 - After every poll that does not end the wait, the wait checks the state of item 4 of the server it polls.
   When that server is now out of date, the wait continues on the first up-to-date maintained server that
   has not failed during the wait, or, when there is none, on the first up-to-date one that has, which then
-  no longer counts as failed. The out-of-date server is not marked as failed: when it is up to date again,
-  a later choice may return to it.
+  no longer counts as failed and is polled only after the usual pause. The out-of-date server is not
+  marked as failed: when it is up to date again, a later choice may return to it.
 - An error answer of the polled server to the transaction request (an answer, not a transport failure)
   counts. Three in a row (about 45 seconds at the swap's 15-second poll) treat the server as failed for
   this wait, as a transport failure does: it is left out while another choice exists, and the wait
@@ -53,23 +53,23 @@ While `electrum_tip_checks` is `true` (the default):
 With `electrum_tip_checks` `false` nothing changes: no server is ever out of date, error answers keep the
 wait on its server, and the wait polls the first connection as T38.6.4o.11 states.
 
-Tests (T38.6.4o.23, T38.6.4o.24): two maintained stubs, *A* chosen first. *A* turns out of date during
-the wait while *B* has the confirmations: the wait ends on *B*. *A* up to date with 0 confirmations and
-*B* with 3: the wait stays on *A* (T38.6.4o.7 unchanged). *A* fails once, the wait moves to *B*, and *B*
-turns out of date while *A* is up to date again: the wait returns to *A*. *A* answers an error three times in a row: the
-wait moves to *B* and ends on its answer. Two errors and then an answer: the wait stays on *A*. With the
-switch `false`, error answers keep the wait on *A* until its deadline.
+Tests (T38.6.4o.23, T38.6.4o.24): two maintained stubs, *A* chosen first. *A* turns out of date during the
+wait while *B* has the confirmations: the wait ends on *B*. *A* up to date with 0 confirmations and *B*
+with 3: the wait stays on *A* (T38.6.4o.7 unchanged). *A* fails once, the wait moves to *B*, and *B* turns
+out of date while *A* is up to date again: the wait returns to *A*. *A* answers an error three times in a
+row: the wait moves to *B* and ends on its answer. Two errors and then an answer: the wait stays on *A*.
+With the switch `false`, error answers keep the wait on *A* until its deadline.
 
 ### 2. The refund chain's look for the maker's spend asks every server (ch.51 R31a)
 
 When an R31a look of an Electrum-backed UTXO taker coin ends without a spend or a refund (the search
-failed, did not finish within its 120-second bound, or found nothing), the look repeats the search once
-on every usable server of the coin's rank, with directed requests (R38.6.4g: a server whose connection
-is closed is opened for the request and released afterwards). The servers are asked at the same time
-and share one bound of 120 seconds, which begins when the first search has ended, so a look can take up
-to two such bounds; that delays only the taker's own refund. The first spend or refund one of them finds is handled as R31a
-states; when none finds one, the chain continues exactly as R31 states. This applies at all three points
-of R31a. Coins that are not Electrum-backed UTXO coins are unchanged.
+failed, did not finish within its 120-second bound, or found nothing), the look repeats the search once on
+every usable server of the coin's rank, with directed requests (R38.6.4g: a server whose connection is
+closed is opened for the request and released afterwards). The servers are asked at the same time and
+share one bound of 120 seconds, which begins when the first search has ended, so a look can take up to two
+such bounds; that delays only the taker's own refund. The first spend or refund one of them finds is
+handled as R31a states; when none finds one, the chain continues exactly as R31 states. This applies at
+all three points of R31a. Coins that are not Electrum-backed UTXO coins are unchanged.
 
 Load: one history request and the transaction requests it names per server and look, only for a swap in
 its refund chain, at most once a minute (R31a item 2) until the refund lock time.

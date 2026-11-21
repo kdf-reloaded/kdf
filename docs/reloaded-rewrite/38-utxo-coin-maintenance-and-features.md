@@ -2796,19 +2796,19 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    that server is out of date, the wait continues on the first up-to-date
    maintained connection in priority order that has not failed during this
    wait, or, when there is none, on the first up-to-date one that has; a
-   server taken this way no longer counts as failed. The out-of-date server
-   is not counted as failed and a later choice may return to it. (ii) Three
-   error answers in a row of the polled server to the transaction request
-   count as a failure of that server for this wait: it is left out while
-   another choice exists, as after a failed request, and the wait chooses
-   again. An
-   answer that is not an error resets the count. An up-to-date server that
-   answers too few confirmations keeps the wait, as before. Every change of
-   server logs one INFO line naming both servers by host and port (§38.6.9)
-   and the reason. With `electrum_tip_checks` `false` neither case applies.
-   This is prompted by a field report in which a taker payment had its
-   confirmations 88 minutes before the wait's deadline, and the wait still
-   timed out on the server it had chosen.
+   server taken this way no longer counts as failed, and the wait polls it
+   only after its usual pause. The out-of-date server is not counted as failed
+   and a later choice may return to it. (ii) Three error answers in a row of
+   the polled server to the transaction request count as a failure of that
+   server for this wait: it is left out while another choice exists, as after
+   a failed request, and the wait chooses again. An answer that is not an
+   error resets the count. An up-to-date server that answers too few
+   confirmations keeps the wait, as before. Every change of server logs one
+   INFO line naming both servers by host and port (§38.6.9) and the reason.
+   With `electrum_tip_checks` `false` neither case applies. This is prompted
+   by a field report in which a taker payment had its confirmations 88 minutes
+   before the wait's deadline, and the wait still timed out on the server it
+   had chosen.
 7. *Headers at the same height (amends R38.6.4l item 4).* Two servers that
    answer different header bytes for the same height, in a measurement round
    or in their header notifications, are not judged by the majority: the

@@ -3172,9 +3172,11 @@ impl PoolShared {
     pub(super) fn tip_checks_on(&self) -> bool { self.tip_checks }
 
     /// R38.6.4o item 6, status note of 2026-11-21: the server a wait that polls `addr` continues on when `addr` is
-    /// now out of date (item 4): the first maintained up-to-date connection in priority order that has not failed
-    /// during the wait (`failed`), as the choice rule gives it. `None` when `addr` is up to date or not maintained,
-    /// or when no other up-to-date server exists; servers that failed come after those that did not. `addr` is not marked as failed and a later choice may return to it.
+    /// now out of date (item 4). The polled server is left out; the choice is the first up-to-date maintained
+    /// connection in priority order that is not in `failed` (the servers that failed during this wait), else the
+    /// first up-to-date one in `failed`. `None` when `addr` is up to date or not maintained, or when no other
+    /// up-to-date server exists. `addr` is not marked as failed and a later choice may return to it; the caller
+    /// takes the chosen server off `failed`.
     pub(super) fn wait_server_after_out_of_date(&self, addr: &str, failed: &[String]) -> Option<String> {
         let maintained = self.refresh_out_of_date();
         let polled_is_out_of_date = maintained
