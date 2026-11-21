@@ -989,6 +989,19 @@ dropped and the taker refunded) is not part of this rule.
 > Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 81 tests of which these twelve
 > are new, and the formatting check passed.
 
+> **Status note (2026-11-21, Reloaded-original, clean side).** A restart
+> before the outcome of the claim is saved is covered by this rule as it
+> stands: the saved log then ends at `TakerPaymentValidatedAndConfirmed`, which
+> resumes at `STAGE-SPEND-TAKER-PAYMENT` (R19). That stage runs again, and every
+> way out of it records `TakerPaymentSpent` or `TakerPaymentSpendFailed` before
+> the refund stage is reached, including the exit taken when four fifths of the
+> lock duration have passed, which sends nothing. The swap has therefore
+> reached the claim step as this rule defines it, and its refund stage makes
+> the look of this rule, whether or not the claim sent before the restart
+> reached the chain. A second send that is accepted records the claim, and the
+> wait for its confirmation decides as before. T35 pins this path. No code is
+> changed.
+
 ## 51.6D Bound Manual Refund After a Lost Claim
 
 > **Status (Reloaded-original; 2026-11-12).** This rule records no claim about
@@ -1060,6 +1073,21 @@ changed by this rule.
 > `test_recover_funds_lost_claim_taker_refund_confirmed_before_the_lock_is_too_early`.
 > Run on 2026-11-12: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 89 tests of which these eight
 > are new, and the formatting check passed.
+
+> **Status note (2026-11-21, Reloaded-original, clean side; maintainer
+> decision of 2026-11-21).** The run loop and the manual recovery answer
+> differently in one case, and the difference is deliberate: the record holds
+> the sent claim of the taker payment, no spend of the taker payment is found
+> and the taker payment is unspent. The run loop refunds the maker payment
+> (R82 item 2: at the maker payment's refund time the taker has had a full lock
+> duration to claim it, and the two refund times race as the protocol intends).
+> The manual recovery refuses (item 4 above), because a claim that is still
+> waiting in a pool may not be visible to every coin's search, and refusing is
+> the cautious answer until the taker's refund is shown. The manual recovery
+> reaches this case only after the run loop ended without a refund: the look
+> could not decide by the refund deadline (R82 item 3), or the look answered
+> that nothing spent the taker payment and the refund that followed was
+> rejected. In every other case the two answer alike.
 
 > **Status note (2026-11-13, Reloaded-original).** R84 narrows R83: it covers the
 > record without a sent spend, after a failed claim call.
@@ -2338,6 +2366,27 @@ payment:
 
 *(Added 2026-11-21 with the status note under R31a.)*
 
+**T35.** *A restart before the outcome of the claim is saved (R82, status
+note of 2026-11-21).* With a maker swap restored from a saved log that ends at
+`TakerPaymentValidatedAndConfirmed`, the taker payment known:
+
+1. the restored swap resumes at `STAGE-SPEND-TAKER-PAYMENT`;
+2. the claim is sent again and the send fails (the claim sent before the
+   restart is already on the chain): `TakerPaymentSpendFailed` is recorded, the
+   refund stage searches the taker payment, finds the maker's confirmed claim,
+   records `TakerPaymentSpent` and `TakerPaymentSpendConfirmed` and finishes
+   without building a refund;
+3. the same log after four fifths of the lock duration have passed:
+   `TakerPaymentSpendFailed` is recorded without a send, and the outcome is as
+   in item 2;
+4. the same log with nothing found by the search: the refund is built once the
+   maker payment's refund time has passed.
+
+A second send that is accepted records `TakerPaymentSpent`, and the wait for
+the claim's confirmation decides as before; T35 has no item for it.
+
+*(Added 2026-11-21 with the status note under R82.)*
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -2595,6 +2644,12 @@ reference rows alike.
   LCC and RVN Electrum servers and this workspace's own refund chain and
   Electrum client code; no reference input was consulted, the note makes no
   parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-21, a second one: the status notes under R82 and
+  R83 and T35 are a Reloaded addition written in a clean session from the
+  maintainer's decision of 2026-11-21, an issue report, and this workspace's
+  own maker run loop, resume map and recovery code; no reference input was
+  consulted, the notes make no parity claim, and no Dirty Gate pass is
+  needed.)
   (Addition of 2026-10-30: R50B, T30 and D6 are a Reloaded addition
   written in a clean session from this workspace's own transaction-helper
   sender and receiver and from R43 of this chapter, prompted by a Reloaded
