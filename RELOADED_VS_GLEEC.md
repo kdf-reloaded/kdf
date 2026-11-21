@@ -594,6 +594,27 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   (status note after D38.6.4Q.1). Code:
   `coins/utxo/rpc_clients/electrum_client_registry.rs`,
   `coins/utxo/utxo_builder/utxo_coin_builder.rs`, `coins/lp_coins_ops.rs`.
+- **QTUM and its QRC20 tokens share one record of spent coins per address,
+  and their builds no longer wait for other UTXO coins.** No switch. GLEEC
+  KDF keeps a record of recently spent coins per coin instance, enters
+  nothing for a token's broadcast, and serializes token broadcasts and the
+  withdraw builds of every UTXO coin with one process-wide lock; a QTUM swap
+  send does not take it and a delegation does not hold it. So a QTUM send
+  right after a token send from the same address, or two token sends, can
+  select the same coin, and the second broadcast is rejected. KDF Reloaded
+  keeps one record per platform and address script for QTUM and its tokens.
+  Every transaction it
+  built from that address and the backend accepted is entered: QTUM's swap
+  sends and merges, every token broadcast, and the withdraws and delegations
+  promoted when they are broadcast. The record's own lock orders the builds
+  of that address, from the answered listing through the broadcast and the
+  entry, in place of the process-wide lock, which the other UTXO coins keep.
+  Under an HD login, QTUM's enabled address and the tokens' address have
+  separate records. Contract:
+  [CRD ch.38 §38.6.4Q](docs/reloaded-rewrite/38-utxo-coin-maintenance-and-features.md)
+  (status note after D38.6.4Q.4). Code:
+  `coins/utxo/spent_record_registry.rs`, `coins/qrc20/qrc20_helpers.rs`,
+  `coins/utxo/utxo_withdraw.rs`, `coins/utxo/qtum_delegation.rs`.
 - **A seed that is already connected is not dialed again.** A node short of relays dials each
   address at most once per 5 minutes, as GLEEC KDF does. GLEEC KDF also dials a seed that has
   connected to it by itself, because it compares addresses only, and the extra connection closes

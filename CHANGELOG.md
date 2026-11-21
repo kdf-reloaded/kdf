@@ -762,8 +762,8 @@ the previous version used. The safe way:
   `electrum_server_order` says, so they start at the same server. Their other reads still take turns,
   and other coins are unchanged. This narrows the gap and does not close it: a server can still
   answer before it has seen the send, and a token that lists other servers than QTUM does not share
-  its first server. A shared connection and a shared record of spent coins for QTUM and its tokens
-  are planned. Detail: PR #368; CRD ch.38 R38.6.4a.
+  its first server. QTUM and its tokens now also share one set of connections and one record of
+  spent coins; see the two items below. Detail: PR #368; CRD ch.38 R38.6.4a.
 - **A QRC20 token keeps working when one of its Electrum servers answers a contract request with an
   error.** Some public QTUM servers answer the token balance, history and receipt requests with an
   internal error. One such answer used to fail the activation, the balance read or the history
@@ -799,8 +799,27 @@ the previous version used. The safe way:
   would join a set whose servers disagree about the chain is refused with the same error as a new
   activation. On a shared set, activation errors, transport error texts, log lines and transport
   metrics name the platform (for example `QTUM`) also for a token, and `electrum_servers` for a token
-  reports the shared set. A shared record of spent coins is still planned. Detail: PR #427; CRD ch.38
+  reports the shared set. Detail: PR #427; CRD ch.38
   D38.6.4Q.1 and its status note.
+- **QTUM and its QRC20 tokens no longer pick a coin that another of them has just spent.** QTUM and
+  each token kept their own record of the coins they had spent, and a token recorded nothing, so a
+  QTUM send right after a token send (a swap payment, a fee, a token withdraw that was broadcast) from
+  the same address could pick the same coin and be rejected; two token sends could do the same. QTUM
+  and its tokens now keep one record per address: every transaction the node built from that address
+  and the network accepted is entered, and the next one uses other coins or the change. Token
+  withdraws and QTUM delegations are entered when they are broadcast with `send_raw_tx`. A token
+  send, and a withdraw or delegation of QTUM or a token, no longer waits for the builds of other UTXO
+  coins, and theirs no longer wait for it. Under an
+  HD login, QTUM's enabled address and the tokens' address are different addresses with separate
+  records. Detail: PR #436; CRD ch.38 D38.6.4Q.4 and its status note.
+- **A spend right after another spend from the same address no longer fails when a server has not
+  yet seen the first one.** This applies to every UTXO coin that checks the maturity of its coins
+  (QRC20 tokens always, QTUM by default, other coins with `check_utxo_maturity`). The next spend uses the
+  change of the first transaction, and the maturity check fetched that transaction from one of the
+  servers; a server that had not seen it yet could answer with an error, and the spend then failed. The
+  node built that transaction itself, so it cannot be a coinbase output, and the check no longer
+  fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
+  after R38.5B.4.
 
 ### Tests
 
@@ -869,6 +888,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P7, one record of spent coins
+  and one lock per address for QTUM and its tokens, in PR #436; Phase E items 1 and 2 are covered.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
   QTUM and its tokens, in PR #427; the Phase C items it leaves open are named under Phase C.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase A (reproduce and measure)

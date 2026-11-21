@@ -603,7 +603,7 @@ pub fn send_raw_tx_bytes(
 /// Qtum): once the backend has accepted the broadcast, the spend is promoted into the recently-spent record if the
 /// bytes are those of a pending withdraw (see [`send_raw_tx_bytes_promoting_withdraw`]).
 pub fn send_raw_tx_promoting_withdraw(
-    coin: &UtxoArc,
+    coin: &UtxoCoinFields,
     tx: &str,
 ) -> Box<dyn Future<Item = String, Error = String> + Send> {
     let bytes = try_fus!(hex::decode(tx));
@@ -615,19 +615,18 @@ pub fn send_raw_tx_promoting_withdraw(
 /// that has not expired move that entry into the record. A refused broadcast promotes nothing, and bytes that match
 /// no pending entry change nothing.
 pub fn send_raw_tx_bytes_promoting_withdraw(
-    coin: &UtxoArc,
+    coin: &UtxoCoinFields,
     tx_bytes: &[u8],
 ) -> Box<dyn Future<Item = String, Error = String> + Send> {
-    let coin = coin.clone();
+    // The record is shared by QTUM and its tokens, so a pending entry that either of them noted is promoted by
+    // the `send_raw_tx` of either (CRD ch.38 D38.6.4Q.4 status note, item 3).
+    let record = coin.recently_spent_outpoints.clone();
     let bytes = tx_bytes.to_vec();
     let broadcast = coin.rpc_client.send_raw_transaction(tx_bytes.into()).compat();
     Box::new(
         async move {
             let hash = broadcast.await.map_err(|e| ERRL!("{}", e))?;
-            coin.recently_spent_outpoints
-                .lock()
-                .await
-                .promote_pending_withdraw(&bytes);
+            record.lock().await.promote_pending_withdraw(&bytes);
             Ok(format!("{:?}", hash))
         }
         .boxed()
@@ -877,7 +876,8 @@ where
     T: UtxoCommonOps + GetUtxoListOps,
 {
     let (unspents, recently_spent) = coin.get_all_unspent_ordered_list(address).await?;
-    let mature_unspents = identify_mature_unspents(coin, unspents).await?;
+    let mature_unspents =
+        identify_mature_unspents_skipping(coin, unspents, |unspent| recently_spent.supplies(unspent)).await?;
     Ok((mature_unspents, recently_spent))
 }
 
@@ -893,11 +893,14 @@ where
 {
     let (unspents_map, recently_spent) = coin.get_all_unspent_ordered_map(addresses).await?;
     // Get an iterator of futures: `Future<Output=UtxoRpcResult<(Address, MatureUnspentList)>>`
+    let record = &recently_spent;
     let fut_it = unspents_map.into_iter().map(|(address, unspents)| {
-        identify_mature_unspents(coin, unspents).map(|res| -> UtxoRpcResult<(Address, MatureUnspentList)> {
-            let mature_unspents = res?;
-            Ok((address, mature_unspents))
-        })
+        identify_mature_unspents_skipping(coin, unspents, |unspent| record.supplies(unspent)).map(
+            |res| -> UtxoRpcResult<(Address, MatureUnspentList)> {
+                let mature_unspents = res?;
+                Ok((address, mature_unspents))
+            },
+        )
     });
     // Poll the `fut_it` futures concurrently.
     let result_map = futures::future::try_join_all(fut_it).await?.into_iter().collect();
@@ -906,6 +909,23 @@ where
 
 /// Splits the given `unspents` outputs into mature and immature.
 pub async fn identify_mature_unspents<T>(coin: &T, unspents: Vec<UnspentInfo>) -> UtxoRpcResult<MatureUnspentList>
+where
+    T: UtxoCommonOps,
+{
+    identify_mature_unspents_skipping(coin, unspents, |_| false).await
+}
+
+/// [`identify_mature_unspents`] that does not look at the outputs `is_own` names: they are mature without a fetch.
+///
+/// The shared listing path passes the outputs the recently-spent record supplied, which are outputs of a transaction
+/// this node built and signed. Such a transaction is never a coinbase or a coinstake, so maturity cannot apply to it.
+/// The parent fetch is a spread read whose error answer is final, so a server that has not yet seen the fresh
+/// transaction failed the next spend from the same address. Outputs the server listed keep the fetch.
+async fn identify_mature_unspents_skipping<T>(
+    coin: &T,
+    unspents: Vec<UnspentInfo>,
+    is_own: impl Fn(&UnspentInfo) -> bool,
+) -> UtxoRpcResult<MatureUnspentList>
 where
     T: UtxoCommonOps,
 {
@@ -941,6 +961,7 @@ where
 
     let to_verbose: HashSet<H256Json> = unspents
         .iter()
+        .filter(|unspent| !is_own(unspent))
         .map(|unspent| unspent.outpoint.hash.reversed().into())
         .collect();
     let verbose_txs = coin
@@ -952,6 +973,10 @@ where
 
     let mut result = MatureUnspentList::with_capacity(unspents.len());
     for unspent in unspents {
+        if is_own(&unspent) {
+            result.mature.push(unspent);
+            continue;
+        }
         let tx_hash: H256Json = unspent.outpoint.hash.reversed().into();
         let tx_info = verbose_txs
             .get(&tx_hash)
