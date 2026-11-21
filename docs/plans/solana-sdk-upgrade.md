@@ -32,7 +32,10 @@
 > the successor crate. Regression vectors written before the move (keypair
 > and address for a single key and the HD path, a signature, a SOL and an SPL
 > transfer, the associated token address under both token programs) pass
-> unchanged after it, native and wasm32. `cargo tree -i ed25519-dalek@1.0.1`
+> unchanged after it; they run natively, and the wasm32 build and test build
+> compile. The lock carries two majors of six Solana crates (`address` 1/2,
+> `clock` 3/4, `define-syscall` 4/5, `hash` 3/4, `instruction` 3/4, `pubkey`
+> 3/4) as transitive duplicates. `cargo tree -i ed25519-dalek@1.0.1`
 > is empty, so RUSTSEC-2022-0093 leaves `deny.toml`. `cargo tree -i
 > curve25519-dalek@3.2.0` is not: the remaining path is the libp2p fork's
 > Noise stack (`libp2p-noise` 0.43 -> `x25519-dalek` 1.1), so

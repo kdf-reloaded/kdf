@@ -12,6 +12,8 @@ use ed25519_dalek_bip32::{DerivationPath, ExtendedSigningKey};
 use solana_hash::Hash;
 use std::str::FromStr;
 
+// Public test vectors: fixed seed bytes 1..=32 and the standard BIP-39 test mnemonic. They hold no funds and are
+// not secrets. The expected values below were produced from the 2.x Solana crates before the move to 3.x.
 const SINGLE_SEED: [u8; 32] = [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32,

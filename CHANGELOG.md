@@ -662,10 +662,11 @@ the previous version used. The safe way:
   PR #371; CRD ch.40 §40.3A, R40.6B.2.
 
 - **Solana libraries moved to their 3.x line.** The Solana and SPL token libraries the coin is built on
-  moved from the 2.x line to the 3.x line (`spl-token` 9). Addresses, signatures and the bytes of every
-  transaction are unchanged: fixed test vectors check a single-key and an HD key, a signature, a SOL and
-  an SPL transfer, and the token-account address under both token programs. The old `ed25519-dalek`
-  1.0.1 library leaves the dependency tree, so the dependency policy no longer ignores RUSTSEC-2022-0093.
+  moved from the 2.x line to the 3.x line (`spl-token` 9). Addresses, signatures and the bytes of the
+  transfers the coin builds are unchanged: fixed test vectors check a single-key and an HD key, a
+  signature, a SOL and an SPL transfer, and the token-account address under both token programs. The
+  old `ed25519-dalek` 1.0.1 library leaves the dependency tree, so the dependency policy no longer
+  ignores RUSTSEC-2022-0093.
   RUSTSEC-2024-0344 stays ignored: `curve25519-dalek` 3.2.0 still comes in through the peer-to-peer
   library's encryption layer, not through Solana. Solana stays switched off in this build.
   Detail: PR #465.
