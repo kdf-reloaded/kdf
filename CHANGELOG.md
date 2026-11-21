@@ -1075,9 +1075,9 @@ the previous version used. The safe way:
   activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
   parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
   last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
-- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
-  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, done in PR #465:
-  RUSTSEC-2022-0093 is cleared, RUSTSEC-2024-0344 stays (it comes in through the peer-to-peer library).
+- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — done: the Solana crates moved to the 3.x
+  line (package S5 of `solana-support`, PR #465); RUSTSEC-2022-0093 is cleared, and RUSTSEC-2024-0344
+  moves to the libp2p modernization task (it comes in through the peer-to-peer library).
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,

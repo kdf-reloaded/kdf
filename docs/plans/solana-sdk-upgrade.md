@@ -1,6 +1,6 @@
 # Plan: Solana SDK ed25519-dalek 1.x → 2.x
 
-**Status:** parked (deferred by choice 2026-08-06; upstream-pinned, would need a fork) — **Last reviewed:** 2026-11-15
+**Status:** done (the Solana crates moved to the 3.x line in PR #465; RUSTSEC-2024-0344 moved to the libp2p modernization task) — **Last reviewed:** 2026-11-22
 
 > **Context: scoped, deferred by choice — 2026-08-06.** Checked reloaded's
 > actual Solana signing code (see "Confirmed root cause" below): the
@@ -41,7 +41,11 @@
 > Noise stack (`libp2p-noise` 0.43 -> `x25519-dalek` 1.1), so
 > RUSTSEC-2024-0344 stays ignored with its comment naming that path. The
 > Solana side of this plan is complete; the second advisory belongs to the
-> libp2p fork's modernization. The Status line is the maintainer's to change.
+> libp2p fork's modernization. By the maintainer's decision of 2026-11-22
+> the plan is done and the `curve25519-dalek` 3.2.0 item moves to the libp2p
+> modernization task. The five new Apache-2.0 license entries are allowed at
+> parity with their predecessors; the licensing of the Apache-2.0-only Solana
+> crates stays an open question.
 
 ## Goal
 
