@@ -705,7 +705,7 @@ the previous version used. The safe way:
   after three error answers in a row; each move is logged at INFO level with both servers. When such a timeout sends
   a taker into its refund chain, the chain looks for the maker's spend of the taker payment, which reveals the secret
   needed to claim the maker payment. If that look finds nothing or fails, it now asks every server of the coin
-  before it goes on with the refund, so the maker payment is claimed in time. Both apply to UTXO coins on Electrum;
+  before it goes on with the refund, so that the maker payment can still be claimed in time. Both apply to UTXO coins on Electrum;
   the first only while `electrum_tip_checks` is `true` (the default). Detail: PR #461; CRD ch.38 R38.6.4o item 6
   and ch.51 R31a, status notes of 2026-11-21.
 - **An Electrum server is no longer marked as stuck just because the next block was slow.** A

@@ -914,6 +914,10 @@ impl ElectrumClient {
                 error!("No Electrum server to poll for the transaction {:?}, retrying", tx_hash);
                 Timer::sleep(check_every as f64).await;
                 server = self.pool.choose_wait_server(&failed);
+                if let Some(next) = &server {
+                    self.pool
+                        .log_wait_server_change(&tx_text, None, next, "no server before");
+                }
                 continue;
             };
 
@@ -950,9 +954,11 @@ impl ElectrumClient {
                             failed.push(addr.clone());
                         }
                         server = self.pool.choose_wait_server(&failed);
+                        if let Some(next) = server.as_ref().filter(|next| **next != addr) {
+                            self.pool.log_wait_server_change(&tx_text, Some(&addr), next, reason);
+                        }
                         // Another server is asked at once; with none left to choose, the wait goes on as before.
-                        if let Some(next) = server.as_ref().filter(|next| !failed.contains(next)) {
-                            self.pool.log_wait_server_change(&tx_text, &addr, next, reason);
+                        if server.as_ref().map_or(false, |next| !failed.contains(next)) {
                             continue;
                         }
                     }
@@ -971,9 +977,13 @@ impl ElectrumClient {
                             Err(e) => {
                                 error!("Error {} getting block number, retrying in 10 seconds", e);
                                 if e.error.is_transport() {
-                                    failed.push(addr);
+                                    failed.push(addr.clone());
                                     server = self.pool.choose_wait_server(&failed);
                                     error_answers = 0;
+                                    if let Some(next) = server.as_ref().filter(|next| **next != addr) {
+                                        self.pool
+                                            .log_wait_server_change(&tx_text, Some(&addr), next, "request failed");
+                                    }
                                 }
                                 Timer::sleep(check_every as f64).await;
                                 continue;
@@ -991,7 +1001,9 @@ impl ElectrumClient {
             let polled = server.clone().unwrap_or(addr);
             if let Some(next) = self.pool.wait_server_after_out_of_date(&polled, &failed) {
                 self.pool
-                    .log_wait_server_change(&tx_text, &polled, &next, "out of date");
+                    .log_wait_server_change(&tx_text, Some(&polled), &next, "out of date");
+                // A server that failed earlier and is up to date again is back in the choice.
+                failed.retain(|failed_addr| *failed_addr != next);
                 server = Some(next);
                 error_answers = 0;
                 continue;

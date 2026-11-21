@@ -2063,11 +2063,11 @@ impl TakerSwap {
             other => {
                 match other {
                     Ok(Err(e)) => warn!(
-                        "Swap {}: could not look for a spend of the taker payment, going on with the refund: {}",
+                        "Swap {}: could not look for a spend of the taker payment: {}",
                         self.uuid, e
                     ),
                     Err(timeout) => warn!(
-                        "Swap {}: the look for a spend of the taker payment did not finish, going on with the refund: {}",
+                        "Swap {}: the look for a spend of the taker payment did not finish: {}",
                         self.uuid, timeout
                     ),
                     Ok(_) => (),

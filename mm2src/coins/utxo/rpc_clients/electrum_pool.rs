@@ -3174,7 +3174,7 @@ impl PoolShared {
     /// R38.6.4o item 6, status note of 2026-11-21: the server a wait that polls `addr` continues on when `addr` is
     /// now out of date (item 4): the first maintained up-to-date connection in priority order that has not failed
     /// during the wait (`failed`), as the choice rule gives it. `None` when `addr` is up to date or not maintained,
-    /// or when no other up-to-date server exists. `addr` is not marked as failed and a later choice may return to it.
+    /// or when no other up-to-date server exists; servers that failed come after those that did not. `addr` is not marked as failed and a later choice may return to it.
     pub(super) fn wait_server_after_out_of_date(&self, addr: &str, failed: &[String]) -> Option<String> {
         let maintained = self.refresh_out_of_date();
         let polled_is_out_of_date = maintained
@@ -3183,20 +3183,25 @@ impl PoolShared {
         if !polled_is_out_of_date {
             return None;
         }
+        // An up-to-date server that has not failed first; when there is none, the first up-to-date one among
+        // those that failed during the wait (the caller then takes it off `failed`).
+        let up_to_date = |(slot, state): &&(Arc<ServerSlot>, Option<OutOfDate>)| state.is_none() && slot.addr != addr;
         maintained
-            .into_iter()
-            .find(|(slot, state)| state.is_none() && !failed.contains(&slot.addr))
+            .iter()
+            .filter(up_to_date)
+            .find(|(slot, _)| !failed.contains(&slot.addr))
+            .or_else(|| maintained.iter().find(up_to_date))
             .map(|(slot, _)| slot.addr.clone())
     }
 
     /// Logs one change of server of a confirmation wait (R38.6.4o item 6, status note of 2026-11-21): both servers
     /// named `host:port` (R38.6.9a) and the reason.
-    pub(super) fn log_wait_server_change(&self, tx_hash: &str, from: &str, to: &str, reason: &str) {
+    pub(super) fn log_wait_server_change(&self, tx_hash: &str, from: Option<&str>, to: &str, reason: &str) {
         info!(
             "{}: the wait for the confirmations of {} moves from Electrum server {} to {}: {}",
             self.ticker,
             tx_hash,
-            self.server_label(from),
+            from.map_or_else(|| "(none)".to_owned(), |from| self.server_label(from)),
             self.server_label(to),
             reason
         );

@@ -575,14 +575,14 @@ locktime.
 > bound, or found nothing) MUST repeat the search once on every usable
 > server of the coin's rank, with directed requests (ch.38 R38.6.4g), before
 > the chain continues. The servers are asked at the same time and share one
-> bound of 120 seconds. The first spend or refund a server finds is handled
-> as this rule states for a found spend or refund; when none is found, the
-> chain continues exactly as R31 states. This applies at all three points
-> above. Other coins keep their single search. The reason is a field report:
-> a maker spent the taker payment a few seconds after its fourth
-> confirmation, and the taker's looks did not find the spend until hours
-> after the maker payment's locktime, while a healthy server of the coin
-> had it all along.
+> bound of 120 seconds, which begins when the first search has ended, so a
+> look can take up to two such bounds. The first spend or refund a server
+> finds is handled as this rule states for a found spend or refund; when
+> none is found, the chain continues exactly as R31 states. This applies at
+> all three points above. Other coins keep their single search. The reason
+> is a field report: a maker spent the taker payment a few seconds after its
+> fourth confirmation, and the taker's looks did not find that spend until
+> hours after the maker payment's locktime.
 
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume

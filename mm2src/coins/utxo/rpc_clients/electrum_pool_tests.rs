@@ -4589,6 +4589,62 @@ fn t38_6_4o_23_the_wait_leaves_a_server_that_turns_out_of_date() {
             assert!(line.contains("out of date"), "{line}");
         }
 
+        // A fails in transport first and the wait moves to B; when B turns out of date while A is up to date
+        // again, the wait returns to A (which failed earlier) and ends on its answer.
+        let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
+        a.set_result(TX_GET, verbose_tx(0));
+        b.set_result(TX_GET, verbose_tx(0));
+        let client = checked_pool(
+            &[&a, &b],
+            PoolSetup::new("WAIT23C"),
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b]).await;
+        let electrum = ElectrumClient(client.clone());
+        let mut wait = Box::pin(wait_for_one_confirmation(&electrum));
+        let mut observer = Box::pin(async {
+            wait_until("the wait to poll A", || a.requests(TX_GET) >= 1).await;
+            a.set_behavior(StubBehavior::Down).await;
+            wait_until("the wait to poll B", || b.requests(TX_GET) >= 1).await;
+            a.set_result(TX_GET, verbose_tx(3));
+            a.set_behavior(StubBehavior::Answer).await;
+            // A is suspended after its failure: pass again until it has joined once more.
+            for _ in 0..40 {
+                client.pool.run_pass().await;
+                if a.accepted() >= 2 {
+                    break;
+                }
+                Timer::sleep(0.2).await;
+            }
+            join_with_heights(&client, &[&a, &b]).await;
+            a.set_tip(H + 10);
+            wait_until("B to be out of date", || {
+                view_of(&client, &b).out_of_date == Some("behind")
+            })
+            .await;
+        });
+        match futures::future::select(wait.as_mut(), observer.as_mut()).await {
+            Either::Left((result, _)) => panic!("the wait ended early: {result:?}"),
+            Either::Right(_) => (),
+        }
+        wait.await.unwrap();
+        assert!(a.requests(TX_GET) >= 1, "{}", a.requests(TX_GET));
+        if capturing {
+            let moves: Vec<String> = info_lines("WAIT23C")
+                .into_iter()
+                .filter(|line| line.contains("moves from"))
+                .collect();
+            assert_eq!(moves.len(), 2, "{moves:?}");
+            assert!(moves[0].contains("request failed"), "{}", moves[0]);
+            assert!(moves[1].contains("out of date"), "{}", moves[1]);
+            assert!(
+                moves[1].find(&b.addr()).unwrap() < moves[1].find(&a.addr()).unwrap(),
+                "{}",
+                moves[1]
+            );
+        }
+
         // With the tip checks off no server is out of date: the wait stays on A until its deadline.
         let (a, b) = (stub_at(5, H).await, stub_at(5, H).await);
         a.set_result(TX_GET, verbose_tx(0));

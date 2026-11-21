@@ -2793,12 +2793,15 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    decision of 2026-11-21).* While `electrum_tip_checks` is `true`, the wait
    also chooses again in two more cases. (i) After every poll that does not
    end the wait, the state of item 4 of the polled server is looked at; when
-   that server is out of date and the choice rule above gives an up-to-date
-   server, the wait continues on that server. The out-of-date server is not
-   counted as failed and a later choice may return to it. (ii) Three error
-   answers in a row of the polled server to the transaction request count as
-   a failure of that server for this wait: it is left out while another
-   choice exists, as after a failed request, and the wait chooses again. An
+   that server is out of date, the wait continues on the first up-to-date
+   maintained connection in priority order that has not failed during this
+   wait, or, when there is none, on the first up-to-date one that has; a
+   server taken this way no longer counts as failed. The out-of-date server
+   is not counted as failed and a later choice may return to it. (ii) Three
+   error answers in a row of the polled server to the transaction request
+   count as a failure of that server for this wait: it is left out while
+   another choice exists, as after a failed request, and the wait chooses
+   again. An
    answer that is not an error resets the count. An up-to-date server that
    answers too few confirmations keeps the wait, as before. Every change of
    server logs one INFO line naming both servers by host and port (§38.6.9)
@@ -3636,7 +3639,10 @@ maintained stubs, *A* chosen first and up to date when the wait starts and
 answering 0 confirmations, and *B* answering 3: when *A* turns out of date
 (item 4) during a wait for 1 confirmation, the wait shall continue on *B* and
 end on its answer, with one INFO line naming *A*, *B* and the reason. While
-*A* stays up to date, the wait shall stay on *A* (T38.6.4o.7). With
+*A* stays up to date, the wait shall stay on *A* (T38.6.4o.7). When a request
+to *A* fails first, so that the wait moves to *B*, and *B* then turns out of
+date while *A* is up to date again, the wait shall return to *A* and end on its
+answer. With
 `electrum_tip_checks` `false` the wait shall stay on *A* (item 6, status note
 of 2026-11-21).
 
