@@ -26,7 +26,7 @@
 > Whether the move happens in the 0.5.0 cycle is an open maintainer decision;
 > `solana-support.md` lists it as package S5.
 
-> **State (2026-11-22): the move is built (PR #XXX).** Every `solana-*` crate
+> **State (2026-11-22): the move is built (PR #465).** Every `solana-*` crate
 > the coin uses is on the 3.x line, `spl-token` on 9, and the associated
 > token address comes from `spl-associated-token-account-interface` 2.0.0,
 > the successor crate. Regression vectors written before the move (keypair

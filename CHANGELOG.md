@@ -668,7 +668,7 @@ the previous version used. The safe way:
   1.0.1 library leaves the dependency tree, so the dependency policy no longer ignores RUSTSEC-2022-0093.
   RUSTSEC-2024-0344 stays ignored: `curve25519-dalek` 3.2.0 still comes in through the peer-to-peer
   library's encryption layer, not through Solana. Solana stays switched off in this build.
-  Detail: PR #XXX.
+  Detail: PR #465.
 
 #### UTXO coins and Electrum
 
@@ -1075,12 +1075,12 @@ the previous version used. The safe way:
   parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
   last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
-  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, done in PR #XXX:
+  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, done in PR #465:
   RUSTSEC-2022-0093 is cleared, RUSTSEC-2024-0344 stays (it comes in through the peer-to-peer library).
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S5 in PR #XXX, S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
+  S5 in PR #465, S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
   withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
