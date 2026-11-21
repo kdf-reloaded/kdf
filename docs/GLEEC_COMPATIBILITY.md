@@ -150,7 +150,8 @@ There is no global "GLEEC mode" switch and no shared JSON object — every setti
 | `get_my_address` while a Trezor is initialized | **none -- no switch exists** | Cannot be reproduced. For an EVM coin that is not activated, KDF Reloaded derives the reported address from the login's key, also when a Trezor context exists; GLEEC KDF derives it from the device whenever a Trezor context exists. Each coin takes its keys and stores its accounts by its own key policy on both, and only a coin activated for the Trezor is refused key export. Two points still differ: in KDF Reloaded a new address of a coin activated for the Trezor is not confirmed on the device, and the BCH activation task refuses the Trezor policy; GLEEC KDF does both. | No | [CRD ch.05 §5.10B R57, D7.e](reloaded-rewrite/05-hd-wallet-support.md) |
 | A Trezor replaced while its coins are active | **none -- no switch exists** | Cannot be reproduced. A coin activated under the Trezor policy keeps the identity of the device it was activated with. After `task::init_trezor` puts a different device in the slot, the coin answers `HwError` with the word `FoundUnexpectedDevice` (before 0.5.0: the error `FoundUnexpectedDevice`) to `task::create_new_account`, `get_new_address` and a withdrawal before it asks the device or writes anything; it works again with its own device, or after it is activated anew with the other one. A swap, also one that was already running, keeps signing with the coin's own device and refuses any other. GLEEC KDF uses the new device's keys against the old device's accounts. Decided by the maintainer on 2026-11-08 (second arm of [the default-side rule](COMPAT_SWITCHES.md#the-default-side-rule)). | No | [CRD ch.05 §5.10B R58a, R58a.1](reloaded-rewrite/05-hd-wallet-support.md) |
 | A coin's `derivation_path` changed between sessions under an HD login | **none -- no switch exists** | Cannot be reproduced in this release. Under an HD login with the seed as the key source, KDF Reloaded removes a coin's stored HD accounts that the seed does not derive under the currently configured path, with one WARN, and starts the coin as a fresh HD wallet at the new path; restoring the previous path brings the earlier addresses back the same way (the first account, or the one `path_to_address` names, scanned up to the gap limit; other accounts with `task::create_new_account`). GLEEC KDF keeps the earlier accounts in use while reporting the new path. No key material is lost in either implementation. A friendlier handling is planned. | No | [CRD ch.05 §5.10B](reloaded-rewrite/05-hd-wallet-support.md), status note of 2026-11-11; plan [`hd-account-storage-on-path-change`](plans/hd-account-storage-on-path-change.md) |
-| `disable_coin` and the passive platform coin | **none -- no switch exists** | Cannot be reproduced in this release. The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized` and takes `force_disable`, as GLEEC KDF does. The differences that remain: the `mmrpc: "2.0"` form neither makes a platform passive nor reads `force_disable` (it removes the platform, and its tokens stay registered); a forced removal checks the platform and every token for running swaps and orders being matched, and refuses the whole call if any is in use, where GLEEC KDF checks the platform's ticker only; an EVM token keeps working while its platform is passive, where GLEEC KDF fails its transactions and fee estimates; a standalone activation task for the ticker of a passive platform is refused at `init`, where GLEEC KDF builds the coin first and ends the task with the same error; removing a coin does not yet end its background work; a platform-with-tokens activation that names a token registered for another platform keeps that token silently in GLEEC KDF, where KDF Reloaded refuses it with `TokenIsAlreadyActivated` before building anything (a registered token of the same platform is kept in both). A passive platform is activated again by the platform-with-tokens methods, as in GLEEC KDF. | No | [CRD ch.43 §43.1E and §43.1F](reloaded-rewrite/43-daemon-rpc-dispatcher-and-misc-maintenance.md) |
+| `disable_coin` and the passive platform coin | **none -- no switch exists** | Cannot be reproduced in this release. The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized` and takes `force_disable`, as GLEEC KDF does. The differences that remain: the `mmrpc: "2.0"` form neither makes a platform passive nor reads `force_disable` (it removes the platform, and its tokens stay registered); a forced removal checks the platform and every token for running swaps and orders being matched, and refuses the whole call if any is in use, where GLEEC KDF checks the platform's ticker only; an EVM token keeps working while its platform is passive, where GLEEC KDF fails its transactions and fee estimates; a standalone activation task for the ticker of a passive platform is refused at `init`, where GLEEC KDF builds the coin first and ends the task with the same error; removing a coin does not yet end its background work; a platform-with-tokens activation that names a token registered for another platform keeps that token silently in GLEEC KDF, where KDF Reloaded refuses it with `TokenIsAlreadyActivated` before building anything by default; the `reactivation_registered_token` setting (next row) selects the GLEEC behavior (a registered token of the same platform is kept in both). A passive platform is activated again by the platform-with-tokens methods, as in GLEEC KDF. | No | [CRD ch.43 §43.1E and §43.1F](reloaded-rewrite/43-daemon-rpc-dispatcher-and-misc-maintenance.md) |
+| Platform activation that names an already registered token *(v0.5.0)* | `reactivation_registered_token` *(top-level `MM2.json`)* | `"keep"` -- a registered token of another platform named in a platform-with-tokens activation is kept silently and joins the platform. Default `"refuse"`: it is refused with `TokenIsAlreadyActivated`. | No | [see below](#reactivation_registered_token) |
 
 ### ZHTLC backend
 
@@ -366,6 +367,34 @@ key material. The bounded exposure and rationale are described in CRD chapter 07
 §7.3A. See [`COMPAT_SWITCHES.md`](COMPAT_SWITCHES.md) and
 [`CODING_STANDARDS.md`](CODING_STANDARDS.md) §5.1 for why this is the sole
 fund-controlling-secret carve-out.
+
+**`reactivation_registered_token`.** A top-level `MM2.json` string, `"refuse"`
+(default, also when the member is absent or `null`) or `"keep"`. It decides what a
+platform-with-tokens activation (the `enable_*_with_tokens` methods and their
+task forms, a first activation or the activation of a passive platform) does
+with a requested token that is already registered.
+
+- `"refuse"` *(default)* — a registered token that is a dependent of the platform,
+  or whose instance belongs to it, is kept and joins the platform again; a token
+  registered for another platform is refused with `TokenIsAlreadyActivated`
+  before anything is built.
+- `"keep"` — any registered token is kept silently, whatever platform it was
+  registered for, and joins the platform's dependent set and token list. A token
+  whose coin configuration names another platform is still refused with
+  `PlatformCoinMismatch`.
+
+Any other value stops the node at start with an error that names the member and
+the two values.
+
+**Compatibility:** for behaviour matching GLEEC KDF, set this to `"keep"`.
+
+```json
+{
+  "reactivation_registered_token": "keep"
+}
+```
+
+CRD chapter 43 §43.1F (D43.1F.1, R43.1F.4).
 
 ## Future fork chapters
 
