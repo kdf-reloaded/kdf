@@ -82,6 +82,11 @@
 > 2026-11-10, and the TRON work stops at the wallet path (PR #333) with TRON
 > activation still off; all three constants stay `false` in 0.4.0-beta.1.
 
+> **Status (2026-11-20).** TRON can be activated again, as a wallet-only coin
+> family (`TRON_ACTIVATION_AVAILABLE` is `true`; `TRON_SWAPS_AVAILABLE` is
+> `false`), so it still takes part in no trade (CRD ch.21 D6 and its status
+> note).
+
 ## Work packages and merge order
 
 | # | Branch / PR | Content | Depends on |

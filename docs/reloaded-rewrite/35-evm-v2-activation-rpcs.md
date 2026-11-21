@@ -280,6 +280,15 @@ In the HD shape `get_balances` has no effect (balances are always reported)
 (G: the reference shows no HD example with `get_balances: false`; the reference
 version ignores the flag in HD mode).
 
+> **Pointer (2026-11-19, Spec Reader round 0.5.0-15; travels with chapter 49
+> §49.2.1 for the KDF Dirty Gate).** After activation, the HD address
+> methods `get_new_address`, `account_balance`, `task::account_balance::init`
+> and `task::scan_for_new_addresses::init` carry the same per-address ticker
+> set as (b) for a platform ticker, and the token's ticker alone for a token
+> ticker. Their address form and the token `from` selector of a withdraw are
+> bound by [Chapter 49](49-withdrawal-task-path.md) R49.32 -- R49.34. This
+> note binds nothing of its own.
+
 The success HTTP status is 200.
 
 ### 35.1.D Signing policy, RPC mode, inline NFT
@@ -474,6 +483,11 @@ does not sign requests; each entry also reads the optional `headers` object of
 chapter 21 R-N9 (the `tron_api_key` applies to its URL as well); and the
 swap-contract members take the base58check and hex forms of chapter 21 R21.B2
 besides the EVM `0x` form. Chapter 21 §21.4 and R21.10B.2 govern the rest.
+
+*Status note (2026-11-20), TRON switched on.* `TRON_ACTIVATION_AVAILABLE` is
+`true` and the "not available" refusal is gone: this route activates a `TRX`
+platform and its `TRC20` tokens. A TRON coin is wallet-only while
+`TRON_SWAPS_AVAILABLE` is `false` (chapter 21 D6, R21.B3).
 
 ---
 
@@ -2859,3 +2873,15 @@ is decided together with this item.
   no behavior of its own; it travels with chapter 43 §43.1F for the KDF
   Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
   43's provenance footer.
+- *Pointer added 2026-11-19 (Spec Reader round 0.5.0-15) -- the note after
+  R35.1.3.* It names chapter 49 R49.32 -- R49.34 and restates their ticker
+  set in one sentence; it states no behavior of its own and travels with
+  chapter 49 §49.2.1 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
+  2026-11-19, measure 0.02, no findings**, as recorded for §49.2.1 in chapter
+  49's provenance footer.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status note of this date after the 2026-11-17 TRON platform note records
+  that `TRON_ACTIVATION_AVAILABLE` is `true` and that a TRON coin is
+  wallet-only while `TRON_SWAPS_AVAILABLE` is `false`. It rests on chapter
+  21 D6 and R21.B3 and on this repository's code. No cleared sentence was
+  edited.

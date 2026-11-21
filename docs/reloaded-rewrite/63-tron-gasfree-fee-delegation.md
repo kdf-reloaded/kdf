@@ -403,6 +403,12 @@ amount.
 `tokenAddress`, `activateFee`, `transferFee`, `symbol`, `decimal`,
 and a `supported` flag. Results may be cached for the session.
 
+> *Status note (2026-11-19; Reloaded-original, takes no reference input).*
+> The provider's published API wraps the array: `data` is an object whose
+> `tokens` member holds the entries, and each entry also carries `createdAt`
+> and `updatedAt`. Source: the provider's public developer documentation
+> (§63.14). The implementation decodes `data.tokens`.
+
 ### 63.4.6 Submit request payload (dictated)
 
 `POST .../gasfree/submit` sends the signed authorization as JSON.
@@ -476,6 +482,31 @@ addresses) are:
 | Mainnet | `TFFAMQLZybALaLb4uxHA9RBE7pxhUAjF3U` | `TSP9UW6FQhT76XD2jWA6ipGMx3yGbjDffP` |
 | Nile | `THQGuFzL87ZqhxkgqYEryRAd7gqFqL5rdc` | `TLtCGmaxH3PbuaF6kbybwteZcHptEdgQGC` |
 | Shasta | `TQghdCeVDA6CnuNVTUhfaAyPfTetqZWNpm` | `TQ1jvA3nLDMDNbJoMPLzTPoqAg8NvZ5CCW` |
+
+> *Status note (2026-11-19), creation bytecode (Reloaded-original; takes no
+> reference input).* Under the sourcing rule above, the bytes Reloaded embeds
+> are taken from the chain: the input of the transaction that deployed the
+> GasFree contracts on each network.
+>
+> | Network | Deploying transaction | Block | Length | keccak-256 of the creation bytecode |
+> | --- | --- | --- | --- | --- |
+> | Mainnet | `7f5e37bc9d78822d5b72bf90ea65444208c6a42b9b3b2f811666a992ba42f037` | 69944703 | 997 bytes | `28122b164158c3961d140d546ce24bb496fa91bff2b3cbc3f073d4eb5d998b22` |
+> | Nile | `df2f6668a4b7dd086f34876f919db63afa1e1649c81a07594552c85540feae1d` | 52537691 | 997 bytes | `8a1613b444604b6dc63c348f90741c31aef84360be2e9aaa142422c90059fcd4` |
+> | Shasta | `a6a20ec22185c82111f1ceceb70ccb144040f71a659c5e15643bcab7fe445aae` | 66317600 | 997 bytes | `52a8ac900543cec486e4d3c7bfd67d80b2a3e4b42e1b6a694382ee8498cdafc9` |
+>
+> The mainnet and Nile bytes are not equal: they differ in 32 bytes at offsets
+> 954 to 985, the compiler's metadata hash. Each equals the bytes SDK v1.1.2
+> publishes for its network. The Shasta controller was upgraded on 2026-07-04
+> (transaction
+> `c5ee6dcd2030b125b16309701b9d8046b14ae3ca294c017b2d734641a8067287`). The
+> Shasta bytes of SDK v1.1.2 (1208 bytes, keccak-256
+> `490791365cc571bb1659ec928507a7b5f69ab6c65a8cdf7ee9a4a8c61b2f3477`) and its
+> five Shasta custody-address vectors describe the implementation that was
+> live before that upgrade, and no longer match the live Shasta controller.
+> Decision D63.5 (a) therefore holds as written for mainnet and Nile; for
+> Shasta the source of the T1 vectors is the live controller's read-only
+> `getGasFreeAddress(address)`. The sentences of this section about the SDK's
+> Shasta bytecode and vectors are left as written.
 
 The `initialize(address)` selector used in step 2 is `0xc4d66de8`
 (the leading 4 bytes of keccak-256 of the ASCII function
@@ -715,6 +746,13 @@ The withdraw pipeline gains a gasless branch selected by
    exactly 1, unknown members are rejected when the payload is read
    back, and the raw signature is redacted in `Debug` (R9). Whether
    Reloaded adopts these member names is part of decision D63.2.
+
+   *Status note (2026-11-19).* The members around the nested signed
+   authorization -- their names, JSON types, value sources, presence
+   and position in the withdraw result -- are stated one by one in
+   §63.8A (R25-R28, T15-T16, D63.8). Where this step and §63.8A
+   differ in precision, §63.8A is the more precise statement. §63.8A
+   passed the KDF Dirty Gate on 2026-11-19.
 6. **Fallback.** With `fee_method = gasless` and
    `fallback_to_native = true`, a *deterministic* unavailability
    (the rail is not configured for the coin, the token is not
@@ -735,6 +773,159 @@ chapter. Submission and settlement tracking are deferred work
 that D63.6 adds a call and not a contract; whether an
 implementation exercises those exchanges before D63.6 lands is not
 observable and is not bound.
+
+## 63.8A The Sign-Only Result: Members Around the Signed Authorization
+
+*(Added 2026-11-19 by the KDF Spec Reader; reference facts at the
+rows of chapter 02 §2.15A named below; passed the KDF Dirty Gate on
+2026-11-19, measure 0.01, attestation in §63.15. It adds to §63.8 step 5
+and replaces none of its sentences.)*
+
+**Reference states.** At the row `dev (as of 2026-03-16)` there is
+no GasFree withdraw: no fee-rail selector, no gasless rail and no
+off-chain payload of any shape. Everything below is the row
+`feat/tron-gasfree (as of 2026-05-04)`, the only cited state that
+has the rail. No test at that row checks a complete withdraw answer
+of the gasless rail; the facts below were established by reading how
+the answer is assembled and serialized, not by running the rail.
+
+R25. **No wrapper member; the payload sits at the top level
+    (reference fact).** The off-chain payload is not carried under a
+    member of its own. Its members are top-level members of the
+    shared transaction-details object of
+    [Chapter 49](49-withdrawal-task-path.md) R49.25, beside the
+    shared members -- the same arrangement as the unsigned results of
+    [Chapter 36](36-tendermint-v2-activation-rpcs.md) R36.14.17. The
+    result carries **no `tx_hex` and no `tx_hash`**; the two members
+    are omitted, not empty. This holds for the direct `withdraw`
+    answer (legacy and `mmrpc` 2.0 form) and for the terminal payload
+    of `task::withdraw::status` alike.
+
+R26. **Member list (reference fact).** The payload contributes
+    exactly the nine members below, emitted in this order and ahead
+    of every shared member. A JSON object is unordered and nothing at
+    the reference row depends on the order; it is recorded for
+    byte-level comparison only.
+
+    | # | Member | JSON type | Value | Present |
+    | --- | --- | --- | --- | --- |
+    | 1 | `relay_type` | string | the fixed text `tron_gasfree` | always |
+    | 2 | `chain_id` | string | the chain id of the platform's Tron network -- the number the typed-data domain of §63.6 uses -- written as decimal digits (`728126428` mainnet, `2494104990` Shasta, `3448148188` Nile) | always |
+    | 3 | `coin` | string | the ticker of the token being withdrawn (the request's `coin`) | always |
+    | 4 | `from` | object | the request's own `from` selector, returned in the form it was sent: either `account_id` (integer), `chain` (`External` or `Internal`) and `address_id` (integer), or a single `derivation_path` (string) | only when the request carried `from`; otherwise the member is omitted, not `null` |
+    | 5 | `from_address` | string | the sending address in Tron Base58Check form (`T...`); it equals the nested `user` | always |
+    | 6 | `gasfree_address` | string | the custody (GasFree) address of the sender, Base58Check; the address the preflight of §63.7 settled on, equal to `gasfree_address` of the fee details (§63.3.5) | always |
+    | 7 | `verifying_contract` | string | the GasFree controller contract of the platform's network (§63.5; the `verifyingContract` of §63.6), Base58Check | always |
+    | 8 | `signed_authorization` | object | the nested object of §63.8 step 5 | always |
+    | 9 | `created_at` | string | the UTC time the payload was built, RFC 3339 with whole seconds and the `Z` suffix | always |
+
+    Inside `signed_authorization` the four address members (`token`,
+    `service_provider`, `user`, `receiver`) are Base58Check strings;
+    the five integer members are decimal strings, `deadline` being
+    Unix seconds; and `sig` is the 65-byte signature as 130
+    hexadecimal digits in lower case with no `0x` prefix, whose last
+    byte is 27 or 28. Its ten members are emitted in the order §63.8
+    step 5 lists them.
+
+R27. **What the payload does not carry (reference fact).** There is
+    no expiry member beside `created_at`: the only expiry in the
+    result is the nested `deadline`. There is no member for the
+    provider's name or address, no trace identifier (the fee details
+    carry `trace_id`, `null` on this path), no numeric form of the
+    chain id, no hexadecimal form of any address, and no sender
+    public key. The token contract, the service provider, the
+    receiver and the amount appear only inside
+    `signed_authorization`; the account or path of the sender appears
+    only as the optional `from` of row 4.
+
+R28. **Shared members on this path, and two repeated names
+    (reference fact).** The shared members follow the nine and carry:
+    `from` (an array holding the sending address) and `to` (an array
+    holding the receiver), both Base58Check; `total_amount` (the
+    requested amount); `spent_by_me` (amount plus the total token
+    fee); `received_by_me` (the amount when the receiver is the
+    sender, otherwise zero); `my_balance_change` (received minus
+    spent); `block_height` 0; `timestamp` (integer Unix seconds);
+    `fee_details` (§63.3.5); `coin`; an empty `internal_id`; the
+    default `transaction_type`; and `memo` `null`. `kmd_rewards` is
+    absent.
+
+    Two names of R26 are also shared names: `coin` (same value in
+    both places) and `from` (row 4 is a selector object; the shared
+    member is an array of strings). The answers named in R25 are
+    written out member by member with no merging step, so the HTTP
+    answer text contains `coin` twice and, when the request carried
+    `from`, `from` twice -- the selector object first, the address
+    array later. A client whose JSON reader keeps the last of two
+    equal names therefore never sees the selector. On a route that
+    first builds the result as a JSON tree, one member per name
+    survives: the later value, at the earlier position. Which routes
+    do so was not examined one by one in this pass.
+
+> **Reading the payload back (informative; not bound).** The
+> reference row defines a typed reading of the nine members that
+> refuses any member outside the nine and accepts a missing `from`;
+> the nested object is read with `version` required to be exactly 1
+> and does not itself refuse extra members. Nothing at the reference
+> row performs that reading on any RPC path (submission is deferred,
+> D63.6), so it is not observable today. Because the nine members are
+> mixed with the shared ones, a consumer has to pick them out by
+> name; the whole result object is not a valid payload under that
+> reading.
+
+> **Code-quality finding (informative; trigger: apparent while
+> reading the payload and the shared result object side by side).**
+> The repeated `coin` and `from` of R28 put two members of the same
+> name into one JSON object, and a client that keeps the last of
+> duplicate names does not see the selector the payload was given.
+> Unless D63.8 chooses byte parity, Reloaded should emit each name
+> once. See D63.8.
+
+D63.8. **Shape of the sign-only result in Reloaded (for the
+    maintainer; open).** Options:
+
+    - (a) *Client sees:* the nine members at the top level as in R25
+      and R26, `coin` once, and `from` always as the address array;
+      no selector. *Reloaded must:* emit each name once and omit the
+      selector of row 4.
+    - (b) *Client sees:* as (a), plus the selector under a member
+      name the reference does not have. *Reloaded must:* emit each
+      name once and choose and document that Reloaded-only name.
+    - (c) *Client sees:* the reference's answer text byte for byte,
+      with `coin` twice and, when the request carried `from`, `from`
+      twice. *Reloaded must:* reproduce the repeated names of R28 in
+      the reference's order.
+
+    *Recommendation:* (a).
+
+    Under every option the result has no `tx_hex` and no `tx_hash`,
+    which Chapter 49 R49.25 otherwise makes mandatory; the Chapter 49
+    pointer of 2026-11-19 records that.
+
+    *Status note (2026-11-19, clean side).* Decided 2026-11-19: option
+    (a). Reloaded's sign-only result carries the members of R26 at the
+    top level except the selector of row 4, emits `coin` once, and gives
+    `from` always as the address array of R28; T16 applies in its (a)
+    form.
+
+T15. **Sign-only result members.** A sign-only gasless withdraw of a
+    TRC20 token, once without and once with a `from` selector under
+    an HD wallet, through the direct method and through the task
+    path: the result has no `tx_hex` and no `tx_hash`; it carries the
+    members of R26 with the stated JSON types; `chain_id` is the
+    decimal text of the network's chain id; `from_address` equals the
+    nested `user`; `gasfree_address` equals the fee details'
+    `gasfree_address`; `verifying_contract` is the network's
+    controller; `created_at` parses as RFC 3339 UTC with whole
+    seconds and is earlier than the nested `deadline`; no member of
+    R27 is present (R25-R27).
+
+T16. **One member per name (conditional on D63.8).** Under D63.8
+    (a) or (b): the serialized answer text of T15 contains each
+    member name of the result object at most once, and its `from` is
+    as the chosen option states. Under D63.8 (c) this test is
+    replaced by a byte-parity check of the answer text against the
+    repeated names and order of R28.
 
 ## 63.9 Error Taxonomy and Status Codes
 
@@ -974,6 +1165,14 @@ R23. **Header-bearing JSON POST.** The cross-platform
     there), so R23's browser sentence stays open until the GasFree rail
     needs it.
 
+    *Status note (2026-11-19).* The GET-with-headers form now exists as a
+    bounded accessor too:
+    `mm2_net::transport::slurp_url_with_headers_bounded(url, headers,
+    timeout_s)`, with the same signature on both targets. The whole exchange
+    is bounded, a redirect is not followed and no header value is rendered;
+    on the browser target the returned header map is empty, as for the POST
+    accessor. The provider's read calls of §63.4.1 use it.
+
 R24. **No silent substitution without consent (Reloaded-original).**
     A rail switch -- native to gasless under `auto`, or gasless to
     native under `fallback_to_native` -- MUST be visible in the
@@ -981,6 +1180,18 @@ R24. **No silent substitution without consent (Reloaded-original).**
     fee-details shape) tells the caller which rail executed. The
     project MUST NOT switch rails under `fee_method = gasless`
     unless `fallback_to_native` is set.
+
+R29. **Custody derivation checked against the controller
+    (Reloaded-original, 2026-11-19).** Before the gasless rail uses a
+    custody address for a user on a network, whenever no confirmation of
+    that address younger than 10 minutes exists (so after every restart
+    of the node, and at least every 10 minutes while the rail is used),
+    the implementation compares the address it derives (§63.5) with the
+    controller's read-only `getGasFreeAddress(user)`. On inequality the
+    gasless rail is refused for that network with `Unavailable` (HTTP 503)
+    and one warning line, nothing is signed, and the native rail stays
+    available. This refusal is not a deterministic unavailability for
+    §63.8 step 6. *(Takes no reference input.)*
 
 > **Code-quality finding (informative; trigger: a comment at the
 > reference row states the problem itself).** At the reference row the custody address is not produced
@@ -1002,6 +1213,12 @@ T1. **`CREATE2` address vectors.** Local derivation reproduces all
     vectors, also the published intermediate salt and init-code
     hash.
 
+    *Status note (2026-11-19).* For Shasta the five vectors are the
+    answers of the live controller's `getGasFreeAddress(address)`, because
+    the Shasta vectors of SDK v1.1.2 predate the controller's upgrade of
+    2026-07-04 (§63.5 status note); the test also requires the derived
+    address to differ from the SDK's value.
+
 T2. **TIP-712 vectors.** The `PermitTransfer` domain separator,
     struct hash and full typed-data hash reproduce the published
     Nile vectors of the public SDK (one domain separator, five
@@ -1009,6 +1226,10 @@ T2. **TIP-712 vectors.** The `PermitTransfer` domain separator,
     separator computed from the per-network chain id and
     controller; a lab row checks one hash per network against the
     controller contract's public read-only message-hash function.
+
+    *Status note (2026-11-19).* The per-network live check reads the
+    controller's `getMessageHashForTransfer` for the first Nile message
+    vector and compares the answer with the locally computed full hash.
 
 T3. **Auth vector.** The request-auth signature reproduces a fixed
     HMAC auth vector (self-derivable from the construction of
@@ -1078,6 +1299,12 @@ T14. **Nile end-to-end (lab row; deferred with D63.6).** A
     settlement tracking to a terminal state; plus a browser-target
     smoke test of the header-bearing transport. No end-to-end test
     exists at the reference row.
+
+T17. **Controller check (R29) (Reloaded-original, 2026-11-19).** A
+    match is confirmed and reused for 10 minutes; after that, or after a
+    restart, the controller is read again; a mismatch refuses with
+    `Unavailable` (503), signs nothing and keeps nothing cached; a failed
+    read is reported through the node error.
 
 ## 63.12 Deferred Work
 
@@ -1303,3 +1530,35 @@ V2. The baseline withdraw request has no fee-rail selector and no
   only in that branch's commit message of 2026-06-26, against a
   reference state that was not tabled at the time. Neither that
   verdict nor the two failed passes carry to this revision.
+- *Scoped addition (2026-11-19, Spec Reader round 0.5.0-16) -- §63.8A
+  (R25 -- R28, the read-back note, the code-quality finding, D63.8, T15
+  and T16) and the status note under §63.8 step 5, cleared together with
+  the pointer after chapter 49 R49.26; no other text of this chapter was
+  changed.* **KDF Dirty Gate: PASS on 2026-11-19, measure 0.01, no
+  findings** (chapter 01 R40; the attestation closes this item).
+  *Inputs:* the forbidden corpus at the row `feat/tron-gasfree (as of
+  2026-05-04)` of chapter 02 §2.15A, read read-only and consulted **only**
+  to establish how the sign-only result of the gasless withdraw is
+  assembled and serialized (its members, their JSON types, value sources,
+  presence and order, and the nested signed authorization), and the row
+  `dev (as of 2026-03-16)`, searched whole-tree, to establish that it has
+  no GasFree withdraw. D63.8, T15 and T16 are original to this section. No
+  row was added to chapter 02 §2.15A: both states already have rows.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-19, measure
+  0.01, no findings, in a main pass and a delta pass after the options of
+  D63.8 were reworded for neutrality. *Extent:* the Tron GasFree gasless
+  withdraw surface of §63.8 and §63.8A -- the assembly and serialization
+  of the sign-only withdraw result, the off-chain payload and the nested
+  signed authorization -- at the row `feat/tron-gasfree (as of
+  2026-05-04)`; the row `dev (as of 2026-03-16)` searched whole-tree (no
+  GasFree withdraw). *Method:* reading plus mechanical comparison (a
+  per-token lookup, an identifier scan, and word n-gram overlap at lengths
+  4, 5 and 6); the repository's clean-room gate tool was not applicable
+  because the additions embed no code blocks. *Measure:* 0.01, on the
+  discretionary-expression basis.
+- *Status note added 2026-11-19 -- after D63.8.* Reloaded-original, clean
+  side: it records the maintainer's decision of 2026-11-19 (option (a));
+  no forbidden-class input, chapter 01 R38 not engaged.
+- *Additions of 2026-11-19:* R29, T17 and the status notes dated
+  2026-11-19 (§63.4.5, §63.5, R23, T1, T2) are Reloaded-original and take no
+  reference input.

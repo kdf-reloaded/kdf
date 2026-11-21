@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::request_fee_scope::{self, FeeReadKind};
+use crate::utxo::zip317;
 use utxo_signer::with_key_pair::sign_tx;
 
 pub const DEFAULT_FEE_VOUT: usize = 0;
@@ -33,6 +34,9 @@ pub async fn get_tx_fee(coin: &UtxoCoinFields) -> UtxoRpcResult<ActualTxFee> {
         },
         TxFee::FixedPerKb(satoshis) => Ok(ActualTxFee::FixedPerKb(*satoshis)),
         TxFee::FixedPerStartedKb(satoshis) => Ok(ActualTxFee::FixedPerStartedKb(*satoshis)),
+        TxFee::Zip317 { legacy_rate_per_kb } => Ok(ActualTxFee::Zip317 {
+            legacy_rate_per_kb: *legacy_rate_per_kb,
+        }),
     }
 }
 
@@ -74,6 +78,18 @@ pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> 
             segwit_virtual_size(base_size, total_size)
         },
         _ => transaction_bytes.len() + tx.inputs().len() * additional_len,
+    }
+}
+
+/// The transparent bytes ZIP 317 counts for a transaction of `input_count` inputs and the given `outputs`: every
+/// input as a signed P2PKH input of the builder's size estimate (the unsigned input plus the 107-byte signature
+/// and public key allowance of [`tx_size_in_v_bytes`], 148 bytes) and every output as serialized.
+pub fn zip317_tx_bytes(input_count: usize, outputs: &[TransactionOutput]) -> zip317::Zip317Bytes {
+    zip317::Zip317Bytes {
+        input: (input_count as u64).saturating_mul(zip317::P2PKH_INPUT_LEN),
+        output: outputs.iter().fold(0u64, |sum, output| {
+            sum.saturating_add(zip317::output_len(output.script_pubkey.len()))
+        }),
     }
 }
 
@@ -190,10 +206,12 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         from_addr_format: &UtxoAddressFormat,
         actual_tx_fee: &ActualTxFee,
     ) -> bool {
-        // CRD ch.38 R38.6.6b: the fee of the transaction as built so far, i.e. without the change output.
+        // CRD ch.38 R38.6.6b: the fee of the transaction as built so far, i.e. without the change output. A
+        // ZIP 317 coin pays for the inputs and outputs of that transaction instead of its size.
         let transaction = UtxoTx::from(self.tx.clone());
         let v_size = tx_size_in_v_bytes(from_addr_format, &transaction) as u64;
-        self.tx_fee = actual_tx_fee.fee_for_size(v_size);
+        let zip317_bytes = zip317_tx_bytes(self.tx.inputs.len(), &self.tx.outputs);
+        self.tx_fee = actual_tx_fee.fee_for_shape(v_size, zip317_bytes);
 
         match self.fee_policy {
             FeePolicy::SendExact => {
@@ -204,7 +222,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
                     if Self::is_change_output(self.change, self.dust()) {
                         final_size += P2PKH_OUTPUT_LEN;
                         // there will be change output
-                        let change_increase = Self::change_output_fee_increase(actual_tx_fee, v_size);
+                        let change_increase = Self::change_output_fee_increase(actual_tx_fee, v_size, zip317_bytes);
                         self.tx_fee += change_increase;
                         outputs_plus_fee += change_increase;
                     }
@@ -226,7 +244,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
                     let mut final_size = v_size;
                     if Self::is_change_output(self.change, self.dust()) {
                         final_size += P2PKH_OUTPUT_LEN;
-                        self.tx_fee += Self::change_output_fee_increase(actual_tx_fee, v_size);
+                        self.tx_fee += Self::change_output_fee_increase(actual_tx_fee, v_size, zip317_bytes);
                     }
                     if let Some(min_relay) = Self::relay_fee_for_size(self.min_relay_fee, final_size) {
                         if self.tx_fee < min_relay {
@@ -242,17 +260,20 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
     }
 
     /// CRD ch.38 R38.6.6b: the forced minimum relay fee of a transaction of `size` bytes,
-    /// `floor(relay_rate * size / 1000)`, from the node's per-kilobyte relay rate.
+    /// `floor(relay_rate * size / 1000)`, from the node's per-kilobyte relay rate. It is a floor over the size
+    /// under every fee rule, the ZIP 317 rule included.
     fn relay_fee_for_size(relay_rate: Option<u64>, size: u64) -> Option<u64> {
-        relay_rate.map(|rate| ActualTxFee::Dynamic(rate).fee_for_size(size))
+        relay_rate.and_then(|rate| ActualTxFee::Dynamic(rate).fee_for_size(size))
     }
 
     /// The fee increase for the change output that is not in the transaction yet. CRD ch.38 R38.6.6b: the
     /// fee of a transaction with a change output is the policy's rule applied once over its whole size, change
     /// output included, so the increase is `fee_for_size(v_size + 34) - fee_for_size(v_size)` under every policy
-    /// (dynamic rate included). The change output's share is never rounded on its own.
-    fn change_output_fee_increase(actual_tx_fee: &ActualTxFee, v_size: u64) -> u64 {
-        actual_tx_fee.change_output_increase(v_size)
+    /// (dynamic rate included). The change output's share is never rounded on its own. Under ZIP 317 the increase
+    /// is the conventional fee with the 34-byte change output minus the one without it: a whole action when the
+    /// change output pushes the outputs into one more action, otherwise nothing.
+    fn change_output_fee_increase(actual_tx_fee: &ActualTxFee, v_size: u64, zip317_bytes: zip317::Zip317Bytes) -> u64 {
+        actual_tx_fee.change_output_increase_for_shape(v_size, zip317_bytes)
     }
 
     /// CRD ch.38 R38.6.6n: a change output is added whenever the change is not below the dust amount (and is
@@ -516,6 +537,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         str_d_zeel,
         hash_algo,
         sighash_suffix: coin.as_ref().conf.sighash_suffix,
+        read_by_library: false,
     };
     let signed_input = try_s!(p2sh_spend(
         &unsigned,
@@ -549,6 +571,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         consensus_branch_id,
         sapling_v5: unsigned.sapling_v5,
         orchard: unsigned.orchard,
+        opaque: None,
     })
 }
 
@@ -613,7 +636,7 @@ pub fn send_raw_tx_bytes_promoting_withdraw(
 }
 
 pub fn tx_enum_from_bytes(coin: &UtxoCoinFields, bytes: &[u8]) -> Result<TransactionEnum, String> {
-    let mut transaction: UtxoTx = try_s!(deserialize(bytes).map_err(|err| format!("{:?}", err)));
+    let mut transaction: UtxoTx = try_s!(read_utxo_tx(bytes).map_err(|err| format!("{:?}", err)));
     transaction.tx_hash_algo = coin.tx_hash_algo;
     Ok(transaction.into())
 }
@@ -623,7 +646,11 @@ pub fn get_trade_fee<T: UtxoCommonOps>(coin: T) -> Box<dyn Future<Item = TradeFe
     let decimals = coin.as_ref().decimals;
     let fut = async move {
         let fee = try_s!(coin.get_tx_fee().await);
-        let amount = fee.rate_per_kb();
+        // A ZIP 317 coin reports the conventional fee of a standard transaction, not a per-kilobyte rate.
+        let amount = match fee {
+            ActualTxFee::Zip317 { .. } => zip317::standard_fee(),
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) | ActualTxFee::FixedPerStartedKb(rate) => rate,
+        };
         Ok(TradeFee {
             coin: ticker,
             amount: big_decimal_from_sat(amount as i64, decimals).into(),
@@ -711,7 +738,7 @@ where
 
             Ok(big_decimal_from_sat(total_fee as i64, decimals))
         },
-        ActualTxFee::FixedPerKb(_) | ActualTxFee::FixedPerStartedKb(_) => {
+        ActualTxFee::FixedPerKb(_) | ActualTxFee::FixedPerStartedKb(_) | ActualTxFee::Zip317 { .. } => {
             let outputs_count = outputs.len();
             let (unspents, _recently_sent_txs) = coin.get_unspent_ordered_list(&my_address).await.mm_err(Into::into)?;
 
@@ -738,8 +765,12 @@ where
             if tx.outputs.len() != outputs_count {
                 v_size = v_size.saturating_sub(P2PKH_OUTPUT_LEN);
             }
+            // A ZIP 317 coin pays for the transparent bytes of the same transaction: the requested outputs (the
+            // builder appends its change output last) and one P2PKH change output.
+            let requested_outputs = &tx.outputs[..outputs_count.min(tx.outputs.len())];
+            let zip317_bytes = zip317_tx_bytes(tx.inputs.len(), requested_outputs).with_p2pkh_change();
             let total_fee = tx_fee
-                .fee_for_size(v_size.saturating_add(P2PKH_OUTPUT_LEN))
+                .fee_for_shape(v_size.saturating_add(P2PKH_OUTPUT_LEN), zip317_bytes)
                 .max(data.fee_amount);
 
             Ok(big_decimal_from_sat(total_fee as i64, decimals))
@@ -788,9 +819,7 @@ where
 /// The fee to spend (receive) other payment is deducted from the trading amount so we should display it
 pub fn get_receiver_trade_fee<T: UtxoCommonOps>(coin: T) -> TradePreimageFut<TradeFee> {
     let fut = async move {
-        let amount_sat = get_htlc_spend_fee(&coin, DEFAULT_SWAP_TX_SPEND_SIZE)
-            .await
-            .mm_err(Into::into)?;
+        let amount_sat = get_v1_htlc_spend_fee_estimate(&coin).await.mm_err(Into::into)?;
         let amount = big_decimal_from_sat_unsigned(amount_sat, coin.as_ref().decimals).into();
         Ok(TradeFee {
             coin: coin.as_ref().conf.ticker.clone(),
@@ -815,9 +844,20 @@ where
         value,
         script_pubkey: Builder::build_p2pkh(&AddressHashEnum::default_address_hash()).to_bytes(),
     };
+    let mut outputs = vec![output];
+    // The estimate cannot know whether the real DEX fee transaction carries a burn output, so under ZIP 317 (where
+    // one more output can be one more action) it counts the fee and a P2PKH burn output, the larger shape. The
+    // second output carries the dust amount only, so the balance the estimate needs hardly changes. Per-kilobyte
+    // coins keep the single output.
+    if matches!(coin.get_tx_fee().await.mm_err(Into::into)?, ActualTxFee::Zip317 { .. }) {
+        outputs.push(TransactionOutput {
+            value: coin.as_ref().dust_amount,
+            script_pubkey: Builder::build_p2pkh(&AddressHashEnum::default_address_hash()).to_bytes(),
+        });
+    }
     let gas_fee = None;
     let fee_amount = coin
-        .preimage_trade_fee_required_to_send_outputs(vec![output], FeePolicy::SendExact, gas_fee, &stage)
+        .preimage_trade_fee_required_to_send_outputs(outputs, FeePolicy::SendExact, gas_fee, &stage)
         .await?;
     Ok(TradeFee {
         coin: coin.ticker().to_owned(),

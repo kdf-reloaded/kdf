@@ -10,21 +10,29 @@ pub mod api;
 pub(crate) mod balance;
 pub(crate) mod broadcast;
 pub mod fee;
+pub(crate) mod gasfree;
+pub(crate) mod hd;
+pub mod history;
 pub mod nodes;
 pub mod proto;
 pub mod sign;
 pub mod tx_builder;
 pub mod withdraw;
 
+#[cfg(all(test, not(target_arch = "wasm32")))] mod hd_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod history_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod node_client_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod test_node;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod wallet_path_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod withdraw_fee_tests;
 
 pub use activation::{parse_trc20_contract, tron_coin_from_conf_and_request, tron_coin_from_params,
-                     tron_required_confirmations, TronCoinParams};
+                     tron_coin_from_params_with_global_hd, tron_required_confirmations, TronCoinParams};
 pub use address::{TronAddress, TronAddressFormat};
+pub use history::spawn_platform_history;
 
 use serde::{Deserialize, Serialize};
 

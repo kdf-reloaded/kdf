@@ -249,6 +249,16 @@ jobs:
           # (docs/UNIT_TESTS.md) and stay ignored here.
           - name: electrum-qrc20
             cmd: "cargo test -p coins --lib -- utxo::rpc_clients::electrum qrc20::"
+          # The node tests of `mm2_main` (`mm2::mm2_tests::`): each starts one or more real nodes as child
+          # processes of the test binary, on loopback addresses and a test netid, which is why the cell builds
+          # with `regtest-netid`. Without `live-network-tests` it runs only the tests that need no public
+          # server, no passphrase variable and no Docker (start-up, RPC password and version checks, batch
+          # requests, swap status, public key, order book ticker rule, the bot start and stop, the database
+          # migration); the others carry the `live-network-tests` `cfg_attr(... ignore)` pattern or a plain
+          # `#[ignore]` with a reason and stay ignored here (docs/UNIT_TESTS.md). `test_mm_start` is the entry
+          # point of those child processes and does nothing when run as a test.
+          - name: node-tests
+            cmd: "cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::"
 
     steps:
       - uses: actions/checkout@v7

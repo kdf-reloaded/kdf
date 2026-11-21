@@ -6,7 +6,6 @@
 //! task variant.
 
 use crate::context::{lock_activation_under, CoinsActivationContext};
-use crate::eth_with_tokens_activation::tron::tron_activation_available;
 use crate::init_token::{InitTokenActivationOps, InitTokenError, InitTokenInProgressStatus, InitTokenTaskHandle,
                         InitTokenTaskManagerShared};
 use crate::platform_coin_with_tokens::{CustomTokenError, InitTokensAsMmCoinsError, RegisterTokenInfo};
@@ -22,7 +21,7 @@ use coins::nft::{fetch_and_store_owned_nfts, Chain, ChainTicker, EnableNftError,
 use coins::rpc_command::get_my_address::PathToAddress;
 use coins::rpc_command::get_token_info::config_ticker_for_contract;
 use coins::{coin_conf, lp_coinfind, lp_coinfind_or_err, BalanceError, CoinBalance, CoinProtocol, CoinsContext,
-            DerivationMethod, MarketCoinOps, MmCoin, MmCoinEnum, TRON_NOT_AVAILABLE};
+            DerivationMethod, MarketCoinOps, MmCoin, MmCoinEnum};
 use common::Future01CompatExt;
 use crypto::{CryptoCtx, KeyPairPolicy};
 use mm2_core::mm_ctx::MmArc;
@@ -566,10 +565,6 @@ pub async fn enable_evm_token(
         .map_to_mm(EnableTokenError::Internal)?;
     ensure_evm_token_not_active(&ctx, &req.ticker).await?;
     match protocol {
-        // While TRON is switched off no TRC20 token is built, whatever the platform state (CRD ch.21 §21.4).
-        EvmTokenProtocol::Erc20(protocol) if protocol.tron && !tron_activation_available(&ctx) => {
-            MmError::err(EnableTokenError::Internal(TRON_NOT_AVAILABLE.to_owned()))
-        },
         EvmTokenProtocol::Erc20(protocol) => enable_erc20_token(&ctx, req, protocol)
             .await
             .map(EvmTokenActivationResult::Erc20),
@@ -818,12 +813,7 @@ impl InitTokenActivationOps for EthCoin {
         ticker: &str,
         inline_protocol: Option<&CoinProtocol>,
     ) -> Result<Self::ProtocolInfo, InitTokenError> {
-        let protocol = resolve_erc20_protocol(ctx, ticker, inline_protocol).map_err(InitTokenError::from)?;
-        // While TRON is switched off no TRC20 token task starts (CRD ch.21 §21.4).
-        if protocol.tron && !tron_activation_available(ctx) {
-            return Err(InitTokenError::Internal(TRON_NOT_AVAILABLE.to_owned()));
-        }
-        Ok(protocol)
+        resolve_erc20_protocol(ctx, ticker, inline_protocol).map_err(InitTokenError::from)
     }
 
     async fn init_token(

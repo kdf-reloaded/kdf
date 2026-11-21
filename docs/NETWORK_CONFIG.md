@@ -467,8 +467,7 @@ pin).
 
 ### TRON node list and API key
 
-TRON is switched off in this build, so nothing below has an effect yet. When TRON returns, the
-node list of its activation request names the TRON full-node HTTP API endpoints. The mmrpc 2.0
+The node list of a TRON activation request names the TRON full-node HTTP API endpoints. The mmrpc 2.0
 methods (`enable_eth_with_tokens`, `task::enable_eth::init`) read it from `nodes`, as the EVM
 family does: each entry is an object with `url`, an optional `komodo_proxy` (read, and, as on the
 EVM route, requests are not signed with it) and an optional `headers` object of request headers
@@ -493,6 +492,14 @@ matched exactly (letter case ignored), and only over HTTPS. A TronGrid host give
 no key; the headers of its own entry are still sent, as configured. The key is never sent to another
 host of the same list, so a list can mix TronGrid with other providers. A header of the same name on a node's own entry wins over
 `tron_api_key` for that node.
+
+The key also decides whether a TRON coin has a transaction history. With `tx_history: true` in the
+activation request, the history runs only when the node list has a TronGrid host over HTTPS that
+carries the `TRON-PRO-API-KEY` header (from its own entry or from `tron_api_key`). The account
+listings the history reads are asked of such nodes only, never of another node of the list. Without
+a key `my_tx_history` answers as before: an empty list from the legacy method and `NotSupportedFor`
+from the versioned one. A pass asks two listings per known address about once a minute, which counts
+against the provider's request quota of the key.
 
 Header values and `tron_api_key` are secrets. No log line, error text, RPC answer or debug output
 shows them, they go to no other host, and no peer sees them. A request is not redirected: a node

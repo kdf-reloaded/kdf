@@ -482,3 +482,18 @@ fn a_shielded_htlc_funding_builds_as_version_6_and_verifies() {
         htlc_value
     );
 }
+
+/// The transparent coin's read entry point reads what the ZHTLC builder emits at the activation height: the same
+/// bytes back, the library's transaction id, the builder's input and output (CRD ch.39 D39.11.4V.3).
+#[test]
+fn the_transparent_coins_reader_reads_the_builders_version_6_transaction() {
+    let tx = build_transparent_only(&params(Some(IRONWOOD_HEIGHT)), IRONWOOD_HEIGHT);
+    let bytes = serialize(&tx);
+    let read = crate::utxo::utxo_common::read_utxo_tx(&bytes).expect("a version 6 transaction is read");
+    assert_eq!(read.version, 6);
+    assert_eq!(read.hash(), txid_internal(&tx));
+    assert_eq!(::serialization::serialize(&read).take(), bytes);
+    assert_eq!((read.inputs.len(), read.outputs.len()), (1, 1));
+    assert_eq!(read.inputs[0].previous_output.hash.take(), [7u8; 32]);
+    assert_eq!(read.outputs[0].value, 90_000);
+}

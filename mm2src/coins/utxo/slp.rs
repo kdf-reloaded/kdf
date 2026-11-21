@@ -1225,6 +1225,7 @@ mod slp_tests {
 
         let req = WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
             amount: big_decimal_from_sat_unsigned(slp_total, fusd.decimals()),
             from,
             to: FEE_TEST_RECIPIENT.to_string(),

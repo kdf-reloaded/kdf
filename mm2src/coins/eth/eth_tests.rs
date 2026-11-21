@@ -1334,6 +1334,48 @@ mod search_for_swap_tx_spend_scripted {
             assert_eq!(windows, vec![(from, tip), (tip - 11, tip + 1)]);
         }
 
+        /// A payment event that the node reports without a transaction hash is an error, not a panic.
+        #[test]
+        fn payment_sent_event_without_tx_hash_is_an_error() {
+            let sent_topic = topic_of("PaymentSent");
+            // The payment id depends on the coin, which is built after the node it talks to.
+            let id_cell: Arc<Mutex<Vec<u8>>> = Arc::default();
+            let id_h = id_cell.clone();
+            let node = spawn(move |method, _params| match method {
+                "eth_blockNumber" => json!(format!("{:#x}", CURRENT_BLOCK)),
+                "eth_getLogs" => json!([{
+                    "address": format!("0x{}", SWAP_CONTRACT_ADDR.to_lowercase()),
+                    "topics": [sent_topic],
+                    "data": format!("0x{}", hex::encode(&*id_h.lock().unwrap())),
+                    "blockHash": format!("0x{}", "22".repeat(32)),
+                    "blockNumber": format!("{:#x}", CURRENT_BLOCK),
+                    "transactionHash": Json::Null,
+                    "transactionIndex": "0x0",
+                    "logIndex": "0x0",
+                    "removed": false,
+                }]),
+                // `payments(id)`: payment hash, lock time, state.
+                "eth_call" => json!(format!("0x{}{}{:064x}", "00".repeat(32), "00".repeat(32), 1)),
+                other => panic!("the scripted node does not serve `{}`", other),
+            });
+            let (_ctx, coin) = coin_with(&node.url, EthCoinType::Eth, "GLW9", 1000);
+            let (time_lock, secret_hash) = (1_000, [7u8; 20]);
+            *id_cell.lock().unwrap() = coin.etomic_swap_id(time_lock, &secret_hash);
+            let err = block_on(
+                coin.check_if_my_payment_sent(
+                    time_lock,
+                    &[],
+                    &[],
+                    &secret_hash,
+                    CURRENT_BLOCK - 10,
+                    &coin.swap_contract_address(),
+                )
+                .compat(),
+            )
+            .unwrap_err();
+            assert!(err.contains("payment event without a transaction hash"), "{err}");
+        }
+
         /// R17.8.3: a window that failed is searched again by the next poll.
         #[test]
         fn t17_8_3_a_failed_window_is_not_skipped() {
@@ -1985,6 +2027,7 @@ fn test_withdraw_impl_manual_fee() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2027,6 +2070,7 @@ fn test_withdraw_impl_fee_details() {
 
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2074,6 +2118,7 @@ fn test_withdraw_impl_refuses_the_cosmos_fee_forms() {
     ] {
         let withdraw_req = WithdrawRequest {
             memo: None,
+            expiration_seconds: None,
             amount: 1.into(),
             from: None,
             to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2091,6 +2136,7 @@ fn task_withdraw_evm_native_accepts_omitted_from_sender() {
     let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2117,6 +2163,7 @@ fn task_withdraw_evm_token_accepts_omitted_from_sender() {
     );
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -2139,6 +2186,7 @@ fn task_withdraw_evm_token_explicit_hd_from_resolves_selected_sender() {
     });
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -2165,6 +2213,7 @@ fn direct_withdraw_evm_explicit_hd_from_signs_with_selected_sender() {
     let (ctx, coin, selected_addr) = eth_hd_coin_for_test(EthCoinType::Eth);
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -2205,6 +2254,7 @@ fn direct_withdraw_evm_single_key_explicit_from_is_structured_sender_error() {
     let (ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
     let withdraw_req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::AddressId(crate::HDAddressId {
             account_id: 0,
@@ -3132,6 +3182,7 @@ fn direct_withdraw_rejected_for_trezor_signer() {
     let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Eth);
     let req = WithdrawRequest {
         memo: None,
+        expiration_seconds: None,
         amount: 1.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_string(),
@@ -4088,6 +4139,26 @@ mod scripted_node_ports {
         let err = validate(true, false, FEE_BLOCK).unwrap_err();
         assert!(err.contains("confirmed before min_block"), "{err}");
         validate(true, false, FEE_BLOCK - 1).unwrap();
+    }
+
+    /// A fee transaction of another coin family is refused with an error before any node request:
+    /// the coin's only node address is unreachable and the call still answers at once.
+    #[test]
+    fn validate_dex_fee_non_evm_tx_is_an_error() {
+        let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
+        let fee_tx = TransactionEnum::UtxoTx(crate::UtxoTx::default());
+        let err = coin
+            .validate_fee(ValidateFeeArgs {
+                fee_tx: &fee_tx,
+                expected_sender: test_dex_fee_addr_raw_pubkey(),
+                fee_addr: test_dex_fee_addr_raw_pubkey(),
+                dex_fee: &DexFee::Standard("0.001".into()),
+                min_block_number: 0,
+                uuid: &[],
+            })
+            .wait()
+            .unwrap_err();
+        assert!(err.contains("is not an EVM transaction"), "{err}");
     }
 
     /// Several transactions sent at once must each get a distinct, consecutive nonce.

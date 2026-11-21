@@ -410,6 +410,7 @@ impl SlpToken {
             consensus_branch_id,
             sapling_v5: unsigned.sapling_v5,
             orchard: unsigned.orchard,
+            opaque: None,
         };
 
         let _broadcast = self

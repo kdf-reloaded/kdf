@@ -20,6 +20,7 @@ macro_rules! true_or {
 mod utxo_common_hd;
 mod utxo_common_helpers;
 mod utxo_common_history;
+mod utxo_common_read;
 mod utxo_common_spv;
 mod utxo_common_swap;
 mod utxo_common_tx;
@@ -27,6 +28,7 @@ mod utxo_common_tx;
 pub use utxo_common_hd::*;
 pub use utxo_common_helpers::*;
 pub use utxo_common_history::*;
+pub use utxo_common_read::*;
 pub use utxo_common_spv::*;
 pub use utxo_common_swap::*;
 // `UtxoMergeParams` (defined in `utxo_common_tx`) is also reachable through the
