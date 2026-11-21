@@ -6,6 +6,7 @@ use crate::utxo::header_time_only::read_window_times;
 #[cfg(not(target_arch = "wasm32"))]
 use common::dns_resolver::connect_tcp;
 use common::jsonrpc_client::process_transport_single_result;
+use common::log::debug;
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -757,6 +758,10 @@ impl ElectrumClient {
     }
 }
 
+/// The error answers of one server to the transaction request, in a row, that a confirmation wait counts as a failure
+/// of that server (CRD ch.38 R38.6.4o item 6, status note of 2026-11-21).
+const WAIT_ERROR_ANSWERS_LIMIT: u32 = 3;
+
 /// Read-only requests addressed to one named server (CRD ch.38 R38.6.4g): the request opens the server's
 /// connection if it is closed and releases it afterwards when the server is not maintained, and it is
 /// answered by that server or fails naming it. Used where the answer of a particular server is the
@@ -794,13 +799,94 @@ impl ElectrumClient {
         rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
     }
 
+    /// The spend of output `vout` of the transaction `tx_hash`, searched on one named server with directed
+    /// requests (R38.6.4g): the history of the output's script hash, then each transaction of it, as
+    /// [`UtxoRpcOps::find_output_spend`] does through the spread reads.
+    async fn find_output_spend_from(
+        &self,
+        server: &str,
+        tx_hash: H256,
+        script_pubkey: &[u8],
+        vout: usize,
+    ) -> Result<Option<SpentOutputInfo>, String> {
+        let script_hash = hex::encode(electrum_script_hash(script_pubkey));
+        let history = try_s!(self.scripthash_get_history_from(server, &script_hash).compat().await);
+        if history.len() < 2 {
+            return Ok(None);
+        }
+        for item in history.iter() {
+            let transaction = try_s!(self.transaction_get_from(server, &item.tx_hash).compat().await);
+            let maybe_spend_tx: UtxoTx =
+                try_s!(crate::utxo::utxo_common::read_utxo_tx(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+            for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
+                if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
+                    return Ok(Some(SpentOutputInfo {
+                        spending_tx: maybe_spend_tx,
+                        input_index: index,
+                        spent_in_block: BlockHashOrHeight::Height(item.height),
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// CRD ch.51 R31a, status note of 2026-11-21: the search of [`Self::find_output_spend_from`] on every usable
+    /// server of the coin's rank at the same time. `found` turns the spend one server found into the answer, or
+    /// `None` when it does not count. Returns the first answer; a server that fails or finds nothing is left
+    /// out. One INFO line names the server that found it. The caller bounds the time the search takes.
+    pub(crate) async fn find_output_spend_on_every_server<T>(
+        &self,
+        tx_hash: H256,
+        script_pubkey: &[u8],
+        vout: usize,
+        found: impl Fn(SpentOutputInfo) -> Option<T>,
+    ) -> Option<T> {
+        let found = &found;
+        let mut searches: futures::stream::FuturesUnordered<_> = self
+            .pool
+            .usable_addrs()
+            .into_iter()
+            .map(|addr| async move {
+                match self.find_output_spend_from(&addr, tx_hash, script_pubkey, vout).await {
+                    Ok(spend) => spend.and_then(found).map(|answer| (addr, answer)),
+                    Err(e) => {
+                        debug!(
+                            "{}: the search for a spend on Electrum server {} failed: {}",
+                            self.coin_ticker,
+                            self.pool.server_label(&addr),
+                            e
+                        );
+                        None
+                    },
+                }
+            })
+            .collect();
+        while let Some(answer) = searches.next().await {
+            if let Some((addr, answer)) = answer {
+                info!(
+                    "{}: Electrum server {} found the spend of the swap payment {:?}",
+                    self.coin_ticker,
+                    self.pool.server_label(&addr),
+                    tx_hash.reversed()
+                );
+                return Some(answer);
+            }
+        }
+        None
+    }
+
     /// The wait for the confirmations of a transaction (CRD ch.38 R38.6.4o item 6). It chooses one server when it
     /// starts (see [`PoolShared::choose_wait_server`]) and sends every transaction request and block-count request
     /// to it as a directed request (R38.6.4g), so that the answer that ends the wait always comes from the server
     /// being polled and never from whichever server a spread read reached. When a request to the server fails in
     /// transport, the wait chooses again, leaving out the servers that failed during this wait while another choice
     /// exists, and goes on with the new server. An error answer of the server is an answer, not a failure of the
-    /// server. No request is added: the wait asks as often as it did.
+    /// server, except that, with the tip checks on, [`WAIT_ERROR_ANSWERS_LIMIT`] of them in a row count as one (status
+    /// note of 2026-11-21).
+    /// After a poll that does not end the wait the wait also leaves a server that is out of date (item 4) for an
+    /// up-to-date one, without counting it as failed; with the tip checks off no server is out of date. No request is
+    /// added: the wait asks as often as it did. Every change of server logs one INFO line.
     pub(crate) async fn wait_for_confirmations_on_one_server(
         &self,
         tx_hash: H256Json,
@@ -812,6 +898,9 @@ impl ElectrumClient {
     ) -> Result<(), String> {
         let mut failed: Vec<String> = Vec::new();
         let mut server = self.pool.choose_wait_server(&failed);
+        // The error answers of the polled server to the transaction request, in a row.
+        let mut error_answers = 0u32;
+        let tx_text = format!("{:?}", tx_hash);
         loop {
             if now_ms() / 1000 > wait_until {
                 return ERR!(
@@ -825,11 +914,16 @@ impl ElectrumClient {
                 error!("No Electrum server to poll for the transaction {:?}, retrying", tx_hash);
                 Timer::sleep(check_every as f64).await;
                 server = self.pool.choose_wait_server(&failed);
+                if let Some(next) = &server {
+                    self.pool
+                        .log_wait_server_change(&tx_text, None, next, "no server before");
+                }
                 continue;
             };
 
             match self.transaction_get_verbose_from(&addr, &tx_hash).compat().await {
                 Ok(t) => {
+                    error_answers = 0;
                     let tx_confirmations = if requires_notarization {
                         t.confirmations
                     } else {
@@ -845,9 +939,24 @@ impl ElectrumClient {
                     }
                 },
                 Err(e) => {
-                    if e.error.is_transport() {
-                        failed.push(addr);
+                    let failure = if e.error.is_transport() {
+                        Some("request failed")
+                    } else if self.pool.tip_checks_on() {
+                        error_answers += 1;
+                        (error_answers >= WAIT_ERROR_ANSWERS_LIMIT).then_some("three error answers in a row")
+                    } else {
+                        // With the tip checks off an error answer keeps the wait on its server (item 11).
+                        None
+                    };
+                    if let Some(reason) = failure {
+                        error_answers = 0;
+                        if !failed.contains(&addr) {
+                            failed.push(addr.clone());
+                        }
                         server = self.pool.choose_wait_server(&failed);
+                        if let Some(next) = server.as_ref().filter(|next| **next != addr) {
+                            self.pool.log_wait_server_change(&tx_text, Some(&addr), next, reason);
+                        }
                         // Another server is asked at once; with none left to choose, the wait goes on as before.
                         if server.as_ref().map_or(false, |next| !failed.contains(next)) {
                             continue;
@@ -868,8 +977,13 @@ impl ElectrumClient {
                             Err(e) => {
                                 error!("Error {} getting block number, retrying in 10 seconds", e);
                                 if e.error.is_transport() {
-                                    failed.push(addr);
+                                    failed.push(addr.clone());
                                     server = self.pool.choose_wait_server(&failed);
+                                    error_answers = 0;
+                                    if let Some(next) = server.as_ref().filter(|next| **next != addr) {
+                                        self.pool
+                                            .log_wait_server_change(&tx_text, Some(&addr), next, "request failed");
+                                    }
                                 }
                                 Timer::sleep(check_every as f64).await;
                                 continue;
@@ -881,6 +995,23 @@ impl ElectrumClient {
                         e, tx_hash
                     )
                 },
+            }
+
+            // The poll did not end the wait: leave the server when it is out of date and another is up to date.
+            let polled = server.clone().unwrap_or(addr);
+            if let Some(next) = self.pool.wait_server_after_out_of_date(&polled, &failed) {
+                self.pool
+                    .log_wait_server_change(&tx_text, Some(&polled), &next, "out of date");
+                // A server that failed earlier and is up to date again is back in the choice.
+                let was_failed = failed.contains(&next);
+                failed.retain(|failed_addr| *failed_addr != next);
+                server = Some(next);
+                error_answers = 0;
+                if was_failed {
+                    // Back on a server that failed: keep the pace of the polls.
+                    Timer::sleep(check_every as f64).await;
+                }
+                continue;
             }
 
             Timer::sleep(check_every as f64).await;
