@@ -821,6 +821,13 @@ the previous version used. The safe way:
   fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
   after R38.5B.4.
 
+#### TRON coins
+
+- **A TRON withdrawal whose `fee` is `{"type":"Tron"}` is now refused with `InvalidFeePolicy`.** Before, such a
+  request failed parsing, for example when the `fee_details` of an earlier TRON result was sent back as `fee`.
+  TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
+  form that is not its own. Detail: PR #455; CRD ch.21 R-WP6.
+
 ### Tests
 
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and

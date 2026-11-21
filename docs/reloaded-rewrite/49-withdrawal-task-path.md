@@ -650,6 +650,13 @@ that decision.
 *2026-11-10 (clean-side note): a TRON withdraw now refuses any `fee` descriptor with `InvalidFeePolicy`
 (ch.21 R-WP6); Solana still does not read it.*
 
+*2026-11-20 (clean-side note): the shared fee descriptor has one more form, `Tron`, without members; other members
+of the object are ignored. A TRON withdraw refuses it with `InvalidFeePolicy` like any other form (ch.21 R-WP6).
+The UTXO, SLP, EVM, QRC20 and Siacoin withdraw paths refuse it through their existing wrong-fee-type arm
+(`InvalidFeePolicy`; the NFT withdraw's `InvalidRequest`), and the shielded coin refuses any `fee` as before. A
+Tendermint request ignores it without error, like any other foreign form (D49.1, option (b)), and Solana does not
+read it. Before, a request with such a `fee` failed request parsing.*
+
 ## 49.3 Status request and retention
 
 R49.11. `task::withdraw::status` shall accept:
