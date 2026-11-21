@@ -1,5 +1,6 @@
 use super::*;
 use crate::activation_locks::{ActivationGuard, ActivationLocks};
+use crate::coin_work::{CoinWork, PendingCoinWork};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::rpc_clients::electrum_client_registry::ElectrumClientRegistry;
@@ -149,6 +150,9 @@ impl MmCoinEnum {
 #[derive(Default)]
 pub(crate) struct CoinRegistry {
     entries: HashMap<String, MmCoinEnum>,
+    /// The background work of each registered instance, by ticker; its id is the identity of the instance (CRD ch.43
+    /// R43.1E.5 item 4, ch.55 R55.4.9). A ticker is a key here exactly when it is a key of `entries`.
+    work: HashMap<String, Arc<CoinWork>>,
     /// The registered platform coins that are passive. A ticker in this set is a key of `entries`.
     passive: HashSet<String>,
     dependents: HashMap<String, BTreeSet<String>>,
@@ -170,6 +174,10 @@ pub(crate) struct RegisteredCoins<'a>(&'a CoinRegistry);
 impl<'a> RegisteredCoins<'a> {
     pub(crate) fn get(&self, ticker: &str) -> Option<&'a MmCoinEnum> { self.0.entries.get(ticker) }
     pub(crate) fn contains(&self, ticker: &str) -> bool { self.0.entries.contains_key(ticker) }
+    /// The background work of the registered instance of `ticker`.
+    pub(crate) fn work(&self, ticker: &str) -> Option<&'a Arc<CoinWork>> { self.0.work.get(ticker) }
+    /// The identity of the registered instance of `ticker` (CRD ch.55 R55.4.9). A passive platform is registered.
+    pub(crate) fn instance_id(&self, ticker: &str) -> Option<u64> { self.0.work.get(ticker).map(|work| work.id()) }
     pub(crate) fn keys(&self) -> impl Iterator<Item = &'a String> { self.0.entries.keys() }
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&'a String, &'a MmCoinEnum)> { self.0.entries.iter() }
     pub(crate) fn values(&self) -> impl Iterator<Item = &'a MmCoinEnum> { self.0.entries.values() }
@@ -183,16 +191,42 @@ impl CoinRegistry {
     pub(crate) fn registered(&self) -> RegisteredCoins<'_> { RegisteredCoins(self) }
     /// Registers a coin that joins no platform's dependent set: a platform or standalone coin, or a token of
     /// the legacy `enable`/`electrum` (R43.1E.5 item 1).
+    ///
+    /// The entry gets a new, empty [`CoinWork`]; an activation that spawned work while it built the instance uses
+    /// [`Self::insert_with_work`].
     pub(crate) fn insert(&mut self, ticker: String, coin: MmCoinEnum) -> Option<MmCoinEnum> {
+        self.insert_with_work(ticker, coin, CoinWork::new())
+    }
+    /// Like [`Self::insert`], with the work of the activation that built the instance. A replaced entry loses its
+    /// work.
+    pub(crate) fn insert_with_work(
+        &mut self,
+        ticker: String,
+        coin: MmCoinEnum,
+        work: Arc<CoinWork>,
+    ) -> Option<MmCoinEnum> {
+        if let Some(replaced) = self.work.insert(ticker.clone(), work) {
+            replaced.abort_all();
+        }
         self.entries.insert(ticker, coin)
     }
     /// Registers a token or layer-two coin and records it as a dependent of `platform`.
     pub(crate) fn insert_dependent(&mut self, platform: &str, ticker: String, coin: MmCoinEnum) {
+        self.insert_dependent_with_work(platform, ticker, coin, CoinWork::new());
+    }
+    /// Like [`Self::insert_dependent`], with the work of the activation that built the instance.
+    pub(crate) fn insert_dependent_with_work(
+        &mut self,
+        platform: &str,
+        ticker: String,
+        coin: MmCoinEnum,
+        work: Arc<CoinWork>,
+    ) {
         self.dependents
             .entry(platform.to_owned())
             .or_default()
             .insert(ticker.clone());
-        self.entries.insert(ticker, coin);
+        self.insert_with_work(ticker, coin, work);
     }
     /// Records `ticker` in the dependent set of `platform` without registering a coin. A ticker that is already a
     /// member stays one.
@@ -205,15 +239,19 @@ impl CoinRegistry {
     /// Removes a coin, passive or not. The coin leaves the dependent set of its platform and loses its passive
     /// flag, and a platform loses its own set: its tokens stay registered (CRD ch.43 §43.1E compatibility note
     /// item 2). A platform whose last dependent leaves stays registered, and passive if it was (R43.1E.6 item 5).
-    pub(crate) fn remove(&mut self, ticker: &str) -> Option<MmCoinEnum> {
+    ///
+    /// Hands the instance's [`CoinWork`] back, not yet aborted, so that the caller ends it (CRD ch.43 R43.1E.5 item
+    /// 4).
+    pub(crate) fn remove(&mut self, ticker: &str) -> Option<(MmCoinEnum, Arc<CoinWork>)> {
         let removed = self.entries.remove(ticker)?;
+        let work = self.work.remove(ticker).unwrap_or_else(CoinWork::new);
         self.passive.remove(ticker);
         self.dependents.remove(ticker);
         self.dependents.retain(|_, set| {
             set.remove(ticker);
             !set.is_empty()
         });
-        Some(removed)
+        Some((removed, work))
     }
     /// Makes a registered platform coin that has at least one dependent passive (R43.1E.5 item 3). Returns
     /// `false`, and changes nothing, for a ticker that is not registered or has no dependent: only a platform
@@ -363,6 +401,17 @@ impl CoinsContext {
     }
 
     pub async fn add_coin(&self, coin: MmCoinEnum) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
+        self.add_coin_with_work(coin, PendingCoinWork::new()).await
+    }
+
+    /// Like [`Self::add_coin`], for an instance whose build spawned background work: the work registered with `work`
+    /// is kept by the registry on success, and ended when the ticker is refused (CRD ch.43 §43.1E not-established
+    /// item (1)).
+    pub async fn add_coin_with_work(
+        &self,
+        coin: MmCoinEnum,
+        work: PendingCoinWork,
+    ) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
         // A passive platform is registered: its ticker counts as already activated until the re-activation of a
         // passive platform is built (CRD ch.43 R43.1E.6 item 6).
@@ -373,7 +422,7 @@ impl CoinsContext {
         }
 
         self.fee_estimate_cache.forget_coin(coin.ticker());
-        coins.insert(coin.ticker().into(), coin);
+        coins.insert_with_work(coin.ticker().into(), coin, work.into_work());
         Ok(())
     }
 
@@ -384,6 +433,18 @@ impl CoinsContext {
         platform_ticker: &str,
         coin: MmCoinEnum,
     ) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
+        self.add_token_with_work(platform_ticker, coin, PendingCoinWork::new())
+            .await
+    }
+
+    /// Like [`Self::add_token`], with the work of the activation that built the instance (see
+    /// [`Self::add_coin_with_work`]).
+    pub async fn add_token_with_work(
+        &self,
+        platform_ticker: &str,
+        coin: MmCoinEnum,
+        work: PendingCoinWork,
+    ) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
         if coins.registered().contains(coin.ticker()) {
             return MmError::err(CoinIsAlreadyActivatedErr {
@@ -392,8 +453,18 @@ impl CoinsContext {
         }
 
         self.fee_estimate_cache.forget_coin(coin.ticker());
-        coins.insert_dependent(platform_ticker, coin.ticker().into(), coin);
+        coins.insert_dependent_with_work(platform_ticker, coin.ticker().into(), coin, work.into_work());
         Ok(())
+    }
+
+    /// The background work of the registered instance of `ticker`, active or passive (CRD ch.43 R43.1E.5 item 4).
+    pub async fn coin_work(&self, ticker: &str) -> Option<Arc<CoinWork>> {
+        self.coins.lock().await.registered().work(ticker).cloned()
+    }
+
+    /// The identity of the registered instance of `ticker` (CRD ch.55 R55.4.9): the id of its [`CoinWork`].
+    pub async fn instance_id(&self, ticker: &str) -> Option<u64> {
+        self.coins.lock().await.registered().instance_id(ticker)
     }
 
     /// The tickers of the dependent tokens and layer-two coins of `platform_ticker`.
@@ -457,6 +528,18 @@ impl CoinsContext {
         platform: MmCoinEnum,
         tokens: Vec<MmCoinEnum>,
     ) -> Result<(), MmError<PlatformIsAlreadyActivatedErr>> {
+        self.add_platform_with_tokens_and_work(platform, PendingCoinWork::new(), tokens)
+            .await
+    }
+
+    /// Like [`Self::add_platform_with_tokens`], with the work of the activation that built the platform (see
+    /// [`Self::add_coin_with_work`]). The tokens get a `CoinWork` of their own each.
+    pub async fn add_platform_with_tokens_and_work(
+        &self,
+        platform: MmCoinEnum,
+        work: PendingCoinWork,
+        tokens: Vec<MmCoinEnum>,
+    ) -> Result<(), MmError<PlatformIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
         // A registered platform, passive or not, is refused: a passive one is re-activated through
         // [`Self::reactivate_platform_with_tokens`].
@@ -468,7 +551,7 @@ impl CoinsContext {
 
         let platform_ticker = platform.ticker().to_owned();
         self.fee_estimate_cache.forget_coin(&platform_ticker);
-        coins.insert(platform_ticker.clone(), platform);
+        coins.insert_with_work(platform_ticker.clone(), platform, work.into_work());
         self.add_requested_tokens(&mut coins, &platform_ticker, tokens);
         Ok(())
     }

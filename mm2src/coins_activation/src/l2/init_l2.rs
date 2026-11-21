@@ -138,25 +138,32 @@ where
                 format!("Platform coin {} is not activated", platform_ticker),
             ))));
         }
-        let (coin, result) = L2::init_l2(
-            &self.ctx,
-            self.platform_coin,
-            self.validated_params,
-            self.protocol_conf,
-            self.coin_conf,
-            task_handle,
-        )
-        .await?;
+        // The work the build spawns belongs to the instance, and ends with this task if the instance is not
+        // registered (CRD ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+        let work = coins::coin_work::PendingCoinWork::new();
+        let (coin, result) = work
+            .scope(L2::init_l2(
+                &self.ctx,
+                self.platform_coin,
+                self.validated_params,
+                self.protocol_conf,
+                self.coin_conf,
+                task_handle,
+            ))
+            .await?;
 
         let c_ctx = CoinsContext::from_ctx(&self.ctx)
             .map_to_mm(RegisterCoinError::Internal)
             .map_mm_err()?;
-        c_ctx.add_token(&platform_ticker, coin.into()).await.map_err(|e| {
-            let reg_err = RegisterCoinError::CoinIsInitializedAlready {
-                coin: e.into_inner().ticker,
-            };
-            MmError::new(L2::ActivationError::from(reg_err))
-        })?;
+        c_ctx
+            .add_token_with_work(&platform_ticker, coin.into(), work)
+            .await
+            .map_err(|e| {
+                let reg_err = RegisterCoinError::CoinIsInitializedAlready {
+                    coin: e.into_inner().ticker,
+                };
+                MmError::new(L2::ActivationError::from(reg_err))
+            })?;
         self.registered_by_task.store(true, Ordering::SeqCst);
 
         Ok(result)

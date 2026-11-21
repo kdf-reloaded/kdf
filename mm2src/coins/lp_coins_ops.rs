@@ -1,4 +1,5 @@
 use super::*;
+use crate::coin_work::{CoinWork, PendingCoinWork};
 
 pub fn coin_conf(ctx: &MmArc, ticker: &str) -> Json {
     match ctx.conf["coins"].as_array() {
@@ -79,6 +80,19 @@ fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str>
 ///
 /// * `req` - Payload of the corresponding "enable" or "electrum" RPC request.
 pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoinEnum, String> {
+    // The work the build spawns belongs to the instance; it ends if the activation does not register the instance
+    // (CRD ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+    let work = PendingCoinWork::new();
+    let scope = work.work().clone();
+    scope.scope(lp_coininit_building(ctx, ticker, req, work)).await
+}
+
+async fn lp_coininit_building(
+    ctx: &MmArc,
+    ticker: &str,
+    req: &Json,
+    work: PendingCoinWork,
+) -> Result<MmCoinEnum, String> {
     let cctx = try_s!(CoinsContext::from_ctx(ctx));
     {
         let coins = cctx.coins.lock().await;
@@ -220,7 +234,7 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         ticker: ticker.to_owned(),
         tx_history: req["tx_history"].as_bool().unwrap_or(false),
     };
-    try_s!(lp_register_coin(ctx, coin.clone(), register_params).await);
+    try_s!(lp_register_coin_with_work(ctx, coin.clone(), register_params, work).await);
     Ok(coin)
 }
 #[derive(Debug, Display)]
@@ -240,6 +254,16 @@ pub async fn lp_register_coin(
     coin: MmCoinEnum,
     params: RegisterCoinParams,
 ) -> Result<(), MmError<RegisterCoinError>> {
+    lp_register_coin_with_work(ctx, coin, params, PendingCoinWork::new()).await
+}
+/// Like [`lp_register_coin`], for an instance whose build spawned background work with `work`: the registry keeps the
+/// work on success, and it ends when the ticker is refused or the registration fails (CRD ch.43 R43.1E.5 item 4).
+pub async fn lp_register_coin_with_work(
+    ctx: &MmArc,
+    coin: MmCoinEnum,
+    params: RegisterCoinParams,
+    work: PendingCoinWork,
+) -> Result<(), MmError<RegisterCoinError>> {
     let RegisterCoinParams { ticker, tx_history } = params;
     let cctx = CoinsContext::from_ctx(ctx).map_to_mm(RegisterCoinError::Internal)?;
 
@@ -253,14 +277,18 @@ pub async fn lp_register_coin(
         return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() });
     }
     cctx.fee_estimate_cache.forget_coin(&ticker);
-    coins.insert(ticker.clone(), coin.clone());
+    let work = work.into_work();
+    coins.insert_with_work(ticker.clone(), coin.clone(), work.clone());
     if tx_history {
-        lp_spawn_tx_history(ctx.clone(), coin).map_to_mm(RegisterCoinError::Internal)?;
+        lp_spawn_tx_history(ctx.clone(), coin, work).map_to_mm(RegisterCoinError::Internal)?;
     }
     Ok(())
 }
+/// Starts the history loop of a registered instance. The loop is abortable and registered with the instance's
+/// `CoinWork`, so removing the instance ends it; it runs in the instance's scope, where it reads its instance id (CRD
+/// ch.43 R43.1E.5 item 4, ch.55 R55.4.9).
 #[cfg(not(target_arch = "wasm32"))]
-fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum) -> Result<(), String> {
+fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum, work: Arc<CoinWork>) -> Result<(), String> {
     // A plain std::thread + futures01 .wait() has no ambient Tokio runtime
     // context. That was never a problem for the coins that have used this
     // path so far (their history fetch doesn't need one), but a coin whose
@@ -281,17 +309,26 @@ fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum) -> Result<(), String> {
     // that happened to need it worked around first. This mirrors the
     // wasm32 branch below, which already spawns onto its own executor
     // rather than a raw thread.
-    common::executor::spawn(async move {
+    let scope = work.clone();
+    let (fut, handle) = futures::future::abortable(async move {
         let _res = coin.process_history_loop(ctx).compat().await;
+    });
+    work.add(handle);
+    common::executor::spawn(async move {
+        let _ = scope.scope(fut).await;
     });
     Ok(())
 }
 #[cfg(target_arch = "wasm32")]
-fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum) -> Result<(), String> {
-    let fut = async move {
+fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum, work: Arc<CoinWork>) -> Result<(), String> {
+    let scope = work.clone();
+    let (fut, handle) = futures::future::abortable(async move {
         let _res = coin.process_history_loop(ctx).compat().await;
-    };
-    common::executor::spawn_local(fut);
+    });
+    work.add(handle);
+    common::executor::spawn_local(async move {
+        let _ = scope.scope(fut).await;
+    });
     Ok(())
 }
 /// NB: Returns only the enabled (aka active) coins: a passive platform coin is not found (CRD ch.43 R43.1E.6
@@ -802,13 +839,18 @@ pub async fn get_enabled_coins(ctx: MmArc) -> Result<Response<Vec<u8>>, String> 
 /// The work that ends with a removed instance, at once and wherever the instance is. Every removal path calls it, once
 /// per removed instance: `disable_coin` and each removal of `disable_platform_with_dependents`.
 ///
+/// The background work that the instance registered with its `CoinWork` (history collector, block-header loop) is
+/// aborted (CRD ch.43 R43.1E.5 item 4). Work that holds the instance only weakly ends with its last handle. The work
+/// of a Lightning coin is not registered and goes on until the node stops.
+///
 /// A QRC20 token's history collector ends with its instance; the token's Electrum client closes with the last handle of
 /// the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
 ///
 /// A removed QTUM or QRC20 instance leaves the subscriptions of its Electrum client; one that no other instance
 /// remembers is no longer placed again after a reconnect (CRD ch.38 D38.6.4Q.1 status note, item 6). This takes no
 /// registry lock and sends nothing.
-fn end_removed_instance_work(removed: &MmCoinEnum) {
+fn end_removed_instance_work(removed: &MmCoinEnum, work: &CoinWork) {
+    work.abort_all();
     match removed {
         MmCoinEnum::QtumCoin(qtum) => {
             AsRef::<crate::utxo::UtxoCoinFields>::as_ref(qtum).forget_electrum_subscriptions()
@@ -820,17 +862,45 @@ fn end_removed_instance_work(removed: &MmCoinEnum) {
         _ => (),
     }
 }
-/// Removes one registered coin, active or passive, and its records on its platform. Ending the rest of the coin's background
-/// work is not part of the removal (CRD ch.43 R43.1E.5 item 4 awaits the work of the background-work plan).
+/// Ends the event streamers that are keyed by the ticker of a removed coin, for every client (CRD ch.43 R43.1E.5 item
+/// 4): the balance, fee-estimation and transaction-history streams. The clients' subscriptions end as after a last
+/// unsubscribe. This takes no registry lock.
+fn end_event_streams_of(ctx: &MmArc, ticker: &str) {
+    let manager = &ctx.event_stream_manager;
+    for streamer_id in [
+        mm2_event_stream::StreamerId::Balance(ticker.to_owned()),
+        mm2_event_stream::StreamerId::FeeEstimation(ticker.to_owned()),
+        mm2_event_stream::StreamerId::TxHistory(ticker.to_owned()),
+    ] {
+        manager.end_streamer(&streamer_id);
+    }
+}
+
+/// Removes one registered coin, active or passive, ends its background work, and removes its records on its platform
+/// (CRD ch.43 R43.1E.5 item 4).
 pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
+    disable_coin_of_instance(ctx, ticker, None).await.map(|_| ())
+}
+
+/// Like [`disable_coin`], for the cleanup of an activation that registered an instance and then failed: with
+/// `instance` set, the coin is removed only when the registered instance of `ticker` is that one (CRD ch.55 R55.4.9).
+/// Returns `false`, and changes nothing, when another instance of the ticker is registered.
+pub async fn disable_coin_of_instance(ctx: &MmArc, ticker: &str, instance: Option<u64>) -> Result<bool, String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
+    if let Some(instance) = instance {
+        match coins.registered().instance_id(ticker) {
+            Some(registered) if registered != instance => return Ok(false),
+            _ => (),
+        }
+    }
     match coins.remove(ticker) {
-        Some(removed) => {
+        Some((removed, work)) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
-            end_removed_instance_work(&removed);
+            end_removed_instance_work(&removed, &work);
+            end_event_streams_of(ctx, ticker);
             forget_token_records(&coins, &removed, ticker);
-            Ok(())
+            Ok(true)
         },
         None => ERR!("{} is disabled already", ticker),
     }
@@ -839,8 +909,8 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
 /// Removes the registered platform coin `platform` and every one of its dependent tokens and layer-two coins in one
 /// step, under one hold of the registry: the forced removal of CRD ch.43 R43.1E.5 item 4. Each dependent leaves
 /// through the same record clean-up as a single [`disable_coin`], before the platform does. Returns the tickers
-/// removed, the dependents first, and the NFT chain among them when it was a dependent. Ending the rest of the
-/// background work of the removed coins is not part of it.
+/// removed, the dependents first, and the NFT chain among them when it was a dependent. The background work of every
+/// removed instance ends (CRD ch.43 R43.1E.5 item 4).
 pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Result<Vec<String>, String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
@@ -854,9 +924,10 @@ pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Re
     for ticker in tickers {
         // A dependent that was removed meanwhile is simply not there; the platform must be.
         match coins.remove(&ticker) {
-            Some(removed) => {
+            Some((removed, work)) => {
                 coins_ctx.fee_estimate_cache.forget_coin(&ticker);
-                end_removed_instance_work(&removed);
+                end_removed_instance_work(&removed, &work);
+                end_event_streams_of(ctx, &ticker);
                 forget_token_records(&coins, &removed, &ticker);
                 removed_tickers.push(ticker);
             },

@@ -2,6 +2,7 @@ use crate::context::lock_activation;
 use crate::prelude::*;
 use async_trait::async_trait;
 use coins::activation_locks::ActivationGuard;
+use coins::coin_work::PendingCoinWork;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
@@ -529,24 +530,28 @@ where
     let requested = requested_platform::<Platform>(&ctx, &req.ticker).await?;
     check_requested_tokens::<Platform>(&ctx, &req.ticker, &req.request).await?;
 
-    let (platform_coin, reactivation) = match requested {
-        RequestedPlatform::Passive(platform_coin) => (platform_coin, true),
+    let (platform_coin, reactivation, work) = match requested {
+        RequestedPlatform::Passive(platform_coin) => (platform_coin, true, None),
         RequestedPlatform::New => {
             let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
 
             let priv_key = &*ctx.legacy_passphrase_key_pair().private().secret;
 
-            let platform_coin = Platform::enable_platform_coin(
-                ctx.clone(),
-                req.ticker.clone(),
-                platform_conf,
-                req.request.clone(),
-                platform_protocol,
-                priv_key,
-            )
-            .await
-            .mm_err(Into::into)?;
-            (platform_coin, false)
+            // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD
+            // ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+            let work = PendingCoinWork::new();
+            let platform_coin = work
+                .scope(Platform::enable_platform_coin(
+                    ctx.clone(),
+                    req.ticker.clone(),
+                    platform_conf,
+                    req.request.clone(),
+                    platform_protocol,
+                    priv_key,
+                ))
+                .await
+                .mm_err(Into::into)?;
+            (platform_coin, false, Some(work))
         },
     };
 
@@ -555,6 +560,7 @@ where
         &req.ticker,
         platform_coin,
         reactivation,
+        work,
         &req.request,
         None,
     )
@@ -593,6 +599,10 @@ impl HDXPubExtractor for NoXPubExtractor {
 /// no history collector is started for it (D43.1F.5), and its registration makes the registered entry active
 /// instead of inserting one.
 ///
+/// `work` is the background work that the build of a new platform instance spawned; it is `None` for a re-activation.
+/// The registry keeps it when the platform is registered, and it ends when this call fails first (CRD ch.43 R43.1E.5
+/// item 4, §43.1E not-established item (1)).
+///
 /// The token record of the platform instance is written once the tokens are built and before the answer is
 /// assembled, which reads it. Every token this call added to the record is removed again when the call fails, so
 /// a refused request leaves no token of its own on the record (D43.1F.2 (b)). The activation locks are held
@@ -602,6 +612,7 @@ pub(crate) async fn finalize_platform_coin_activation<Platform, XPubExtractor>(
     ticker: &str,
     platform_coin: Platform,
     reactivation: bool,
+    work: Option<PendingCoinWork>,
     request: &Platform::ActivationRequest,
     xpub_extractor: Option<&XPubExtractor>,
 ) -> Result<Platform::ActivationResult, MmError<EnablePlatformCoinWithTokensError>>
@@ -673,7 +684,7 @@ where
     } else {
         // The platform instance is new and dropped with the refusal, together with its token record.
         coins_ctx
-            .add_platform_with_tokens(platform_coin.into(), mm_tokens)
+            .add_platform_with_tokens_and_work(platform_coin.into(), work.unwrap_or_default(), mm_tokens)
             .await
             .mm_err(|e| EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(e.ticker))?;
     }
@@ -682,7 +693,13 @@ where
     if let Some(nft_ticker) = nft_ticker {
         coins_ctx.add_nft_dependent(ticker, &nft_ticker).await;
     }
-    Platform::on_platform_registered(&ctx, ticker, request, reactivation);
+    // The hook runs in the scope of the registered instance, so a process it starts (the TRON history) is work of that
+    // instance: removing the platform aborts it (CRD ch.43 R43.1E.5 item 4, ch.55 R55.4.9). A re-activation runs it in
+    // the scope of the passive platform's existing record; no process starts then, and the NFT marking does not spawn.
+    match coins_ctx.coin_work(ticker).await {
+        Some(work) => work.run_in_scope(|| Platform::on_platform_registered(&ctx, ticker, request, reactivation)),
+        None => Platform::on_platform_registered(&ctx, ticker, request, reactivation),
+    }
 
     // The history collector starts after the registry accepted the platform, so a failure before the registration
     // leaves no loop behind and the loop's first registration check finds the platform (CRD ch.55 D55.8). A
@@ -712,13 +729,25 @@ where
     if !platform_coin.history_supported() {
         return;
     }
-    let abort_handler = platform_coin.start_history_background_fetching(
-        ctx.clone(),
-        ctx.metrics.clone(),
-        SqliteTxHistoryStorage(ctx.sqlite_connection.as_option().unwrap().clone()),
-        activation_result.get_platform_balance(),
-    );
-    ctx.abort_handlers.lock().unwrap().push(abort_handler);
+    // The collector is work of the registered instance: removing the platform aborts it (CRD ch.43 R43.1E.5 item 4),
+    // and it runs in the instance's scope, where it reads its instance id (CRD ch.55 R55.4.9).
+    let work = match CoinsContext::from_ctx(ctx) {
+        Ok(coins_ctx) => coins_ctx.coin_work(ticker).await,
+        Err(_) => None,
+    };
+    let Some(work) = work else {
+        log::warn!("{ticker}: the registered platform has no background work record, no history collector was started");
+        return;
+    };
+    let abort_handler = work.run_in_scope(|| {
+        platform_coin.start_history_background_fetching(
+            ctx.clone(),
+            ctx.metrics.clone(),
+            SqliteTxHistoryStorage(ctx.sqlite_connection.as_option().unwrap().clone()),
+            activation_result.get_platform_balance(),
+        )
+    });
+    work.add(abort_handler);
 }
 
 /// Removes the tokens a failed activation call added to the token record of the platform instance.
@@ -757,8 +786,8 @@ where
     let requested = requested_platform::<Platform>(&ctx, &req.ticker).await?;
     check_requested_tokens::<Platform>(&ctx, &req.ticker, &req.request).await?;
 
-    let (platform_coin, reactivation) = match requested {
-        RequestedPlatform::Passive(platform_coin) => (platform_coin, true),
+    let (platform_coin, reactivation, work) = match requested {
+        RequestedPlatform::Passive(platform_coin) => (platform_coin, true, None),
         RequestedPlatform::New => {
             let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker).mm_err(Into::into)?;
 
@@ -768,18 +797,22 @@ where
                 .update_in_progress_status(InitPlatformCoinWithTokensInProgressStatus::ActivatingCoin)
                 .mm_err(rpc_task_error)?;
 
-            let platform_coin = Platform::enable_platform_coin_with_task(
-                ctx.clone(),
-                req.ticker.clone(),
-                platform_conf,
-                req.request.clone(),
-                platform_protocol,
-                priv_key,
-                task_handle,
-            )
-            .await
-            .mm_err(Into::into)?;
-            (platform_coin, false)
+            // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD
+            // ch.43 R43.1E.5 item 4, §43.1E not-established item (1)).
+            let work = PendingCoinWork::new();
+            let platform_coin = work
+                .scope(Platform::enable_platform_coin_with_task(
+                    ctx.clone(),
+                    req.ticker.clone(),
+                    platform_conf,
+                    req.request.clone(),
+                    platform_protocol,
+                    priv_key,
+                    task_handle,
+                ))
+                .await
+                .mm_err(Into::into)?;
+            (platform_coin, false, Some(work))
         },
     };
 
@@ -801,6 +834,7 @@ where
         &req.ticker,
         platform_coin,
         reactivation,
+        work,
         &req.request,
         xpub_extractor,
     )

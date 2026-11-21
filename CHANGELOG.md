@@ -85,7 +85,7 @@ or undo, and every change that needs a step from you.
     reads `force_disable`: it removes the platform, and its tokens stay registered.
   - *Activating it again:* `enable_eth_with_tokens` and the other platform-with-tokens methods activate a passive
     platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
-    Ending a removed coin's background work is still to come.
+    Disabling a coin now ends its background work (see "Changed" below).
   - Detail: PR #424; CRD ch.43 §43.1E and §43.1F.
 - **A platform-with-tokens activation that names a token registered for another platform is now refused.**
   Before, `enable_eth_with_tokens`, `enable_bch_with_tokens`, `enable_tendermint_with_assets`,
@@ -152,9 +152,10 @@ the previous version used. The safe way:
   active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens
   activation, is not removed by `disable_coin`. The call cancels the platform's own orders, keeps the platform
   registered but passive, and answers `{"coin", "cancelled_orders", "passivized": true}`. A passive platform is
-  listed by `get_enabled_coins`, its tokens stay active (a TRC20 token's `withdraw`, HD methods and GasFree address
-  included), and its history collection goes on, TRON's included; every other method answers as if it were not
-  activated, and a second `disable_coin` for it is refused like one for an unknown coin.
+  listed by `get_enabled_coins`, its tokens stay active (a TRC20 or ERC-20 token's `withdraw` and HD methods
+  included, and a TRC20 token's GasFree address), and its history collection goes on, TRON's included; every other
+  method answers as if it were not activated, and a second `disable_coin` for it is refused like one for an unknown
+  coin.
   With `"force_disable": true` the call removes the platform and all its tokens and answers `passivized: false`;
   unlike in GLEEC KDF it first checks the platform and every token, and refuses the whole call if any of them has a
   running swap or an order that is being matched. Every other successful call now also answers `passivized: false`.
@@ -469,6 +470,15 @@ the previous version used. The safe way:
 
 #### RPC interface
 
+- **Disabling a coin now ends its background work.** When `disable_coin` removes a coin (a coin, a token, a platform
+  with its tokens by `force_disable`, or the clean-up of a failed or cancelled activation), the transaction-history
+  collection of that coin and the block-header sync of a UTXO coin stop, and the balance, fee-estimate and
+  transaction-history streams of the removed ticker end for every client: a client that was subscribed sees the stream
+  stop, as after its own unsubscribe, and subscribes again after the coin is enabled again. Before, history collection
+  of BCH, EVM and Tendermint platforms ran until the node stopped, and a removed coin stayed alive in its streams. A
+  passive platform keeps its work. A removed Lightning coin keeps its background work (graph persistence, peer
+  listener, reconnect and announcement loops) until the node stops; that is a known limitation of this release. Detail:
+  PR #439; CRD ch.43 R43.1E.5 item 4.
 - **A token or layer-two activation waits for a `disable_coin` of its platform, and the other way round.** The token
   and layer-two activation methods (`enable_erc20`, `enable_nft`, `enable_slp`, `enable_tendermint_token`, the Solana
   token method, the Lightning activation, and the task forms) now take the activation lock of the platform with the lock of
@@ -686,6 +696,11 @@ the previous version used. The safe way:
 
 #### EVM, BCH, Sia and Lightning coins
 
+- **A quick disable and re-enable no longer leaves the old history loop running, and a failed legacy activation no
+  longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
+  of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at
+  once when the same ticker is enabled again. The clean-up of a failed `enable` or `electrum` balance read removes only the
+  coin that call registered. Detail: PR #439; CRD ch.55 R55.4.9.
 - **EVM transaction history could fail to start after an activation with `tx_history`.** The history collection
   started just before the platform was registered, and its first check for the registered coin could run before
   the registration, which ended the collection. It now starts after the registration, and a failed activation no
