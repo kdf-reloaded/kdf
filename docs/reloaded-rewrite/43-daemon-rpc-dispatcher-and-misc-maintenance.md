@@ -1997,9 +1997,9 @@ names.
 >    `get_enabled_coins` in both forms, and not active for any other look-up
 >    (R43.1E.6, R43.1F.10 item 1); its history collection goes on, the TRON
 >    platform history included (its process finds its platform and its tokens
->    on the registered view, R43.1E.6 item 3). A history process that checks
->    its registration on each pass (EVM, UTXO, Sia, TRON) ends at its next
->    pass once its coin is removed.
+>    on the registered view, R43.1E.6 item 3). The EVM and TRON history
+>    processes check their registration on each pass and end at their next
+>    pass once their coin is removed.
 > 2. *Versioned form.* The `disable_coin` of §43.1R is as it was (the
 >    maintainer's decision on its scope): it does not read `force_disable`, has
 >    no `passivized`, removes the requested coin, and answers `NoSuchCoin` for a
@@ -2021,8 +2021,9 @@ names.
 >    gas-fee policy in its own instance and looks its platform up by no ticker,
 >    so a token's orders, swaps and fee estimates work while its platform is
 >    passive; nothing changed in the EVM token code for it. A TRC20 token looks
->    its platform up by ticker for its HD methods and `withdraw`; that look-up
->    is the token's own and finds a passive platform.
+>    its platform up by ticker for its HD methods, its GasFree address and
+>    `withdraw`, gasless included; that look-up is the token's own and finds a
+>    passive platform.
 > 6. *Standalone tasks (D43.1F.4 (b)).* The `init` of a standalone activation
 >    task refuses the ticker of a passive platform with `CoinIsAlreadyActivated`
 >    and builds nothing.
@@ -2082,7 +2083,7 @@ names.
 >     active.
 > 11. *Not yet built.* The `reactivation_registered_token` setting of D43.1F.1
 >     and its `"keep"` value (the default behavior of item 8 is the only one in
->     effect), and ending the background work of a removed coin (R43.1E.5
+>     effect), and ending the other background work of a removed coin (R43.1E.5
 >     items 2 and 4).
 
 **D43.1F.1** *(Open, 2026-11-18.)* **A requested token that is already

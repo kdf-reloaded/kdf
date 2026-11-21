@@ -112,11 +112,12 @@ fn is_funding_failure(error: &WithdrawError) -> bool {
 /// # Errors
 ///
 /// Before a node is asked: [`WithdrawError::UnsupportedError`] for a sender without a local private key (CRD ch.63
-/// R22); [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor (the TRON fee is estimated from the
-/// account's bandwidth and energy, CRD ch.21 R-W3, and no `WithdrawFee` variant describes it), for `gasless`
-/// options without `fee_method` `gasless` or `auto`, for a `gasless.max_fee` that is not a decimal amount and for
-/// a `gasless.deadline_seconds` of zero (CRD ch.63 §63.9.4); and [`WithdrawError::UnsupportedError`] for a `memo`
-/// (CRD ch.21 R21.10B.7, ch.49 R49.27a) and for `max` with `fee_method` `gasless` (CRD ch.63 R14).
+/// R22); [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor (the TRON fee is always estimated from the
+/// account's bandwidth and energy, CRD ch.21 R-W3; the `WithdrawFee::Tron` form exists only so that it can be refused
+/// here, CRD ch.21 R-WP6), for `gasless` options without `fee_method` `gasless` or `auto`, for a `gasless.max_fee` that
+/// is not a decimal amount and for a `gasless.deadline_seconds` of zero (CRD ch.63 §63.9.4); and
+/// [`WithdrawError::UnsupportedError`] for a `memo` (CRD ch.21 R21.10B.7, ch.49 R49.27a) and for `max` with
+/// `fee_method` `gasless` (CRD ch.63 R14).
 ///
 /// From the amounts (CRD ch.21 R21.10B.7): [`WithdrawError::ZeroBalanceToWithdrawMax`],
 /// [`WithdrawError::AmountTooLow`], [`WithdrawError::NotSufficientBalance`] and, for a TRC20 transfer whose

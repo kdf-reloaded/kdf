@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 in PR #427; P7, P8 and P9 next) — **Last reviewed:** 2026-11-19
+**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 merged; P7 in PR #436; P8 and P9 next) — **Last reviewed:** 2026-11-20
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -204,8 +204,10 @@ which serves one wallet, so no client crosses wallet identities.
 *P5 (2026-11-19).* PR #427 implements the shared client of D38.6.4Q.1, all six
 items of its status note in CRD ch.38. Of the Phase C items above, it covers
 items 1 and 4, and item 3 for QTUM and a token activating at the same time.
-Still open in Phase C: a test of a repeated activation of one instance (item 3),
-and the INFO lines for creating, reusing and releasing a shared client (item 5).
+Item 2 holds for the shared client as for any other, because it is built by the
+same code under §38.6.4. Still open in Phase C: a test of a repeated activation
+of one instance (item 3), and the INFO lines for creating, reusing and releasing
+a shared client (item 5).
 
 ## Phase D -- QRC20 history reliability
 
@@ -237,6 +239,12 @@ and the INFO lines for creating, reusing and releasing a shared client (item 5).
 4. Assert exact contract-call outputs, gas accounting, fee values, transaction
    serialization, and swap terminal state. Balance-only assertions are not
    sufficient.
+
+*P7 (2026-11-20).* PR #436 implements D38.6.4Q.4 (b), as its status note in CRD
+ch.38 records it: one recently-spent record per platform and address script for
+QTUM and its tokens, whose lock orders the builds of that address. Items 1 and
+2 are covered by offline tests with the stub server. Items 3 and 4 stay open;
+the swap rows of this package run on a QTUM regtest in the lab.
 
 ## Phase F -- verification and rollout
 
