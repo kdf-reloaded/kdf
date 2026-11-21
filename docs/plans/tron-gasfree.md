@@ -76,6 +76,7 @@ new PRs, and the branch stays until the second PR below has landed.
     shared request, balance or error fields; unreachable from every RPC.
   - Then: the activation binding, the fields at every placement ch.63 R18 lists, and the withdraw dispatcher.
   - Then: submission and settlement tracking (ch.63 D63.6), as a Reloaded extension.
+    - The reference row has no submission flow; see ch.63 §63.8B R30–R35 and D63.9.
 
 > **Activation binding and report fields built (2026-11-20).** The platform
 > activation reads `tron_gasless_provider` and a TRC20 token activation reads

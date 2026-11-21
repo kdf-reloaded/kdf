@@ -860,6 +860,14 @@ absence is not an error.
 > (R25-R28). R49.25's "mandatory for a completed withdrawal transaction" does
 > not reach that result. §63.8A passed the KDF Dirty Gate on 2026-11-19.
 
+> **Gasless submission (pointer, 2026-11-21).** What the reference has of
+> submitting and tracing a signed gasless authorization -- no RPC does either;
+> three task progress values are declared and never reported; the task cancel
+> has no gasless-specific part -- is stated by
+> [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8B (R30-R35), with the
+> wire form of the three values in R33. §63.8B passed the KDF Dirty Gate on
+> 2026-11-21.
+
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
 `withdraw` result with the `details` payload of a successful task withdrawal.
@@ -1262,3 +1270,10 @@ addresses.
   item above).* Reloaded-original, clean side: it corrects, from chapter 21
   D6 and this repository's code, what that note says about TRON being
   switched off; no forbidden-class input. No cleared sentence was edited.
+- *Pointer added 2026-11-21 (Spec Reader round 0.5.0-19) -- after the
+  sign-only gasless result pointer of 2026-11-19.* It names chapter 63
+  §63.8B (R30 -- R35) and R33 for what the reference has of submitting
+  and tracing a signed gasless authorization; it travels with chapter 63
+  §63.8B for the KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-21,
+  measure 0.02, no findings**, as recorded for §63.8B in chapter 63's
+  provenance footer.
