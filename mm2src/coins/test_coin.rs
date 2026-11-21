@@ -367,6 +367,8 @@ impl MmCoin for TestCoin {
 
     fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { true }
 
+    fn required_counterparty_capabilities(&self) -> Vec<&'static str> { Vec::new() }
+
     fn burn_pubkey(&self) -> Vec<u8> { Vec::new() }
 
     fn should_burn_directly(&self) -> bool { false }

@@ -669,6 +669,10 @@ impl MmCoin for UtxoStandardCoin {
         utxo_common::is_coin_protocol_supported(self, info)
     }
 
+    fn required_counterparty_capabilities(&self) -> Vec<&'static str> {
+        utxo_common::required_counterparty_capabilities(self)
+    }
+
     fn should_burn_directly(&self) -> bool { self.utxo_arc.conf.ticker == "KMD" }
 }
 

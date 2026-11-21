@@ -315,7 +315,10 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   counterparty without it before any swap starts (CRD ch.61 R61.5A, ch.59
   §59.4A); nodes that predate the word, and the reference builds, are declined.
   Set `require_suffix_counterparty` to `false` in the coin entry to admit them;
-  a swap with them still cannot complete when they have to spend BC2. This
+  a swap with them still cannot complete when they have to spend BC2. From
+  v0.4.1 the order book does not list the BC2 orders of such a node (see
+  "From v0.4.1, orders that cannot be matched are not listed" below; this
+  setting lists them again). This
   check is temporary and will be removed as soon as the other implementations
   support suffix signing. A coins file from before 2026-11-14 may lack the
   `sighash_suffix` key on the `BC2` and `BC2-segwit` entries: add it, or use
@@ -1089,6 +1092,21 @@ ARRR transaction, after the DEX fee was paid. GLEEC KDF nodes and KDF Reloaded
 `false` in the coin's `consensus_params` to admit them again; an ARRR swap with GLEEC KDF
 still cannot complete. The capability check is temporary: it will be removed once
 version 6 is generally supported.
+
+**From v0.4.1, orders that cannot be matched are not listed.** GLEEC KDF lists every order
+of a pair. KDF Reloaded leaves out an order whose maker does not declare a capability this
+node requires for one of the order's coins: version-6 capability for ARRR, suffix signing
+for BC2 (CRD ch.59 §59.4C). This applies to `orderbook` and `best_orders` (legacy and
+mmrpc 2.0), to the order-book event stream and to the `orderbook_depth` counts the node
+takes from its own book; counts and volume totals cover the listed orders. `best_orders`
+reads the pair's full book when the best-priced orders are left out, and `buy` or `sell`
+that names only such orders in `match_by` fails at once instead of timing out. Such an
+order used to be listed, often at the best price, and a taker that picked it got no swap.
+`require_v6_counterparty: false` and `require_suffix_counterparty: false` list the orders
+again, together with admitting those counterparties; while a requirement is on there is no
+request that lists them. Other nodes are not affected: no message changes, and a KDF
+Reloaded relay still passes every order on. Counts that `orderbook_depth` gets from a relay
+still include such orders.
 
 Three coin-activation behaviours differ from GLEEC KDF by default (CRD ch.46
 R46.2.4, ch.55 R55.4.6):

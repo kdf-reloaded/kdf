@@ -1,6 +1,6 @@
 # Plan: ARRR native mode and the Ironwood pool
 
-**Status:** planning (the v0.4.0 items shipped in PRs #227 to #288; native mode and the rest of the Ironwood pool are not designed yet) — **Last reviewed:** 2026-11-08
+**Status:** planning (the v0.4.0 items shipped in PRs #227 to #288; native mode and the rest of the Ironwood pool are not designed yet) — **Last reviewed:** 2026-11-20
 
 > **Context:** decided by the maintainer on 2026-10-28 (Decision X). Release 0.3.0-beta stays
 > Sapling-only. It builds version-6 transactions that carry a Sapling bundle and an empty Ironwood
@@ -108,12 +108,15 @@ apart from a Reloaded one. The maintainer decided:
 - **Decision BN:** Reloaded 0.3.0-beta.1 nodes, which build version 6 but send no word, are
   declined for ARRR swaps too.
 - **Decision BO:** the order-book answer shows no capability flag.
+  *Revised on 2026-11-20:* the answer still shows no flag, but it no longer lists an order that
+  lacks a capability the node requires (the "Order book" row below).
 
 | Part | What | CRD | State |
 |---|---|---|---|
 | Capability word | A generic word after a coin's first value in its protocol information, sent only by coins that opt in. The reader fails closed. The order-match layer carries the bytes unchanged and logs declines. | ch.59 §59.4A (R59.4A.1–R59.4A.7, T14) | CRD PR #227, code PR #235 (generic part), both merged 2026-11-05 |
 | ARRR requirement | ARRR sends `tx_v6` always. Inside the Ironwood window it declines a counterparty without it, on the taker and the maker path, with the per-coin switch `require_v6_counterparty` (default on). One debug line per decline, and at most one warning per coin per hour with the count. | ch.39 R39.6.4f, T39.6.4f | CRD PR #230, merged 2026-11-05 |
 | ARRR predicate code | The shielded coin's protocol information and acceptance check, the switch, and the logs. Stacked on the capability-word code. | — | code PR #241, merged 2026-11-05 |
+| Order book | The `orderbook` and `best_orders` answers, the order-book event stream and the node's own `orderbook_depth` counts leave out an order that lacks a capability the node requires (ARRR `tx_v6`, BC2 `sighash_suffix`). `best_orders` is refilled from the pair's full book, and `buy`/`sell` naming only such orders are refused at once. The requirement's switch is the opt-back. Relay answers are unchanged. | ch.59 §59.4C (R59.4C.1–R59.4C.8, T16) | CRD PR #446, code PR #447, for the 0.4.1 patch release |
 
 ### 5. Transparent addresses in the shielded history (done for the node's own swap transactions)
 

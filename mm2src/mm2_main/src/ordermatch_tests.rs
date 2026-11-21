@@ -17457,6 +17457,1517 @@ mod t14_capability_word_tests {
     }
 }
 
+/// CRD ch.59 §59.4C, T16: orders that lack a required capability are not listed.
+///
+/// The coin `SFX` of these tests is a UTXO coin whose configuration entry sets a sighash suffix, so the
+/// node requires `sighash_suffix` of its counterparty (ch.61 R61.5A.2) without the coin being activated.
+/// The coins-side items T16 (a) and (c) are tested in the `coins` crate.
+mod t16_capability_presentation_tests {
+    use super::capability_presentation::{CapabilityFilter, MissingCapability};
+    use super::orderbook_events::OrderbookStreamer;
+    use super::*;
+    use coins::coin_protocol_capability::{append_capability_word, CAPABILITY_SIGHASH_SUFFIX, CAPABILITY_TX_V6};
+    use coins::{CoinBalance, CoinsContext, MarketCoinOps, MmCoinEnum, TradeFee};
+    use common::mm_number::BigRational;
+    use common::wio::CORE;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc as StdArc;
+
+    const SFX: &str = "SFX";
+    const DOC: &str = "DOC";
+    const MARTY: &str = "MARTY";
+
+    /// How the configuration entry of `SFX` stands with respect to the requirement.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Requirement {
+        /// A sighash suffix with the switch at its default: `sighash_suffix` is required.
+        On,
+        /// A sighash suffix with `require_suffix_counterparty: false` (R59.4C.7).
+        SwitchOff,
+        /// No sighash suffix: a node without the requirement.
+        Absent,
+    }
+
+    fn coins_conf(requirement: Requirement) -> Json {
+        let utxo = |ticker: &str| {
+            json!({"coin": ticker, "asset": ticker, "pubtype": 60, "p2shtype": 85, "wiftype": 188, "txfee": 1000,
+                   "mm2": 1, "protocol": {"type": "UTXO"}})
+        };
+        let mut sfx = utxo(SFX);
+        match requirement {
+            Requirement::On => sfx["sighash_suffix"] = json!("0x01324342"),
+            Requirement::SwitchOff => {
+                sfx["sighash_suffix"] = json!("0x01324342");
+                sfx["require_suffix_counterparty"] = json!(false);
+            },
+            Requirement::Absent => (),
+        }
+        json!([sfx, utxo(DOC), utxo(MARTY)])
+    }
+
+    /// A node with the coins of [`coins_conf`], none of them activated.
+    fn node(requirement: Requirement) -> MmArc { node_with_coins(coins_conf(requirement)) }
+
+    fn node_with_coins(coins: Json) -> MmArc {
+        let ctx = MmCtxBuilder::new().with_conf(json!({ "coins": coins })).into_mm_arc();
+        ctx.init_metrics().unwrap();
+        ctx.secp256k1_key_pair
+            .pin(key_pair_from_seed("t16-node").unwrap())
+            .unwrap();
+        ctx
+    }
+
+    /// A node that requires `sighash_suffix` for `SFX` and trades `SFX` under the order-book ticker `SFX-OB`.
+    fn node_with_an_order_book_ticker() -> MmArc {
+        let mut coins = coins_conf(Requirement::On);
+        coins[0]["orderbook_ticker"] = json!("SFX-OB");
+        let ctx = node_with_coins(coins);
+        // The order-book tickers are read from the configuration when the context is initialized.
+        init_ordermatch_context(&ctx).unwrap();
+        ctx
+    }
+
+    /// Marks the order book of (SFX, DOC) as already requested, so that the RPC handlers read the node's own
+    /// book without a P2P round trip.
+    fn mark_requested(ctx: &MmArc) {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let mut subs = ordermatch_ctx.orderbook_subscriptions.write();
+        subs.insert(
+            orderbook_topic_from_base_rel(SFX, DOC),
+            OrderbookRequestingState::Requested,
+        );
+    }
+
+    fn maker() -> String { pubkey_and_secret_for_test("t16-maker").0 }
+
+    /// The first value of a UTXO coin: its encoded address format.
+    fn first_value() -> Vec<u8> { rmp_serde::to_vec(&AddressFormat::Standard).unwrap() }
+
+    /// Protocol information of `SFX` that declares the required capability.
+    fn declaring() -> Vec<u8> { append_capability_word(first_value(), &[CAPABILITY_SIGHASH_SUFFIX]) }
+
+    /// A word cut in the middle after the first value.
+    fn malformed() -> Vec<u8> {
+        let mut info = declaring();
+        info.pop();
+        info
+    }
+
+    /// An order of the maker on (`base`, `rel`), one of them `SFX`, whose protocol information for `SFX` is
+    /// `sfx_info`; the other coin's information is a first value alone.
+    fn order(base: &str, rel: &str, price: u64, volume: u64, sfx_info: Vec<u8>) -> OrderbookItem {
+        let (base_protocol_info, rel_protocol_info) = if base == SFX {
+            (sfx_info, first_value())
+        } else {
+            (first_value(), sfx_info)
+        };
+        OrderbookItem {
+            pubkey: maker(),
+            base: base.to_owned(),
+            rel: rel.to_owned(),
+            price: BigRational::from_integer(price.into()),
+            max_volume: BigRational::from_integer(volume.into()),
+            min_volume: BigRational::from_integer(0.into()),
+            uuid: Uuid::new_v4(),
+            created_at: now_ms() / 1000,
+            base_protocol_info,
+            rel_protocol_info,
+            conf_settings: Some(OrderConfirmationsSettings::default()),
+        }
+    }
+
+    /// One side of the book: two unpresentable orders at the best prices and one presentable order at a worse
+    /// price.
+    struct Side {
+        without_word: OrderbookItem,
+        empty_info: OrderbookItem,
+        presentable: OrderbookItem,
+    }
+
+    impl Side {
+        fn new(base: &str, rel: &str) -> Side {
+            Side {
+                without_word: order(base, rel, 1, 5, first_value()),
+                empty_info: order(base, rel, 2, 7, Vec::new()),
+                presentable: order(base, rel, 3, 3, declaring()),
+            }
+        }
+
+        fn all(&self) -> Vec<OrderbookItem> {
+            vec![
+                self.without_word.clone(),
+                self.empty_info.clone(),
+                self.presentable.clone(),
+            ]
+        }
+    }
+
+    /// One presentable and two unpresentable orders on each side of (SFX, DOC).
+    struct Book {
+        asks: Side,
+        bids: Side,
+    }
+
+    impl Book {
+        fn new() -> Book {
+            Book {
+                asks: Side::new(SFX, DOC),
+                bids: Side::new(DOC, SFX),
+            }
+        }
+
+        fn all(&self) -> Vec<OrderbookItem> { [self.asks.all(), self.bids.all()].concat() }
+
+        fn presentable(&self) -> Vec<OrderbookItem> {
+            vec![self.asks.presentable.clone(), self.bids.presentable.clone()]
+        }
+    }
+
+    fn hold(ctx: &MmArc, orders: &[OrderbookItem]) {
+        for order in orders {
+            insert_or_update_order(ctx, order.clone());
+        }
+        flush_trie(ctx);
+    }
+
+    fn uuids(orders: &[Json]) -> Vec<String> {
+        let mut uuids: Vec<String> = orders
+            .iter()
+            .map(|order| order["uuid"].as_str().unwrap().to_owned())
+            .collect();
+        uuids.sort();
+        uuids
+    }
+
+    fn uuid_of(order: &OrderbookItem) -> Vec<String> { vec![order.uuid.to_string()] }
+
+    fn uuids_of(orders: &[OrderbookItem]) -> Vec<String> {
+        let mut uuids: Vec<String> = orders.iter().map(|order| order.uuid.to_string()).collect();
+        uuids.sort();
+        uuids
+    }
+
+    // --- (b) presentable ---
+
+    fn filter(ctx: &MmArc, first: &str, second: &str) -> CapabilityFilter {
+        block_on(CapabilityFilter::for_pair(ctx, first, second))
+    }
+
+    #[test]
+    fn t16_b_an_order_is_presentable_exactly_when_it_declares_what_its_coins_require() {
+        let ctx = node(Requirement::On);
+        let infos = [declaring(), first_value(), Vec::new(), malformed()];
+
+        // A coin with a required key, as the base and as the rel coin of the order.
+        for (base, rel) in [(SFX, DOC), (DOC, SFX)] {
+            let filter = filter(&ctx, SFX, DOC);
+            assert!(!filter.requires_nothing());
+            let presentable: Vec<bool> = infos
+                .iter()
+                .map(|info| filter.is_presentable(&order(base, rel, 1, 1, info.clone()), false))
+                .collect();
+            assert_eq!(presentable, vec![true, false, false, false], "{base}/{rel}");
+            // An order of the node's own is presentable with empty information.
+            assert!(filter.is_presentable(&order(base, rel, 1, 1, Vec::new()), true));
+            // The filter of a pair judges its orders in both directions, whichever coin was named first.
+            let reversed = self::filter(&ctx, DOC, SFX);
+            assert!(!reversed.is_presentable(&order(base, rel, 1, 1, first_value()), false));
+            assert!(reversed.is_presentable(&order(base, rel, 1, 1, declaring()), false));
+        }
+
+        // A pair whose coins require nothing: all four inputs are presentable.
+        let plain = filter(&ctx, DOC, MARTY);
+        assert!(plain.requires_nothing());
+        for info in &infos {
+            let mut item = order(DOC, MARTY, 1, 1, Vec::new());
+            item.base_protocol_info = info.clone();
+            item.rel_protocol_info = info.clone();
+            assert!(plain.is_presentable(&item, false), "{info:?}");
+        }
+    }
+
+    #[test]
+    fn t16_b_the_missing_capability_names_the_coin_and_judges_the_base_coin_first() {
+        let ctx = node(Requirement::On);
+        let filter = filter(&ctx, SFX, DOC);
+        let missing = |coin: &str| {
+            Some(MissingCapability {
+                coin: coin.to_owned(),
+                capability: CAPABILITY_SIGHASH_SUFFIX,
+            })
+        };
+        assert_eq!(filter.missing(&order(SFX, DOC, 1, 1, first_value())), missing(SFX));
+        assert_eq!(filter.missing(&order(DOC, SFX, 1, 1, Vec::new())), missing(SFX));
+        assert_eq!(filter.missing(&order(SFX, DOC, 1, 1, declaring())), None);
+        // The other coin's information plays no part.
+        let mut item = order(SFX, DOC, 1, 1, declaring());
+        item.rel_protocol_info = Vec::new();
+        assert_eq!(filter.missing(&item), None);
+    }
+
+    // --- (d) surfaces: orderbook ---
+
+    /// The legacy and the mmrpc-2.0 `orderbook` of (SFX, DOC), without the members that depend on the clock.
+    fn orderbook_answers(ctx: &MmArc) -> (Json, Json) {
+        let without_clock = |mut answer: Json| {
+            answer.as_object_mut().unwrap().remove("timestamp");
+            for side in ["asks", "bids"] {
+                for entry in answer[side].as_array_mut().unwrap() {
+                    entry.as_object_mut().unwrap().remove("age");
+                }
+            }
+            answer
+        };
+        (
+            without_clock(legacy_orderbook(ctx, SFX, DOC)),
+            without_clock(v2_orderbook(ctx, SFX, DOC)),
+        )
+    }
+
+    #[test]
+    fn t16_d_orderbook_lists_one_ask_and_one_bid_with_the_totals_of_the_listed_orders() {
+        let book = Book::new();
+        let ctx = node(Requirement::On);
+        mark_requested(&ctx);
+        hold(&ctx, &book.all());
+        let (legacy, v2) = orderbook_answers(&ctx);
+
+        assert_eq!(legacy["numasks"], 1);
+        assert_eq!(legacy["numbids"], 1);
+        assert_eq!(
+            uuids(legacy["asks"].as_array().unwrap()),
+            uuid_of(&book.asks.presentable)
+        );
+        assert_eq!(
+            uuids(legacy["bids"].as_array().unwrap()),
+            uuid_of(&book.bids.presentable)
+        );
+        assert_eq!(v2["num_asks"], 1);
+        assert_eq!(v2["num_bids"], 1);
+        assert_eq!(uuids(v2["asks"].as_array().unwrap()), uuid_of(&book.asks.presentable));
+        assert_eq!(uuids(v2["bids"].as_array().unwrap()), uuid_of(&book.bids.presentable));
+
+        // The ask: 3 SFX at 3 DOC each. Totals and running sums are those of the one listed order.
+        assert_eq!(legacy["total_asks_base_vol"], "3");
+        assert_eq!(legacy["total_asks_rel_vol"], "9");
+        assert_eq!(legacy["asks"][0]["base_max_volume_aggr"], "3");
+        assert_eq!(legacy["asks"][0]["rel_max_volume_aggr"], "9");
+        assert_eq!(v2["total_asks_base_vol"]["decimal"], "3");
+        assert_eq!(v2["asks"][0]["base_max_volume_aggr"]["decimal"], "3");
+        // The bid: 3 DOC at 3 SFX each.
+        assert_eq!(legacy["total_bids_rel_vol"], "3");
+        assert_eq!(legacy["total_bids_base_vol"], "9");
+        assert_eq!(legacy["bids"][0]["rel_max_volume_aggr"], "3");
+        assert_eq!(v2["total_bids_rel_vol"]["decimal"], "3");
+
+        // Every count, total and running sum: the answers are those of a book that holds the two presentable
+        // orders alone.
+        let alone = node(Requirement::On);
+        mark_requested(&alone);
+        hold(&alone, &book.presentable());
+        assert_eq!((legacy, v2), orderbook_answers(&alone));
+
+        // Nothing was removed from the stored book.
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert_eq!(ordermatch_ctx.orderbook.lock().order_set.len(), 6);
+    }
+
+    #[test]
+    fn t16_h_with_the_switch_off_orderbook_lists_every_order() {
+        let book = Book::new();
+        let answers = |requirement| {
+            let ctx = node(requirement);
+            mark_requested(&ctx);
+            hold(&ctx, &book.all());
+            orderbook_answers(&ctx)
+        };
+        let (legacy, v2) = answers(Requirement::SwitchOff);
+        assert_eq!(legacy["numasks"], 3);
+        assert_eq!(legacy["numbids"], 3);
+        assert_eq!(v2["num_asks"], 3);
+        assert_eq!(v2["num_bids"], 3);
+        assert_eq!(legacy["total_asks_base_vol"], "15");
+        // The results of a node without the requirement.
+        assert_eq!((legacy, v2), answers(Requirement::Absent));
+    }
+
+    // --- (d) surfaces: orderbook_depth ---
+
+    fn depth(ctx: &MmArc) -> Json {
+        let req = json!({ "pairs": [[SFX, DOC]] });
+        let response = block_on(orderbook_depth_rpc(ctx.clone(), req)).expect("orderbook_depth must succeed");
+        json::from_slice::<Json>(response.body()).unwrap()["result"].clone()
+    }
+
+    #[test]
+    fn t16_d_orderbook_depth_counts_presentable_orders_of_a_pair_the_node_holds() {
+        let book = Book::new();
+        let ctx = node(Requirement::On);
+        mark_requested(&ctx);
+        hold(&ctx, &book.all());
+        assert_eq!(
+            depth(&ctx),
+            json!([{ "pair": [SFX, DOC], "depth": { "asks": 1, "bids": 1 } }])
+        );
+    }
+
+    #[test]
+    fn t16_h_with_the_switch_off_orderbook_depth_counts_every_order() {
+        let book = Book::new();
+        for requirement in [Requirement::SwitchOff, Requirement::Absent] {
+            let ctx = node(requirement);
+            mark_requested(&ctx);
+            hold(&ctx, &book.all());
+            assert_eq!(
+                depth(&ctx),
+                json!([{ "pair": [SFX, DOC], "depth": { "asks": 3, "bids": 3 } }]),
+                "{requirement:?}"
+            );
+        }
+    }
+
+    // --- (d) surfaces: the event stream ---
+
+    /// The events a client of the stream receives.
+    type Events = mm2_event_stream::mpsc::Receiver<StdArc<mm2_event_stream::Event>>;
+
+    /// Subscribes a client to the order-book event stream of (SFX, DOC).
+    fn open_stream(ctx: &MmArc) -> Events {
+        mark_requested(ctx);
+        let events = ctx.event_stream_manager.new_client(1).rx;
+        let streamer = OrderbookStreamer::new(ctx.clone(), SFX.to_owned(), DOC.to_owned());
+        block_on(ctx.event_stream_manager.add(1, streamer)).expect("the streamer starts");
+        events
+    }
+
+    /// An event of the stream: its kind and the order it is about.
+    #[derive(Clone, Debug, PartialEq)]
+    enum Streamed {
+        NewOrUpdated(Uuid),
+        Removed(Uuid),
+    }
+
+    /// The events the stream emitted so far, in order. A presentable order is inserted last and the events are
+    /// read up to its own, so the result does not depend on timing.
+    fn streamed(ctx: &MmArc, stream: &mut Events) -> Vec<Streamed> {
+        let last = order(SFX, DOC, 9, 1, declaring());
+        insert_or_update_order(ctx, last.clone());
+        let mut events = Vec::new();
+        loop {
+            let event = CORE
+                .0
+                .block_on(async { tokio::time::timeout(Duration::from_secs(30), stream.recv()).await })
+                .expect("the event of the last order arrives")
+                .expect("the stream is open");
+            let (_, message) = event.get();
+            let streamed = match message["order_type"].as_str() {
+                Some("NewOrUpdatedItem") => {
+                    Streamed::NewOrUpdated(json::from_value(message["order_data"]["uuid"].clone()).unwrap())
+                },
+                Some("RemovedItem") => Streamed::Removed(json::from_value(message["order_data"].clone()).unwrap()),
+                other => panic!("unexpected event {other:?}: {message}"),
+            };
+            if streamed == Streamed::NewOrUpdated(last.uuid) {
+                return events;
+            }
+            events.push(streamed);
+        }
+    }
+
+    /// The arrival, an update and the removal of every order of `side`, the unpresentable ones first.
+    fn arrive_update_remove(ctx: &MmArc, side: &Side) {
+        for order in side.all() {
+            insert_or_update_order(ctx, order.clone());
+            let mut updated = order.clone();
+            updated.max_volume = BigRational::from_integer(2.into());
+            insert_or_update_order(ctx, updated);
+            delete_order(ctx, &order.pubkey, order.uuid);
+        }
+    }
+
+    fn arrival_update_removal(order: &OrderbookItem) -> Vec<Streamed> {
+        vec![
+            Streamed::NewOrUpdated(order.uuid),
+            Streamed::NewOrUpdated(order.uuid),
+            Streamed::Removed(order.uuid),
+        ]
+    }
+
+    #[test]
+    fn t16_d_the_event_stream_emits_nothing_for_an_unpresentable_order() {
+        let book = Book::new();
+        let ctx = node(Requirement::On);
+        let mut stream = open_stream(&ctx);
+
+        arrive_update_remove(&ctx, &book.asks);
+        arrive_update_remove(&ctx, &book.bids);
+
+        let expected = [
+            arrival_update_removal(&book.asks.presentable),
+            arrival_update_removal(&book.bids.presentable),
+        ]
+        .concat();
+        assert_eq!(streamed(&ctx, &mut stream), expected);
+    }
+
+    #[test]
+    fn t16_h_with_the_switch_off_the_event_stream_emits_every_order() {
+        let book = Book::new();
+        for requirement in [Requirement::SwitchOff, Requirement::Absent] {
+            let ctx = node(requirement);
+            let mut stream = open_stream(&ctx);
+
+            arrive_update_remove(&ctx, &book.asks);
+
+            let expected: Vec<Streamed> = book.asks.all().iter().flat_map(arrival_update_removal).collect();
+            assert_eq!(streamed(&ctx, &mut stream), expected, "{requirement:?}");
+        }
+    }
+
+    // --- a node and the relay that answers its requests ---
+
+    /// A node whose requests to a relay are answered by `relay`, through the relay's own request handler.
+    struct Net {
+        node: MmArc,
+        relay: MmArc,
+        /// The full-order-book requests the node made.
+        fetches: StdArc<AtomicUsize>,
+        /// While set, a full-order-book request fails without an answer.
+        fail_fetch: StdArc<AtomicBool>,
+        /// While set, no relay has an answer to a full-order-book request.
+        unanswered_fetch: StdArc<AtomicBool>,
+    }
+
+    impl Net {
+        fn new(requirement: Requirement, relay_orders: &[OrderbookItem]) -> Net {
+            Net::with_node(node(requirement), requirement, relay_orders)
+        }
+
+        /// `node` and a relay with the coins of `relay_requirement` that holds `relay_orders`.
+        fn with_node(node: MmArc, relay_requirement: Requirement, relay_orders: &[OrderbookItem]) -> Net {
+            let relay = self::node(relay_requirement);
+            hold(&relay, relay_orders);
+            let fetches = StdArc::new(AtomicUsize::new(0));
+            let fail_fetch = StdArc::new(AtomicBool::new(false));
+            let unanswered_fetch = StdArc::new(AtomicBool::new(false));
+
+            let (tx, mut rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&node);
+            let (answering, counted, failing) = (relay.clone(), fetches.clone(), fail_fetch.clone());
+            let unanswered = unanswered_fetch.clone();
+            // Ends when the node, which owns the sender, is dropped.
+            std::thread::spawn(move || {
+                while let Some(cmd) = block_on(rx.next()) {
+                    let AdexBehaviourCmd::RequestAnyRelay { req, response_tx } = cmd else {
+                        continue;
+                    };
+                    let Ok(P2PRequest::Ordermatch(request)) = decode_message::<P2PRequest>(&req) else {
+                        continue;
+                    };
+                    if matches!(request, OrdermatchRequest::GetOrderbook { .. }) {
+                        counted.fetch_add(1, AtomicOrdering::SeqCst);
+                        if failing.load(AtomicOrdering::SeqCst) {
+                            // Dropping the sender fails the request on the node's side.
+                            continue;
+                        }
+                        if unanswered.load(AtomicOrdering::SeqCst) {
+                            let _ = response_tx.send(None);
+                            continue;
+                        }
+                    }
+                    let answer = process_peer_request(answering.clone(), request).expect("the relay answers");
+                    let _ = response_tx.send(answer.map(|bytes| (PeerId::random(), bytes)));
+                }
+            });
+            Net {
+                node,
+                relay,
+                fetches,
+                fail_fetch,
+                unanswered_fetch,
+            }
+        }
+
+        fn fetches(&self) -> usize { self.fetches.load(AtomicOrdering::SeqCst) }
+
+        /// The number of orders in the node's own book.
+        fn held_by_node(&self) -> usize {
+            OrdermatchContext::from_ctx(&self.node)
+                .unwrap()
+                .orderbook
+                .lock()
+                .order_set
+                .len()
+        }
+
+        /// The legacy `best_orders` of the node, by volume.
+        fn legacy_best_orders(&self, coin: &str, action: &str, volume: &str) -> Json {
+            let req = json!({ "coin": coin, "action": action, "volume": volume });
+            let response = block_on(best_orders_rpc(self.node.clone(), req)).expect("legacy best_orders must succeed");
+            json::from_slice::<Json>(response.body()).unwrap()["result"].clone()
+        }
+
+        /// The mmrpc-2.0 `best_orders` of the node.
+        fn v2_best_orders(&self, coin: &str, action: &str, request_by: Json) -> Json {
+            let req = json::from_value(json!({ "coin": coin, "action": action, "request_by": request_by })).unwrap();
+            let response =
+                block_on(best_orders_rpc_v2(self.node.clone(), req)).expect("mmrpc 2.0 best_orders must succeed");
+            json::to_value(response).unwrap()["orders"].clone()
+        }
+    }
+
+    fn by_number(number: usize) -> Json { json!({ "type": "number", "value": number }) }
+
+    fn by_volume(volume: &str) -> Json { json!({ "type": "volume", "value": volume }) }
+
+    /// The identifiers of the orders `result` lists under `coin`; empty when the coin is not listed.
+    fn listed(result: &Json, coin: &str) -> Vec<String> {
+        uuids(
+            &result
+                .get(coin)
+                .and_then(|orders| orders.as_array())
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+
+    // --- (d) surfaces: best_orders ---
+
+    #[test]
+    fn t16_d_best_orders_of_both_generations_list_the_presentable_order_only() {
+        let book = Book::new();
+        let asks = uuid_of(&book.asks.presentable);
+        let bids = uuid_of(&book.bids.presentable);
+
+        // Buying SFX: the asks, listed under the other coin of the pair.
+        let net = Net::new(Requirement::On, &book.all());
+        assert_eq!(listed(&net.legacy_best_orders(SFX, "buy", "100"), DOC), asks);
+        assert_eq!(listed(&net.v2_best_orders(SFX, "buy", by_number(10)), DOC), asks);
+        assert_eq!(listed(&net.v2_best_orders(SFX, "buy", by_volume("100")), DOC), asks);
+        // Selling SFX: the bids.
+        assert_eq!(listed(&net.legacy_best_orders(SFX, "sell", "100"), DOC), bids);
+        assert_eq!(listed(&net.v2_best_orders(SFX, "sell", by_number(10)), DOC), bids);
+        // Asked from the other coin of the pair, the same orders are listed under SFX.
+        assert_eq!(listed(&net.legacy_best_orders(DOC, "sell", "100"), SFX), asks);
+        assert_eq!(listed(&net.v2_best_orders(DOC, "buy", by_number(10)), SFX), bids);
+        // The relay itself still holds and serves all six.
+        assert_eq!(
+            OrdermatchContext::from_ctx(&net.relay)
+                .unwrap()
+                .orderbook
+                .lock()
+                .order_set
+                .len(),
+            6
+        );
+    }
+
+    // --- (e) unchanged ---
+
+    /// The mirror of the relay's best-orders answer.
+    #[derive(Debug, Deserialize)]
+    struct BestOrdersAnswer {
+        orders: HashMap<String, Vec<OrderbookP2PItemWithProof>>,
+        protocol_infos: HashMap<Uuid, BaseRelProtocolInfo>,
+    }
+
+    /// The mirror of the relay's depth answer.
+    #[derive(Debug, Deserialize)]
+    struct DepthAnswer {
+        depth: HashMap<(String, String), DepthOfPair>,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct DepthOfPair {
+        asks: usize,
+        bids: usize,
+    }
+
+    fn answer_of(ctx: &MmArc, request: OrdermatchRequest) -> Vec<u8> {
+        process_peer_request(ctx.clone(), request)
+            .expect("the request is answered")
+            .expect("with an answer")
+    }
+
+    fn best_orders_answer(ctx: &MmArc, request: OrdermatchRequest) -> BestOrdersAnswer {
+        rmp_serde::from_slice(&answer_of(ctx, request)).unwrap()
+    }
+
+    fn answered(answer: &BestOrdersAnswer, coin: &str) -> Vec<Uuid> {
+        answer.orders[coin].iter().map(|item| item.order.uuid).collect()
+    }
+
+    #[test]
+    fn t16_e_the_answers_to_a_peer_contain_every_order() {
+        let book = Book::new();
+        let ctx = node(Requirement::On);
+        hold(&ctx, &book.all());
+        let asks: Vec<Uuid> = book.asks.all().iter().map(|order| order.uuid).collect();
+
+        // The full order book: all six orders, with their protocol information.
+        let full: GetOrderbookRes = decode_message(&answer_of(&ctx, OrdermatchRequest::GetOrderbook {
+            base: SFX.to_owned(),
+            rel: DOC.to_owned(),
+        }))
+        .unwrap();
+        let mut served: Vec<String> = full
+            .pubkey_orders
+            .values()
+            .flat_map(|item| item.orders.iter().map(|(uuid, _)| uuid.to_string()))
+            .collect();
+        served.sort();
+        assert_eq!(served, uuids_of(&book.all()));
+        for order in book.all() {
+            assert_eq!(full.protocol_infos[&order.uuid], order.base_rel_proto_info());
+        }
+
+        // Best orders by volume and by number: the three asks in price order, the unpresentable ones first.
+        let by_volume = best_orders_answer(&ctx, OrdermatchRequest::BestOrders {
+            coin: SFX.to_owned(),
+            action: BestOrdersAction::Buy,
+            volume: BigRational::from_integer(100.into()),
+        });
+        assert_eq!(answered(&by_volume, DOC), asks);
+        let by_number = best_orders_answer(&ctx, OrdermatchRequest::BestOrdersByNumber {
+            coin: SFX.to_owned(),
+            action: BestOrdersAction::Buy,
+            number: 3,
+        });
+        assert_eq!(answered(&by_number, DOC), asks);
+        for order in book.asks.all() {
+            assert_eq!(by_number.protocol_infos[&order.uuid], order.base_rel_proto_info());
+        }
+        // The selection stops where it stopped before: at the best price, presentable or not.
+        let best_one = best_orders_answer(&ctx, OrdermatchRequest::BestOrdersByNumber {
+            coin: SFX.to_owned(),
+            action: BestOrdersAction::Buy,
+            number: 1,
+        });
+        assert_eq!(answered(&best_one, DOC), vec![book.asks.without_word.uuid]);
+        let small_volume = best_orders_answer(&ctx, OrdermatchRequest::BestOrders {
+            coin: SFX.to_owned(),
+            action: BestOrdersAction::Buy,
+            volume: BigRational::from_integer(6.into()),
+        });
+        assert_eq!(answered(&small_volume, DOC), vec![
+            book.asks.without_word.uuid,
+            book.asks.empty_info.uuid
+        ]);
+
+        // Depth: three asks and three bids.
+        let pair = (SFX.to_owned(), DOC.to_owned());
+        let depth: DepthAnswer = rmp_serde::from_slice(&answer_of(&ctx, OrdermatchRequest::OrderbookDepth {
+            pairs: vec![pair.clone()],
+        }))
+        .unwrap();
+        assert_eq!(depth.depth[&pair], DepthOfPair { asks: 3, bids: 3 });
+    }
+
+    #[test]
+    fn t16_e_the_answers_and_the_trie_root_are_those_of_a_node_without_the_requirement() {
+        let book = Book::new();
+        let requiring = node(Requirement::On);
+        let plain = node(Requirement::Absent);
+        hold(&requiring, &book.all());
+        hold(&plain, &book.all());
+        let pair = alb_ordered_pair(SFX, DOC);
+
+        // The pair's trie root is the root of all six orders, not of the presentable ones.
+        let root = pair_trie_root_by_pub(&requiring, &maker(), &pair);
+        assert_eq!(root, pair_trie_root_by_pub(&plain, &maker(), &pair));
+        let presentable_only = node(Requirement::On);
+        hold(&presentable_only, &book.presentable());
+        assert_ne!(root, pair_trie_root_by_pub(&presentable_only, &maker(), &pair));
+
+        // The same selections in both nodes.
+        let requests = || {
+            vec![
+                OrdermatchRequest::BestOrders {
+                    coin: SFX.to_owned(),
+                    action: BestOrdersAction::Buy,
+                    volume: BigRational::from_integer(6.into()),
+                },
+                OrdermatchRequest::BestOrders {
+                    coin: SFX.to_owned(),
+                    action: BestOrdersAction::Sell,
+                    volume: BigRational::from_integer(100.into()),
+                },
+                OrdermatchRequest::BestOrdersByNumber {
+                    coin: DOC.to_owned(),
+                    action: BestOrdersAction::Buy,
+                    number: 2,
+                },
+                OrdermatchRequest::BestOrdersByNumber {
+                    coin: DOC.to_owned(),
+                    action: BestOrdersAction::Sell,
+                    number: 0,
+                },
+            ]
+        };
+        for (with, without) in requests().into_iter().zip(requests()) {
+            let label = format!("{with:?}");
+            let (with, without) = (
+                best_orders_answer(&requiring, with),
+                best_orders_answer(&plain, without),
+            );
+            assert_eq!(with.orders, without.orders, "{label}");
+            assert_eq!(with.protocol_infos, without.protocol_infos, "{label}");
+        }
+        // One pair, one order: the encoded answer is the same bytes.
+        let one = || OrdermatchRequest::BestOrdersByNumber {
+            coin: SFX.to_owned(),
+            action: BestOrdersAction::Buy,
+            number: 1,
+        };
+        assert_eq!(answer_of(&requiring, one()), answer_of(&plain, one()));
+        let depth = || OrdermatchRequest::OrderbookDepth {
+            pairs: vec![(SFX.to_owned(), DOC.to_owned())],
+        };
+        assert_eq!(answer_of(&requiring, depth()), answer_of(&plain, depth()));
+    }
+
+    // --- (f) refill ---
+
+    #[test]
+    fn t16_f_a_thinned_answer_is_refilled_from_the_fetched_book_by_number() {
+        let book = Book::new();
+        let net = Net::new(Requirement::On, &book.all());
+
+        // The relay's best ask is unpresentable; the presentable one is two prices deeper.
+        let result = net.v2_best_orders(SFX, "buy", by_number(1));
+
+        assert_eq!(listed(&result, DOC), uuid_of(&book.asks.presentable));
+        assert_eq!(net.fetches(), 1, "the pair's full order book is fetched once");
+        assert_eq!(net.held_by_node(), 6);
+        // The fetched pair is not fetched again.
+        let again = net.v2_best_orders(SFX, "buy", by_number(2));
+        assert_eq!(listed(&again, DOC), uuid_of(&book.asks.presentable));
+        assert_eq!(net.fetches(), 1);
+    }
+
+    #[test]
+    fn t16_f_a_thinned_answer_is_refilled_from_the_fetched_book_by_volume() {
+        let book = Book::new();
+        let presentable = uuid_of(&book.bids.presentable);
+
+        // Legacy, by volume: the relay answers with the best bid alone, which is unpresentable.
+        let net = Net::new(Requirement::On, &book.all());
+        let result = net.legacy_best_orders(SFX, "sell", "1");
+        assert_eq!(listed(&result, DOC), presentable);
+        assert_eq!(net.fetches(), 1);
+
+        // The mmrpc-2.0 request by volume takes the same path.
+        let net = Net::new(Requirement::On, &book.all());
+        let result = net.v2_best_orders(SFX, "sell", by_volume("1"));
+        assert_eq!(listed(&result, DOC), presentable);
+        assert_eq!(net.fetches(), 1);
+    }
+
+    #[test]
+    fn t16_f_an_answer_that_loses_nothing_triggers_no_fetch() {
+        let book = Book::new();
+        let mut orders = book.presentable();
+        orders.extend(make_random_orders(maker(), &[0; 32], DOC.into(), MARTY.into(), 2));
+        let net = Net::new(Requirement::On, &orders);
+
+        let legacy = net.legacy_best_orders(DOC, "buy", "100");
+        let v2 = net.v2_best_orders(DOC, "buy", by_number(10));
+
+        assert_eq!(listed(&legacy, SFX), uuid_of(&book.bids.presentable));
+        assert_eq!(listed(&v2, SFX), uuid_of(&book.bids.presentable));
+        assert_eq!(listed(&legacy, MARTY).len(), 2);
+        assert_eq!(listed(&v2, MARTY).len(), 2);
+        assert_eq!(net.fetches(), 0);
+        assert_eq!(net.held_by_node(), 0);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&net.node).unwrap();
+        assert!(ordermatch_ctx.orderbook_subscriptions.read().is_empty());
+    }
+
+    #[test]
+    fn t16_f_a_failed_fetch_yields_the_relay_answer_without_the_unpresentable_orders() {
+        let book = Book::new();
+        let net = Net::new(Requirement::On, &book.all());
+        net.fail_fetch.store(true, AtomicOrdering::SeqCst);
+
+        // The relay answers with all three asks; the fetch fails, so its answer is listed without the two.
+        let result = net.v2_best_orders(SFX, "buy", by_number(3));
+        assert_eq!(listed(&result, DOC), uuid_of(&book.asks.presentable));
+        assert_eq!(net.fetches(), 1);
+        assert_eq!(net.held_by_node(), 0, "nothing was fetched");
+
+        // With the best ask alone in the relay's answer, nothing is left to list.
+        let result = net.legacy_best_orders(SFX, "buy", "1");
+        assert!(listed(&result, DOC).is_empty());
+        assert_eq!(net.fetches(), 2);
+    }
+
+    #[test]
+    fn t16_f_a_fetch_that_no_relay_answers_yields_the_relay_answer_without_the_unpresentable_orders() {
+        let book = Book::new();
+        let net = Net::new(Requirement::On, &book.all());
+        net.unanswered_fetch.store(true, AtomicOrdering::SeqCst);
+
+        // The request for the full order book reports no error, but the node's book was not filled.
+        let result = net.v2_best_orders(SFX, "buy", by_number(3));
+        assert_eq!(listed(&result, DOC), uuid_of(&book.asks.presentable));
+        assert_eq!(net.fetches(), 1);
+        assert_eq!(net.held_by_node(), 0, "nothing was fetched");
+
+        // Once a relay answers, the pair's part comes from the fetched book.
+        net.unanswered_fetch.store(false, AtomicOrdering::SeqCst);
+        let result = net.v2_best_orders(SFX, "buy", by_number(1));
+        assert_eq!(listed(&result, DOC), uuid_of(&book.asks.presentable));
+        assert_eq!(net.fetches(), 2);
+        assert_eq!(net.held_by_node(), 6);
+    }
+
+    /// R59.4C.1: where the caller names no coin, the required set is that of the order's own ticker. An order
+    /// filed under the own ticker of a coin that this node trades under an order-book ticker is judged like any
+    /// other: it reaches the event stream, and `best_orders` asked from the other coin of the pair.
+    #[test]
+    fn t16_d_an_order_filed_under_the_own_ticker_of_an_aliased_coin_is_listed_only_with_the_capability() {
+        let book = Book::new();
+
+        // The event stream of the pair: nothing for the four orders without the capability.
+        let ctx = node_with_an_order_book_ticker();
+        assert_eq!(
+            OrdermatchContext::from_ctx(&ctx).unwrap().orderbook_ticker_bypass(SFX),
+            "SFX-OB"
+        );
+        let mut stream = open_stream(&ctx);
+        arrive_update_remove(&ctx, &book.asks);
+        arrive_update_remove(&ctx, &book.bids);
+        let expected = [
+            arrival_update_removal(&book.asks.presentable),
+            arrival_update_removal(&book.bids.presentable),
+        ]
+        .concat();
+        assert_eq!(streamed(&ctx, &mut stream), expected);
+
+        // `best_orders` asked from DOC: the relay lists the orders under the ticker they were filed with.
+        let net = Net::with_node(node_with_an_order_book_ticker(), Requirement::On, &book.all());
+        assert_eq!(
+            listed(&net.legacy_best_orders(DOC, "sell", "100"), SFX),
+            uuid_of(&book.asks.presentable)
+        );
+        assert_eq!(
+            listed(&net.v2_best_orders(DOC, "buy", by_number(10)), SFX),
+            uuid_of(&book.bids.presentable)
+        );
+        assert_eq!(
+            listed(&net.v2_best_orders(DOC, "sell", by_number(1)), SFX),
+            uuid_of(&book.asks.presentable)
+        );
+    }
+
+    #[test]
+    fn t16_h_with_the_switch_off_best_orders_lists_the_relay_answer_and_fetches_nothing() {
+        let book = Book::new();
+        for requirement in [Requirement::SwitchOff, Requirement::Absent] {
+            let net = Net::new(requirement, &book.all());
+            let asks = uuids_of(&book.asks.all());
+
+            assert_eq!(listed(&net.legacy_best_orders(SFX, "buy", "100"), DOC), asks);
+            assert_eq!(listed(&net.v2_best_orders(SFX, "buy", by_number(10)), DOC), asks);
+            // The relay's best order, presentable or not.
+            assert_eq!(
+                listed(&net.v2_best_orders(SFX, "buy", by_number(1)), DOC),
+                uuid_of(&book.asks.without_word)
+            );
+            assert_eq!(net.fetches(), 0, "{requirement:?}");
+            assert_eq!(net.held_by_node(), 0, "{requirement:?}");
+        }
+    }
+
+    // --- (g) early refusal ---
+
+    /// A refusal: its error text, and the coin and the capability the typed error names.
+    #[derive(Clone, Copy)]
+    struct Refusal {
+        text: &'static str,
+        coin: &'static str,
+        capability: &'static str,
+    }
+
+    const REFUSAL: Refusal = Refusal {
+        text: "None of the orders named in match_by can be matched: BASE requires a counterparty that declares tx_v6",
+        coin: "BASE",
+        capability: CAPABILITY_TX_V6,
+    };
+
+    /// A `buy` or `sell` of [`Taker::trade`] and its outcome on the shared path with the text error.
+    struct Trade {
+        method: String,
+        match_by: Option<Json>,
+        result: Result<String, String>,
+    }
+
+    impl Trade {
+        /// The order identifiers `match_by` names, in ascending order.
+        fn named_orders(&self) -> Vec<Uuid> {
+            let match_by = self.match_by.as_ref().expect("the request names orders");
+            let mut named: Vec<Uuid> = json::from_value(match_by["data"].clone()).unwrap();
+            named.sort();
+            named
+        }
+    }
+
+    /// A node with the activated coins `BASE` and `REL`; `BASE` requires `tx_v6` of a counterparty when
+    /// `required` is set.
+    struct Taker {
+        ctx: MmArc,
+        rx: mpsc::Receiver<AdexBehaviourCmd>,
+        dbdir: std::path::PathBuf,
+    }
+
+    impl Drop for Taker {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+    }
+
+    impl Taker {
+        fn new(required: bool) -> Taker {
+            Taker::build(if required { &[("BASE", CAPABILITY_TX_V6)] } else { &[] }, false)
+        }
+
+        /// A node with the activated coins `BASE`, `REL` and `OTHER`. Each coin of `required` requires the
+        /// capability listed with it. With `logged_in` the node has a crypto context, so the order book knows
+        /// its persistent key.
+        fn build(required: &'static [(&'static str, &'static str)], logged_in: bool) -> Taker {
+            Taker::build_with(required, logged_in, None)
+        }
+
+        /// As [`Taker::build`]; with `base_orderbook_ticker` the coin `BASE` trades under that order-book ticker.
+        fn build_with(
+            required: &'static [(&'static str, &'static str)],
+            logged_in: bool,
+            base_orderbook_ticker: Option<&str>,
+        ) -> Taker {
+            TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
+            // What the balance check of the typed cores of `buy` and `sell` reads: a balance of 100 and no fees.
+            TestCoin::my_balance.mock_safe(|_| {
+                MockResult::Return(Box::new(futures01::future::ok(CoinBalance::new(BigDecimal::from(100)))))
+            });
+            fn no_fee(coin: &TestCoin) -> TradeFee {
+                TradeFee {
+                    coin: coin.ticker().to_owned(),
+                    amount: MmNumber::from(0),
+                    paid_from_trading_vol: false,
+                }
+            }
+            TestCoin::get_sender_trade_fee.mock_safe(|coin, _value, _stage| {
+                let fee = no_fee(coin);
+                MockResult::Return(Box::pin(async move { Ok(fee) }))
+            });
+            TestCoin::get_receiver_trade_fee
+                .mock_safe(|coin, _stage| MockResult::Return(Box::new(futures01::future::ok(no_fee(coin)))));
+            TestCoin::get_fee_to_send_taker_fee.mock_safe(|coin, _dex_fee_amount, _stage| {
+                let fee = no_fee(coin);
+                MockResult::Return(Box::pin(async move { Ok(fee) }))
+            });
+            TestCoin::required_counterparty_capabilities.mock_safe(move |coin| {
+                MockResult::Return(
+                    required
+                        .iter()
+                        .filter(|(ticker, _)| *ticker == coin.ticker())
+                        .map(|(_, capability)| *capability)
+                        .collect(),
+                )
+            });
+            let dbdir = std::env::temp_dir().join(format!("kdf-t16-capability-{}", Uuid::new_v4()));
+            let conf = json!({
+                "coins": [
+                    { "coin": "BASE", "orderbook_ticker": base_orderbook_ticker },
+                    { "coin": "REL" },
+                    { "coin": "OTHER" }
+                ],
+                "dbdir": dbdir.to_string_lossy(),
+                // The dex fee of the balance check of the typed cores needs a supported `netid`.
+                "netid": mm2_net_config::SUPPORTED_NETIDS[0],
+                "pre_trade_spend_check": false
+            });
+            let ctx = if logged_in {
+                let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+                CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "t16-taker").unwrap();
+                ctx
+            } else {
+                MmCtxBuilder::new()
+                    .with_conf(conf)
+                    .with_secp256k1_key_pair(key_pair_from_seed("t16-taker").unwrap())
+                    .into_mm_arc()
+            };
+            if base_orderbook_ticker.is_some() {
+                // The order-book tickers are read from the configuration when the context is initialized.
+                init_ordermatch_context(&ctx).unwrap();
+            }
+            let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+            for ticker in ["BASE", "REL", "OTHER"] {
+                block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+            }
+            std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+            let (tx, rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            Taker { ctx, rx, dbdir }
+        }
+
+        /// Puts a maker's order on (`base`, `rel`) into the node's own book; `base_coin_info` is its protocol
+        /// information for the coin `BASE`.
+        fn hold_order(&self, base: &str, rel: &str, base_coin_info: Vec<u8>) -> Uuid {
+            let mut item = order(base, rel, 1, 10, Vec::new());
+            if base == "BASE" {
+                item.base_protocol_info = base_coin_info;
+                item.rel_protocol_info = first_value();
+            } else {
+                item.base_protocol_info = first_value();
+                item.rel_protocol_info = base_coin_info;
+            }
+            self.hold(item)
+        }
+
+        /// Puts `item` into the node's own book.
+        fn hold(&self, item: OrderbookItem) -> Uuid {
+            let uuid = item.uuid;
+            insert_or_update_order(&self.ctx, item);
+            flush_trie(&self.ctx);
+            uuid
+        }
+
+        /// The body of a `buy` or `sell` of 3 BASE at price 1 with the given `match_by`.
+        fn body(method: &str, match_by: &Option<Json>) -> Json {
+            let mut body = json!({
+                "base": "BASE", "rel": "REL", "price": 1, "volume": 3, "method": method, "save_in_history": false
+            });
+            if let Some(match_by) = match_by {
+                body["match_by"] = match_by.clone();
+            }
+            body
+        }
+
+        /// `buy` or `sell` of 3 BASE at price 1 through the shared path, with the given `match_by`.
+        fn trade(&self, method: &str, match_by: Option<Json>) -> Trade {
+            let base = block_on(lp_coinfind(&self.ctx, "BASE")).unwrap().unwrap();
+            let rel = block_on(lp_coinfind(&self.ctx, "REL")).unwrap().unwrap();
+            let input = json::from_value(Taker::body(method, &match_by)).unwrap();
+            let result = block_on(lp_auto_buy(&self.ctx, &base, &rel, input));
+            Trade {
+                method: method.to_owned(),
+                match_by,
+                result,
+            }
+        }
+
+        /// The request of `trade` through the typed core of its method, which the mmrpc-2.0 `buy` and `sell` answer
+        /// from.
+        fn typed_trade(&self, trade: &Trade) -> Result<TakerOrderResponse, MmError<TakerOrderError>> {
+            let req: TakerOrderReq = json::from_value(Taker::body(&trade.method, &trade.match_by)).unwrap();
+            match trade.method.as_str() {
+                "buy" => block_on(buy_core(self.ctx.clone(), req)),
+                "sell" => block_on(sell_core(self.ctx.clone(), req)),
+                method => unreachable!("not a taker method: {method}"),
+            }
+        }
+
+        /// The request of `trade` through the legacy handler of its method.
+        fn legacy_trade(&self, trade: &Trade) -> Result<Response<Vec<u8>>, String> {
+            let body = Taker::body(&trade.method, &trade.match_by);
+            match trade.method.as_str() {
+                "buy" => block_on(buy(self.ctx.clone(), body)),
+                "sell" => block_on(sell(self.ctx.clone(), body)),
+                method => unreachable!("not a taker method: {method}"),
+            }
+        }
+
+        /// The taker requests that left the node since the last call.
+        fn taker_requests(&mut self) -> usize {
+            let mut requests = 0;
+            while let Ok(cmd) = self.rx.try_recv() {
+                if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                    if let Ok((new_protocol::OrdermatchMessage::TakerRequest(_), ..)) = decode_signed(&msg) {
+                        requests += 1;
+                    }
+                }
+            }
+            requests
+        }
+
+        /// The taker orders the node holds, in memory and as active records.
+        fn taker_orders(&self) -> (usize, usize) {
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&self.ctx).unwrap();
+            let in_memory = block_on(ordermatch_ctx.my_taker_orders.lock()).len();
+            let stored = block_on(MyOrdersStorage::new(self.ctx.clone()).load_active_taker_orders()).unwrap();
+            (in_memory, stored.len())
+        }
+
+        fn assert_refused(&mut self, trade: Trade) { self.assert_refused_with(trade, REFUSAL) }
+
+        /// Nothing of a taker order exists: no order in memory, no active record, no request sent and no
+        /// subscription.
+        fn assert_no_taker_order(&mut self) {
+            assert_eq!(self.taker_orders(), (0, 0), "no taker order exists afterwards");
+            assert_eq!(self.taker_requests(), 0);
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&self.ctx).unwrap();
+            assert!(ordermatch_ctx.orderbook_subscriptions.read().is_empty());
+        }
+
+        /// The request was refused with the error text of `refusal`, and nothing of a taker order exists. The
+        /// typed core of the method refuses the same request with `OrderNotMatchableMissingCapability`, whose
+        /// members are the coin and the capability of `refusal` and the named orders in ascending order, and the
+        /// legacy handler of the method with the same text; nothing of a taker order exists after either.
+        fn assert_refused_with(&mut self, trade: Trade, refusal: Refusal) {
+            match &trade.result {
+                Ok(created) => panic!("the request must be refused, got {created}"),
+                Err(e) => assert!(e.ends_with(refusal.text), "{e}"),
+            }
+            self.assert_no_taker_order();
+
+            let error = match self.typed_trade(&trade) {
+                Ok(_) => panic!("the typed core must refuse the request"),
+                Err(e) => e.into_inner(),
+            };
+            match &error {
+                TakerOrderError::OrderNotMatchableMissingCapability {
+                    coin,
+                    capability,
+                    orders,
+                } => {
+                    assert_eq!(coin, refusal.coin);
+                    assert_eq!(capability, refusal.capability);
+                    assert_eq!(orders, &trade.named_orders());
+                },
+                other => panic!("the typed core must refuse for the missing capability, got {other:?}"),
+            }
+            assert_eq!(error.to_string(), refusal.text);
+            assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                json::to_value(&error).unwrap()["error_type"],
+                "OrderNotMatchableMissingCapability"
+            );
+            self.assert_no_taker_order();
+
+            match self.legacy_trade(&trade) {
+                Ok(_) => panic!("the legacy handler must refuse the request"),
+                Err(e) => assert!(e.ends_with(refusal.text), "{e}"),
+            }
+            self.assert_no_taker_order();
+        }
+
+        /// The request proceeded on the shared path: one taker order exists and one request left the node. The
+        /// typed core of the method then places the same request as well.
+        fn assert_proceeds(&mut self, trade: Trade) {
+            if let Err(e) = &trade.result {
+                panic!("the request must proceed: {e}");
+            }
+            assert_eq!(self.taker_orders(), (1, 1));
+            assert_eq!(self.taker_requests(), 1);
+
+            if let Err(e) = self.typed_trade(&trade) {
+                panic!("the request must proceed through the typed core: {e}");
+            }
+            assert_eq!(self.taker_orders(), (2, 2));
+            assert_eq!(self.taker_requests(), 1);
+        }
+    }
+
+    fn match_by_orders(uuids: &[Uuid]) -> Option<Json> { Some(json!({ "type": "Orders", "data": uuids })) }
+
+    /// Protocol information of `BASE` that declares `tx_v6`.
+    fn declaring_tx_v6() -> Vec<u8> { append_capability_word(first_value(), &[CAPABILITY_TX_V6]) }
+
+    #[test]
+    fn t16_g_match_by_naming_one_held_unpresentable_order_is_refused() {
+        // `buy` is matched by orders that sell BASE; `sell` by orders that buy it.
+        for (method, base, rel) in [("buy", "BASE", "REL"), ("sell", "REL", "BASE")] {
+            let mut taker = Taker::new(true);
+            let unpresentable = taker.hold_order(base, rel, first_value());
+            let result = taker.trade(method, match_by_orders(&[unpresentable]));
+            taker.assert_refused(result);
+
+            // Two named orders, both held and both unpresentable.
+            let also = taker.hold_order(base, rel, Vec::new());
+            let result = taker.trade(method, match_by_orders(&[unpresentable, also]));
+            taker.assert_refused(result);
+        }
+    }
+
+    #[test]
+    fn t16_g_a_named_order_that_is_not_held_proceeds() {
+        let mut taker = Taker::new(true);
+        let result = taker.trade("buy", match_by_orders(&[Uuid::new_v4()]));
+        taker.assert_proceeds(result);
+
+        // One of the two named orders is held and unpresentable, the other one is not held.
+        let mut taker = Taker::new(true);
+        let unpresentable = taker.hold_order("BASE", "REL", first_value());
+        let result = taker.trade("buy", match_by_orders(&[unpresentable, Uuid::new_v4()]));
+        taker.assert_proceeds(result);
+    }
+
+    #[test]
+    fn t16_g_one_presentable_order_of_two_named_proceeds() {
+        let mut taker = Taker::new(true);
+        let unpresentable = taker.hold_order("BASE", "REL", first_value());
+        let presentable = taker.hold_order("BASE", "REL", declaring_tx_v6());
+        let result = taker.trade("buy", match_by_orders(&[unpresentable, presentable]));
+        taker.assert_proceeds(result);
+
+        // `sell` is matched by orders that buy BASE.
+        let mut taker = Taker::new(true);
+        let unpresentable = taker.hold_order("REL", "BASE", first_value());
+        let presentable = taker.hold_order("REL", "BASE", declaring_tx_v6());
+        let result = taker.trade("sell", match_by_orders(&[unpresentable, presentable]));
+        taker.assert_proceeds(result);
+    }
+
+    #[test]
+    fn t16_g_match_by_public_key_and_no_match_by_proceed() {
+        let mut taker = Taker::new(true);
+        taker.hold_order("BASE", "REL", first_value());
+        let maker_key = maker()[2..].to_owned();
+        let result = taker.trade("buy", Some(json!({ "type": "Pubkeys", "data": [maker_key] })));
+        taker.assert_proceeds(result);
+
+        let mut taker = Taker::new(true);
+        taker.hold_order("BASE", "REL", first_value());
+        let result = taker.trade("buy", None);
+        taker.assert_proceeds(result);
+
+        let mut taker = Taker::new(true);
+        taker.hold_order("BASE", "REL", first_value());
+        let result = taker.trade("buy", Some(json!({ "type": "Any" })));
+        taker.assert_proceeds(result);
+
+        // `match_by` of kind orders that names none.
+        let mut taker = Taker::new(true);
+        taker.hold_order("BASE", "REL", first_value());
+        let result = taker.trade("buy", match_by_orders(&[]));
+        taker.assert_proceeds(result);
+    }
+
+    /// An order of the maker on (`base`, `rel`) with the given protocol information of its two coins.
+    fn order_with(base: &str, rel: &str, base_info: Vec<u8>, rel_info: Vec<u8>) -> OrderbookItem {
+        OrderbookItem {
+            base_protocol_info: base_info,
+            rel_protocol_info: rel_info,
+            ..order(base, rel, 1, 10, Vec::new())
+        }
+    }
+
+    /// BASE and OTHER require `tx_v6`; REL requires nothing.
+    const BASE_AND_OTHER_REQUIRE: &[(&str, &str)] = &[("BASE", CAPABILITY_TX_V6), ("OTHER", CAPABILITY_TX_V6)];
+
+    /// An order of the maker on (`base`, `rel`) that declares no capability for either coin.
+    fn declaring_nothing(base: &str, rel: &str) -> OrderbookItem { order_with(base, rel, first_value(), first_value()) }
+
+    /// The outcome of a `buy` or `sell` of BASE for REL that names one held order on (`base`, `rel`) which
+    /// declares no capability. BASE and OTHER require `tx_v6`.
+    fn trade_naming_an_order_on(method: &str, base: &str, rel: &str) -> (Taker, Trade) {
+        let taker = Taker::build(BASE_AND_OTHER_REQUIRE, false);
+        let named = taker.hold(declaring_nothing(base, rel));
+        let result = taker.trade(method, match_by_orders(&[named]));
+        (taker, result)
+    }
+
+    /// R59.4C.6: a named order is judged only if the request can match it by its coins. A held order of another
+    /// pair is not judged, although one of its coins requires a capability the order does not declare.
+    #[test]
+    fn t16_g_a_named_order_of_another_pair_proceeds() {
+        let other_pairs = [
+            // No coin of the request.
+            ("OTHER", "REL2"),
+            // The coin of the request that requires nothing.
+            ("OTHER", "REL"),
+            ("REL", "OTHER"),
+            // The coin of the request that requires the capability, as base and as rel.
+            ("BASE", "OTHER"),
+            ("OTHER", "BASE"),
+        ];
+        for method in ["buy", "sell"] {
+            for (base, rel) in other_pairs {
+                let (mut taker, result) = trade_naming_an_order_on(method, base, rel);
+                taker.assert_proceeds(result);
+            }
+        }
+    }
+
+    /// R59.4C.6: the request's pair on the side the request does not take. A `buy` of BASE for REL is matched by
+    /// orders that sell BASE for REL, a `sell` by orders that sell REL for BASE; an order on the other side
+    /// cannot match and is not judged, while the same order on the matchable side is refused.
+    #[test]
+    fn t16_g_a_named_order_on_the_side_the_request_cannot_match_proceeds() {
+        for (method, matchable, other_side) in [
+            ("buy", ("BASE", "REL"), ("REL", "BASE")),
+            ("sell", ("REL", "BASE"), ("BASE", "REL")),
+        ] {
+            let (mut taker, result) = trade_naming_an_order_on(method, matchable.0, matchable.1);
+            taker.assert_refused(result);
+
+            let (mut taker, result) = trade_naming_an_order_on(method, other_side.0, other_side.1);
+            taker.assert_proceeds(result);
+        }
+    }
+
+    /// R59.4C.6: a held order the request cannot match counts like an order the node does not hold, so with one
+    /// such order among the named ones the request proceeds, whatever the other named orders are.
+    #[test]
+    fn t16_g_one_named_order_the_request_cannot_match_is_enough_to_proceed() {
+        for (method, matchable, cannot_match) in [
+            ("buy", ("BASE", "REL"), ("REL", "BASE")),
+            ("buy", ("BASE", "REL"), ("BASE", "OTHER")),
+            ("sell", ("REL", "BASE"), ("BASE", "REL")),
+            ("sell", ("REL", "BASE"), ("OTHER", "BASE")),
+        ] {
+            let mut taker = Taker::build(BASE_AND_OTHER_REQUIRE, false);
+            let unpresentable = taker.hold(declaring_nothing(matchable.0, matchable.1));
+            let result = taker.trade(method, match_by_orders(&[unpresentable]));
+            taker.assert_refused(result);
+
+            let not_judged = taker.hold(declaring_nothing(cannot_match.0, cannot_match.1));
+            let result = taker.trade(method, match_by_orders(&[unpresentable, not_judged]));
+            taker.assert_proceeds(result);
+        }
+    }
+
+    /// R59.4C.6: the pair and the side are compared as the matching compares them, order-book tickers included.
+    /// `BASE` trades under the order-book ticker `BASE-OB`; an order names either ticker.
+    #[test]
+    fn t16_g_the_pair_and_the_side_are_compared_with_order_book_tickers() {
+        let aliased = || Taker::build_with(BASE_AND_OTHER_REQUIRE, false, Some("BASE-OB"));
+        for base_ticker in ["BASE-OB", "BASE"] {
+            // On the matchable side, under either ticker of the coin: judged, and the coin is named by its own ticker.
+            let mut taker = aliased();
+            let named = taker.hold(declaring_nothing(base_ticker, "REL"));
+            let result = taker.trade("buy", match_by_orders(&[named]));
+            taker.assert_refused(result);
+
+            let mut taker = aliased();
+            let named = taker.hold(declaring_nothing("REL", base_ticker));
+            let result = taker.trade("sell", match_by_orders(&[named]));
+            taker.assert_refused(result);
+
+            // With the capability declared, the same order lets the request proceed.
+            let mut taker = aliased();
+            let named = taker.hold(order_with(base_ticker, "REL", declaring_tx_v6(), first_value()));
+            let result = taker.trade("buy", match_by_orders(&[named]));
+            taker.assert_proceeds(result);
+
+            // On the other side, and on another pair: not judged.
+            for (base, rel) in [("REL", base_ticker), (base_ticker, "OTHER")] {
+                let mut taker = aliased();
+                let named = taker.hold(declaring_nothing(base, rel));
+                let result = taker.trade("buy", match_by_orders(&[named]));
+                taker.assert_proceeds(result);
+            }
+        }
+    }
+
+    #[test]
+    fn t16_g_a_named_order_of_the_nodes_own_proceeds() {
+        // An order under a per-order key of the node (a shielded coin's order), with empty protocol information.
+        let mut taker = Taker::new(true);
+        let named = taker.hold(order_with("BASE", "REL", Vec::new(), Vec::new()));
+        let result = taker.trade("buy", match_by_orders(&[named]));
+        taker.assert_refused(result);
+        OrdermatchContext::from_ctx(&taker.ctx)
+            .unwrap()
+            .orderbook
+            .lock()
+            .my_p2p_pubkeys
+            .insert(maker());
+        let result = taker.trade("buy", match_by_orders(&[named]));
+        taker.assert_proceeds(result);
+
+        // An order under the node's persistent key, with empty protocol information.
+        let mut taker = Taker::build(&[("BASE", CAPABILITY_TX_V6)], true);
+        let own_key = mm2_internal_pubkey_hex(&taker.ctx)
+            .unwrap()
+            .expect("the node is logged in");
+        let of_a_peer = taker.hold(order_with("BASE", "REL", Vec::new(), Vec::new()));
+        let result = taker.trade("buy", match_by_orders(&[of_a_peer]));
+        taker.assert_refused(result);
+        let own = taker.hold(OrderbookItem {
+            pubkey: own_key,
+            ..order_with("BASE", "REL", Vec::new(), Vec::new())
+        });
+        let result = taker.trade("buy", match_by_orders(&[own]));
+        taker.assert_proceeds(result);
+
+        // One own order among the named ones is enough, as one presentable order is.
+        let mut taker = Taker::new(true);
+        let of_a_peer = taker.hold(OrderbookItem {
+            pubkey: pubkey_and_secret_for_test("t16-another-maker").0,
+            ..order_with("BASE", "REL", Vec::new(), Vec::new())
+        });
+        let own = taker.hold(order_with("BASE", "REL", Vec::new(), Vec::new()));
+        OrdermatchContext::from_ctx(&taker.ctx)
+            .unwrap()
+            .orderbook
+            .lock()
+            .my_p2p_pubkeys
+            .insert(maker());
+        let result = taker.trade("buy", match_by_orders(&[of_a_peer]));
+        taker.assert_refused(result);
+        let result = taker.trade("buy", match_by_orders(&[of_a_peer, own]));
+        taker.assert_proceeds(result);
+    }
+
+    #[test]
+    fn t16_g_the_refusal_names_the_coin_and_the_capability_of_the_named_order_with_the_lowest_identifier() {
+        const REQUIRED: &[(&str, &str)] = &[("BASE", CAPABILITY_TX_V6), ("REL", CAPABILITY_SIGHASH_SUFFIX)];
+        const BASE_REFUSAL: Refusal = REFUSAL;
+        const REL_REFUSAL: Refusal = Refusal {
+            text: "None of the orders named in match_by can be matched: REL requires a counterparty that declares \
+                   sighash_suffix",
+            coin: "REL",
+            capability: CAPABILITY_SIGHASH_SUFFIX,
+        };
+        let mut identifiers = [Uuid::new_v4(), Uuid::new_v4()];
+        identifiers.sort();
+        let [low, high] = identifiers;
+        assert!(low < high);
+        // One order lacks what BASE requires, the other one what REL requires.
+        let lacks_for_base = || order_with("BASE", "REL", first_value(), declaring());
+        let lacks_for_rel = || order_with("BASE", "REL", declaring_tx_v6(), first_value());
+
+        for (lowest, other, refusal) in [
+            (lacks_for_base(), lacks_for_rel(), BASE_REFUSAL),
+            (lacks_for_rel(), lacks_for_base(), REL_REFUSAL),
+        ] {
+            let mut taker = Taker::build(REQUIRED, false);
+            taker.hold(OrderbookItem { uuid: low, ..lowest });
+            taker.hold(OrderbookItem { uuid: high, ..other });
+            // Whichever order the request lists first.
+            for named in [[low, high], [high, low]] {
+                let result = taker.trade("buy", match_by_orders(&named));
+                taker.assert_refused_with(result, refusal);
+            }
+        }
+
+        // Within the order, its base coin is judged before its rel coin: for a `sell` that is the request's rel.
+        let mut taker = Taker::build(REQUIRED, false);
+        let lacks_both = taker.hold(order_with("BASE", "REL", Vec::new(), Vec::new()));
+        let result = taker.trade("buy", match_by_orders(&[lacks_both]));
+        taker.assert_refused_with(result, BASE_REFUSAL);
+        let mut taker = Taker::build(REQUIRED, false);
+        let lacks_both = taker.hold(order_with("REL", "BASE", Vec::new(), Vec::new()));
+        let result = taker.trade("sell", match_by_orders(&[lacks_both]));
+        taker.assert_refused_with(result, REL_REFUSAL);
+    }
+
+    #[test]
+    fn t16_h_with_the_switch_off_match_by_naming_an_unpresentable_order_proceeds() {
+        for method in ["buy", "sell"] {
+            let mut taker = Taker::new(false);
+            let (base, rel) = if method == "buy" {
+                ("BASE", "REL")
+            } else {
+                ("REL", "BASE")
+            };
+            let named = taker.hold_order(base, rel, first_value());
+            let result = taker.trade(method, match_by_orders(&[named]));
+            taker.assert_proceeds(result);
+        }
+    }
+}
+
 /// CRD ch.28 R16a, T4a: every ordermatch message the node sends passes the bounds check, and the order record
 /// decoded from a peer's bytes is read under the bounds.
 mod t4a_bounded_reading_tests {

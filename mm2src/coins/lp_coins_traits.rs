@@ -782,6 +782,12 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
     /// Check if serialized coin protocol info is supported by current version.
     fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool;
 
+    /// The capability keys whose absence from a counterparty's protocol information makes
+    /// [`MmCoin::is_coin_protocol_supported`] decline it at this moment (CRD ch.59 R59.4C.1). Empty for a
+    /// coin that requires nothing. The acceptance check reads the same source, so the two cannot disagree.
+    /// Reading it has no side effect and writes no log line.
+    fn required_counterparty_capabilities(&self) -> Vec<&'static str> { Vec::new() }
+
     /// Compressed public key of the network-designated burn address for this
     /// coin family. Empty when burn is not configured for the coin.
     fn burn_pubkey(&self) -> Vec<u8> { Vec::new() }

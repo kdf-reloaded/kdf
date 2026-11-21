@@ -2415,6 +2415,7 @@ several legacy texts; the text is not part of the contract.
 | `TradingNotSupported` | object `{coin}` | 400 | coin cannot trade | setprice, buy, sell |
 | `SwapKeyMismatch` | object `{coin, reason}` | 400 | coin cannot be swapped under this login | setprice, update_maker_order, buy, sell |
 | `ChainDisagreement` | string | 400 | Electrum servers disagree about the chain (chapter 38) | setprice, buy, sell |
+| `OrderNotMatchableMissingCapability` | object `{coin, capability, orders}` | 400 | every order named in `match_by` is held by the node and lacks a capability the node requires of a counterparty (chapter 59 R59.4C.6) | buy, sell |
 | `BaseEqualRel` | none | 400 | same coin on both sides | setprice, buy, sell |
 | `CoinsNotActivated` | object `{base, rel}` | 400 | order's coins not activated | update_maker_order |
 | `VolumeTooLow` | object (volume, threshold; coin where known) | 400 | max, min, rel, base or spend-safety volume below floor; amount below minimum | setprice, update_maker_order, buy, sell |
@@ -3046,3 +3047,7 @@ shall be wound down as part of shutdown rather than abandoned.
   §43.1F.* Reloaded-original, clean side: they record the maintainer's
   decisions of 2026-11-18 on those items; no cleared sentence was changed
   and no forbidden-class input was used, chapter 01 R38 not engaged.
+- *Reloaded-original addition (2026-11-20) -- the row
+  `OrderNotMatchableMissingCapability` of the table under R43.1R.4.* The
+  typed form of the refusal of chapter 59 R59.4C.6. No forbidden-class input;
+  it needs no Dirty Gate pass.

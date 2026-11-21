@@ -904,6 +904,10 @@ impl MmCoin for QtumCoin {
     fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool {
         utxo_common::is_coin_protocol_supported(self, info)
     }
+
+    fn required_counterparty_capabilities(&self) -> Vec<&'static str> {
+        utxo_common::required_counterparty_capabilities(self)
+    }
 }
 
 #[async_trait]

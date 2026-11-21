@@ -1,10 +1,11 @@
 // utxo_common_helpers — address utilities, balance queries, config, withdraw
 
 use super::*;
-use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, CapabilityWordStatus,
-                                      DeclineLines, DeclineLog, CAPABILITY_SIGHASH_SUFFIX};
+use crate::coin_protocol_capability::{append_capability_word, classify_capability_word, missing_capabilities,
+                                      CapabilityWordStatus, DeclineLines, DeclineLog, CAPABILITY_SIGHASH_SUFFIX};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
-use crate::utxo::utxo_builder::REQUIRE_SUFFIX_COUNTERPARTY_KEY;
+use crate::utxo::utxo_builder::{require_suffix_counterparty_from_conf, sighash_suffix_from_conf,
+                                REQUIRE_SUFFIX_COUNTERPARTY_KEY};
 
 const FIXED_FEE_MIN_VOL_TX_SIZE_BYTES: u64 = 496;
 
@@ -623,6 +624,37 @@ pub fn is_coin_protocol_supported<T: UtxoCommonOps>(coin: &T, info: &Option<Vec<
     }
 }
 
+/// The required set of a UTXO-family coin (CRD ch.59 R59.4C.1): what [`is_coin_protocol_supported`]
+/// requires of a counterparty's capability word.
+pub fn required_counterparty_capabilities<T: UtxoCommonOps>(coin: &T) -> Vec<&'static str> {
+    let conf = &coin.as_ref().conf;
+    suffix_required_capabilities(conf.sighash_suffix, conf.require_suffix_counterparty)
+}
+
+/// The required set of a UTXO-family coin that is not activated, from its configuration entry `conf`
+/// (CRD ch.59 R59.4C.1). The two keys are read as activation reads them; an entry whose keys do not parse
+/// cannot be activated and requires nothing.
+pub(crate) fn required_capabilities_from_conf(conf: &Json) -> Vec<&'static str> {
+    match (
+        sighash_suffix_from_conf(conf),
+        require_suffix_counterparty_from_conf(conf),
+    ) {
+        (Ok(own_suffix), Ok(require_switch)) => suffix_required_capabilities(own_suffix, require_switch),
+        _ => Vec::new(),
+    }
+}
+
+/// The capability keys a coin with the resolved `own_suffix` and the switch `require_switch`
+/// (`require_suffix_counterparty`) requires of a counterparty (CRD ch.61 R61.5A.2): `sighash_suffix` for a
+/// non-zero suffix with the switch on, nothing otherwise.
+pub(crate) fn suffix_required_capabilities(own_suffix: u32, require_switch: bool) -> Vec<&'static str> {
+    if own_suffix != 0 && require_switch {
+        vec![CAPABILITY_SIGHASH_SUFFIX]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Why a counterparty's protocol information does not declare `sighash_suffix` (CRD ch.61 R61.5A.5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SuffixDecline {
@@ -652,15 +684,17 @@ pub(crate) fn suffix_counterparty_decline(
     require_switch: bool,
     info: &Option<Vec<u8>>,
 ) -> Option<SuffixDecline> {
-    if own_suffix == 0 || !require_switch {
+    // CRD ch.59 R59.4C.1: the decision is the one the order book's presentation reads.
+    let required = suffix_required_capabilities(own_suffix, require_switch);
+    if missing_capabilities(&required, info.as_deref()).is_empty() {
         return None;
     }
-    match classify_capability_word(info.as_deref()) {
-        CapabilityWordStatus::NoWord => Some(SuffixDecline::NoWord),
-        CapabilityWordStatus::Malformed => Some(SuffixDecline::MalformedWord),
-        CapabilityWordStatus::WellFormed(declared) if declared.declares(CAPABILITY_SIGHASH_SUFFIX) => None,
-        CapabilityWordStatus::WellFormed(_) => Some(SuffixDecline::WithoutSuffix),
-    }
+    // The cause only distinguishes the log line.
+    Some(match classify_capability_word(info.as_deref()) {
+        CapabilityWordStatus::NoWord => SuffixDecline::NoWord,
+        CapabilityWordStatus::Malformed => SuffixDecline::MalformedWord,
+        CapabilityWordStatus::WellFormed(_) => SuffixDecline::WithoutSuffix,
+    })
 }
 
 /// The log lines of one decline of `ticker` at `now_sec`, rate-limited by `log` (CRD ch.61 R61.5A.5): a

@@ -749,6 +749,20 @@ pub enum TakerOrderError {
         volume: BigDecimal,
         threshold: BigDecimal,
     },
+    /// The node's own orderbook holds every order that `match_by` names, and none of them declares a capability
+    /// that `coin` requires of a counterparty, so none can be matched (CRD ch.59 R59.4C.6). `coin` and `capability`
+    /// are those of the named order with the lowest identifier; `orders` are the named identifiers in ascending
+    /// order.
+    #[display(
+        fmt = "None of the orders named in match_by can be matched: {} requires a counterparty that declares {}",
+        coin,
+        capability
+    )]
+    OrderNotMatchableMissingCapability {
+        coin: String,
+        capability: String,
+        orders: Vec<Uuid>,
+    },
     /// The pre-trade spend-safety check refused a leg of the smallest trade (CRD ch.60 R60.6.7).
     #[display(
         fmt = "The volume {} of the {} coin is too low, required at least {}: a payment of that size could not be spent or refunded",
@@ -816,6 +830,16 @@ pub enum TakerOrderError {
 
 impl_common_order_error_conversions!(TakerOrderError);
 
+impl From<capability_presentation::NamedOrdersRefusal> for TakerOrderError {
+    fn from(refusal: capability_presentation::NamedOrdersRefusal) -> Self {
+        TakerOrderError::OrderNotMatchableMissingCapability {
+            coin: refusal.coin,
+            capability: refusal.capability.to_owned(),
+            orders: refusal.orders,
+        }
+    }
+}
+
 impl TakerOrderError {
     /// Classifies the refusal of the taker-order builder. `base` and `rel` name the coins whose amounts it reports.
     pub(crate) fn from_taker_order_build_error(error: TakerOrderBuildError, base: &str, rel: &str) -> Self {
@@ -866,6 +890,7 @@ impl HttpStatusCode for TakerOrderError {
             | TakerOrderError::NotSufficientBalance { .. }
             | TakerOrderError::NotSufficientBaseCoinBalance { .. }
             | TakerOrderError::VolumeTooLow { .. }
+            | TakerOrderError::OrderNotMatchableMissingCapability { .. }
             | TakerOrderError::SpendUnsafeVolume { .. }
             | TakerOrderError::PriceTooLow { .. }
             | TakerOrderError::RelCoinSameAsBase
@@ -897,7 +922,8 @@ pub enum OrderbookDepthError {
     /// whole text.
     #[display(fmt = "{}", _0)]
     P2PSubscribeError(String),
-    /// The order-matching context of the node could not be obtained. The payload is the whole text.
+    /// The order-matching context of the node could not be obtained, or the node's own key could not be read. The
+    /// payload is the whole text.
     #[display(fmt = "{}", _0)]
     Internal(String),
 }
