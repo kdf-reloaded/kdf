@@ -5,6 +5,8 @@ mod context;
 mod erc20_token_activation;
 mod eth_with_tokens_activation;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod evm_hd_p1_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod evm_test_support;
 mod init_platform_coin_with_tokens;
 mod init_token;

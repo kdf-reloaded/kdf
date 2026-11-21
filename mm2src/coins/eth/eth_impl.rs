@@ -1002,7 +1002,13 @@ pub(crate) async fn withdraw_impl_with_progress(
     }
 
     validate_evm_withdraw_request(&coin, &req)?;
-    let sender = resolve_evm_withdraw_sender(&ctx, &coin, &req).await?;
+    // A token's `from` selects an address of its platform's HD wallet (CRD ch.49 R49.34); the token carries the
+    // enabled address only.
+    let sender = if req.from.is_some() && matches!(coin.coin_type, EthCoinType::Erc20 { .. }) {
+        resolve_withdraw_sender_in_platform_wallet(&ctx, &coin, &req).await?
+    } else {
+        resolve_evm_withdraw_sender(&ctx, &coin, &req).await?
+    };
     let (plan, _nonce_lock) = build_evm_withdraw_plan(&ctx, &coin, &req, sender.address).await?;
 
     // CRD R47.5.6/R47.5.7 -- delegated sign-and-broadcast under the MetaMask

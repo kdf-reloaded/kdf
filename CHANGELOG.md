@@ -311,8 +311,8 @@ the previous version used. The safe way:
   the account, so Reloaded also looks at the token balances and finds an address that holds only a token.
   `task::create_new_account::init` fails with `Internal` for every TRON coin. `withdraw` and `task::withdraw` take an HD
   `from` for TRX and TRC20 and sign with the key of that path, and `show_priv_key` answers the key of the activated
-  address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, which Reloaded's EVM
-  ERC-20 coins do not allow. A TRON coin on a single key now refuses `from` with `UnexpectedFromAddress`, as an EVM coin
+  address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, as an EVM ERC-20
+  withdraw also does since PR #438. A TRON coin on a single key now refuses `from` with `UnexpectedFromAddress`, as an EVM coin
   does; it was ignored before. The legacy `enable` method keeps the node's internal key under a global-HD login, as the
   EVM and UTXO legacy routes do in Reloaded, so its TRON address differs from the one the mmrpc 2.0 methods give for the
   same seed.
@@ -591,6 +591,18 @@ the previous version used. The safe way:
   to close them first by activating under the previous `priv_key_policy`. Closed channels, and an empty or
   missing history of the other identity, allow the activation. Detail: PR #400; CRD ch.05 R46,
   status note of 2026-11-17.
+- **An ERC-20 withdraw accepts `from` under an HD wallet.** `withdraw` and `task::withdraw::init` of a token take
+  the address from the platform coin's HD wallet (address id or derivation path), check the token balance and the
+  nonce at that address, and sign with its key; `from` of the result is that address. A selector that does not
+  resolve is refused before any node request. A token on a single-key platform still refuses `from`. Under a
+  hardware wallet the task route signs at the selected path. Detail: PR #438; CRD ch.49 R49.34.
+- **The HD address methods answer an ERC-20 token ticker from its platform's HD wallet, with the token's balance
+  only.** `get_new_address`, `account_balance`, `task::account_balance::init` and `task::scan_for_new_addresses::init`
+  asked for a token ticker use the platform's accounts and known addresses, so an address found or created through
+  the token is listed by the platform as well. The scan counts an address as used when its nonce or that token's
+  balance is not zero. Detail: PR #438; CRD ch.49 R49.32.
+- **`task::scan_for_new_addresses::init` serves EVM coins under an HD wallet.** It was answered only for TRON coins
+  and UTXO coins; an EVM platform now answers it. Detail: PR #438; CRD ch.05 R54.
 
 #### Solana coins
 
@@ -678,6 +690,9 @@ the previous version used. The safe way:
   started just before the platform was registered, and its first check for the registered coin could run before
   the registration, which ended the collection. It now starts after the registration, and a failed activation no
   longer leaves it running. Detail: PR #435; CRD ch.55 D55.8.
+- **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
+  abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
+  checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
 
 #### WalletConnect
 
@@ -820,6 +835,23 @@ the previous version used. The safe way:
   `task::enable_sia` is the per-account report under an HD login, but it listed account 0 with no
   address. It now lists account 0 with its single address, the one the coin uses, and that address's
   balance. Detail: PR #402; CRD ch.46 R46.2.4.
+
+#### Solana coins
+
+- **Solana balances are shown exactly.** `my_balance` and the activation results rounded a SOL balance to
+  nine significant digits, so a balance of 10 SOL or more lost its last decimals (12.345678901 SOL read
+  12.3456789) and a zero balance read `0.00000000`. SOL and token balances are now the exact amount
+  without trailing zeros (`0`, `1.5`, `12.345678901`); token balances are computed from the raw amount
+  the node reports. Withdraw values were never rounded; the text of their sums is in the next item.
+  Solana stays switched off in this beta.
+  Detail: PR #456; CRD ch.40 §40.2A (R40.2A.1, R40.2A.5), R40.2.3, R40.3A.2, T40.6B.7.
+- **Sums in Solana withdraw answers carry the coin's full decimals.** Members that add or subtract two
+  amounts (`spent_by_me` and `my_balance_change` of a SOL withdraw, `my_balance_change` of a token
+  withdraw, a token withdraw's `fee_details.total_amount`, and the `required` member of a SOL
+  `NotSufficientBalance` and of `NotSufficientPlatformBalanceForFee`) are written with 9 decimals for SOL
+  and the mint's decimals for a token, for example `1.000000000` or `-1.500000`. The values are unchanged;
+  single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
+  CRD ch.40 R40.2A.4, D40.2A.1.
 
 #### QTUM and QRC20
 
@@ -970,6 +1002,11 @@ the previous version used. The safe way:
   exact copies, four that need a native ZOMBIE daemon, which no CI runner has, and two whose checks already run
   offline in CI. The other node tests still need public servers and stay off by default; the two that were ignored
   without a reason now state it. Only test code changed. Detail: PR #453.
+- **Two tests of the shared QTUM Electrum client no longer depend on the moment their holder count is taken.**
+  They compared the number of holders of the client right after activation with the number at the end. The
+  client's maintenance pass also holds it while it runs, so a count taken during the first pass could be one
+  too high. Both counts are now taken once they have stayed the same for 2 s and are compared for equality, so
+  a handle that a failed token activation keeps still fails the test. Only test code changed. Detail: PR #460.
 
 ### Plans touched
 
