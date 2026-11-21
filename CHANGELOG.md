@@ -226,6 +226,12 @@ the previous version used. The safe way:
 
 #### Solana coins
 
+- **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
+  entries in both forms and route `enable_solana_with_tokens`, `enable_spl` and the two
+  `experimental::` methods as native builds do, with the same node pool. While Solana is switched
+  off they answer the same refusal as native builds instead of an unknown method. A Solana coin
+  cannot be traded in browser builds either. Detail: PR #430; CRD ch.40 R40.1.1, T40.1.
+
 - **The Solana activation methods of GLEEC KDF are routed.** `experimental::enable_solana_with_assets`
   activates a Solana platform with its tokens and `experimental::enable_solana_token` a single SPL
   token, with the requests, results and errors GLEEC KDF uses, in native builds. They share the
@@ -1079,8 +1085,8 @@ the previous version used. The safe way:
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S6 in PR #425, S7 in PR #426; new package S6c (a rent-exempt guard for SOL withdraws); switch-on
-  lab rows for `disable_coin` and the Token-2022 refusal.
+  S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
+  withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the

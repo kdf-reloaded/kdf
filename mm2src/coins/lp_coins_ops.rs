@@ -62,7 +62,6 @@ pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this 
 /// The refusal text for a coin protocol whose family is switched off in this build, if it is.
 fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str> {
     match protocol {
-        #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. }
             if !SOLANA_ACTIVATION_AVAILABLE =>
         {
@@ -185,11 +184,9 @@ async fn lp_coininit_building(
         CoinProtocol::ZHTLC(_) => return ERR!("ZHTLC protocol is not supported by lp_coininit"),
         #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::LIGHTNING { .. } => return ERR!("Lightning protocol is not supported by lp_coininit"),
-        #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::SOLANA => {
             return ERR!("Solana protocol is not supported by lp_coininit - use enable_solana_with_tokens instead")
         },
-        #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. } => {
             return ERR!("SplToken protocol is not supported by lp_coininit - use enable_spl instead")
         },
@@ -736,11 +733,8 @@ pub async fn my_tx_history(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
         Err(err) => return ERR!("!lp_coinfind({}): {}", request.coin, err),
     };
     // A Solana coin or SPL token has no history yet (CRD ch.40 R40.6B.15, D40.6B.1): a structured error naming the coin.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)) {
-            return ERR!("my_tx_history is not supported for {}", request.coin);
-        }
+    if matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)) {
+        return ERR!("my_tx_history is not supported for {}", request.coin);
     }
 
     let history = try_s!(coin.load_history_from_file(&ctx).compat().await);
@@ -965,7 +959,6 @@ pub(crate) fn forget_token_records(registry: &CoinRegistry, removed: &MmCoinEnum
         },
         MmCoinEnum::SlpToken(token) => token.platform_coin().remove_slp_token_info(ticker),
         MmCoinEnum::TendermintToken(token) => token.platform_coin.remove_activated_token_info(ticker),
-        #[cfg(not(target_arch = "wasm32"))]
         MmCoinEnum::SplToken(token) => token.platform_coin.remove_spl_token_info(ticker),
         _ => (),
     }

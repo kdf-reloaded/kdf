@@ -252,11 +252,8 @@ pub use test_coin::TestCoin;
 
 #[doc(hidden)]
 #[allow(unused_variables)]
-#[cfg(not(target_arch = "wasm32"))]
 pub mod solana;
-#[cfg(not(target_arch = "wasm32"))]
 pub use solana::spl::SplToken;
-#[cfg(not(target_arch = "wasm32"))]
 pub use solana::{solana_coin_from_conf_and_params, solana_coin_with_node_order, SolanaActivationParams, SolanaCoin,
                  SolanaFeeDetails};
 
