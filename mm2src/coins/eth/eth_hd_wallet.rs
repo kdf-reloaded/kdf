@@ -1,4 +1,4 @@
-use crate::coin_balance::{coin_balance_map_for_ticker, AddressBalanceStatus, HDAddressBalance,
+use crate::coin_balance::{coin_balance_map_for_ticker, AddressBalanceStatus, CoinBalanceMap, HDAddressBalance,
                           HDAddressBalanceScanner, HDWalletBalanceOps};
 use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError, HDXPubExtractor};
 use crate::hd_wallet::{choose_new_account_id, AccountUpdatingError, AddressDerivingError, AsyncMutexGuard,
@@ -7,8 +7,8 @@ use crate::hd_wallet::{choose_new_account_id, AccountUpdatingError, AddressDeriv
                        InvalidBip44ChainError, NewAccountCreatingError, NewAccountIndex, NewAddressDerivingError};
 use crate::hd_wallet_storage::{HDAccountStorageItem, HDWalletCoinStorage, HDWalletCoinWithStorageOps,
                                HDWalletStorageResult};
-use crate::{coin_balance, hd_wallet, BalanceError, BalanceResult, CoinBalance, CoinWithDerivationMethod,
-            DerivationMethod, MarketCoinOps};
+use crate::{coin_balance, hd_wallet, lp_coinfind_registered, BalanceError, BalanceResult, CoinBalance,
+            CoinWithDerivationMethod, DerivationMethod, MarketCoinOps, MmCoinEnum};
 use async_trait::async_trait;
 use bip32::ChildNumber;
 use crypto::{Bip32DerPathOps, Bip44Chain, Bip44PathToAccount, Bip44PathToCoin, CryptoCtx, DerivationPath,
@@ -23,7 +23,10 @@ use alloy::primitives::Address as AlloyAddress;
 use alloy::providers::Provider;
 use std::future::IntoFuture;
 
-use super::{checksum_address, Erc20TokenInfo, EthCoin};
+use super::tron::balance::coin_balance_units_of;
+use super::tron::hd::TronUsedAddressProbe;
+use super::tron::TronAddress;
+use super::{checksum_address, Erc20TokenInfo, EthCoin, EthCoinType};
 
 // -------------------------------------------------------------------
 // Type aliases mirroring the UTXO pattern
@@ -338,7 +341,15 @@ impl HDWalletRpcOps for EthCoin {
         &self,
         params: GetNewHDAddressParams,
     ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
-        hd_wallet::common_impl::get_new_address_rpc(self, params).await
+        // A token asks the HD wallet of its platform (CRD ch.21 R21.10B.4, ch.49 R49.32). The address is written
+        // in the coin's own form (R49.33); the common implementation would abbreviate a 20-byte address.
+        let serving = self.hd_serving_coin().await.map_to_mm(HDWalletRpcError::Internal)?;
+        let mut response = hd_get_new_address_rpc(&serving, params).await?;
+        self.keep_own_ticker_if_trc20(&mut response.new_address.balance);
+        self.narrow_to_erc20_ticker(std::slice::from_mut(&mut response.new_address))
+            .await
+            .mm_err(HDWalletRpcError::from)?;
+        Ok(response)
     }
 }
 
@@ -363,6 +374,12 @@ impl CoinWithDerivationMethod for EthCoin {
 /// `latest` block tag are unchanged.
 pub struct EthAddressScanner {
     provider: KdfProvider,
+    /// The used-address rule of a TRON platform (CRD ch.21 R21.10B.4), which asks the TRON node and not the
+    /// placeholder provider.
+    tron: Option<TronUsedAddressProbe>,
+    /// The used-address rule of an ERC-20 ticker (CRD ch.49 R49.32): the token's balance stands in for the
+    /// platform balance.
+    token: Option<(EthCoin, Erc20TokenInfo)>,
 }
 
 #[async_trait]
@@ -370,6 +387,9 @@ impl HDAddressBalanceScanner for EthAddressScanner {
     type Address = Address;
 
     async fn is_address_used(&self, address: &Address) -> BalanceResult<bool> {
+        if let Some(tron) = &self.tron {
+            return tron.is_used(address).await;
+        }
         // An address is considered "used" if its nonce > 0 or balance > 0.
         let alloy_addr = AlloyAddress::from(address.0);
         let nonce = assert_send_future(self.provider.get_transaction_count(alloy_addr).into_future())
@@ -377,6 +397,11 @@ impl HDAddressBalanceScanner for EthAddressScanner {
             .map_err(|e| BalanceError::Transport(format!("{}", e)))?;
         if nonce != 0 {
             return Ok(true);
+        }
+        if let Some((token, info)) = &self.token {
+            let balance = token.erc20_balance_of(info, *address).await?;
+            let zero = BigDecimal::from(0);
+            return Ok(balance.spendable != zero || balance.unspendable != zero);
         }
         let balance = assert_send_future(self.provider.get_balance(alloy_addr).into_future())
             .await
@@ -396,8 +421,18 @@ impl HDWalletBalanceOps for EthCoin {
     type HDAddressScanner = EthAddressScanner;
 
     async fn produce_hd_address_scanner(&self) -> BalanceResult<Self::HDAddressScanner> {
+        // The tokens enabled at this moment count for the used-address rule of a TRON platform.
+        let tron = match (&self.tron_api, &self.coin_type) {
+            (Some(api), EthCoinType::Tron) => Some(TronUsedAddressProbe::new(
+                api.clone(),
+                self.get_erc20_tokens_infos().into_values().collect(),
+            )),
+            _ => None,
+        };
         Ok(EthAddressScanner {
             provider: self.alloy_provider(),
+            tron,
+            token: None,
         })
     }
 
@@ -444,7 +479,8 @@ impl HDWalletBalanceOps for EthCoin {
 
     /// Overrides the trait default only in how an address is rendered: the default uses the
     /// `Display` of the address, which abbreviates a 20-byte EVM address, while the wire form of an
-    /// EVM address is the full EIP-55 checksummed string (CRD R35.1.3).
+    /// EVM address is the full EIP-55 checksummed string (CRD R35.1.3) and that of a TRON address is
+    /// base58check (CRD ch.21 R21.10B.4). A TRON platform also reports the balance of each enabled token.
     async fn known_addresses_balances_with_ids<Ids>(
         &self,
         hd_account: &Self::HDAccount,
@@ -469,16 +505,12 @@ impl HDWalletBalanceOps for EthCoin {
         let addresses = derived.iter().map(|(address, _)| *address).collect();
         let balances = self.known_addresses_balances(addresses).await?;
         // [`HDWalletBalanceOps::known_addresses_balances`] returns pairs in the order they were requested.
-        Ok(balances
-            .into_iter()
-            .zip(derived)
-            .map(|((address, balance), (_, derivation_path))| HDAddressBalance {
-                address: checksum_address(&format!("{:#x}", address)),
-                derivation_path: RpcDerivationPath(derivation_path),
-                chain,
-                balance: coin_balance_map_for_ticker(self.ticker(), balance),
-            })
-            .collect())
+        let mut reported = Vec::with_capacity(derived.len());
+        for ((address, balance), (_, derivation_path)) in balances.into_iter().zip(derived) {
+            let balance = self.hd_balance_map(&address, balance).await?;
+            reported.push(self.hd_address_balance(&address, derivation_path, chain, balance).await);
+        }
+        Ok(reported)
     }
 
     async fn all_known_addresses_balances(&self, hd_account: &Self::HDAccount) -> BalanceResult<Vec<HDAddressBalance>> {
@@ -488,6 +520,16 @@ impl HDWalletBalanceOps for EthCoin {
     }
 
     async fn known_address_balance(&self, address: &Self::Address) -> BalanceResult<CoinBalance> {
+        // A TRON coin reads the TRON node: TRX at 6 decimals, a TRC20 token through `balanceOf` (CRD ch.21 R-WP1,
+        // R-WP3).
+        if self.tron_api.is_some() {
+            let units = coin_balance_units_of(self, *address).await?;
+            let spendable = u256_to_big_decimal(units, self.decimals)?;
+            return Ok(CoinBalance {
+                spendable,
+                unspendable: BigDecimal::from(0),
+            });
+        }
         // The balance of a token coin is the `balanceOf` of its contract, not the native balance.
         if let Some(info) = self.erc20_token_info() {
             return self.erc20_balance_of(&info, *address).await;
@@ -557,19 +599,21 @@ async fn scan_for_new_addresses_impl(
                     let empty_address = coin
                         .derive_address(hd_account, chain, empty_address_id)
                         .mm_err(Into::into)?;
-                    balances.push(HDAddressBalance {
-                        address: super::checksum_address(&format!("{:#x}", empty_address.address)),
-                        derivation_path: RpcDerivationPath(empty_address.derivation_path),
-                        chain,
-                        balance: coin_balance_map_for_ticker(coin.ticker(), CoinBalance::default()),
-                    });
+                    balances.push(
+                        coin.hd_address_balance(
+                            &empty_address.address,
+                            empty_address.derivation_path,
+                            chain,
+                            coin.hd_empty_balance_map(),
+                        )
+                        .await,
+                    );
                 }
-                balances.push(HDAddressBalance {
-                    address: super::checksum_address(&format!("{:#x}", checking_address)),
-                    derivation_path: RpcDerivationPath(checking_address_der_path),
-                    chain,
-                    balance: coin_balance_map_for_ticker(coin.ticker(), non_empty_balance),
-                });
+                let balance = coin.hd_balance_map(&checking_address, non_empty_balance).await?;
+                balances.push(
+                    coin.hd_address_balance(&checking_address, checking_address_der_path, chain, balance)
+                        .await,
+                );
                 unused_addresses_counter = 0;
             },
             AddressBalanceStatus::NotUsed => unused_addresses_counter += 1,
@@ -603,7 +647,28 @@ impl AccountBalanceRpcOps for EthCoin {
         &self,
         params: AccountBalanceParams,
     ) -> MmResult<HDAccountBalanceResponse, HDAccountBalanceRpcError> {
-        account_balance::common_impl::account_balance_rpc(self, params).await
+        // A TRC20 token asks the HD wallet of its platform (CRD ch.21 R21.10B.4); the page balance of the answer
+        // is then the token's own, and each balance map holds the token's ticker only.
+        let serving = self
+            .hd_serving_coin()
+            .await
+            .map_to_mm(HDAccountBalanceRpcError::Internal)?;
+        let mut response = account_balance::common_impl::account_balance_rpc(&serving, params).await?;
+        self.narrow_to_erc20_ticker(&mut response.addresses)
+            .await
+            .mm_err(HDAccountBalanceRpcError::from)?;
+        if matches!(self.coin_type, EthCoinType::Trc20 { .. } | EthCoinType::Erc20 { .. }) {
+            response.page_balance = response
+                .addresses
+                .iter()
+                .fold(CoinBalance::default(), |total, address| {
+                    total + address.balance.get(self.ticker()).cloned().unwrap_or_default()
+                });
+        }
+        for address in response.addresses.iter_mut() {
+            self.keep_own_ticker_if_trc20(&mut address.balance);
+        }
+        Ok(response)
     }
 }
 
@@ -622,7 +687,24 @@ impl InitAccountBalanceRpcOps for EthCoin {
         &self,
         params: InitAccountBalanceParams,
     ) -> MmResult<HDAccountBalance, HDAccountBalanceRpcError> {
-        init_account_balance_mod::common_impl::init_account_balance_rpc(self, params).await
+        // A TRC20 token asks the HD wallet of its platform (CRD ch.21 R21.10B.4). For the platform's ticker the
+        // balance maps cover the platform and its enabled tokens; for a token's ticker, that token only.
+        let serving = self
+            .hd_serving_coin()
+            .await
+            .map_to_mm(HDAccountBalanceRpcError::Internal)?;
+        let mut response = init_account_balance_mod::common_impl::init_account_balance_rpc(&serving, params).await?;
+        self.keep_own_ticker_if_trc20(&mut response.total_balance);
+        if self.erc20_ticker_info().is_some() {
+            self.narrow_to_erc20_ticker(&mut response.addresses)
+                .await
+                .mm_err(HDAccountBalanceRpcError::from)?;
+            response.total_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &response.addresses);
+        }
+        for address in response.addresses.iter_mut() {
+            self.keep_own_ticker_if_trc20(&mut address.balance);
+        }
+        Ok(response)
     }
 }
 
@@ -640,6 +722,105 @@ impl InitCreateHDAccountRpcOps for EthCoin {
         init_create_account::common_impl::init_create_new_account_rpc(self, params, xpub_extractor, created_account)
             .await
     }
+}
+
+// -------------------------------------------------------------------
+// get_new_address in the coin's address form, and the scan task (CRD ch.21 R21.10B.4, ch.49 R49.33)
+// -------------------------------------------------------------------
+
+/// `get_new_address` of an HD platform: the common derivation, with the address in the coin's form (base58check for
+/// TRON, the EIP-55 string for an EVM coin) and the balance map of [`EthCoin::hd_balance_map`]. The common
+/// implementation renders an address with its `Display`, which abbreviates a 20-byte address.
+async fn hd_get_new_address_rpc(
+    coin: &EthCoin,
+    params: GetNewHDAddressParams,
+) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
+    use std::ops::DerefMut;
+
+    let (account_id, chain) = (params.account_id, params.chain);
+    let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
+    let mut hd_account = hd_wallet
+        .get_account_mut(account_id)
+        .await
+        .or_mm_err(|| HDWalletRpcError::UnknownAccount { account_id })?;
+    let HDAddress {
+        address,
+        derivation_path,
+        ..
+    } = coin
+        .generate_new_address(hd_wallet, hd_account.deref_mut(), chain)
+        .await
+        .mm_err(Into::into)?;
+    let balance = coin.known_address_balance(&address).await.mm_err(Into::into)?;
+    let balance = coin.hd_balance_map(&address, balance).await.mm_err(Into::into)?;
+    Ok(GetNewHDAddressResponse {
+        new_address: coin.hd_address_balance(&address, derivation_path, chain, balance).await,
+    })
+}
+
+use crate::rpc_command::init_scan_for_new_addresses::{self, InitScanAddressesRpcOps, ScanAddressesParams,
+                                                      ScanAddressesResponse};
+
+/// `task::scan_for_new_addresses::init` of an HD platform and of a token ticker (CRD ch.21 R21.10B.4, ch.49
+/// R49.32). A token ticker is served from its platform's wallet and counts an address as used by its nonce or that
+/// token's balance.
+#[async_trait]
+impl InitScanAddressesRpcOps for EthCoin {
+    async fn init_scan_for_new_addresses_rpc(
+        &self,
+        params: ScanAddressesParams,
+    ) -> MmResult<ScanAddressesResponse, HDAccountBalanceRpcError> {
+        let serving = self
+            .hd_serving_coin()
+            .await
+            .map_to_mm(HDAccountBalanceRpcError::Internal)?;
+        let mut response = match self.erc20_ticker_info() {
+            Some(info) => scan_for_erc20_ticker(self, info, &serving, params).await?,
+            None => init_scan_for_new_addresses::common_impl::scan_for_new_addresses_rpc(&serving, params).await?,
+        };
+        for address in response.new_addresses.iter_mut() {
+            self.keep_own_ticker_if_trc20(&mut address.balance);
+        }
+        Ok(response)
+    }
+}
+
+/// The scan of an ERC-20 ticker: the platform's wallet is scanned with an address counted as used by its nonce or the
+/// token's balance, and each entry then reports that token only.
+async fn scan_for_erc20_ticker(
+    token: &EthCoin,
+    info: Erc20TokenInfo,
+    platform: &EthCoin,
+    params: ScanAddressesParams,
+) -> MmResult<ScanAddressesResponse, HDAccountBalanceRpcError> {
+    use std::ops::DerefMut;
+
+    let hd_wallet = platform.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
+    let account_id = params.account_index;
+    let mut hd_account = hd_wallet
+        .get_account_mut(account_id)
+        .await
+        .or_mm_err(|| HDAccountBalanceRpcError::CoinIsActivatedNotWithHDWallet)?;
+    let account_derivation_path = hd_account.account_derivation_path();
+    let address_scanner = EthAddressScanner {
+        provider: platform.alloy_provider(),
+        tron: None,
+        token: Some((token.clone(), info)),
+    };
+    let gap_limit = params.gap_limit.unwrap_or_else(|| hd_wallet.gap_limit());
+    let mut new_addresses = platform
+        .scan_for_new_addresses(hd_wallet, hd_account.deref_mut(), &address_scanner, gap_limit)
+        .await
+        .mm_err(Into::into)?;
+    token
+        .narrow_to_erc20_ticker(&mut new_addresses)
+        .await
+        .mm_err(HDAccountBalanceRpcError::from)?;
+    Ok(ScanAddressesResponse {
+        account_index: account_id,
+        derivation_path: RpcDerivationPath(account_derivation_path),
+        new_addresses,
+    })
 }
 
 // -------------------------------------------------------------------
@@ -668,10 +849,160 @@ fn u256_to_big_decimal(value: ethereum_types::U256, decimals: u8) -> BalanceResu
 // -------------------------------------------------------------------
 
 impl EthCoin {
+    /// How an address of this coin's HD wallet is rendered in a report: base58check for a TRON coin (CRD ch.21
+    /// R21.10B.4), the EIP-55 checksummed string for an EVM coin (CRD R35.1.3).
+    pub(crate) fn hd_address_string(&self, address: &Address) -> String {
+        if self.is_tron_family() {
+            TronAddress::from_evm_address(*address).to_base58()
+        } else {
+            checksum_address(&format!("{:#x}", address))
+        }
+    }
+
+    /// One address entry of an HD wallet report of this coin. Every HD report of the EVM family is built from the
+    /// entries this function makes (`get_new_address`, `account_balance`, the task forms of the account balance
+    /// and of the scan for new addresses, and the HD results of the platform and token activations), so the GasFree
+    /// custody address is attached here and nowhere else (CRD ch.63 §63.3.3, R18, and the finding in §63.10). The
+    /// field is `None` for a coin that is not a TRON coin with a provider binding
+    /// ([`Self::gasfree_report_address`]).
+    pub(crate) async fn hd_address_balance(
+        &self,
+        address: &Address,
+        derivation_path: DerivationPath,
+        chain: Bip44Chain,
+        balance: CoinBalanceMap,
+    ) -> HDAddressBalance {
+        HDAddressBalance {
+            address: self.hd_address_string(address),
+            gasfree_address: self.gasfree_report_address(address).await,
+            derivation_path: RpcDerivationPath(derivation_path),
+            chain,
+            balance,
+        }
+    }
+
+    /// Every address of this coin's wallet that is known now: the enabled address of a single-key coin, and for an
+    /// HD wallet the known (activated) external addresses of every account. No node is asked. The TRON
+    /// transaction history lists each of them (CRD ch.21 §21.10C).
+    ///
+    /// # Errors
+    ///
+    /// The text of why an address of the HD wallet cannot be derived.
+    pub(crate) async fn known_wallet_addresses(&self) -> Result<Vec<Address>, String> {
+        let hd_wallet = match &self.derivation_method {
+            DerivationMethod::HDWallet(hd_wallet) => hd_wallet,
+            DerivationMethod::Iguana(address) => return Ok(vec![*address]),
+        };
+        let accounts = hd_wallet.accounts.lock().await;
+        let mut addresses = Vec::new();
+        for account in accounts.values() {
+            for address_id in 0..account.external_addresses_number {
+                let hd_address = self
+                    .derive_address(account, Bip44Chain::External, address_id)
+                    .map_err(|e| e.into_inner().to_string())?;
+                addresses.push(hd_address.address);
+            }
+        }
+        if !addresses.contains(&self.my_address) {
+            addresses.push(self.my_address);
+        }
+        Ok(addresses)
+    }
+
+    /// The balance map of one address of an HD wallet report: the coin's own ticker, and for a TRON platform also
+    /// every enabled TRC20 token (CRD ch.21 R21.10B.4). An EVM coin reports its own ticker only; its tokens are
+    /// added by [`Self::add_erc20_balances_to_hd_report`].
+    pub(crate) async fn hd_balance_map(
+        &self,
+        address: &Address,
+        platform_balance: CoinBalance,
+    ) -> BalanceResult<CoinBalanceMap> {
+        let mut map = coin_balance_map_for_ticker(self.ticker(), platform_balance);
+        if self.is_tron_platform_coin() {
+            for (ticker, info) in self.get_erc20_tokens_infos() {
+                let balance = self.erc20_balance_of(&info, *address).await?;
+                map.insert(ticker, balance);
+            }
+        }
+        Ok(map)
+    }
+
+    /// The balance map of an address known to hold nothing: zero for each ticker [`Self::hd_balance_map`] reports.
+    fn hd_empty_balance_map(&self) -> CoinBalanceMap {
+        let mut map = coin_balance_map_for_ticker(self.ticker(), CoinBalance::default());
+        if self.is_tron_platform_coin() {
+            for ticker in self.get_erc20_tokens_infos().into_keys() {
+                map.insert(ticker, CoinBalance::default());
+            }
+        }
+        map
+    }
+
+    /// Narrows a balance map of an HD method's answer to this coin's own ticker when the method was asked for a
+    /// TRC20 ticker, as for an ERC-20 ticker (CRD ch.21 status note of 2026-11-19, ch.49 R49.32). The platform's
+    /// wallet serves the method ([`Self::hd_serving_coin`]) and reports the platform and every enabled token; a
+    /// TRC20 ticker answers that token only. A map asked for the TRX ticker is left whole.
+    fn keep_own_ticker_if_trc20(&self, map: &mut CoinBalanceMap) {
+        if matches!(self.coin_type, EthCoinType::Trc20 { .. }) {
+            let ticker = self.ticker();
+            map.retain(|reported, _| reported == ticker);
+        }
+    }
+
+    /// The token this coin is when it is an ERC-20 token: the HD methods asked of it answer that token only.
+    fn erc20_ticker_info(&self) -> Option<Erc20TokenInfo> {
+        match self.coin_type {
+            EthCoinType::Erc20 { .. } => self.erc20_token_info(),
+            _ => None,
+        }
+    }
+
+    /// Replaces the balance map of each entry of an HD method's answer with this token's own balance when the method
+    /// was asked for an ERC-20 ticker (CRD ch.49 R49.32, last paragraph). The platform's wallet serves the method
+    /// and reports the platform ticker; an ERC-20 ticker answers its `balanceOf` only, and leaves any other coin's
+    /// answer as it is.
+    async fn narrow_to_erc20_ticker(&self, entries: &mut [HDAddressBalance]) -> BalanceResult<()> {
+        let Some(info) = self.erc20_ticker_info() else {
+            return Ok(());
+        };
+        for entry in entries.iter_mut() {
+            let address = super::addr_from_str(&entry.address).map_to_mm(BalanceError::Internal)?;
+            let balance = self.erc20_balance_of(&info, address).await?;
+            entry.balance = coin_balance_map_for_ticker(self.ticker(), balance);
+        }
+        Ok(())
+    }
+
+    /// The coin whose HD wallet serves the HD RPC methods asked of this coin: the platform for a token (a token
+    /// coin carries the enabled address only, CRD ch.21 R21.10B.4, ch.49 R49.34), this coin otherwise.
+    ///
+    /// The token's own look-up of its platform finds a passive platform (CRD ch.43 D43.1F.3 (b)).
+    ///
+    /// # Errors
+    ///
+    /// The text of why the platform of a token cannot be found.
+    pub(crate) async fn hd_serving_coin(&self) -> Result<EthCoin, String> {
+        let (EthCoinType::Trc20 { platform, .. } | EthCoinType::Erc20 { platform, .. }) = &self.coin_type else {
+            return Ok(self.clone());
+        };
+        let ctx = MmArc::from_weak(&self.ctx).ok_or_else(|| "MM context has been dropped".to_owned())?;
+        match lp_coinfind_registered(&ctx, platform).await? {
+            Some(MmCoinEnum::EthCoin(platform_coin)) => Ok(platform_coin),
+            _ => Err(format!(
+                "The platform coin {platform} of {} is not active",
+                self.ticker()
+            )),
+        }
+    }
+
     /// Adds the balance of every ERC-20 token registered on this platform coin to each address of an HD wallet
     /// report, and recomputes the per-account totals (CRD R35.1.3(b): each balance map covers the platform
-    /// ticker and every activated token ticker).
+    /// ticker and every activated token ticker). A TRON platform's reports carry its tokens already
+    /// ([`Self::hd_balance_map`]).
     pub async fn add_erc20_balances_to_hd_report(&self, report: &mut HDWalletBalance) -> BalanceResult<()> {
+        if self.is_tron_platform_coin() {
+            return Ok(());
+        }
         let tokens = self.get_erc20_tokens_infos();
         if tokens.is_empty() {
             return Ok(());
@@ -715,12 +1046,15 @@ impl EthCoin {
                     .derive_address(account, Bip44Chain::External, address_id)
                     .mm_err(Into::into)?;
                 let balance = self.erc20_balance_of(info, hd_address.address).await?;
-                addresses.push(HDAddressBalance {
-                    address: checksum_address(&format!("{:#x}", hd_address.address)),
-                    derivation_path: RpcDerivationPath(hd_address.derivation_path),
-                    chain: Bip44Chain::External,
-                    balance: coin_balance_map_for_ticker(token_ticker, balance),
-                });
+                addresses.push(
+                    self.hd_address_balance(
+                        &hd_address.address,
+                        hd_address.derivation_path,
+                        Bip44Chain::External,
+                        coin_balance_map_for_ticker(token_ticker, balance),
+                    )
+                    .await,
+                );
             }
             report.accounts.push(HDAccountBalance {
                 account_index: account.account_id,

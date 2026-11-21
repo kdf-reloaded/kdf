@@ -84,6 +84,8 @@ impl RpcTask for InitScanAddressesTask {
         match self.coin {
             MmCoinEnum::UtxoCoin(utxo) => utxo.init_scan_for_new_addresses_rpc(self.req.params).await,
             MmCoinEnum::QtumCoin(qtum) => qtum.init_scan_for_new_addresses_rpc(self.req.params).await,
+            // An EVM or TRON platform and a token ticker (CRD ch.21 R21.10B.4, ch.49 R49.32).
+            MmCoinEnum::EthCoin(eth) => eth.init_scan_for_new_addresses_rpc(self.req.params).await,
             _ => MmError::err(HDAccountBalanceRpcError::CoinIsActivatedNotWithHDWallet),
         }
     }

@@ -325,6 +325,17 @@ expose a dual transport substrate organised as:
 > accessors do the same) and has no browser test. The first user is the Tron
 > node client ([Chapter 21](21-tron-integration.md) R-N3, R-N9). The
 > table above is not changed.
+>
+> *Status note (2026-11-19).* A bounded GET accessor that carries
+> caller-supplied request headers now exists beside it:
+> `mm2_net::transport::slurp_url_with_headers_bounded(url, headers,
+> timeout_s)`, with the same signature on both targets and the same
+> properties: the whole exchange is bounded by `timeout_s`, a redirect is not
+> followed, header values are never logged and never put into an error text,
+> and the browser build returns an empty header map and has no browser test.
+> Its user is the GasFree provider client
+> ([Chapter 63](63-tron-gasfree-fee-delegation.md) §63.4). The table above is
+> not changed.
 
 Consumers above the transport layer write one
 code path. The native WebSocket

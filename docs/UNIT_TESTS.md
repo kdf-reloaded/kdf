@@ -31,6 +31,9 @@ cargo test -p common --lib msgpack_bounds::
 cargo test -p mm2_p2p --features application --lib t4a_
 cargo test -p coins --lib t4a_
 cargo test -p mm2_main --lib t4a_
+
+# The node tests of `mm2_main` that need no public server (the CI row `node-tests`)
+cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::
 ```
 
 ## Tests that need public servers (`live-network-tests`)
@@ -62,7 +65,8 @@ cargo test -p mm2_net --lib --features live-network-tests test_slurp_req
 
 The integration tests in `mm2_tests` need the `regtest-netid` feature (they start nodes on the test netid) and run
 as library tests of `mm2_main`, with no Docker. The `docker_tests` binary is only for the tests that need the
-local Docker chains: it pulls images and starts containers unless `_MM2_TEST_CONF` is set.
+local Docker chains: it pulls images and starts containers unless `_MM2_TEST_CONF` is set. The tests of
+`mm2_tests` that need no public server run in CI; see [Node tests of `mm2_main`](#node-tests-of-mm2_main).
 
 What carries the attribute:
 
@@ -88,13 +92,47 @@ What does not, and why:
 - `polygon_check_if_my_payment_sent`, which skips itself when `POLYGON_RPC_URL` is not set.
 
 No CI job runs a gated test unless it passes the feature on purpose. The jobs that run unit tests select
-their tests by name. Only the filters of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4)
-and of the `electrum-qrc20` row (`utxo::rpc_clients::electrum qrc20::`) also match gated tests; those rows
-run without the feature, so they skip them and run the offline tests. The `docker-tests` job selects three gated tests by name
+their tests by name. Only the filters of the `withdraw-family` row (`withdraw qtum bch slp`, added in batch 4),
+of the `electrum-qrc20` row (`utxo::rpc_clients::electrum qrc20::`) and of the `node-tests` row
+(`mm2::mm2_tests::`) also match gated tests; those rows run without the feature, so they skip them and run the
+offline tests. The `docker-tests` job selects three gated tests by name
 (`test_withdraw_segwit`, `test_withdraw_cashaddresses` and
 `test_withdraw_to_different_cashaddress_network_should_fail`), so it passes the feature. A new test that needs
 a public server should carry the attribute, and it joins a CI job only if someone adds the feature to that
 job on purpose. If a gated test fails, look at the server before you look at the code.
+
+## Node tests of `mm2_main`
+
+Location: `mm2src/mm2_main/src/mm2_tests.rs` and its `mm2_tests/` modules. CI cell: `node-tests`
+(`cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::`).
+
+Most of these tests start one or more real nodes: the test binary runs itself again as a child process
+with the node configuration, on its own loopback address (`127.0.0.x`) and a test netid, and the test
+talks to the node over its RPC port. The test netids exist only with the `regtest-netid` feature and have
+no seed nodes. The test helper turns the start-up clock check off (`"ntp_servers": []`) unless the test's
+own configuration sets that key, so a node start asks no time server.
+
+Without `live-network-tests` the cell runs the tests that need no public server, no passphrase variable
+and no Docker. It lists every other test of the module as ignored: those carry the `live-network-tests`
+attribute above or a plain `#[ignore]` with its reason.
+
+| Test | What is tested |
+|------|----------------|
+| `test_rpc` | A started node answers malformed and unknown requests with an error and the configured CORS origin, and answers `version` and `help` |
+| `test_rpc_password_from_json` | An empty or non-string `rpc_password` stops the start; a configured one is required by a protected call |
+| `test_rpc_password_from_json_no_userpass` | A protected call without `userpass` is refused |
+| `test_mmrpc_v2` | The mmrpc 2.0 errors for a missing `userpass`, a wrong `userpass` and an unknown `mmrpc` version |
+| `test_batch_requests` | A batch of a legacy call, an mmrpc 2.0 call and a call with a wrong `userpass` is answered item by item |
+| `test_startup_passphrase` | A seed phrase, a WIF key and a `0x` hex key as the passphrase give the same public key |
+| `test_get_public_key`, `test_get_public_key_hash` | The public key and its hash for a fixed passphrase |
+| `test_swap_status` | `my_swap_status` and `stats_swap_status` answer an unknown swap with an error |
+| `test_get_orderbook_with_same_orderbook_ticker` | An order book of two coins that share an order book ticker is refused for two UTXO entries of the same asset and answered for a UTXO coin and a token |
+| `test_mm2_db_migration` | A node starts on a database folder that holds a swap file of the old layout |
+| `test_start_and_stop_simple_market_maker_bot`, `test_start_and_stop_simple_market_maker_bot_from_ctx` | The bot starts once, refuses a second start, stops once and refuses a second stop; its price source is a closed loopback port |
+| `log_test_status`, `log_test_printed_dashboard` | The log status line and the dashboard |
+
+`test_mm_start` is also listed as passed. It is not a test: it is the entry point of the child processes
+and does nothing unless the node configuration is passed to it.
 
 ## tQTUM tests and their Electrum server
 
@@ -730,3 +768,26 @@ first test below; the positive cases of T6 are unchanged.
 
 Not covered: the raw-transaction signing request end to end (a lab row on the wire covers the text); the four swap
 functions that pass the error on (it cannot occur for the outputs they build).
+
+## EVM HD address methods and ERC-20 `from` (10 tests)
+
+Location: `mm2src/coins_activation/src/evm_hd_p1_tests.rs` (names start with `evm_hd_p1_`). CRD: chapter 49, R49.32 (last
+paragraph), R49.33, R49.34, T49.31 and T49.32; chapter 05, R54. Run with `cargo test -p coins_activation --lib evm_hd_p1_`.
+The platform and the token are activated through the public routines against a scripted EVM node that answers per
+address and records every balance and nonce query.
+
+| Test | CRD | What is tested |
+|---|---|---|
+| `evm_hd_p1_get_new_address_answers_the_full_checksummed_address` | R49.33, R35.1.3 | `get_new_address` on an EVM HD platform answers the full 42-character EIP-55 address and the platform ticker only |
+| `evm_hd_p1_the_scan_task_for_an_evm_hd_platform_reaches_the_evm_scan` | ch.05 R54 | `task::scan_for_new_addresses::init` on an EVM HD platform runs the EVM scan, finds a used address and answers it in the full form |
+| `evm_hd_p1_get_new_address_with_a_token_ticker_answers_the_token_only_and_the_platform_lists_it` | R49.32, T49.31 | A token ticker answers a map with that token only; the platform's `account_balance` then lists the new address |
+| `evm_hd_p1_account_balance_with_a_token_ticker_answers_token_only_maps` | R49.32 | `account_balance` and the account balance of the task route answer token-only maps and token-only totals |
+| `evm_hd_p1_the_scan_with_a_token_ticker_finds_an_address_that_holds_only_that_token` | R49.32 | The token scan finds an address with nonce 0 and only the token; the platform ticker's scan still does not |
+| `evm_hd_p1_a_token_on_a_single_key_platform_keeps_its_current_answer` | R49.32 | A token on a single-key platform answers `CoinIsActivatedNotWithHDWallet` on the three methods |
+| `evm_hd_p1_a_token_withdraw_with_from_is_sent_from_the_selected_address_on_both_routes` | R49.34, T49.32 | Both selector forms on `withdraw` and `task::withdraw::init`: the selected address supplies balance and nonce, its key signs, `from` is that address |
+| `evm_hd_p1_a_token_withdraw_without_from_is_sent_from_the_activated_address` | R49.34 item 4 | Without `from` both routes send from the activated address |
+| `evm_hd_p1_a_token_selector_that_does_not_resolve_is_refused_before_any_query` | R49.34 item 3 | Address id at the known count, an unknown account and a path of another coin type are refused (HTTP 400 on the direct route) with no balance or nonce query, and the known count is unchanged |
+| `evm_hd_p1_a_token_on_a_single_key_platform_refuses_from_with_the_existing_text` | R49.3 | A token on a single-key platform refuses `from` with `UnexpectedFromAddress` on both routes |
+
+Not covered: the Trezor routes need a device emulator; `emulator_trezor_withdraw_erc20_with_from_path` (T49.9) now builds
+the token through its platform coin and runs only with the `trezor-emulator-tests` feature and a reachable emulator.

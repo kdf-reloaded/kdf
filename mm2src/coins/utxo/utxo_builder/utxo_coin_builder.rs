@@ -2,12 +2,13 @@ use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageKeyPolicy};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+use crate::utxo::rpc_clients::electrum_client_registry::ClientKey;
 use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_listed_order_for_spends,
                                               electrum_server_order, electrum_spread_near_factor,
                                               electrum_spread_near_offset_ms, electrum_spread_reads,
                                               electrum_tip_checks};
-use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
-                               ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
+use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumOwner, ElectrumPoolOptions,
+                               ElectrumPoolTimings, ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, InitBlockHeaderStorageOps};
 use crate::utxo::utxo_builder::utxo_conf_builder::{header_layout_fallback_families, unrecognised_enum_policy,
@@ -15,8 +16,8 @@ use crate::utxo::utxo_builder::utxo_conf_builder::{header_layout_fallback_famili
 use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, ElectrumProtoVerifier, RecentlySpentOutPoints,
                   SPVConf, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoRpcMode,
                   DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
-use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, PrivKeyBuildPolicy,
-            PrivKeyPolicy, RpcClientType, UtxoActivationParams};
+use crate::{BlockchainNetwork, CoinTransportMetrics, CoinsContext, DerivationMethod, HistorySyncState,
+            PrivKeyBuildPolicy, PrivKeyPolicy, RpcClientType, UtxoActivationParams};
 use async_trait::async_trait;
 use chain::TxHashAlgo;
 use common::executor::{spawn, Timer};
@@ -56,12 +57,33 @@ pub(crate) enum TxFeeConfClass {
     WholeKbFixed(u64),
     /// `txfee: 0`, the rate is estimated per transaction.
     Dynamic,
+    /// An overwintered, version 5 entry with a known NU7-or-later `consensus_branch_id`: the ZIP 317
+    /// conventional fee, whatever `txfee` says (Reloaded's own rule, see `crate::utxo::zip317`). The value is
+    /// the plain per-kilobyte rate the entry's `txfee` names (1,000 when it names none or asks for estimation),
+    /// kept for the size-based version-2 swap spend estimate only.
+    Zip317(u64),
 }
 
-/// Classifies the `txfee` and `dingo_fee` keys of a coins-configuration entry (CRD ch.38 R38.6.6a).
+/// Classifies the `txfee` and `dingo_fee` keys of a coins-configuration entry (CRD ch.38 R38.6.6a), after the
+/// ZIP 317 selection: an entry that selects that rule (`overwintered`, `txversion` 5 and a known
+/// `consensus_branch_id`) is [`TxFeeConfClass::Zip317`] and its `txfee` is not used to build.
 /// An absent `txfee`, or one that is not a non-negative JSON integer, is plain fixed at 1,000;
 /// `dingo_fee` matters only for a positive `txfee` and only as the JSON boolean `true`.
 pub(crate) fn classify_tx_fee_conf(conf: &Json) -> TxFeeConfClass {
+    let size_based = classify_size_fee_conf(conf);
+    if crate::utxo::zip317::conf_selects_zip317(conf) {
+        let legacy_rate_per_kb = match size_based {
+            TxFeeConfClass::Fixed(rate) | TxFeeConfClass::WholeKbFixed(rate) => rate,
+            // `txfee: 0` asks for an estimate, which a ZIP 317 coin never reads: the default of an absent `txfee`.
+            TxFeeConfClass::Dynamic | TxFeeConfClass::Zip317(_) => 1000,
+        };
+        return TxFeeConfClass::Zip317(legacy_rate_per_kb);
+    }
+    size_based
+}
+
+/// The `txfee` and `dingo_fee` part of [`classify_tx_fee_conf`] (CRD ch.38 R38.6.6a).
+fn classify_size_fee_conf(conf: &Json) -> TxFeeConfClass {
     match conf["txfee"].as_u64() {
         None => TxFeeConfClass::Fixed(1000),
         Some(0) => TxFeeConfClass::Dynamic,
@@ -225,19 +247,22 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
         let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
+        let (recently_spent_outpoints, spent_record_is_shared) = self.recently_spent_record(my_script_pubkey)?;
 
         let coin = UtxoCoinFields {
             conf,
             decimals,
             dust_amount,
             rpc_client,
+            electrum_owner: ElectrumOwner::new_unique(),
             priv_key_policy,
             hw_ctx: None,
             derivation_method,
             history_sync_state: Mutex::new(initial_history_state),
             tx_cache,
             block_headers_storage,
-            recently_spent_outpoints: AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey)),
+            recently_spent_outpoints,
+            spent_record_is_shared,
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
@@ -362,19 +387,22 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
         let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
+        let (recently_spent_outpoints, spent_record_is_shared) = self.recently_spent_record(my_script_pubkey)?;
 
         let coin = UtxoCoinFields {
             conf,
             decimals,
             dust_amount,
             rpc_client,
+            electrum_owner: ElectrumOwner::new_unique(),
             priv_key_policy,
             hw_ctx: None,
             derivation_method,
             history_sync_state: Mutex::new(initial_history_state),
             tx_cache,
             block_headers_storage,
-            recently_spent_outpoints: AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey)),
+            recently_spent_outpoints,
+            spent_record_is_shared,
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
@@ -401,7 +429,6 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         // For now, use a default script pubkey.
         // TODO change the type of `recently_spent_outpoints` to `AsyncMutex<HashMap<Bytes, RecentlySpentOutPoints>>`
         let my_script_pubkey = Bytes::new();
-        let recently_spent_outpoints = AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey));
 
         let address_format = self.address_format()?;
         let derivation_path = self.derivation_path().mm_err(Into::into)?;
@@ -435,12 +462,14 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
         let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
+        let (recently_spent_outpoints, spent_record_is_shared) = self.recently_spent_record(my_script_pubkey)?;
 
         let coin = UtxoCoinFields {
             conf,
             decimals,
             dust_amount,
             rpc_client,
+            electrum_owner: ElectrumOwner::new_unique(),
             priv_key_policy: PrivKeyPolicy::Trezor,
             hw_ctx: Some(hw_ctx),
             derivation_method: DerivationMethod::HDWallet(hd_wallet),
@@ -448,6 +477,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             block_headers_storage,
             tx_cache,
             recently_spent_outpoints,
+            spent_record_is_shared,
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
@@ -568,6 +598,41 @@ pub(crate) async fn build_electrum_client(
     Ok(ElectrumClient(client))
 }
 
+/// Builds the Electrum client of an instance of the QTUM family, or reuses the one an instance with exactly the same
+/// client inputs holds (CRD ch.38 D38.6.4Q.1 status note, items 1 to 5). `platform` is the platform's ticker: the
+/// shared client goes by it in its log lines, error texts and transport metrics, whichever instance builds it first.
+///
+/// The callers hold the activation lock of their own ticker (R55.1.12). The build lock of the key follows, then the
+/// registry's maps inside it; the coin registry is not touched here, so the callers take it only after this returns.
+pub(crate) async fn build_or_reuse_electrum_client(
+    ctx: &MmArc,
+    platform: &str,
+    coin_conf: &Json,
+    args: ElectrumBuilderArgs,
+    servers: Vec<ElectrumRpcRequest>,
+    min_connected: Option<usize>,
+    max_connected: Option<usize>,
+) -> UtxoCoinBuildResult<ElectrumClient> {
+    let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(UtxoCoinBuildError::Internal)?;
+    let key = ClientKey::new(
+        platform,
+        &servers,
+        min_connected,
+        max_connected,
+        electrum_listed_order_for_spends(coin_conf),
+        electrum_block_interval(coin_conf),
+        &args,
+    );
+    coins_ctx
+        .electrum_clients
+        .get_or_build(
+            key,
+            |text| MmError::new(UtxoCoinBuildError::ElectrumServersDisagree(text)),
+            || build_electrum_client(ctx, platform, coin_conf, args, servers, min_connected, max_connected),
+        )
+        .await
+}
+
 #[async_trait]
 pub trait UtxoCoinBuilderCommonOps {
     fn ctx(&self) -> &MmArc;
@@ -673,7 +738,10 @@ pub trait UtxoCoinBuilderCommonOps {
         // An undeclared fee keeps the shared fixed default below, as the published ARRR entry relies
         // on (CRD ch.39 R39.11.1).
         #[cfg(not(target_arch = "wasm32"))]
-        if matches!(rpc_client, UtxoRpcClientEnum::LightWalletD(_)) && self.conf()["txfee"].as_u64() == Some(0) {
+        if matches!(rpc_client, UtxoRpcClientEnum::LightWalletD(_))
+            && self.conf()["txfee"].as_u64() == Some(0)
+            && !matches!(classify_tx_fee_conf(self.conf()), TxFeeConfClass::Zip317(_))
+        {
             return MmError::err(UtxoCoinBuildError::NoFixedFeeDeclared {
                 ticker: self.ticker().to_owned(),
             });
@@ -681,6 +749,7 @@ pub trait UtxoCoinBuilderCommonOps {
         let tx_fee = match classify_tx_fee_conf(self.conf()) {
             TxFeeConfClass::Fixed(fee) => TxFee::FixedPerKb(fee),
             TxFeeConfClass::WholeKbFixed(fee) => TxFee::FixedPerStartedKb(fee),
+            TxFeeConfClass::Zip317(legacy_rate_per_kb) => TxFee::Zip317 { legacy_rate_per_kb },
             TxFeeConfClass::Dynamic => {
                 let fee_method = match &rpc_client {
                     UtxoRpcClientEnum::Electrum(_) => EstimateFeeMethod::Standard,
@@ -733,6 +802,31 @@ pub trait UtxoCoinBuilderCommonOps {
         }
     }
 
+    /// The platform ticker of an instance of the QTUM family (a coin whose `protocol.type` is `QTUM` or `QRC20`):
+    /// QTUM's own ticker, a token's `protocol.protocol_data.platform`. Such an instance takes its Electrum client from
+    /// the registry of shared clients (CRD ch.38 D38.6.4Q.1 status note); every other coin has `None` and builds its
+    /// own.
+    fn shared_electrum_platform(&self) -> Option<&str> { None }
+
+    /// The recently-spent record of the instance being built, and whether it is the shared record of the QTUM family.
+    ///
+    /// An instance of the QTUM family takes the live record of its platform and `my_script_pubkey` from the registry
+    /// of the node's context, or starts it (CRD ch.38 D38.6.4Q.4 status note, items 1 and 2); every other coin gets a
+    /// private record bound to `my_script_pubkey`, as before. This touches the registry's map only, and no lock.
+    fn recently_spent_record(
+        &self,
+        my_script_pubkey: Bytes,
+    ) -> UtxoCoinBuildResult<(Arc<AsyncMutex<RecentlySpentOutPoints>>, bool)> {
+        let Some(platform) = self.shared_electrum_platform() else {
+            return Ok((
+                Arc::new(AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey))),
+                false,
+            ));
+        };
+        let coins_ctx = CoinsContext::from_ctx(self.ctx()).map_to_mm(UtxoCoinBuildError::Internal)?;
+        Ok((coins_ctx.spent_records.get_or_insert(platform, my_script_pubkey), true))
+    }
+
     async fn electrum_client(
         &self,
         args: ElectrumBuilderArgs,
@@ -740,6 +834,18 @@ pub trait UtxoCoinBuilderCommonOps {
         min_connected: Option<usize>,
         max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
+        if let Some(platform) = self.shared_electrum_platform() {
+            return build_or_reuse_electrum_client(
+                self.ctx(),
+                platform,
+                self.conf(),
+                args,
+                servers,
+                min_connected,
+                max_connected,
+            )
+            .await;
+        }
         build_electrum_client(
             self.ctx(),
             self.ticker(),
@@ -907,6 +1013,70 @@ fn read_native_mode_conf(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ZIP 317 selection reaches the classification: the NU7 version 5 entry is selected whatever its
+    /// `txfee` says, every other entry keeps its `txfee` class.
+    #[test]
+    fn test_classify_tx_fee_conf_zip317_selection() {
+        use serde_json::json;
+        let v5 = |branch: &str, txfee: serde_json::Value| json!({"overwintered": 1, "txversion": 5, "consensus_branch_id": branch, "txfee": txfee});
+        assert_eq!(
+            classify_tx_fee_conf(&v5("0x77190ad9", json!(70000))),
+            TxFeeConfClass::Zip317(70000)
+        );
+        assert_eq!(
+            classify_tx_fee_conf(&v5("77190ad9", json!(70000))),
+            TxFeeConfClass::Zip317(70000)
+        );
+        assert_eq!(
+            classify_tx_fee_conf(&v5("0x77190ad9", json!(0))),
+            TxFeeConfClass::Zip317(1000)
+        );
+        assert_eq!(
+            classify_tx_fee_conf(&json!({"overwintered": 1, "txversion": 5, "consensus_branch_id": "0x77190ad9"})),
+            TxFeeConfClass::Zip317(1000)
+        );
+        // A whole-kilobyte `txfee` keeps its value as the legacy rate.
+        assert_eq!(
+            classify_tx_fee_conf(
+                &json!({"overwintered": 1, "txversion": 5, "consensus_branch_id": "0x77190ad9",
+                                         "txfee": 300, "dingo_fee": true})
+            ),
+            TxFeeConfClass::Zip317(300)
+        );
+        // An unknown version 5 branch id falls back to per kilobyte.
+        assert_eq!(
+            classify_tx_fee_conf(&v5("0x12345678", json!(70000))),
+            TxFeeConfClass::Fixed(70000)
+        );
+        // ZEC version 4, FLUX (Sapling id, version 4), ZER/BTCZ/KMD style entries.
+        let v4 = |branch: &str, txfee: u64| json!({"overwintered": 1, "txversion": 4, "consensus_branch_id": branch, "txfee": txfee});
+        assert_eq!(
+            classify_tx_fee_conf(&v4("0x37a5165b", 70000)),
+            TxFeeConfClass::Fixed(70000)
+        );
+        assert_eq!(
+            classify_tx_fee_conf(&v4("0x76b809bb", 10000)),
+            TxFeeConfClass::Fixed(10000)
+        );
+        assert_eq!(
+            classify_tx_fee_conf(&v4("0x77190ad9", 10000)),
+            TxFeeConfClass::Fixed(10000)
+        );
+        assert_eq!(
+            classify_tx_fee_conf(&json!({"overwintered": 1, "txversion": 4, "txfee": 10000, "dingo_fee": true})),
+            TxFeeConfClass::WholeKbFixed(10000)
+        );
+        assert_eq!(
+            classify_tx_fee_conf(&json!({"txfee": 1000})),
+            TxFeeConfClass::Fixed(1000)
+        );
+        // A non-overwintered entry with version 5 is unchanged.
+        assert_eq!(
+            classify_tx_fee_conf(&json!({"txversion": 5, "consensus_branch_id": "0x77190ad9", "txfee": 1000})),
+            TxFeeConfClass::Fixed(1000)
+        );
+    }
 
     /// CRD ch.38 R38.6.6a: the classification table.
     #[test]

@@ -239,6 +239,23 @@ pub async fn slurp_post_json_with_headers_bounded(
     slurp_req_bounded(request, timeout_s).await
 }
 
+/// Executes a GET with the caller's own headers, the whole exchange bounded by `timeout_s` seconds, returning the
+/// response status, headers and body.
+///
+/// - The bound covers connecting, the request, the response head and the full body, and ends the spawned exchange
+///   itself ([`slurp_req_bounded`]); at the bound the call returns [`SlurpError::Timeout`].
+/// - A redirect is **not** followed: the shared client does not follow redirects, so a 3xx answer comes back as
+///   it is (a non-2xx status for the caller to judge) and `headers` never go to another host.
+/// - Header values are never logged and never put into an error text: no error of this function renders them.
+pub async fn slurp_url_with_headers_bounded(url: &str, headers: &http::HeaderMap, timeout_s: f64) -> SlurpResult {
+    let mut request = Request::builder().uri(url).body(Vec::new())?;
+    let request_headers = request.headers_mut();
+    for (name, value) in headers {
+        request_headers.insert(name.clone(), value.clone());
+    }
+    slurp_req_bounded(request, timeout_s).await
+}
+
 #[cfg(test)]
 mod tests {
     use crate::native_http::{abandoned_line, slurp_post_json, slurp_req, slurp_req_bounded, slurp_url, Ended};
@@ -449,6 +466,115 @@ mod tests {
         assert!(matches!(err.get_inner(), SlurpError::Timeout { .. }), "not a timeout");
         assert_no_secret(&format!("{err} {err:?}"));
         peer.join().unwrap();
+    }
+
+    #[test]
+    fn test_get_with_headers_sends_the_headers_and_no_body() {
+        let (port, peer) = serve_once_capturing(
+            b"HTTP/1.1 200 OK\r\nX-Probe: yes\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-api-key", "k-1".parse().unwrap());
+        headers.insert("timestamp", "1700000000".parse().unwrap());
+        let (status, answer_headers, body) = block_on(super::slurp_url_with_headers_bounded(
+            &format!("http://127.0.0.1:{port}/x/y"),
+            &headers,
+            5.,
+        ))
+        .unwrap();
+        assert_eq!(status.as_u16(), 200);
+        assert_eq!(answer_headers.get("x-probe").unwrap(), "yes");
+        assert_eq!(body, b"ok");
+        let request = peer.join().unwrap().to_ascii_lowercase();
+        assert!(
+            request.starts_with("get /x/y http/1.1\r\n"),
+            "the request is not a GET of the path"
+        );
+        assert!(request.contains("x-api-key: k-1"), "a caller header was not sent");
+        assert!(
+            request.contains("timestamp: 1700000000"),
+            "a caller header was not sent"
+        );
+        assert!(request.ends_with("\r\n\r\n"), "the request carries a body");
+    }
+
+    #[test]
+    fn test_get_with_headers_does_not_follow_a_redirect() {
+        // The redirect target is a second listener that must never be contacted.
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let response: &'static [u8] = Box::leak(
+            format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/y\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .into_bytes()
+                .into_boxed_slice(),
+        );
+        let (port, peer) = serve_once_capturing(response);
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-api-key", "k-1".parse().unwrap());
+        let (status, ..) = block_on(super::slurp_url_with_headers_bounded(
+            &format!("http://127.0.0.1:{port}/x"),
+            &headers,
+            5.,
+        ))
+        .unwrap();
+        assert_eq!(status.as_u16(), 302, "the redirect was followed");
+        peer.join().unwrap();
+        assert!(target.accept().is_err(), "the redirect target was contacted");
+    }
+
+    #[test]
+    fn test_get_with_headers_times_out_on_a_silent_peer_without_naming_the_headers() {
+        use std::io::Read;
+        use std::time::{Duration, Instant};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.read(&mut request); // until the client closes
+        });
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-api-key", "hunter2".parse().unwrap());
+        let started = Instant::now();
+        let err = block_on(super::slurp_url_with_headers_bounded(
+            &format!("http://127.0.0.1:{port}/x"),
+            &headers,
+            0.3,
+        ))
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(matches!(err.get_inner(), SlurpError::Timeout { .. }), "not a timeout");
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(3),
+            "the call did not end within the bound"
+        );
+        assert_no_secret(&format!("{err} {err:?}"));
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn test_get_with_headers_names_no_header_value_when_nothing_listens() {
+        // Reserve a port and close it again, so that nothing listens there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut headers = http::HeaderMap::new();
+        headers.insert("authorization", "ApiKey bob:hunter2".parse().unwrap());
+        let err = block_on(super::slurp_url_with_headers_bounded(
+            &format!("http://127.0.0.1:{port}/x"),
+            &headers,
+            5.,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(err.get_inner(), SlurpError::Transport { .. }),
+            "not a transport error"
+        );
+        assert_no_secret(&format!("{err} {err:?}"));
     }
 
     fn assert_no_secret(text: &str) {

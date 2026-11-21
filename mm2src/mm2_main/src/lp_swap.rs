@@ -686,6 +686,19 @@ pub async fn get_locked_amount_rpc(
     })
 }
 
+/// Registers an active second-generation swap of the two coins, as the V2 swap state machines do, so that the tests of
+/// the checks that read the active swaps (`disable_coin`, CRD ch.43 R43.1E.3) can have a running swap.
+#[cfg(test)]
+pub(crate) fn add_active_swap_v2_for_test(ctx: &MmArc, uuid: Uuid, maker_coin: &str, taker_coin: &str) {
+    let info = ActiveSwapV2Info {
+        uuid,
+        maker_coin: maker_coin.to_owned(),
+        taker_coin: taker_coin.to_owned(),
+        swap_type: swap_v2_common::SwapV2Type::MakerV2,
+    };
+    SwapsContext::from_ctx(ctx).unwrap().add_active_swap_v2(info);
+}
+
 /// Get number of currently running swaps
 pub fn running_swaps_num(ctx: &MmArc) -> u64 {
     let swap_ctx = SwapsContext::from_ctx(ctx).unwrap();

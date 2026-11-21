@@ -563,13 +563,13 @@ pub struct GetNewHDAddressRequest {
 
 #[derive(Deserialize)]
 pub struct GetNewHDAddressParams {
-    account_id: u32,
-    chain: Bip44Chain,
+    pub(crate) account_id: u32,
+    pub(crate) chain: Bip44Chain,
 }
 
 #[derive(Serialize)]
 pub struct GetNewHDAddressResponse {
-    new_address: HDAddressBalance,
+    pub(crate) new_address: HDAddressBalance,
 }
 
 #[async_trait]
@@ -657,6 +657,7 @@ pub mod common_impl {
         Ok(GetNewHDAddressResponse {
             new_address: HDAddressBalance {
                 address: address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(derivation_path),
                 chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(coin.ticker(), balance),

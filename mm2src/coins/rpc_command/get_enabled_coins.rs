@@ -40,7 +40,9 @@ pub async fn get_enabled_coins_rpc(
     let coins_ctx = CoinsContext::from_ctx(&ctx).map_to_mm(GetEnabledCoinsError::Internal)?;
     let coins_map = coins_ctx.coins.lock().await;
 
+    // A passive platform is listed (CRD ch.43 R43.1E.6 item 2).
     let coins = coins_map
+        .registered()
         .keys()
         .map(|ticker| EnabledCoinV2 { ticker: ticker.clone() })
         .collect();

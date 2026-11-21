@@ -186,8 +186,6 @@ pub(crate) async fn qrc20_withdraw(coin: Qrc20Coin, req: WithdrawRequest) -> Wit
         return MmError::err(WithdrawError::InvalidAddress(error));
     }
 
-    let _utxo_lock = UTXO_LOCK.lock().await;
-
     let qrc20_balance = coin.my_spendable_balance().compat().await.mm_err(Into::into)?;
 
     // the qrc20_amount_sat is used only within smart contract calls
@@ -225,14 +223,23 @@ pub(crate) async fn qrc20_withdraw(coin: Qrc20Coin, req: WithdrawRequest) -> Wit
         .mm_err(Into::into)?;
     let outputs = vec![transfer_output];
 
-    let GenerateQrc20TxResult {
-        signed,
-        miner_fee,
-        gas_fee,
-    } = coin
+    // The guard of the shared recently-spent record is held from the listing through signing and the pending entry
+    // below (CRD ch.38 D38.6.4Q.4 status note, item 4); the process-wide `UTXO_LOCK` is not taken.
+    let (
+        GenerateQrc20TxResult {
+            signed,
+            spent,
+            miner_fee,
+            gas_fee,
+        },
+        mut recently_spent,
+    ) = coin
         .generate_qrc20_transaction(outputs)
         .await
         .mm_err(|gen_tx_error| gen_tx_error.into_withdraw_error(coin.platform.clone(), coin.utxo.decimals))?;
+    let tx_bytes = serialize(&signed);
+    recently_spent.note_pending_withdraw(&tx_bytes, spent, signed.hash(), signed.outputs.clone());
+    drop(recently_spent);
 
     let my_address = coin.utxo.derivation_method.iguana_or_err().mm_err(Into::into)?;
     let received_by_me = if to_addr == *my_address {
@@ -264,7 +271,7 @@ pub(crate) async fn qrc20_withdraw(coin: Qrc20Coin, req: WithdrawRequest) -> Wit
         received_by_me,
         my_balance_change,
         tx_hash: signed.hash().reversed().to_vec().to_tx_hash(),
-        tx_hex: serialize(&signed).into(),
+        tx_hex: tx_bytes.into(),
         fee_details: Some(fee_details.into()),
         block_height: 0,
         coin: conf.ticker.clone(),

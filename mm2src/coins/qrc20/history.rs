@@ -1,6 +1,7 @@
 use super::*;
 use crate::history_absence::{removed_rows_line, AbsenceMarks, ChainChangeWatch};
 use crate::utxo::rpc_clients::electrum_pool::every_server_answered_an_error;
+use crate::utxo::rpc_clients::UtxoJsonRpcClientInfo;
 use crate::utxo::{RequestTxHistoryResult, UtxoFeeDetails};
 use crate::{CoinsContext, MmCoinEnum, TxFeeDetails, TxHistoryResult};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -174,9 +175,10 @@ impl Qrc20Coin {
                 let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
                 let coins = coins_ctx.coins.lock().await;
                 // The ticker has to be registered, and registered as this instance: the token may have been disabled
-                // and enabled again (CRD ch.38 D38.6.4Q.5 status note, item 2).
+                // and enabled again (CRD ch.38 D38.6.4Q.5 status note, item 2). A passive platform is still
+                // registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
                 let registered = matches!(
-                    coins.get(&self.utxo.conf.ticker),
+                    coins.registered().get(&self.utxo.conf.ticker),
                     Some(MmCoinEnum::Qrc20Coin(registered)) if Arc::ptr_eq(&registered.0, &self.0)
                 );
                 if !registered {
@@ -516,9 +518,10 @@ impl Qrc20Coin {
                         },
                         // The pool reports a call that failed on every server it tried as a transport failure.
                         JsonRpcErrorType::Transport(err) => {
+                            // The failure names the client, which is the platform's on a shared client.
                             let kind = match self.utxo.rpc_client {
-                                UtxoRpcClientEnum::Electrum(_)
-                                    if every_server_answered_an_error(&self.utxo.conf.ticker, &err) =>
+                                UtxoRpcClientEnum::Electrum(ref client)
+                                    if every_server_answered_an_error(client.coin_name(), &err) =>
                                 {
                                     HistoryPassKind::EveryServerAnsweredAnError
                                 },
@@ -1074,7 +1077,7 @@ fn is_transfer_event_log(log: &LogEntry) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use common::block_on;

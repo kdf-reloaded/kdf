@@ -3,17 +3,13 @@ use crate::{NumConversError, SignatureError, SignatureResult, SolanaCoin, Valida
 use base58::{FromBase58, ToBase58};
 use common::mm_number::BigDecimal;
 use mm2_err_handle::prelude::*;
-use solana_native_token::LAMPORTS_PER_SOL;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
 use std::str::FromStr;
 
-pub fn lamports_to_sol(lamports: u64) -> BigDecimal { BigDecimal::from(lamports) / BigDecimal::from(LAMPORTS_PER_SOL) }
-
-pub fn amount_to_ui_amount(amount: u64, decimals: u8) -> BigDecimal {
-    BigDecimal::from(amount) / BigDecimal::from(10_u64.pow(decimals as u32))
-}
+/// SOL for `lamports`: the exact value in the shortest form (CRD ch.40 R40.2A.1; see [`units_to_amount`]).
+pub fn lamports_to_sol(lamports: u64) -> BigDecimal { units_to_amount(lamports, LAMPORTS_DECIMALS) }
 
 /// The length in bytes of a Solana public key, and so of an address once base58-decoded.
 const SOLANA_PUBKEY_LEN: usize = 32;
@@ -70,10 +66,28 @@ pub fn verify_message(
     Ok(is_valid)
 }
 
+/// Decimals of SOL: one SOL is 10^9 lamports.
+const LAMPORTS_DECIMALS: u8 = 9;
+
 /// `amount` units of a coin with `decimals` decimals as a decimal number, 10^-decimals each, with no trailing zeros.
-/// Built from the exponent, so any `u8` is safe.
+/// Built from the exponent, so any `u8` is safe. The single place where raw units become a shown balance: this is
+/// the shortest form of CRD ch.40 R40.2A.1 (SOL) and R40.2A.5 (a token balance from the raw amount and the mint's
+/// decimals), with no significant-digit limit and no rounding.
 pub fn units_to_amount(units: u64, decimals: u8) -> BigDecimal {
     BigDecimal::new(units.into(), i64::from(decimals)).normalized()
+}
+
+/// `value` written with at least `decimals` decimals, as the sum members of a withdraw answer are (CRD ch.40
+/// R40.2A.4, second bullet, and D40.2A.1: the coin's full decimals, so a zero reads `"0.000000000"` for SOL). The
+/// value is not changed. A value that already carries more decimals than `decimals` keeps all of them: no digit is
+/// ever dropped.
+pub fn with_at_least_decimals(value: BigDecimal, decimals: u8) -> BigDecimal {
+    let (_, scale) = value.as_bigint_and_exponent();
+    if scale < i64::from(decimals) {
+        value.with_scale(i64::from(decimals))
+    } else {
+        value
+    }
 }
 
 /// `amount` (in whole units of a coin with `decimals` decimals) as a count of its smallest units. Digits beyond

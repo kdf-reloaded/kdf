@@ -29,12 +29,11 @@
 //! byte-identical `init` params and success results.
 
 use crate::context::CoinsActivationContext;
-use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens_for_task, rpc_task_error,
+use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens_for_task, requested_platform, rpc_task_error,
                                        EnablePlatformCoinWithTokensError, EnablePlatformCoinWithTokensReq,
                                        PlatformWithTokensActivationOps};
 use crate::prelude::CurrentBlock;
 use async_trait::async_trait;
-use coins::lp_coinfind;
 use common::{log, SuccessResponse};
 use crypto::hw_rpc_task::{HwConnectStatuses, HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use mm2_core::mm_ctx::MmArc;
@@ -199,11 +198,10 @@ where
     // reported by the task. The public Tendermint page draws its platform, protocol and token configuration errors
     // as mmrpc-level answers but does not say which call returns them; the reference reports them in `status`, and
     // Reloaded does the same (CRD ch.48 R48.5.4, ch.36 R36.6.3).
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &request.ticker).await {
-        return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
-            request.ticker,
-        ));
-    }
+    // An active ticker, and a passive ticker of another family, are refused here; a passive platform of the
+    // task's family is re-activated by the task (CRD ch.43 R43.1F.2). The task decides again under the activation
+    // locks.
+    requested_platform::<Platform>(&ctx, &request.ticker).await?;
     let coins_act_ctx =
         CoinsActivationContext::from_ctx(&ctx).map_to_mm(EnablePlatformCoinWithTokensError::Internal)?;
     let task = InitPlatformCoinWithTokensTask::<Platform> { ctx, request };

@@ -1,5 +1,5 @@
 use super::*;
-use crate::utxo::rpc_clients::{UtxoRpcError, UtxoRpcFut};
+use crate::utxo::rpc_clients::{ElectrumOwner, UtxoRpcError, UtxoRpcFut};
 use common::jsonrpc_client::JsonRpcError;
 use rpc::v1::types::H256;
 
@@ -283,8 +283,12 @@ pub trait Qrc20ElectrumOps {
     /// set, so a token transfer need not disturb the QTUM address's script hash
     /// and cannot be observed through a script-hash subscription.
     /// https://github.com/qtumproject/qtum-electrumx-server/blob/master/docs/qrc20-integration.md
+    ///
+    /// `owner` is the instance that asks: the client, which several instances of the QTUM family may share, remembers
+    /// the subscription for it (CRD ch.38 D38.6.4Q.1 status note, item 6).
     fn blockchain_contract_event_subscribe(
         &self,
+        owner: ElectrumOwner,
         address: &H160Json,
         contract_addr: &H160Json,
         topic: &str,
@@ -400,6 +404,7 @@ impl Qrc20ElectrumOps for ElectrumClient {
 
     fn blockchain_contract_event_subscribe(
         &self,
+        owner: ElectrumOwner,
         address: &H160Json,
         contract_addr: &H160Json,
         topic: &str,
@@ -411,9 +416,13 @@ impl Qrc20ElectrumOps for ElectrumClient {
         let contract_addr = json::to_value(contract_addr).expect("a hash serializes");
         let topic = topic.to_owned();
         Box::new(
-            async move { client.subscribe_contract_event(address, contract_addr, topic).await }
-                .boxed()
-                .compat(),
+            async move {
+                client
+                    .subscribe_contract_event(owner, address, contract_addr, topic)
+                    .await
+            }
+            .boxed()
+            .compat(),
         )
     }
 

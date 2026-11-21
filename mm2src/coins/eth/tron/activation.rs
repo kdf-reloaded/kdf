@@ -14,14 +14,19 @@
 
 use super::api::TronApiClient;
 use super::balance::trc20_decimals;
+use super::gasfree::binding::{CoinGasFree, GasFreeBinding, TokenGasless, TronTokenGaslessRequest};
 use super::nodes::{parse_nodes, TronApiKey, TronNode};
 use super::{Network, TronAddress, TRX_DECIMALS};
 
-use crate::eth::{rpc_event_handlers_for_eth_transport, Erc20BuildError, EthCoin, EthCoinBuildError, EthCoinImpl,
-                 EthCoinType, EthGasLimit, EthGasLimitV2, EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
+use crate::eth::{build_eth_hd_wallet, derive_eth_hd_activation_key, rpc_event_handlers_for_eth_transport,
+                 Erc20BuildError, EthCoin, EthCoinBuildError, EthCoinImpl, EthCoinType, EthGasLimit, EthGasLimitV2,
+                 EthHDWallet, EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
+use crate::hd_wallet_storage::HDWalletStorageKeyPolicy;
+use crate::rpc_command::get_my_address::PathToAddress;
 use crate::{CoinProtocol, DerivationMethod, HistorySyncState, MarketCoinOps};
 
 use common::log::warn;
+use crypto::GlobalHDAccountArc;
 use ethereum_types::Address;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -92,9 +97,12 @@ pub struct TronCoinParams {
     pub nodes: Vec<TronNode>,
     /// The swap confirmations, resolved by [`tron_required_confirmations`].
     pub required_confirmations: u64,
-    /// Whether the legacy history process is requested. The mmrpc 2.0 route passes `false`: it ignores
-    /// `tx_history` (CRD ch.21 R21.10B.2).
+    /// Whether the request asks for the transaction history (`tx_history`, on both activation routes). The history
+    /// is enabled only when the node list also has a keyed TronGrid node (CRD ch.21 §21.10C).
     pub tx_history: bool,
+    /// The GasFree provider binding of a TRX platform coin (CRD ch.63 §63.3.1), already validated. `None` when the
+    /// request gave no `tron_gasless_provider`; the legacy route has no such member.
+    pub gasfree: Option<GasFreeBinding>,
 }
 
 /// Assemble the [`EthCoinImpl`] for a TRX or TRC20 coin and wrap it in
@@ -120,6 +128,7 @@ pub async fn tron_coin_from_conf_and_request(
         nodes,
         required_confirmations: tron_required_confirmations(req["required_confirmations"].as_u64(), conf),
         tx_history: req["tx_history"].as_bool().unwrap_or(false),
+        gasfree: None,
     };
     tron_coin_from_params(ctx, ticker, conf, params, priv_key, protocol)
         .await
@@ -144,15 +153,70 @@ pub async fn tron_coin_from_params(
     priv_key: &[u8],
     protocol: CoinProtocol,
 ) -> Result<EthCoin, MmError<EthCoinBuildError>> {
+    let key_pair = KeyPair::from_secret_slice(priv_key)
+        .map_to_mm(|e| EthCoinBuildError::Internal(format!("Failed to derive TRON key pair: {e}")))?;
+    let derivation_method = DerivationMethod::Iguana(key_pair.address());
+    build_tron_coin(ctx, ticker, conf, params, key_pair, derivation_method, protocol).await
+}
+
+/// Assemble the [`EthCoinImpl`] of the TRX platform coin of a software HD wallet (CRD ch.21 R-A2, R21.10B.4): the
+/// coin's configured `derivation_path` (coin type 195 in practice) extended by `path_to_address` selects the enabled
+/// address, and the wallet is the same HD wallet an EVM platform has, with `gap_limit`. A TRC20 token is built on
+/// the platform and uses its wallet, so this builds a TRX platform only.
+///
+/// # Errors
+///
+/// [`EthCoinBuildError::InvalidPayload`] for a coin config without a usable `derivation_path` or a path that cannot
+/// be derived; [`EthCoinBuildError::Internal`] for a protocol that is not TRX, a wallet storage that cannot be
+/// opened, or a provider that cannot be built.
+pub async fn tron_coin_from_params_with_global_hd(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    params: TronCoinParams,
+    global_hd: &GlobalHDAccountArc,
+    path_to_address: &PathToAddress,
+    gap_limit: u32,
+    protocol: CoinProtocol,
+) -> Result<EthCoin, MmError<EthCoinBuildError>> {
+    if !matches!(protocol, CoinProtocol::TRX { .. }) {
+        return MmError::err(EthCoinBuildError::Internal(format!(
+            "the TRON HD wallet is built for a TRX platform, not for {ticker}"
+        )));
+    }
+    let key_pair = derive_eth_hd_activation_key(global_hd, conf, path_to_address)?;
+    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit, HDWalletStorageKeyPolicy::Software).await?;
+    build_tron_coin(
+        ctx,
+        ticker,
+        conf,
+        params,
+        key_pair,
+        DerivationMethod::HDWallet(hd_wallet),
+        protocol,
+    )
+    .await
+}
+
+/// The coin builder behind [`tron_coin_from_params`] and [`tron_coin_from_params_with_global_hd`]: `key_pair` is the
+/// key of the enabled address, and `derivation_method` the wallet it belongs to.
+async fn build_tron_coin(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    params: TronCoinParams,
+    key_pair: KeyPair,
+    derivation_method: DerivationMethod<Address, EthHDWallet>,
+    protocol: CoinProtocol,
+) -> Result<EthCoin, MmError<EthCoinBuildError>> {
     let TronCoinParams {
         nodes,
         required_confirmations,
         tx_history,
+        gasfree,
     } = params;
     let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
 
-    let key_pair = KeyPair::from_secret_slice(priv_key)
-        .map_to_mm(|e| EthCoinBuildError::Internal(format!("Failed to derive TRON key pair: {e}")))?;
     let my_address = key_pair.address();
 
     let tron_api = TronApiClient::new(ticker, nodes);
@@ -163,6 +227,12 @@ pub async fn tron_coin_from_params(
             platform,
             contract_address,
         } => {
+            // The binding lives on the platform coin (CRD ch.63 §63.3.1); a token built on its own has none.
+            if gasfree.is_some() {
+                return MmError::err(EthCoinBuildError::Internal(format!(
+                    "a GasFree provider binding belongs to a TRX platform coin, not to the token {ticker}"
+                )));
+            }
             let token_addr = parse_trc20_contract(&contract_address).map_to_mm(EthCoinBuildError::InvalidPayload)?;
             let decimals = resolve_trc20_decimals(
                 conf,
@@ -197,7 +267,9 @@ pub async fn tron_coin_from_params(
             EthCoinBuildError::Internal(format!("Failed to build placeholder alloy provider for TRON: {e}"))
         })?;
 
-    let initial_history_state = if tx_history {
+    // The history needs both the request and a keyed TronGrid node (CRD ch.21 §21.10C); without either the coin
+    // keeps the reference behavior of R21.10B.6.
+    let initial_history_state = if tx_history && tron_api.has_history_nodes() {
         HistorySyncState::NotStarted
     } else {
         HistorySyncState::NotEnabled
@@ -225,7 +297,7 @@ pub async fn tron_coin_from_params(
         chain_id: conf["chain_id"].as_u64(),
         logs_block_range: 0,
         logs_window: Default::default(),
-        derivation_method: DerivationMethod::Iguana(my_address),
+        derivation_method,
         swap_v2_contracts: None,
         // TRON has no V1 or V2 EVM swap and no EVM gas model (energy and bandwidth instead): the gas-limit
         // blocks of CRD ch. 57 do not apply, so the defaults stand.
@@ -235,6 +307,7 @@ pub async fn tron_coin_from_params(
         estimate_gas_mult: None,
         taker_fee_quote_at_limit: true,
         tron_api: Some(tron_api),
+        tron_gasfree: gasfree.map(CoinGasFree::Platform),
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -252,8 +325,15 @@ impl EthCoin {
     /// confirmation requirement. The decimals come from the token's coin config when it declares 1 to 255, and are
     /// read from the contract otherwise (CRD ch.21 R21.10B.2).
     ///
+    /// `gasless` is the `gasless` block of the token's activation request (CRD ch.63 §63.3.2). A block with
+    /// `enabled: false` behaves as an absent one. An enabled block needs a provider binding on this platform coin;
+    /// its `transfer_max_fee` is kept on the token in the token's smallest unit.
+    ///
     /// # Errors
     ///
+    /// [`Erc20BuildError::InvalidPayload`] for an enabled `gasless` block on a platform without a provider binding
+    /// and for a `transfer_max_fee` that is negative or finer than the token's decimals; the first two are refused
+    /// before any node is asked;
     /// [`Erc20BuildError::Transport`] when the decimals read fails or gives a value above 255;
     /// [`Erc20BuildError::UnsupportedDecimals`] for a configured value above 255;
     /// [`Erc20BuildError::Internal`] when this is not a TRX platform coin or its context is gone.
@@ -262,6 +342,7 @@ impl EthCoin {
         ticker: String,
         token_addr: Address,
         required_confirmations: u64,
+        gasless: Option<&TronTokenGaslessRequest>,
     ) -> Result<EthCoin, MmError<Erc20BuildError>> {
         let (tron_api, EthCoinType::Tron) = (&self.tron_api, &self.coin_type) else {
             return MmError::err(Erc20BuildError::Internal(
@@ -273,6 +354,11 @@ impl EthCoin {
                 "the TRX platform coin has no node client".to_owned(),
             ));
         };
+        let gasless = gasless.filter(|gasless| gasless.is_enabled());
+        if let Some(gasless) = gasless {
+            TokenGasless::precheck(gasless, self.gasfree_platform_binding().is_some())
+                .map_to_mm(|e| Erc20BuildError::InvalidPayload(e.to_string()))?;
+        }
         let ctx = MmArc::from_weak(&self.ctx)
             .or_mm_err(|| Erc20BuildError::Internal("MM context has been dropped".to_owned()))?;
         let conf = crate::coin_conf(&ctx, &ticker);
@@ -289,6 +375,13 @@ impl EthCoin {
             EthCoinBuildError::Transport(text) => Erc20BuildError::Transport(text),
             other => Erc20BuildError::Internal(other.to_string()),
         })?;
+        let tron_gasfree = match gasless {
+            Some(gasless) => Some(CoinGasFree::Token(
+                TokenGasless::from_request(gasless, decimals)
+                    .map_to_mm(|e| Erc20BuildError::InvalidPayload(e.to_string()))?,
+            )),
+            None => None,
+        };
         let token_impl = EthCoinImpl {
             signer: self.signer.clone(),
             my_address: self.my_address,
@@ -306,7 +399,12 @@ impl EthCoin {
             gas_station_policy: self.gas_station_policy.clone(),
             web3: self.web3.clone(),
             web3_instances: self.web3_instances.clone(),
-            history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
+            // The platform's history process also writes the history of its tokens (CRD ch.21 §21.10C).
+            history_sync_state: Mutex::new(if self.tron_history_enabled() {
+                HistorySyncState::NotStarted
+            } else {
+                HistorySyncState::NotEnabled
+            }),
             ctx: self.ctx.clone(),
             required_confirmations: required_confirmations.into(),
             chain_id: self.chain_id,
@@ -319,6 +417,7 @@ impl EthCoin {
             estimate_gas_mult: self.estimate_gas_mult,
             taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: Some(tron_api.clone()),
+            tron_gasfree,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
             erc20_tokens_infos: Default::default(),

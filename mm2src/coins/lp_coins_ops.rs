@@ -15,12 +15,13 @@ pub fn is_wallet_only_ticker(ctx: &MmArc, ticker: &str) -> bool {
     let coin_conf = coin_conf(ctx, ticker);
     coin_conf["wallet_only"].as_bool().unwrap_or(false)
 }
-/// Beta switch: whether TRON (TRX, TRC20) coins can be activated.
+/// Whether TRON (TRX, TRC20) coins can be activated.
 ///
-/// TRON support is postponed for the current beta. While this is `false`, every activation route for the
-/// family answers [`TRON_NOT_AVAILABLE`] and registers nothing; the coin code stays compiled and its unit
-/// tests keep running. Set it to `true` to turn the family back on.
-pub const TRON_ACTIVATION_AVAILABLE: bool = false;
+/// `true` since 2026-11-20 (CRD ch.21 D6): every activation route of the family (`enable_eth_with_tokens`,
+/// `task::enable_eth::*`, `enable_erc20`, `task::enable_erc20::*`, and the legacy `enable` and `electrum`) builds
+/// and registers the coin. No route reads this constant any more; it records the state of the family next to the
+/// other family switches. Whether a TRON coin can trade is a separate switch, [`TRON_SWAPS_AVAILABLE`].
+pub const TRON_ACTIVATION_AVAILABLE: bool = true;
 
 /// Beta switch: whether Solana (SOL, SPL tokens) coins can be activated.
 ///
@@ -41,8 +42,18 @@ pub const SOLANA_ACTIVATION_AVAILABLE: bool = false;
 /// back the behavior its coins-config entry asks for.
 pub const TENDERMINT_SWAPS_AVAILABLE: bool = false;
 
-/// The refusal text of every TRON activation route while [`TRON_ACTIVATION_AVAILABLE`] is `false`.
-pub const TRON_NOT_AVAILABLE: &str = "TRON support is not available in this build";
+/// Switch: whether TRON (TRX, TRC20) coins can take part in orders and swaps.
+///
+/// Reloaded has no TRON swap (CRD ch.21 R-D1, R21.B3). While this is `false`, every TRON platform coin and every
+/// TRC20 token reports itself as wallet-only, whatever its coins-config entry says: activation, balances,
+/// addresses, `withdraw` and the transaction history work, while `setprice`, `buy`, `sell` and the other ways to
+/// start a new trade refuse the coin with the usual wallet-only error, and an order or request that already exists
+/// is not matched. An order with a TRON coin that was saved earlier is cancelled at startup, and an unfinished
+/// saved swap that names a TRON coin is not resumed at startup (its record is kept). The read-only views
+/// (`orderbook`, `best_orders`, `trade_preimage`) look at the coins-config `wallet_only` flag alone and are not
+/// changed by this switch, and neither are `max_taker_vol`, `max_maker_vol` and the legacy `get_trade_fee`, which
+/// do not ask whether a coin is wallet-only. Set it to `true` only together with a TRON swap implementation.
+pub const TRON_SWAPS_AVAILABLE: bool = false;
 
 /// The refusal text of every Solana activation route while [`SOLANA_ACTIVATION_AVAILABLE`] is `false`.
 pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this build";
@@ -50,7 +61,6 @@ pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this 
 /// The refusal text for a coin protocol whose family is switched off in this build, if it is.
 fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str> {
     match protocol {
-        CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } if !TRON_ACTIVATION_AVAILABLE => Some(TRON_NOT_AVAILABLE),
         CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. }
             if !SOLANA_ACTIVATION_AVAILABLE =>
         {
@@ -71,7 +81,9 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
     let cctx = try_s!(CoinsContext::from_ctx(ctx));
     {
         let coins = cctx.coins.lock().await;
-        if coins.get(ticker).is_some() {
+        // A passive platform is registered, so the legacy `enable` and `electrum` refuse its ticker as already
+        // activated (CRD ch.43 R43.1E.6 item 6).
+        if coins.registered().contains(ticker) {
             return ERR!("Coin {} already initialized", ticker);
         }
     }
@@ -189,9 +201,12 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         // TRON activation routes through a dedicated builder that populates
         // `EthCoin.tron_api`. P10.2 wiring.
         // Docs vs reference (CRD ch.55 R55.4.7, D55.5): the reference release rejects TRX and TRC20 on the
-        // legacy path and requires an mmrpc 2.0 activation. Reloaded has no mmrpc 2.0 TRON activation, so
-        // rejecting them here would remove TRON activation entirely; it keeps them as a documented extension
-        // (maintainer decision 2026-10-11). A client written for the reference never sends such a request.
+        // legacy path and requires an mmrpc 2.0 activation. Reloaded has that activation now
+        // (`enable_eth_with_tokens`, `task::enable_eth`), and builds the TRON HD wallet there under a global-HD
+        // login (CRD ch.21 R-A2). This legacy route stays as a documented extension (maintainer decision
+        // 2026-10-11). Under a global-HD login it keeps the node's internal key, as the EVM and UTXO legacy routes
+        // do in Reloaded (decided 2026-11-19), so its address differs from the one the mmrpc 2.0 HD route gives for
+        // the same seed. A client written for the reference never sends such a request.
         CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } => try_s!(
             crate::eth::tron::tron_coin_from_conf_and_request(ctx, ticker, &coins_en, req, &secret, protocol).await
         )
@@ -230,7 +245,8 @@ pub async fn lp_register_coin(
     // So I'm leaving the possibility of race condition intentionally in favor of faster concurrent activation.
     // Should consider refactoring: maybe extract the RPC client initialization part from coin init functions.
     let mut coins = cctx.coins.lock().await;
-    if coins.contains_key(&ticker) {
+    // A passive platform is registered: its ticker is refused as already initialized.
+    if coins.registered().contains(&ticker) {
         return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() });
     }
     cctx.fee_estimate_cache.forget_coin(&ticker);
@@ -275,11 +291,20 @@ fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum) -> Result<(), String> {
     common::executor::spawn_local(fut);
     Ok(())
 }
-/// NB: Returns only the enabled (aka active) coins.
+/// NB: Returns only the enabled (aka active) coins: a passive platform coin is not found (CRD ch.43 R43.1E.6
+/// item 1). A caller that a rule says must still see a passive coin uses [`lp_coinfind_registered`].
 pub async fn lp_coinfind(ctx: &MmArc, ticker: &str) -> Result<Option<MmCoinEnum>, String> {
     let cctx = try_s!(CoinsContext::from_ctx(ctx));
     let coins = cctx.coins.lock().await;
-    Ok(coins.get(ticker).cloned())
+    Ok(coins.active().get(ticker).cloned())
+}
+/// Returns a registered coin, active or passive (CRD ch.43 R43.1E.6). Use it only where a rule says that a passive
+/// platform coin still counts: `get_enabled_coins`, the already-activated checks, a dependent token's own look-up of
+/// its platform (D43.1F.3), and the background work of a passive platform.
+pub async fn lp_coinfind_registered(ctx: &MmArc, ticker: &str) -> Result<Option<MmCoinEnum>, String> {
+    let cctx = try_s!(CoinsContext::from_ctx(ctx));
+    let coins = cctx.coins.lock().await;
+    Ok(coins.registered().get(ticker).cloned())
 }
 /// Attempts to find a pair of active coins returning None if one is not enabled
 pub async fn find_pair(ctx: &MmArc, base: &str, rel: &str) -> Result<Option<(MmCoinEnum, MmCoinEnum)>, String> {
@@ -400,6 +425,8 @@ pub async fn validate_address_core(
 }
 pub async fn withdraw(ctx: MmArc, req: WithdrawRequest) -> WithdrawResult {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    // CRD ch.63 R21: the fee-rail check comes before any other processing of the request, for every coin family.
+    check_withdraw_fee_rail(&coin, &req)?;
     // A withdrawal is not built while the coin's Electrum servers disagree about the chain (CRD ch.38 R38.6.4o item 12).
     if let Some(error) = coin.chain_disagreement() {
         return MmError::err(WithdrawError::ChainDisagreement(error));
@@ -750,7 +777,9 @@ struct EnabledCoin {
 pub async fn get_enabled_coins(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
     let coins_ctx: Arc<CoinsContext> = try_s!(CoinsContext::from_ctx(&ctx));
     let coins = coins_ctx.coins.lock().await;
+    // A passive platform is listed, with its address as for an active coin (CRD ch.43 R43.1E.6 item 2).
     let enabled_coins: Vec<_> = try_s!(coins
+        .registered()
         .iter()
         .map(|(ticker, coin)| {
             let address = try_s!(coin.my_address());
@@ -764,22 +793,81 @@ pub async fn get_enabled_coins(ctx: MmArc) -> Result<Response<Vec<u8>>, String> 
     let res = try_s!(json::to_vec(&json!({ "result": enabled_coins })));
     Ok(try_s!(Response::builder().body(res)))
 }
+/// The work that ends with a removed instance, at once and wherever the instance is. Every removal path calls it, once
+/// per removed instance: `disable_coin` and each removal of `disable_platform_with_dependents`.
+///
+/// A QRC20 token's history collector ends with its instance; the token's Electrum client closes with the last handle of
+/// the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
+///
+/// A removed QTUM or QRC20 instance leaves the subscriptions of its Electrum client; one that no other instance
+/// remembers is no longer placed again after a reconnect (CRD ch.38 D38.6.4Q.1 status note, item 6). This takes no
+/// registry lock and sends nothing.
+fn end_removed_instance_work(removed: &MmCoinEnum) {
+    match removed {
+        MmCoinEnum::QtumCoin(qtum) => {
+            AsRef::<crate::utxo::UtxoCoinFields>::as_ref(qtum).forget_electrum_subscriptions()
+        },
+        MmCoinEnum::Qrc20Coin(token) => {
+            token.end_history_collector();
+            token.utxo.forget_electrum_subscriptions();
+        },
+        _ => (),
+    }
+}
+/// Removes one registered coin, active or passive, and its records on its platform. Ending the rest of the coin's background
+/// work is not part of the removal (CRD ch.43 R43.1E.5 item 4 awaits the work of the background-work plan).
 pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
         Some(removed) => {
             coins_ctx.fee_estimate_cache.forget_coin(ticker);
-            // A QRC20 token's history collector ends with its instance, at once and wherever it is; the token's
-            // Electrum client closes with the last handle of the instance (CRD ch.38 R38.6.4Q.10 item 1, D38.6.4Q.5).
-            if let MmCoinEnum::Qrc20Coin(token) = &removed {
-                token.end_history_collector();
-            }
+            end_removed_instance_work(&removed);
             forget_token_records(&coins, &removed, ticker);
             Ok(())
         },
         None => ERR!("{} is disabled already", ticker),
     }
+}
+
+/// Removes the registered platform coin `platform` and every one of its dependent tokens and layer-two coins in one
+/// step, under one hold of the registry: the forced removal of CRD ch.43 R43.1E.5 item 4. Each dependent leaves
+/// through the same record clean-up as a single [`disable_coin`], before the platform does. Returns the tickers
+/// removed, the dependents first, and the NFT chain among them when it was a dependent. Ending the rest of the
+/// background work of the removed coins is not part of it.
+pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Result<Vec<String>, String> {
+    let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
+    let mut coins = coins_ctx.coins.lock().await;
+    // The platform must be registered before any dependent is removed.
+    if !coins.registered().contains(platform) {
+        return ERR!("{} is disabled already", platform);
+    }
+    let mut tickers: Vec<String> = coins.dependents_of(platform).into_iter().collect();
+    tickers.push(platform.to_owned());
+    let mut removed_tickers = Vec::with_capacity(tickers.len());
+    for ticker in tickers {
+        // A dependent that was removed meanwhile is simply not there; the platform must be.
+        match coins.remove(&ticker) {
+            Some(removed) => {
+                coins_ctx.fee_estimate_cache.forget_coin(&ticker);
+                end_removed_instance_work(&removed);
+                forget_token_records(&coins, &removed, &ticker);
+                removed_tickers.push(ticker);
+            },
+            None if ticker == platform => return ERR!("{} is disabled already", ticker),
+            // The NFT chain of the platform is a dependent with no coin entry: it is deactivated with the others
+            // (CRD ch.43 R43.1F.8 item 3).
+            None => {
+                if let Ok(chain) = <crate::nft::Chain as crate::nft::ChainTicker>::from_nft_ticker(&ticker) {
+                    if let Ok(nft_ctx) = crate::nft::NftCtx::from_mm_ctx(ctx) {
+                        nft_ctx.unmark_activated(chain);
+                    }
+                    removed_tickers.push(ticker);
+                }
+            },
+        }
+    }
+    Ok(removed_tickers)
 }
 
 /// Takes a disabled token out of the record its platform keeps of its tokens, so that the platform no longer
@@ -793,7 +881,7 @@ pub(crate) fn forget_token_records(registry: &CoinRegistry, removed: &MmCoinEnum
         MmCoinEnum::EthCoin(token) => {
             use crate::eth::EthCoinType;
             if let EthCoinType::Erc20 { platform, .. } | EthCoinType::Trc20 { platform, .. } = &token.coin_type {
-                if let Some(MmCoinEnum::EthCoin(platform_coin)) = registry.get(platform) {
+                if let Some(MmCoinEnum::EthCoin(platform_coin)) = registry.registered().get(platform) {
                     platform_coin.remove_erc20_token_info(ticker);
                 }
             }
@@ -1186,18 +1274,20 @@ mod postponed_family_switch_tests {
     use super::*;
 
     /// Flipping a family switch is a deliberate change: this test fails when someone does, and must be updated in
-    /// the same commit that turns the family back on (and removes the refusal tests that go with it).
+    /// the same commit that turns a family back on (and removes the refusal tests that go with it). TRON can be
+    /// activated since 2026-11-20 (CRD ch.21 D6); its swaps stay off.
     #[test]
-    fn postponed_families_are_switched_off_for_this_beta() {
-        assert!(!TRON_ACTIVATION_AVAILABLE);
+    fn family_switches_have_their_documented_values() {
+        assert!(TRON_ACTIVATION_AVAILABLE);
+        assert!(!TRON_SWAPS_AVAILABLE);
         assert!(!SOLANA_ACTIVATION_AVAILABLE);
         assert!(!TENDERMINT_SWAPS_AVAILABLE);
-        assert_eq!(TRON_NOT_AVAILABLE, "TRON support is not available in this build");
         assert_eq!(SOLANA_NOT_AVAILABLE, "Solana support is not available in this build");
     }
 
+    /// TRON is switched on: no route refuses its protocols as a family that is not available.
     #[test]
-    fn tron_protocols_are_refused_while_the_switch_is_off() {
+    fn tron_protocols_are_not_refused() {
         let trx = CoinProtocol::TRX {
             network: crate::eth::tron::Network::Mainnet,
         };
@@ -1205,8 +1295,8 @@ mod postponed_family_switch_tests {
             platform: "TRX".to_owned(),
             contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned(),
         };
-        assert_eq!(unavailable_protocol_message(&trx), Some(TRON_NOT_AVAILABLE));
-        assert_eq!(unavailable_protocol_message(&trc20), Some(TRON_NOT_AVAILABLE));
+        assert_eq!(unavailable_protocol_message(&trx), None);
+        assert_eq!(unavailable_protocol_message(&trc20), None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
