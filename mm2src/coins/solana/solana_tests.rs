@@ -62,7 +62,7 @@ fn solana_prerequisites() {
         println!("{:?}", token_accounts);
         let actual_token_pubkey = Pubkey::from_str(token_accounts[0].pubkey.as_str()).unwrap();
         let amount = block_on(client.get_token_account_balance(&actual_token_pubkey)).unwrap();
-        assert_ne!(amount.ui_amount_string.as_str(), "0");
+        assert_ne!(amount.ui_amount_string.as_deref(), Some("0"));
     }
 }
 

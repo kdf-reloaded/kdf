@@ -2067,6 +2067,111 @@ mod reactivation {
         assert!(block_on(coins_ctx(&ctx).dependents_of(PLATFORM)).is_empty());
     }
 
+    /// A context of the EVM tests with the `extra` top-level `MM2.json` settings merged in, an Iguana key and an
+    /// in-memory database (the history collector writes to it).
+    fn iguana_ctx_with_conf(extra: Json) -> MmArc {
+        let mut conf = json!({ "coins": coins_conf() });
+        conf.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().expect("an object").clone());
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "evm activation test passphrase")
+            .expect("initialize the crypto context");
+        let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().expect("in-memory database");
+        let _ = ctx.sqlite_connection.pin(Arc::new(std::sync::Mutex::new(connection)));
+        ctx
+    }
+
+    /// T43.1F.5 (c') under `reactivation_registered_token: "keep"` (CRD ch.43 D43.1F.1): a token registered for
+    /// another platform and named in a first activation is kept, joins the dependent set, the activation answers,
+    /// and an unforced `disable_coin` of the platform then passivizes it.
+    #[test]
+    fn t43_1f_5_keep_a_token_registered_for_another_platform_is_kept_in_a_first_activation() {
+        let ctx = iguana_ctx_with_conf(json!({ "reactivation_registered_token": "keep" }));
+        let (node, _) = counting_node();
+        block_on(coins_ctx(&ctx).add_coin(TestCoin::new("USDT-ERC20").into())).unwrap();
+
+        activate(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20"]) }),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+        assert!(
+            block_on(coins::lp_coinfind_registered(&ctx, "USDT-ERC20"))
+                .unwrap()
+                .is_some(),
+            "the registered token stays"
+        );
+        assert!(
+            block_on(coins_ctx(&ctx).make_passive(PLATFORM)),
+            "the platform has a dependent, so an unforced disable passivizes it"
+        );
+        assert!(is_passive(&ctx));
+    }
+
+    /// Under `"keep"` a token whose configuration names another platform is still `PlatformCoinMismatch` (CRD ch.43
+    /// D43.1F.1, case c), and nothing is registered.
+    #[test]
+    fn t43_1f_6_keep_a_configuration_mismatch_is_still_refused() {
+        let ctx = iguana_ctx_with_conf(json!({ "reactivation_registered_token": "keep" }));
+        let (node, _) = counting_node();
+
+        let (wire, status) = failure(
+            &ctx,
+            request(
+                std::slice::from_ref(&node.url),
+                json!({ "erc20_tokens_requests": tokens(&["DAI-ERC20", "OTHER-ERC20"]) }),
+            ),
+        );
+
+        assert_eq!(wire["error_type"], "PlatformCoinMismatch", "{:?}", wire);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+        assert!(dependents(&ctx).is_empty());
+    }
+
+    /// CRD ch.55 D55.8: a first activation with `tx_history` starts the history collector after the registration
+    /// (the collector is built from the registered platform), and a failure before the registration leaves no
+    /// collector behind.
+    #[test]
+    fn d55_8_the_history_collector_follows_the_registration() {
+        let ctx = iguana_ctx_with_conf(json!({}));
+        let fail = Arc::new(AtomicBool::new(true));
+        let node = failing_node(fail.clone());
+        let collectors = ctx.abort_handlers.lock().unwrap().len();
+
+        failure(
+            &ctx,
+            request(std::slice::from_ref(&node.url), json!({ "tx_history": true })),
+        );
+        assert_eq!(
+            ctx.abort_handlers.lock().unwrap().len(),
+            collectors,
+            "a failed activation left a collector"
+        );
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_none());
+
+        fail.store(false, Ordering::SeqCst);
+        activate(
+            &ctx,
+            request(std::slice::from_ref(&node.url), json!({ "tx_history": true })),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
+            .unwrap()
+            .is_some());
+        assert_eq!(ctx.abort_handlers.lock().unwrap().len(), collectors + 1);
+    }
+
     /// T43.1F.5 with the decision of 2026-11-19: after the versioned `disable_coin` of a platform its tokens stay
     /// registered and its dependent set is dropped. A later activation naming a token that is registered for this
     /// platform is accepted: the registered instance is kept, joins the set and the token list, and is reported.
