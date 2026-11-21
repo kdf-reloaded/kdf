@@ -82,7 +82,8 @@ or undo, and every change that needs a step from you.
   activated.
   - *What to do:* to remove the platform and its tokens, send `"force_disable": true`.
   - *Versioned form:* the `mmrpc: "2.0"` `disable_coin` does not change. It neither makes a platform passive nor
-    reads `force_disable`: it removes the platform, and its tokens stay registered.
+    reads `force_disable`: it removes the platform, and its tokens stay registered and active but without history
+    collection until the platform is activated again.
   - *Activating it again:* `enable_eth_with_tokens` and the other platform-with-tokens methods activate a passive
     platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
     Disabling a coin now ends its background work (see "Changed" below).
