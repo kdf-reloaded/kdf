@@ -1033,8 +1033,10 @@ fn t40_6b_15_send_raw_transaction_answers_the_withdraw_hash() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Balance precision (CRD ch.40 R40.2.3, R40.3A.2, §40.6A, T40.6B.7): a balance is the exact value, normalized, as
-// the serialized decimal string.
+// Balance string form (CRD ch.40 R40.2A.1, R40.2A.5, T40.2A.1 to T40.2A.3): a balance is the exact value in the
+// shortest form, as the serialized decimal string. Every surface of R40.2A.3 and `enable_solana_with_tokens` reads
+// its balances through `activation_balances` (platform and tokens) or `my_balance` (`enable_solana_token`,
+// `my_balance`), the two paths the tests below read.
 // ---------------------------------------------------------------------------------------------------------------
 
 /// The serialized form of a decimal, as it travels in an RPC answer.
@@ -1058,10 +1060,14 @@ fn sol_wire(lamports: u64) -> (String, String, String) {
     )
 }
 
+/// R40.2A.1, T40.2A.1: every row of the table, plus whole numbers that end in zeros.
 #[test]
 fn sol_balance_is_the_exact_normalized_value() {
-    let cases: [(u64, &str); 7] = [
+    let cases: [(u64, &str); 10] = [
         (0, "0"),
+        (5_000, "0.000005"),
+        (1_000_000_000, "1"),
+        (12_345_678_901_234, "12345.678901234"),
         (10_000_000_000, "10"),
         (1, "0.000000001"),
         (1_500_000_000, "1.5"),
@@ -1094,9 +1100,13 @@ fn token_wire(raw: u64, decimals: u8) -> (String, String) {
     (balance_wire(&my.spendable), balance_wire(&activated.spendable))
 }
 
+/// R40.2A.5, T40.2A.2: a token balance from the raw amount and the mint's decimals.
 #[test]
 fn token_balance_is_the_exact_normalized_value() {
-    let cases: [(u64, u8, &str); 8] = [
+    let cases: [(u64, u8, &str); 11] = [
+        (7, 0, "7"),
+        (4_572_211_441_380, 8, "45722.1144138"),
+        (123_456_789_012_345_678, 9, "123456789.012345678"),
         (0, 6, "0"),
         (1_000_000, 6, "1"),
         (100, 0, "100"),
@@ -1126,4 +1136,48 @@ fn a_wallet_without_a_token_account_reads_zero_on_the_wire() {
     assert_eq!(balance_wire(&activation.balance.spendable), "0");
     let activated = activation.token_balances.get("USDC").expect("the token balance");
     assert_eq!(balance_wire(&activated.spendable), "0");
+}
+
+/// T40.2A.3: the unspendable member is `"0"` on the wire for SOL and for a token, on `my_balance` and on the
+/// activation balances.
+#[test]
+fn the_unspendable_member_is_zero_on_the_wire() {
+    let node = spawn(Script::new().with_sol(wallet(), 12_345_678_901).with_token_account(
+        &wallet(),
+        &SPL_TOKEN_PROGRAM_ID,
+        1_500_000,
+        6,
+    ));
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, 6);
+    token
+        .platform_coin
+        .add_spl_token_info("USDC".to_string(), token.get_info());
+    let sol_my = block_on(token.platform_coin.my_balance().compat()).expect("a balance");
+    let token_my = block_on(token.my_balance().compat()).expect("a balance");
+    let activation = block_on(token.platform_coin.activation_balances()).expect("activation balances");
+    let activated = activation.token_balances.get("USDC").expect("the token balance");
+    for balance in [&sol_my, &token_my, &activation.balance, activated] {
+        assert_eq!(balance_wire(&balance.unspendable), "0");
+    }
+}
+
+/// R40.2A.2, fourth bullet: the balance string has the scale of the mint (the node answer), not of the configured
+/// decimals.
+#[test]
+fn a_token_balance_uses_the_decimals_of_the_mint_not_the_configured_ones() {
+    let node = spawn(Script::new().with_sol(wallet(), 1).with_token_account(
+        &wallet(),
+        &SPL_TOKEN_PROGRAM_ID,
+        12_345_678,
+        6,
+    ));
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, 9);
+    token
+        .platform_coin
+        .add_spl_token_info("USDC".to_string(), token.get_info());
+    let my = block_on(token.my_balance().compat()).expect("a balance");
+    assert_eq!(balance_wire(&my.spendable), "12.345678");
+    let activation = block_on(token.platform_coin.activation_balances()).expect("activation balances");
+    let activated = activation.token_balances.get("USDC").expect("the token balance");
+    assert_eq!(balance_wire(&activated.spendable), "12.345678");
 }

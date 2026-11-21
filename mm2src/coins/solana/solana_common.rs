@@ -8,7 +8,7 @@ use solana_signature::Signature;
 use solana_signer::Signer;
 use std::str::FromStr;
 
-/// SOL for `lamports`: the exact value, normalized (see [`units_to_amount`]).
+/// SOL for `lamports`: the exact value in the shortest form (CRD ch.40 R40.2A.1; see [`units_to_amount`]).
 pub fn lamports_to_sol(lamports: u64) -> BigDecimal { units_to_amount(lamports, LAMPORTS_DECIMALS) }
 
 /// The length in bytes of a Solana public key, and so of an address once base58-decoded.
@@ -70,7 +70,9 @@ pub fn verify_message(
 const LAMPORTS_DECIMALS: u8 = 9;
 
 /// `amount` units of a coin with `decimals` decimals as a decimal number, 10^-decimals each, with no trailing zeros.
-/// Built from the exponent, so any `u8` is safe. The single place where raw units become a shown balance.
+/// Built from the exponent, so any `u8` is safe. The single place where raw units become a shown balance: this is
+/// the shortest form of CRD ch.40 R40.2A.1 (SOL) and R40.2A.5 (a token balance from the raw amount and the mint's
+/// decimals), with no significant-digit limit and no rounding.
 pub fn units_to_amount(units: u64, decimals: u8) -> BigDecimal {
     BigDecimal::new(units.into(), i64::from(decimals)).normalized()
 }

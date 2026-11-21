@@ -712,7 +712,7 @@ the previous version used. The safe way:
   12.3456789) and a zero balance read `0.00000000`. SOL and token balances are now the exact amount
   without trailing zeros (`0`, `1.5`, `12.345678901`); token balances are computed from the raw amount
   the node reports. Withdraw amounts were not affected. Solana stays switched off in this beta.
-  Detail: PR #456; CRD ch.40 R40.2.3, R40.3A.2, T40.6B.7.
+  Detail: PR #456; CRD ch.40 §40.2A (R40.2A.1, R40.2A.5), R40.2.3, R40.3A.2, T40.6B.7.
 
 #### QTUM and QRC20
 
