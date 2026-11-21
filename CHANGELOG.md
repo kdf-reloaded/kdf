@@ -1117,8 +1117,8 @@ the previous version used. The safe way:
   the error (for example a transport error from `withdraw`, or "TRON broadcast failed" from
   `send_raw_transaction`) and does not wait and try again. In the test, a broadcast refused this way sent nothing,
   and repeating the request later succeeded. For regular use, set a TronGrid API key (`tron_api_key`) or use your
-  own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: CRD ch.21
-  §21.9.
+  own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: PR #467;
+  CRD ch.21 §21.9.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
