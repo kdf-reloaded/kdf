@@ -254,8 +254,8 @@ the previous version used. The safe way:
   the account, so Reloaded also looks at the token balances and finds an address that holds only a token.
   `task::create_new_account::init` fails with `Internal` for every TRON coin. `withdraw` and `task::withdraw` take an HD
   `from` for TRX and TRC20 and sign with the key of that path, and `show_priv_key` answers the key of the activated
-  address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, which Reloaded's EVM
-  ERC-20 coins do not allow. A TRON coin on a single key now refuses `from` with `UnexpectedFromAddress`, as an EVM coin
+  address. A TRC20 withdraw may name any activated address of the platform's HD wallet in `from`, as an EVM ERC-20
+  withdraw also does since PR #438. A TRON coin on a single key now refuses `from` with `UnexpectedFromAddress`, as an EVM coin
   does; it was ignored before. The legacy `enable` method keeps the node's internal key under a global-HD login, as the
   EVM and UTXO legacy routes do in Reloaded, so its TRON address differs from the one the mmrpc 2.0 methods give for the
   same seed.
@@ -520,6 +520,18 @@ the previous version used. The safe way:
   to close them first by activating under the previous `priv_key_policy`. Closed channels, and an empty or
   missing history of the other identity, allow the activation. Detail: PR #400; CRD ch.05 R46,
   status note of 2026-11-17.
+- **An ERC-20 withdraw accepts `from` under an HD wallet.** `withdraw` and `task::withdraw::init` of a token take
+  the address from the platform coin's HD wallet (address id or derivation path), check the token balance and the
+  nonce at that address, and sign with its key; `from` of the result is that address. A selector that does not
+  resolve is refused before any node request. A token on a single-key platform still refuses `from`. Under a
+  hardware wallet the task route signs at the selected path. Detail: PR #438; CRD ch.49 R49.34.
+- **The HD address methods answer an ERC-20 token ticker from its platform's HD wallet, with the token's balance
+  only.** `get_new_address`, `account_balance`, `task::account_balance::init` and `task::scan_for_new_addresses::init`
+  asked for a token ticker use the platform's accounts and known addresses, so an address found or created through
+  the token is listed by the platform as well. The scan counts an address as used when its nonce or that token's
+  balance is not zero. Detail: PR #438; CRD ch.49 R49.32.
+- **`task::scan_for_new_addresses::init` serves EVM coins under an HD wallet.** It was answered only for TRON coins
+  and UTXO coins; an EVM platform now answers it. Detail: PR #438; CRD ch.05 R54.
 
 #### Solana coins
 
@@ -600,6 +612,12 @@ the previous version used. The safe way:
   Detail: PR #431; CRD ch.39 R39.11.4V.10 status note.
 
 ### Fixed
+
+#### EVM coins
+
+- **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
+  abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
+  checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
 
 #### WalletConnect
 

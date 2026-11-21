@@ -1009,6 +1009,12 @@ exposes is the set its key source produced; mixing sources inside one
 coin's account set would store extended public keys that the coin's signer
 cannot spend from.
 
+> *Status note (2026-11-20), EVM address form and scan (as built).* An EVM
+> coin's `get_new_address` answers the full EIP-55 checksummed address (chapter
+> 35 R35.1.3); it used to write an abbreviated form. `task::scan_for_new_addresses::init`
+> serves EVM coins under an HD wallet, for the platform ticker and for an ERC-20
+> token ticker (chapter 49 R49.32, last paragraph).
+
 **R55.** *Storage identity of a hardware-policy coin.* The per-coin HD
 account storage (the HD-account table of the wallet database) MUST namespace a `Trezor`-policy coin by the
 **device digest of R51** and a `ContextPrivKey` global-HD coin by the
