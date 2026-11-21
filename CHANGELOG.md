@@ -892,6 +892,11 @@ the previous version used. The safe way:
   exact copies, four that need a native ZOMBIE daemon, which no CI runner has, and two whose checks already run
   offline in CI. The other node tests still need public servers and stay off by default; the two that were ignored
   without a reason now state it. Only test code changed. Detail: PR #453.
+- **Two tests of the shared QTUM Electrum client no longer fail now and then under load.** They compared the
+  number of holders of the client right after activation with the number at the end. The client's maintenance
+  pass also holds it while it runs, so a count taken during the first pass could be one too high. Both counts
+  are now taken once they have stayed the same for 2 s and are compared for equality, so a handle that a failed
+  token activation keeps still fails the test. Only test code changed. Detail: PR #460.
 
 ### Plans touched
 
