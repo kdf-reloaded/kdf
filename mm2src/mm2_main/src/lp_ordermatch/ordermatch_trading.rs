@@ -3775,27 +3775,26 @@ pub struct HistoricalOrder {
     pub(crate) conf_settings: Option<OrderConfirmationsSettings>,
 }
 
-/// The log line for a saved order that must be cancelled at startup because it involves a Tendermint platform
-/// coin or token while [`coins::TENDERMINT_SWAPS_AVAILABLE`] is `false`; `None` when the order is kept. The coins
-/// configuration decides, so the coins do not have to be activated yet.
-pub(super) fn tendermint_order_cancel_message(
+/// The log line for a saved order that must be cancelled at startup because it involves a coin of a family whose
+/// swaps are switched off in this build; `None` when the order is kept. The families are Tendermint (platform coin
+/// or token) while [`coins::TENDERMINT_SWAPS_AVAILABLE`] is `false`, and TRON (TRX or TRC20) while
+/// [`coins::TRON_SWAPS_AVAILABLE`] is `false` (CRD ch.21 R-D1). The coins configuration decides, so the coins do
+/// not have to be activated yet.
+pub(super) fn swaps_off_order_cancel_message(
     ctx: &MmArc,
     kind: &str,
     uuid: &Uuid,
     base: &str,
     rel: &str,
 ) -> Option<String> {
-    let is_tendermint = |ticker: &str| {
-        matches!(
-            coin_conf(ctx, ticker)["protocol"]["type"].as_str(),
-            Some("TENDERMINT" | "TENDERMINTTOKEN")
-        )
+    let family_switched_off = |ticker: &str| match coin_conf(ctx, ticker)["protocol"]["type"].as_str() {
+        Some("TENDERMINT" | "TENDERMINTTOKEN") if !coins::TENDERMINT_SWAPS_AVAILABLE => Some("Tendermint"),
+        Some("TRX" | "TRC20") if !coins::TRON_SWAPS_AVAILABLE => Some("TRON"),
+        _ => None,
     };
-    if coins::TENDERMINT_SWAPS_AVAILABLE || !(is_tendermint(base) || is_tendermint(rel)) {
-        return None;
-    }
+    let family = family_switched_off(base).or_else(|| family_switched_off(rel))?;
     Some(format!(
-        "Cancelled saved {kind} order {uuid} ({base}/{rel}): Tendermint swaps are not available in this build"
+        "Cancelled saved {kind} order {uuid} ({base}/{rel}): {family} swaps are not available in this build"
     ))
 }
 
@@ -3828,7 +3827,7 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
                 continue;
             }
         }
-        if let Some(message) = tendermint_order_cancel_message(ctx, "maker", &order.uuid, &order.base, &order.rel) {
+        if let Some(message) = swaps_off_order_cancel_message(ctx, "maker", &order.uuid, &order.base, &order.rel) {
             log::info!("{}", message);
             delete_my_maker_order(ctx.clone(), order, MakerOrderCancellationReason::Cancelled)
                 .compat()
@@ -3847,7 +3846,7 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
     let mut taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
     for order in saved_taker_orders {
         let request = &order.request;
-        if let Some(message) = tendermint_order_cancel_message(ctx, "taker", &request.uuid, &request.base, &request.rel)
+        if let Some(message) = swaps_off_order_cancel_message(ctx, "taker", &request.uuid, &request.base, &request.rel)
         {
             log::info!("{}", message);
             delete_my_taker_order(ctx.clone(), order, TakerOrderCancellationReason::Cancelled)

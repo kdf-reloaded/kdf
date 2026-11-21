@@ -14,6 +14,7 @@
 
 use super::api::TronApiClient;
 use super::balance::trc20_decimals;
+use super::gasfree::binding::{CoinGasFree, GasFreeBinding, TokenGasless, TronTokenGaslessRequest};
 use super::nodes::{parse_nodes, TronApiKey, TronNode};
 use super::{Network, TronAddress, TRX_DECIMALS};
 
@@ -99,6 +100,9 @@ pub struct TronCoinParams {
     /// Whether the request asks for the transaction history (`tx_history`, on both activation routes). The history
     /// is enabled only when the node list also has a keyed TronGrid node (CRD ch.21 §21.10C).
     pub tx_history: bool,
+    /// The GasFree provider binding of a TRX platform coin (CRD ch.63 §63.3.1), already validated. `None` when the
+    /// request gave no `tron_gasless_provider`; the legacy route has no such member.
+    pub gasfree: Option<GasFreeBinding>,
 }
 
 /// Assemble the [`EthCoinImpl`] for a TRX or TRC20 coin and wrap it in
@@ -124,6 +128,7 @@ pub async fn tron_coin_from_conf_and_request(
         nodes,
         required_confirmations: tron_required_confirmations(req["required_confirmations"].as_u64(), conf),
         tx_history: req["tx_history"].as_bool().unwrap_or(false),
+        gasfree: None,
     };
     tron_coin_from_params(ctx, ticker, conf, params, priv_key, protocol)
         .await
@@ -208,6 +213,7 @@ async fn build_tron_coin(
         nodes,
         required_confirmations,
         tx_history,
+        gasfree,
     } = params;
     let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
 
@@ -221,6 +227,12 @@ async fn build_tron_coin(
             platform,
             contract_address,
         } => {
+            // The binding lives on the platform coin (CRD ch.63 §63.3.1); a token built on its own has none.
+            if gasfree.is_some() {
+                return MmError::err(EthCoinBuildError::Internal(format!(
+                    "a GasFree provider binding belongs to a TRX platform coin, not to the token {ticker}"
+                )));
+            }
             let token_addr = parse_trc20_contract(&contract_address).map_to_mm(EthCoinBuildError::InvalidPayload)?;
             let decimals = resolve_trc20_decimals(
                 conf,
@@ -295,6 +307,7 @@ async fn build_tron_coin(
         estimate_gas_mult: None,
         taker_fee_quote_at_limit: true,
         tron_api: Some(tron_api),
+        tron_gasfree: gasfree.map(CoinGasFree::Platform),
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -312,8 +325,15 @@ impl EthCoin {
     /// confirmation requirement. The decimals come from the token's coin config when it declares 1 to 255, and are
     /// read from the contract otherwise (CRD ch.21 R21.10B.2).
     ///
+    /// `gasless` is the `gasless` block of the token's activation request (CRD ch.63 §63.3.2). A block with
+    /// `enabled: false` behaves as an absent one. An enabled block needs a provider binding on this platform coin;
+    /// its `transfer_max_fee` is kept on the token in the token's smallest unit.
+    ///
     /// # Errors
     ///
+    /// [`Erc20BuildError::InvalidPayload`] for an enabled `gasless` block on a platform without a provider binding
+    /// and for a `transfer_max_fee` that is negative or finer than the token's decimals; the first two are refused
+    /// before any node is asked;
     /// [`Erc20BuildError::Transport`] when the decimals read fails or gives a value above 255;
     /// [`Erc20BuildError::UnsupportedDecimals`] for a configured value above 255;
     /// [`Erc20BuildError::Internal`] when this is not a TRX platform coin or its context is gone.
@@ -322,6 +342,7 @@ impl EthCoin {
         ticker: String,
         token_addr: Address,
         required_confirmations: u64,
+        gasless: Option<&TronTokenGaslessRequest>,
     ) -> Result<EthCoin, MmError<Erc20BuildError>> {
         let (tron_api, EthCoinType::Tron) = (&self.tron_api, &self.coin_type) else {
             return MmError::err(Erc20BuildError::Internal(
@@ -333,6 +354,11 @@ impl EthCoin {
                 "the TRX platform coin has no node client".to_owned(),
             ));
         };
+        let gasless = gasless.filter(|gasless| gasless.is_enabled());
+        if let Some(gasless) = gasless {
+            TokenGasless::precheck(gasless, self.gasfree_platform_binding().is_some())
+                .map_to_mm(|e| Erc20BuildError::InvalidPayload(e.to_string()))?;
+        }
         let ctx = MmArc::from_weak(&self.ctx)
             .or_mm_err(|| Erc20BuildError::Internal("MM context has been dropped".to_owned()))?;
         let conf = crate::coin_conf(&ctx, &ticker);
@@ -349,6 +375,13 @@ impl EthCoin {
             EthCoinBuildError::Transport(text) => Erc20BuildError::Transport(text),
             other => Erc20BuildError::Internal(other.to_string()),
         })?;
+        let tron_gasfree = match gasless {
+            Some(gasless) => Some(CoinGasFree::Token(
+                TokenGasless::from_request(gasless, decimals)
+                    .map_to_mm(|e| Erc20BuildError::InvalidPayload(e.to_string()))?,
+            )),
+            None => None,
+        };
         let token_impl = EthCoinImpl {
             signer: self.signer.clone(),
             my_address: self.my_address,
@@ -384,6 +417,7 @@ impl EthCoin {
             estimate_gas_mult: self.estimate_gas_mult,
             taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: Some(tron_api.clone()),
+            tron_gasfree,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
             erc20_tokens_infos: Default::default(),

@@ -235,6 +235,8 @@ impl MutContractCallType {
 
 pub struct GenerateQrc20TxResult {
     pub signed: UtxoTx,
+    /// The unspents `signed` consumes, with their values: what the recently-spent record enters.
+    pub spent: Vec<UnspentInfo>,
     pub miner_fee: u64,
     pub gas_fee: u64,
 }

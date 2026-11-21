@@ -39,6 +39,27 @@ shape.
 > They are inert for every non-Tron coin. Chapter 63 passed the KDF Dirty Gate
 > on 2026-11-08.
 
+> *Status note (2026-11-20), the fee-rail members as built (clean side).* The
+> shared request has the optional members `fee_method` and `gasless`, and the
+> structured withdrawal error has the arm `Gasless`, whose `error_data` is an
+> object with its own `error_type` (chapter 63 §63.9.1). The direct `withdraw`
+> method and `task::withdraw::init` check the two members right after the coin
+> is found: on a coin that is not a TRON coin `fee_method` `gasless` or `auto`
+> answers `Gasless`/`Unavailable` (HTTP 503), and on every coin `gasless`
+> options without one of those two values answer `InvalidFeePolicy` (HTTP
+> 400). On the task route the `init` call itself answers both. A request
+> without the two members is served as before. The task status vocabulary
+> gained `FetchingGaslessQuote` and `SigningGaslessAuthorization` (chapter 63
+> §63.3.6). TRON stays switched off, so only the two refusals can be met
+> today.
+
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The last
+> sentence of the note above describes the tree before TRON activation was
+> switched on ([Chapter 21](21-tron-integration.md) D6 and its status note of
+> this date). With it on, a request for an activated TRC20 token reaches the
+> sign-only gasless rail of chapter 63 §63.8A, and the two task progress
+> values can be met.
+
 > **The `fee` descriptor's EVM forms (cross-reference).** The descriptor is a
 > single enumeration shared by every coin family, tagged by a `type` member.
 > Its EVM forms, the rule for an absent descriptor, the gas-limit estimation
@@ -629,6 +650,13 @@ that decision.
 *2026-11-10 (clean-side note): a TRON withdraw now refuses any `fee` descriptor with `InvalidFeePolicy`
 (ch.21 R-WP6); Solana still does not read it.*
 
+*2026-11-20 (clean-side note): the shared fee descriptor has one more form, `Tron`, without members; other members
+of the object are ignored. A TRON withdraw refuses it with `InvalidFeePolicy` like any other form (ch.21 R-WP6).
+The UTXO, SLP, EVM, QRC20 and Siacoin withdraw paths refuse it through their existing wrong-fee-type arm
+(`InvalidFeePolicy`; the NFT withdraw's `InvalidRequest`), and the shielded coin refuses any `fee` as before. A
+Tendermint request ignores it without error, like any other foreign form (D49.1, option (b)), and Solana does not
+read it. Before, a request with such a `fee` failed request parsing.*
+
 ## 49.3 Status request and retention
 
 R49.11. `task::withdraw::status` shall accept:
@@ -831,6 +859,14 @@ absence is not an error.
 > members are stated by [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8A
 > (R25-R28). R49.25's "mandatory for a completed withdrawal transaction" does
 > not reach that result. §63.8A passed the KDF Dirty Gate on 2026-11-19.
+
+> **Gasless submission (pointer, 2026-11-21).** What the reference has of
+> submitting and tracing a signed gasless authorization -- no RPC does either;
+> three task progress values are declared and never reported; the task cancel
+> has no gasless-specific part -- is stated by
+> [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8B (R30-R35), with the
+> wire form of the three values in R33. §63.8B passed the KDF Dirty Gate on
+> 2026-11-21.
 
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
@@ -1226,3 +1262,18 @@ addresses.
   chapter 63 §63.8A for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
   2026-11-19, measure 0.01, no findings**, as recorded for §63.8A in chapter
   63's provenance footer.
+- *Status note added 2026-11-20 (after the fee-rail pointer of §49.2).*
+  Reloaded-original, clean side: it records the two request members, the
+  `Gasless` error arm and the two task progress values as built; no
+  forbidden-class input.
+- *Status note added 2026-11-20 (TRON switched on; after the note of the
+  item above).* Reloaded-original, clean side: it corrects, from chapter 21
+  D6 and this repository's code, what that note says about TRON being
+  switched off; no forbidden-class input. No cleared sentence was edited.
+- *Pointer added 2026-11-21 (Spec Reader round 0.5.0-19) -- after the
+  sign-only gasless result pointer of 2026-11-19.* It names chapter 63
+  §63.8B (R30 -- R35) and R33 for what the reference has of submitting
+  and tracing a signed gasless authorization; it travels with chapter 63
+  §63.8B for the KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-21,
+  measure 0.02, no findings**, as recorded for §63.8B in chapter 63's
+  provenance footer.

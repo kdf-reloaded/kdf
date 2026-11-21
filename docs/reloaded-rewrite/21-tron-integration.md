@@ -27,6 +27,24 @@
 > describe TRON as activatable or functional describe the code with
 > the constant set to `true`.
 
+*Status note (2026-11-20), TRON is switched on as a wallet-only coin
+family.* The availability note above describes the tree until this
+date. `TRON_ACTIVATION_AVAILABLE` is now `true`: every activation route
+of §21.4 activates TRX and TRC20 (the mmrpc 2.0 methods, and the legacy
+`enable` and `electrum` of Chapter 55 D55.5), and the "TRON support is
+not available in this build" refusal no longer exists on any route. The
+wallet surface of §21.4 -- §21.10C is reachable: activation, balances,
+addresses, the HD wallet, withdraw, and the transaction history with a
+TronGrid API key. Swaps stay off: a second build constant,
+`TRON_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`), is `false`, and while
+it is `false` every TRX and TRC20 coin is wallet-only whatever its
+coins-config entry says, declines every match, and an order saved
+earlier that names one is cancelled at startup (the status notes at
+R21.10B.9, D6 and R21.B3). Where a sentence of this chapter says that a
+statement holds "when switched on", "behind the availability constant"
+or "while the constant is `false`", read it with the constant `true`
+from this date.
+
 ## 21.0 Executive Summary
 
 Tron support is a coin-support capability inside the workspace's
@@ -189,6 +207,10 @@ public method strings are part of the external API contract
 > the legacy `enable` / `electrum` answer "TRON support is not
 > available in this build". The flow below is the target for when
 > TRON returns, planned for the next beta.
+
+*Status note (2026-11-20).* The box above no longer holds: TRON
+activation is switched on, and the flow below is what the tree does (the
+status note of 2026-11-20 at the top of this chapter).
 
 > **Reference behavior and as-built route (Spec Reader 2026-11-07, rows
 > `v3.0.0-beta` and `feat/tron-swap-support (as of 2026-04-23)` of
@@ -707,6 +729,12 @@ carries a `fee` descriptor of any form is refused with
 gives for a fee descriptor of a type the coin does not take. The
 fee is the R-W3 estimate. A request without `fee` is unchanged.
 
+*2026-11-20 (clean-side note): the shared fee descriptor now has a
+`Tron` form, so a request whose `fee` is `{"type":"Tron"}` (for
+example a TRON result's `fee_details` sent back) parses and is
+refused with `InvalidFeePolicy` like any other form; before, it
+failed request parsing.*
+
 **T-WP (tests).** Unit tests against a loopback stub node
 (`coins/eth/tron/wallet_path_tests.rs`, `tron/balance.rs`,
 `tron/broadcast.rs`, `tron/address.rs`) cover each rule: the
@@ -919,6 +947,13 @@ and `unspendable` (0) decimal strings; `nfts_infos` is empty. Global HD:
 addresses and their derivation paths) and an empty `nfts_infos`.
 `enable_erc20` reports the token contract in base58check as
 `token_contract_address`.
+
+*Status note (2026-11-20), `gasfree_address`.* R21.10B.5 describes the rows it
+names, which have no GasFree. When the platform was activated with a GasFree
+provider, the address entries of the result also carry `gasfree_address`
+([Chapter 63](63-tron-gasfree-fee-delegation.md) §63.3.3 and its status note of
+2026-11-20); without one the result is as R21.10B.5 states. The sentences of
+R21.10B.5 above are unchanged.
 
 **R21.10B.6** *Transaction history (completes R-T4).* No TRON history source
 exists at either row: the reference reads none of the full-node API, a
@@ -1367,6 +1402,31 @@ gas path and the coin has no EVM node; the answer is the same legacy
 error body and no order is created. The row `v2.6.0-beta` has the same
 wallet-only check.
 
+*Status note (2026-11-20), how Reloaded keeps a TRON coin wallet-only
+(clean-side, not corpus-sourced).* Reloaded has no TRON swap (R-D1), so
+while the build constant `TRON_SWAPS_AVAILABLE` is `false` a TRX or
+TRC20 coin reports itself wallet-only whatever its coins-config entry
+says. For a coin configured `"wallet_only": true` the answer of
+`setprice`, `buy` and `sell` is the one R21.10B.9 states: the legacy
+error body, HTTP 500, from the wallet-only check, naming the ticker, and
+no order is created (T21.10B.15); this is parity. For a TRON coin whose
+config is trading-capable Reloaded diverges in the check that refuses:
+the order is refused by the wallet-only check, where the reference
+passes that check and refuses at the balance-and-fee check. The answer
+has the same form (the legacy error body, HTTP 500, no order created);
+its text names the wallet-only ticker. No compatibility switch is
+offered: the reference's path ends in a refusal too, and a switch could
+only let a later, less clear check refuse the same order. The v2
+`start_swap` front of the three methods refuses the same way. A TRON
+coin also declines every match (its answer to the protocol-support
+question of order matching is no), and an order saved earlier that names
+a coin whose coins-config protocol is `TRX` or `TRC20` is cancelled at
+startup with a log line, as a saved Tendermint order is (Chapter 18,
+availability note). The read-only views (`orderbook`, `best_orders`,
+`trade_preimage`) read the coins-config `wallet_only` flag alone and are
+unchanged, and so are `max_taker_vol`, `max_maker_vol` and the legacy
+`get_trade_fee`, which do not ask whether a coin is wallet-only.
+
 **D21.10B.1** *TRC20 `fee_limit` policy.* The reference sets `fee_limit` to
 the dry-run energy times the energy price with no margin; Reloaded today
 sets a fixed cap (compatibility note). The cap is not visible to a peer.
@@ -1800,6 +1860,16 @@ a single flag.
   the top of this chapter). Setting it to `true` and retiring the
   refusal tests that go with it is planned for the next beta.
 
+  *Status note (2026-11-20), D6 done: switched on as wallet-only.*
+  `TRON_ACTIVATION_AVAILABLE` is `true` from this date and the refusal
+  tests are retired; each route they covered has a test that activates a
+  TRX coin and a TRC20 token against a loopback node. The refusal text
+  and its test-only override are removed, and no route reads the
+  constant any more. Swaps stay off behind a second constant,
+  `TRON_SWAPS_AVAILABLE` (`false`): D1 -- D4 are unchanged, and that
+  constant is set to `true` only together with a TRON swap
+  implementation (§21.11B).
+
 **R-D1 (gate invariant).** Because the coin activates with no
 swap-contract binding, no production code path may reach a
 Tron swap/NFT operation; the deferral sites exist to make the
@@ -2008,6 +2078,25 @@ operators are told to write is D21.B7.
 R-D1 continues to hold for a TRON coin activated with `wallet_only:
 true` or without a swap-contract binding; the refusal MUST remain typed
 and MUST occur before any transaction is built.
+
+*Status note (2026-11-20), R21.B3 as built.* Every TRON coin activates
+without a swap-contract binding (R-A1 step 5), so R21.B3 covers every
+TRON coin Reloaded can activate. From this date it is enforced before
+the deferral sites of §21.11 are reached: while `TRON_SWAPS_AVAILABLE`
+is `false` a TRX or TRC20 coin is wallet-only whatever its config says,
+so order placement refuses it before any balance or fee work, it
+declines every match, a saved order naming it is cancelled at
+startup (the status note at R21.10B.9), and an unfinished saved swap
+whose maker or taker coin is a TRON coin, by the coins-config protocol
+`TRX` or `TRC20`, is not resumed at startup, in the legacy swap files
+and in both v2 swap storages. Such a swap is skipped with one log line
+that names its uuid and the reason; its record is neither deleted nor
+marked failed, so it can resume in a build that has TRON swaps, and its
+coins are not among those the kick-start asks to be enabled. The typed
+refusals of §21.11 stay in place behind that; a `recover_funds_of_swap`
+asked for by hand for such a record is not stopped by this switch and meets
+them. The swap-contract members of an activation request are still validated
+by the rule of F21.B3 and still not bound.
 
 **R21.B4 (orderbook address).** When TRON swaps are enabled, the
 orderbook address derived from an order's public key for a `TRX` or
@@ -2509,4 +2598,12 @@ V3. The address encoding, protobuf transaction/contract formats,
   public TRON full-node HTTP API (§21.9); answers of a public mainnet node
   and public mainnet receipts captured on 2026-11-20 (chapter 01 R6); and
   this repository's own code. *Forbidden corpus:* not consulted for these
+  notes. No cleared sentence was edited.
+- *Status notes added 2026-11-20 (clean-side, Reloaded-original) -- TRON
+  switched on as a wallet-only coin family: the notes after the
+  availability note at the top, after the "In this beta" box of §21.4,
+  after R21.10B.9, at D6 and after R21.B3.* *Inputs:* the cleared text of
+  R-D1, R21.10B.9, T21.10B.15, R21.B3 and F21.B3 above; the availability
+  note of chapter 18 for the form of the swap switch; and this
+  repository's own code. *Forbidden corpus:* not consulted for these
   notes. No cleared sentence was edited.

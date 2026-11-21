@@ -74,6 +74,9 @@ mod swap_rpc_tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "rpc/lp_commands/trezor.rs"]
 pub mod trezor;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc/lp_commands/tron_activation_tests.rs"]
+mod tron_activation_tests;
 #[path = "rpc/lp_commands/wallet_connect.rs"]
 pub mod wallet_connect;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -1056,6 +1059,89 @@ mod server_tests {
                 }
             }
         }
+    }
+
+    /// CRD ch.21 R-D1, R21.10B.9, R21.B3, T21.10B.15: Reloaded has no TRON swap (`coins::TRON_SWAPS_AVAILABLE`), so
+    /// over the wire a real TRX coin and a real TRC20 token are refused by the routes that start a new trade
+    /// (`setprice`, `buy`, `sell` and the v2 `start_swap`), on either side of the pair, with the usual wallet-only
+    /// answer: the legacy error body with HTTP 500, naming the ticker. Neither coin's config says `wallet_only`.
+    /// No order is created.
+    #[test]
+    fn tron_coins_are_refused_by_the_new_trade_routes() {
+        use coins::eth::tron::tron_coin_from_conf_and_request;
+        use coins::{CoinProtocol, CoinsContext, MmCoinEnum, TestCoin};
+
+        let coins = json!([
+            { "coin": "TRX", "mm2": 1, "wallet_only": false,
+              "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
+            { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "protocol": { "type": "TRC20", "protocol_data": {
+                "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } } },
+            { "coin": "TRADE", "mm2": 1 },
+        ]);
+        let (ctx, addr) = start_server_with_coins(coins.clone());
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tron trade refusal test passphrase")
+            .expect("initialize the crypto context");
+        let priv_key = *ctx.secp256k1_key_pair().private().secret;
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for conf in [&coins[0], &coins[1]] {
+            let ticker = conf["coin"].as_str().unwrap();
+            let protocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).unwrap();
+            // Nothing listens on port 1 of the loopback interface; building the coin asks no node.
+            let request = json!({ "urls": ["http://127.0.0.1:1"] });
+            let coin = common::block_on(tron_coin_from_conf_and_request(
+                &ctx, ticker, conf, &request, &priv_key, protocol,
+            ))
+            .unwrap_or_else(|e| panic!("cannot build {ticker}: {e}"));
+            common::block_on(coins_ctx.add_coin(MmCoinEnum::from(coin))).unwrap();
+        }
+        common::block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new("TRADE")))).unwrap();
+
+        for tron in ["TRX", "USDT-TRC20"] {
+            for (base, rel, side) in [(tron, "TRADE", "Base"), ("TRADE", tron, "Rel")] {
+                let wallet_only_error = format!("{side} coin {tron} is wallet only");
+
+                // The legacy routes answer `{"error": ...}` with HTTP 500.
+                for method in ["setprice", "buy", "sell"] {
+                    let request = json!({
+                        "userpass": "pw", "method": method, "base": base, "rel": rel, "price": 1, "volume": 1
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(status.contains("500"), "{method} {base}/{rel}: {status}");
+                    let error = body["error"].as_str().unwrap_or_else(|| panic!("{method}: {body}"));
+                    assert!(error.ends_with(&wallet_only_error), "{method} {base}/{rel}: {body}");
+                }
+
+                // `start_swap` is the v2 front of the same three.
+                for method in ["set_price", "buy", "sell"] {
+                    let request = json!({
+                        "mmrpc": "2.0", "userpass": "pw", "method": "start_swap", "id": 3,
+                        "params": {
+                            "base": base, "rel": rel, "base_coin_amount": "1", "rel_coin_amount": "1",
+                            "method": { method: {} },
+                        },
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(
+                        status.contains("500"),
+                        "start_swap {method} {base}/{rel}: {status} {body}"
+                    );
+                    assert_eq!(body["error_type"], "Internal", "{body}");
+                    assert!(
+                        body["error_data"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .ends_with(&wallet_only_error),
+                        "start_swap {method} {base}/{rel}: {body}"
+                    );
+                }
+            }
+        }
+
+        // T21.10B.15: no order was created.
+        let (status, body) = post(addr, &json!({ "userpass": "pw", "method": "my_orders" }));
+        assert!(status.contains("200"), "{status}: {body}");
+        assert_eq!(body["result"]["maker_orders"], json!({}), "{body}");
+        assert_eq!(body["result"]["taker_orders"], json!({}), "{body}");
     }
 
     /// Methods that only the legacy method table knows (CRD ch.43 R43.1A.4): `get_trade_fee`, which stays legacy-only

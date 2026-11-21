@@ -85,6 +85,10 @@ pub struct HDAccountBalance {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct HDAddressBalance {
     pub address: String,
+    /// The TRON GasFree custody address of `address` (CRD ch.63 §63.3.3): present for a TRON coin whose platform
+    /// has a GasFree provider, omitted for every other coin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gasfree_address: Option<String>,
     pub derivation_path: RpcDerivationPath,
     pub chain: Bip44Chain,
     pub balance: CoinBalanceMap,
@@ -242,6 +246,7 @@ pub trait HDWalletBalanceOps: HDWalletCoinOps {
             .zip(der_paths)
             .map(|((address, balance), derivation_path)| HDAddressBalance {
                 address: address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(derivation_path),
                 chain,
                 balance: coin_balance_map_for_ticker(self.ticker(), balance),

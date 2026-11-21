@@ -6,7 +6,6 @@
 //! task variant.
 
 use crate::context::{lock_activation, CoinsActivationContext};
-use crate::eth_with_tokens_activation::tron::tron_activation_available;
 use crate::init_token::{InitTokenActivationOps, InitTokenError, InitTokenInProgressStatus, InitTokenTaskHandle,
                         InitTokenTaskManagerShared};
 use crate::platform_coin_with_tokens::{CustomTokenError, InitTokensAsMmCoinsError, RegisterTokenInfo};
@@ -14,7 +13,7 @@ use crate::prelude::*;
 use crate::token::{EnableTokenError, TokenDerivationError, TokenProtocolParams};
 use async_trait::async_trait;
 use coins::coin_balance::{coin_balance_map_for_ticker, CoinBalanceMap, HDWalletBalance};
-use coins::eth::tron::{parse_trc20_contract, TronAddress};
+use coins::eth::tron::{parse_trc20_contract, TronAddress, TronTokenGaslessRequest};
 use coins::eth::{addr_from_str, checksum_address, derive_eth_hd_activation_key, find_active_erc20_by_contract,
                  valid_addr_from_str, Erc20BuildError, EthCoin};
 use coins::nft::{fetch_and_store_owned_nfts, Chain, ChainTicker, EnableNftError, EnableNftResponse, NftCtx,
@@ -22,7 +21,7 @@ use coins::nft::{fetch_and_store_owned_nfts, Chain, ChainTicker, EnableNftError,
 use coins::rpc_command::get_my_address::PathToAddress;
 use coins::rpc_command::get_token_info::config_ticker_for_contract;
 use coins::{coin_conf, lp_coinfind, lp_coinfind_or_err, BalanceError, CoinBalance, CoinProtocol, CoinsContext,
-            DerivationMethod, MarketCoinOps, MmCoin, MmCoinEnum, TRON_NOT_AVAILABLE};
+            DerivationMethod, MarketCoinOps, MmCoin, MmCoinEnum};
 use common::Future01CompatExt;
 use crypto::{CryptoCtx, KeyPairPolicy};
 use mm2_core::mm_ctx::MmArc;
@@ -55,6 +54,10 @@ pub struct Erc20ActivationRequest {
     /// The protocol of a custom token that is not in the coins configuration (CRD R35.2.7).
     #[serde(default)]
     pub protocol: Option<CoinProtocol>,
+    /// The GasFree block of a TRC20 token (CRD ch.63 §63.3.2). A token that is not a TRC20 token refuses an
+    /// enabled block.
+    #[serde(default)]
+    pub gasless: Option<TronTokenGaslessRequest>,
 }
 
 /// The protocol of an ERC-20 token resolved from the coins configuration or from an inline `protocol`
@@ -317,6 +320,8 @@ pub(crate) enum Erc20TokenError {
     UnsupportedDecimals(String),
     /// The token's coin-configuration entry holds an unusable `gas_limit` / `gas_limit_v2` member (CRD R57.5.1).
     InvalidConfig(String),
+    /// The `gasless` block of the request is refused (CRD ch.63 §63.3.2, R1).
+    InvalidPayload(String),
     Internal(String),
 }
 
@@ -326,6 +331,7 @@ impl From<Erc20TokenError> for EnableTokenError {
             Erc20TokenError::Custom(e) => EnableTokenError::CustomTokenError(e),
             Erc20TokenError::Transport(e) => EnableTokenError::Transport(e),
             Erc20TokenError::InvalidConfig(e) => EnableTokenError::InvalidConfig(e),
+            Erc20TokenError::InvalidPayload(e) => EnableTokenError::InvalidPayload(e),
             Erc20TokenError::UnsupportedDecimals(e) | Erc20TokenError::Internal(e) => EnableTokenError::Internal(e),
         }
     }
@@ -336,6 +342,7 @@ impl From<Erc20TokenError> for InitTokensAsMmCoinsError {
         match err {
             Erc20TokenError::Custom(e) => InitTokensAsMmCoinsError::CustomTokenError(e),
             Erc20TokenError::Transport(e) => InitTokensAsMmCoinsError::Transport(e),
+            Erc20TokenError::InvalidPayload(e) => InitTokensAsMmCoinsError::InvalidPayload(e),
             Erc20TokenError::UnsupportedDecimals(e)
             | Erc20TokenError::InvalidConfig(e)
             | Erc20TokenError::Internal(e) => InitTokensAsMmCoinsError::InvalidPubkey(e),
@@ -348,8 +355,11 @@ impl From<Erc20TokenError> for InitTokenError {
         match err {
             Erc20TokenError::Custom(e) => InitTokenError::CustomTokenError(e),
             // An unusable configuration is an invalid-payload class failure of the construction, which the
-            // token task reports as `Transport` (CRD R35.3A.6).
-            Erc20TokenError::Transport(e) | Erc20TokenError::UnsupportedDecimals(e) => InitTokenError::Transport(e),
+            // token task reports as `Transport` (CRD R35.3A.6). A refused `gasless` block (CRD ch.63 §63.3.2) is of
+            // that class.
+            Erc20TokenError::Transport(e)
+            | Erc20TokenError::UnsupportedDecimals(e)
+            | Erc20TokenError::InvalidPayload(e) => InitTokenError::Transport(e),
             Erc20TokenError::InvalidConfig(e) | Erc20TokenError::Internal(e) => InitTokenError::Internal(e),
         }
     }
@@ -381,13 +391,25 @@ fn reported_contract_address(protocol: &Erc20Protocol, token_addr: ethereum_type
 /// The decimals come from the token configuration and are read from the contract when the configuration lacks
 /// them. The swap confirmations are the requested ones, else the token configuration's, else the platform's.
 /// A custom token is rejected while another token with the same contract is active (CRD R35.2.7).
+///
+/// `gasless` is the GasFree block of the token's request (CRD ch.63 §63.3.2, R1). A block with `enabled: false`
+/// behaves as an absent one. An enabled block is an invalid payload for a token that is not a TRC20 token, for a
+/// TRON platform without a `tron_gasless_provider`, and for a `transfer_max_fee` that is negative or finer than
+/// the token's decimals.
 pub(crate) async fn build_erc20_token(
     ctx: &MmArc,
     platform_coin: &EthCoin,
     ticker: &str,
     protocol: &Erc20Protocol,
     requested_confirmations: Option<u64>,
+    gasless: Option<&TronTokenGaslessRequest>,
 ) -> Result<EthCoin, MmError<Erc20TokenError>> {
+    let gasless = gasless.filter(|gasless| gasless.is_enabled());
+    if gasless.is_some() && !protocol.tron {
+        return MmError::err(Erc20TokenError::InvalidPayload(
+            "gasless is valid for a TRC20 token of a TRON platform only".to_owned(),
+        ));
+    }
     let token_addr = token_address(protocol).map_to_mm(Erc20TokenError::Internal)?;
 
     if protocol.custom {
@@ -409,7 +431,7 @@ pub(crate) async fn build_erc20_token(
 
     let built = if protocol.tron {
         platform_coin
-            .trc20_token_from_conf_or_contract(ticker.to_owned(), token_addr, required_confirmations)
+            .trc20_token_from_conf_or_contract(ticker.to_owned(), token_addr, required_confirmations, gasless)
             .await
     } else {
         platform_coin
@@ -420,6 +442,7 @@ pub(crate) async fn build_erc20_token(
         Erc20BuildError::Transport(e) => Erc20TokenError::Transport(e),
         Erc20BuildError::UnsupportedDecimals(e) => Erc20TokenError::UnsupportedDecimals(e),
         Erc20BuildError::InvalidConfig(e) => Erc20TokenError::InvalidConfig(e),
+        Erc20BuildError::InvalidPayload(e) => Erc20TokenError::InvalidPayload(e),
         Erc20BuildError::Internal(e) => Erc20TokenError::Internal(e),
     })
 }
@@ -456,6 +479,10 @@ pub struct EvmTokenActivationParams {
     #[serde(default)]
     #[allow(dead_code)]
     min_addresses_number: Option<u32>,
+    /// The GasFree block of a TRC20 token (CRD ch.63 §63.3.2). A token that is not a TRC20 token refuses an
+    /// enabled block.
+    #[serde(default)]
+    pub gasless: Option<TronTokenGaslessRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -466,10 +493,21 @@ pub struct EnableEvmTokenRequest {
     activation_params: EvmTokenActivationParams,
 }
 
+/// The entry of one address in the `balances` map of `enable_erc20` (CRD R35.2.3): the BalanceInfo members, and
+/// for a TRC20 token whose platform has a GasFree provider the custody address of that address (CRD ch.63 §63.3.3).
+/// The member is omitted otherwise, which leaves the entry as it always was.
+#[derive(Debug, Serialize)]
+pub struct Erc20AddressBalance {
+    #[serde(flatten)]
+    balance: CoinBalance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gasfree_address: Option<String>,
+}
+
 /// The success result of `enable_erc20` (CRD R35.2.3).
 #[derive(Debug, Serialize)]
 pub struct Erc20InitResult {
-    balances: HashMap<String, CoinBalance>,
+    balances: HashMap<String, Erc20AddressBalance>,
     platform_coin: String,
     token_contract_address: String,
     required_confirmations: u64,
@@ -552,13 +590,21 @@ pub async fn enable_evm_token(
     let protocol =
         resolve_evm_token_protocol(&ctx, &req.ticker, req.protocol.as_ref()).map_to_mm(EnableTokenError::from)?;
     match protocol {
-        // While TRON is switched off no TRC20 token is built, whatever the platform state (CRD ch.21 §21.4).
-        EvmTokenProtocol::Erc20(protocol) if protocol.tron && !tron_activation_available(&ctx) => {
-            MmError::err(EnableTokenError::Internal(TRON_NOT_AVAILABLE.to_owned()))
-        },
         EvmTokenProtocol::Erc20(protocol) => enable_erc20_token(&ctx, req, protocol)
             .await
             .map(EvmTokenActivationResult::Erc20),
+        // An NFT pseudo-coin lives on an EVM chain: no GasFree block applies to it (CRD ch.63 §63.3.2, R1).
+        EvmTokenProtocol::Nft { .. }
+            if req
+                .activation_params
+                .gasless
+                .as_ref()
+                .is_some_and(TronTokenGaslessRequest::is_enabled) =>
+        {
+            MmError::err(EnableTokenError::InvalidPayload(
+                "gasless is valid for a TRC20 token of a TRON platform only".to_owned(),
+            ))
+        },
         EvmTokenProtocol::Nft { platform } => enable_nft_token(&ctx, req, &platform)
             .await
             .map(EvmTokenActivationResult::Nft),
@@ -587,6 +633,7 @@ async fn enable_erc20_token(
         &req.ticker,
         &protocol,
         req.activation_params.required_confirmations,
+        req.activation_params.gasless.as_ref(),
     )
     .await
     .mm_err(EnableTokenError::from)?;
@@ -596,7 +643,11 @@ async fn enable_erc20_token(
             let balance = token.my_balance().compat().await.mm_err(EnableTokenError::from)?;
             let my_address = token.my_address().map_to_mm(EnableTokenError::Internal)?;
             let mut balances = HashMap::new();
-            balances.insert(my_address, balance);
+            balances.insert(my_address, Erc20AddressBalance {
+                balance,
+                // The token is not registered yet; its platform holds the provider binding.
+                gasfree_address: platform_coin.enabled_address_gasfree().await,
+            });
             balances
         },
         DerivationMethod::HDWallet(_) => {
@@ -668,14 +719,17 @@ fn enable_error_from_init(err: InitTokenError) -> EnableTokenError {
 fn flatten_hd_report(
     ticker: &str,
     report: HDWalletBalance,
-) -> MmResult<HashMap<String, CoinBalance>, EnableTokenError> {
+) -> MmResult<HashMap<String, Erc20AddressBalance>, EnableTokenError> {
     let mut balances = HashMap::new();
     for account in report.accounts {
         for address in account.addresses {
             let balance = address.balance.get(ticker).cloned().or_mm_err(|| {
                 EnableTokenError::Internal(format!("The report of {} has no {} balance", address.address, ticker))
             })?;
-            balances.insert(address.address, balance);
+            balances.insert(address.address, Erc20AddressBalance {
+                balance,
+                gasfree_address: address.gasfree_address,
+            });
         }
     }
     Ok(balances)
@@ -733,7 +787,14 @@ async fn enable_nft_token(
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "wallet_type")]
 pub enum Erc20WalletBalance {
-    Iguana { address: String, balance: CoinBalanceMap },
+    Iguana {
+        address: String,
+        /// The TRON GasFree custody address of `address` (CRD ch.63 §63.3.3): present for a TRC20 token whose
+        /// platform has a GasFree provider, omitted otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gasfree_address: Option<String>,
+        balance: CoinBalanceMap,
+    },
     HD(HDWalletBalance),
 }
 
@@ -804,12 +865,7 @@ impl InitTokenActivationOps for EthCoin {
         ticker: &str,
         inline_protocol: Option<&CoinProtocol>,
     ) -> Result<Self::ProtocolInfo, InitTokenError> {
-        let protocol = resolve_erc20_protocol(ctx, ticker, inline_protocol).map_err(InitTokenError::from)?;
-        // While TRON is switched off no TRC20 token task starts (CRD ch.21 §21.4).
-        if protocol.tron && !tron_activation_available(ctx) {
-            return Err(InitTokenError::Internal(TRON_NOT_AVAILABLE.to_owned()));
-        }
-        Ok(protocol)
+        resolve_erc20_protocol(ctx, ticker, inline_protocol).map_err(InitTokenError::from)
     }
 
     async fn init_token(
@@ -848,6 +904,7 @@ impl InitTokenActivationOps for EthCoin {
             ticker,
             protocol_info,
             activation_request.required_confirmations,
+            activation_request.gasless.as_ref(),
         )
         .await
         .mm_err(InitTokenError::from)?;
@@ -877,6 +934,8 @@ impl InitTokenActivationOps for EthCoin {
                     } else {
                         checksum_address(&format!("{:#x}", address))
                     },
+                    // The token is not registered yet; its platform holds the provider binding.
+                    gasfree_address: platform_coin.gasfree_report_address(address).await,
                     balance: coin_balance_map_for_ticker(ticker, balance),
                 }
             },

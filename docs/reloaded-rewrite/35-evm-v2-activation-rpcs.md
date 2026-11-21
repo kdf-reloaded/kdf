@@ -191,6 +191,26 @@ reference version at all. A malformed value in any of these five fields shall
 > are bound by [Chapter 63](63-tron-gasfree-fee-delegation.md)
 > §63.3.1–§63.3.2 (passed the KDF Dirty Gate on 2026-11-08).
 
+*Status note (2026-11-20), the two GasFree members.* Both are read now, for a
+TRON platform only (behind `TRON_ACTIVATION_AVAILABLE`, `false`):
+`tron_gasless_provider` on this request and on `task::enable_eth::init`, and
+`gasless` on each entry of `erc20_tokens_requests`, in the `activation_params`
+of `enable_erc20` (R35.2.1) and of `task::enable_erc20::init` (R35.3A.2). An EVM
+platform refuses `tron_gasless_provider`, and a token that is not a TRC20 token
+refuses an enabled `gasless` block, with `InvalidPayload` (HTTP 400); on
+`task::enable_erc20` the refusal is the `Transport` of R35.3A.6 in the task
+status. With a provider on the platform, the address entries of the results of
+R35.1.3, R35.2.3 and R35.3A.5 also carry `gasfree_address`. The two credentials
+of the object are credentials under R35.1.17. Chapter 63 §63.3.1 -- §63.3.3 and
+their status notes of 2026-11-20 govern.
+
+*Status note (2026-11-20, Reloaded-original), the two GasFree members with
+TRON switched on.* The note above names `TRON_ACTIVATION_AVAILABLE` as `false`.
+It is `true` in this tree (the status note of this date after the 2026-11-17
+TRON platform note below; chapter 21 D6), so both members are read on a route a
+request reaches, and the results carry `gasfree_address` as the note above
+states. The gasless withdraw of chapter 63 is not built.
+
 ### 35.1.B Activation flow and failure precedence
 
 R35.1.2 Activation shall proceed through the following phases, and when a
@@ -483,6 +503,11 @@ does not sign requests; each entry also reads the optional `headers` object of
 chapter 21 R-N9 (the `tron_api_key` applies to its URL as well); and the
 swap-contract members take the base58check and hex forms of chapter 21 R21.B2
 besides the EVM `0x` form. Chapter 21 §21.4 and R21.10B.2 govern the rest.
+
+*Status note (2026-11-20), TRON switched on.* `TRON_ACTIVATION_AVAILABLE` is
+`true` and the "not available" refusal is gone: this route activates a `TRX`
+platform and its `TRC20` tokens. A TRON coin is wallet-only while
+`TRON_SWAPS_AVAILABLE` is `false` (chapter 21 D6, R21.B3).
 
 ---
 
@@ -2874,3 +2899,14 @@ is decided together with this item.
   chapter 49 §49.2.1 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
   2026-11-19, measure 0.02, no findings**, as recorded for §49.2.1 in chapter
   49's provenance footer.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status note of this date after the 2026-11-17 TRON platform note records
+  that `TRON_ACTIVATION_AVAILABLE` is `true` and that a TRON coin is
+  wallet-only while `TRON_SWAPS_AVAILABLE` is `false`. It rests on chapter
+  21 D6 and R21.B3 and on this repository's code. No cleared sentence was
+  edited.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  second status note of this date after the GasFree provider binding pointer
+  (the two GasFree members with TRON switched on) corrects the switch value
+  the note before it names. It rests on chapter 21 D6 and on this
+  repository's code. No cleared sentence was edited.

@@ -149,7 +149,12 @@ impl ControllerChecks {
 
 /// The warning line of a failed controller check (R29). It names the network and the three addresses, all of
 /// them public values.
-fn mismatch_warning(network: &str, user: &TronAddress, derived: &TronAddress, reported: &TronAddress) -> String {
+pub(super) fn mismatch_warning(
+    network: &str,
+    user: &TronAddress,
+    derived: &TronAddress,
+    reported: &TronAddress,
+) -> String {
     format!(
         "GasFree is refused on {network}: for the user {user} this build derives the custody address {derived}, \
          but the GasFree controller reports {reported}"

@@ -172,11 +172,25 @@ where
 
         let script_pubkey = output_script(&to, script_type).to_bytes();
 
-        let _utxo_lock = UTXO_LOCK.lock().await;
-        let (unspents, _) = coin
+        // The coins of the QTUM family hold the guard of their shared recently-spent record from the listing through
+        // signing and the pending entry, in place of the process-wide lock (CRD ch.38 D38.6.4Q.4 status note,
+        // item 4). Every other coin keeps the process-wide lock and drops the guard after the listing.
+        let record_is_lock = coin.as_ref().spent_record_is_shared;
+        let _utxo_lock = if record_is_lock {
+            None
+        } else {
+            Some(UTXO_LOCK.lock().await)
+        };
+        let (unspents, listing_guard) = coin
             .get_unspent_ordered_list(&self.sender_address())
             .await
             .mm_err(Into::into)?;
+        let mut held_guard = if record_is_lock {
+            Some(listing_guard)
+        } else {
+            drop(listing_guard);
+            None
+        };
         let p2pk_outpoints = crate::utxo::electrum_p2pk_outpoints_for_address(coin.as_ref(), &self.sender_address())
             .await
             .mm_err(Into::into)?;
@@ -250,11 +264,17 @@ where
                     .any(|input| input.previous_output == unspent.outpoint)
             })
             .collect();
-        coin.as_ref()
-            .recently_spent_outpoints
-            .lock()
-            .await
-            .note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone());
+        match held_guard.take() {
+            Some(mut guard) => {
+                guard.note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone())
+            },
+            None => coin
+                .as_ref()
+                .recently_spent_outpoints
+                .lock()
+                .await
+                .note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone()),
+        }
         let tx_hex = tx_bytes.into();
         Ok(TransactionDetails {
             unsigned: None,

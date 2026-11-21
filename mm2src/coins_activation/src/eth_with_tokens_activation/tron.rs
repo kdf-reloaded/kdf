@@ -1,7 +1,7 @@
 //! The TRON platform on the mmrpc 2.0 activation route (CRD ch.21 §21.4, R21.10B.2, R21.10B.4, R21.10B.5).
 //!
 //! `enable_eth_with_tokens` and `task::enable_eth::*` build a TRX platform coin through
-//! [`enable_tron_platform_coin`]: the availability gate, the checks that need neither a key nor a node, the node
+//! [`enable_tron_platform_coin`]: the checks that need neither a key nor a node, the node
 //! list of the request, and the coin builder of the `coins` crate. Under a global-HD login the coin is an HD wallet
 //! on the coin's `derivation_path` (CRD ch.21 R-A2, R21.10B.4) unless the request names the `IguanaPrivKey` policy;
 //! otherwise it is the single-key coin of the node's internal key. The platform's TRC20 tokens go through the same
@@ -9,40 +9,16 @@
 //!
 //! # Invariants
 //!
-//! - While `coins::TRON_ACTIVATION_AVAILABLE` is `false` no TRON coin is built or registered: the route answers
-//!   the same "not available" refusal as the legacy `enable` and `electrum` routes. Unit tests open the gate per
-//!   context with [`TRON_TEST_OVERRIDE_KEY`], a key that exists in test builds only.
+//! - A TRON coin activates as a wallet-only coin: while `coins::TRON_SWAPS_AVAILABLE` is `false` it reports
+//!   `wallet_only` whatever its coins-config entry says (CRD ch.21 R-D1, R21.B3).
 //! - Every refusal of this module comes before any key is read and any node is contacted.
-//! - A node's headers and the API key are secrets: no error of this module renders one.
+//! - A node's headers and the API key are secrets: no error of this module renders one. Neither does it render a
+//!   value of the request's `tron_gasless_provider` (CRD ch.63 R9).
 
 use super::*;
 use coins::eth::tron::nodes::{parse_nodes, TronApiKey, TronNode, TronNodeConfigError};
 use coins::eth::tron::{tron_coin_from_params, tron_coin_from_params_with_global_hd, tron_required_confirmations,
-                       TronCoinParams};
-use coins::{TRON_ACTIVATION_AVAILABLE, TRON_NOT_AVAILABLE};
-
-/// The `MM2.json` key that opens the TRON gate for one test context. Read in test builds only.
-#[cfg(test)]
-pub(crate) const TRON_TEST_OVERRIDE_KEY: &str = "tron_activation_available_for_test";
-
-/// Whether the TRON activation routes are open for `ctx`: the build switch, or, in a test build, the override key
-/// of the context.
-pub(crate) fn tron_activation_available(ctx: &MmArc) -> bool { TRON_ACTIVATION_AVAILABLE || test_override(ctx) }
-
-#[cfg(test)]
-fn test_override(ctx: &MmArc) -> bool { ctx.conf[TRON_TEST_OVERRIDE_KEY].as_bool() == Some(true) }
-
-#[cfg(not(test))]
-fn test_override(_ctx: &MmArc) -> bool { false }
-
-/// The refusal of the platform route while TRON is switched off: the text of the legacy routes, as a
-/// `PlatformCoinCreationError` like the other families that are switched off.
-fn not_available(ticker: &str) -> MmError<ActivationErr> {
-    MmError::new(ActivationErr::PlatformCoinCreationError {
-        ticker: ticker.to_owned(),
-        error: TRON_NOT_AVAILABLE.to_owned(),
-    })
-}
+                       GasFreeBinding, TronCoinParams};
 
 /// What the request says about its signing policy, reduced to the facts the TRON rules read. A separate value so
 /// that the rules can be tested on a native build, where the browser-only MetaMask policy does not exist.
@@ -161,16 +137,28 @@ pub(super) fn tron_nodes(
     })
 }
 
-/// The refusals that need neither a key nor a node, in their order: the availability gate, the NFT request
-/// (`Internal`, before any key or node work), then the key policy (R21.10B.4).
-pub(super) fn tron_precheck(
-    ctx: &MmArc,
-    ticker: &str,
+/// The GasFree provider binding of the request for a platform on `network` (CRD ch.63 §63.3.1): `None` without a
+/// `tron_gasless_provider`. Neither a node nor the provider is contacted.
+///
+/// # Errors
+///
+/// `InvalidPayload` for a `base_url` that is more than a scheme and a host (R13) and for a `service_provider` that
+/// is not a well-formed TRON address. The text repeats no value of the request.
+pub(super) fn tron_gasfree_binding(
     request: &EthWithTokensActivationRequest,
-) -> Result<(), MmError<ActivationErr>> {
-    if !tron_activation_available(ctx) {
-        return Err(not_available(ticker));
-    }
+    network: &TronNetwork,
+) -> Result<Option<GasFreeBinding>, MmError<ActivationErr>> {
+    request
+        .tron_gasless_provider
+        .as_ref()
+        .map(|provider| GasFreeBinding::from_request(network, provider))
+        .transpose()
+        .map_to_mm(|e| ActivationErr::InvalidPayload(e.to_string()))
+}
+
+/// The refusals that need neither a key nor a node, in their order: the NFT request (`Internal`, before any key or
+/// node work), then the key policy (R21.10B.4).
+pub(super) fn tron_precheck(request: &EthWithTokensActivationRequest) -> Result<(), MmError<ActivationErr>> {
     if request.nft_req.is_some() {
         return MmError::err(ActivationErr::Internal(
             "TRON has no NFT support: the request carries nft_req".to_owned(),
@@ -183,15 +171,17 @@ pub(super) fn tron_precheck(
 }
 
 /// Builds the TRX platform coin of a `enable_eth_with_tokens` or `task::enable_eth` request (CRD ch.21 R-A1,
-/// R21.10B.2): the checks of [`tron_precheck`], the swap-contract rule of F21.B3, the node list, and the coin. The
+/// R21.10B.2): the checks of [`tron_precheck`], the swap-contract rule of F21.B3, the GasFree provider binding of
+/// [`tron_gasfree_binding`], the node list, and the coin. The
 /// coin is the HD wallet of the coin's `derivation_path` under a global-HD login (R-A2, R21.10B.4), and the
 /// single-key coin of the node's internal key under an iguana login or for the `IguanaPrivKey` policy. The tokens
 /// of the request are enabled afterwards by the shared tail of the activation.
 ///
 /// # Errors
 ///
-/// The refusals above, `InvalidPayload` for a swap contract that F21.B3 refuses and for a global-HD activation of
-/// a coin config without `derivation_path`, and the build errors of [`tron_coin_from_params`].
+/// The refusals above, `InvalidPayload` for a swap contract that F21.B3 refuses, for a `tron_gasless_provider` that
+/// [`tron_gasfree_binding`] refuses and for a global-HD activation of a coin config without `derivation_path`, and
+/// the build errors of [`tron_coin_from_params`].
 pub(super) async fn enable_tron_platform_coin(
     ctx: &MmArc,
     ticker: &str,
@@ -199,10 +189,11 @@ pub(super) async fn enable_tron_platform_coin(
     request: &EthWithTokensActivationRequest,
     network: &TronNetwork,
 ) -> Result<EthCoin, MmError<ActivationErr>> {
-    tron_precheck(ctx, ticker, request)?;
+    tron_precheck(request)?;
     // F21.B3: ignored for a wallet-only coin, required and non-zero for a trading coin. The coin itself keeps the
     // swap-contract binding empty (R-A1 step 5); only the request is validated here.
     activation_params(ctx, platform_conf, request, true)?;
+    let gasfree = tron_gasfree_binding(request, network)?;
     let nodes = tron_nodes(ctx, request)?;
 
     let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ActivationErr::Internal(e.to_string()))?;
@@ -211,6 +202,7 @@ pub(super) async fn enable_tron_platform_coin(
         required_confirmations: tron_required_confirmations(request.required_confirmations, platform_conf),
         // The history is enabled only when the node list also has a keyed TronGrid node (CRD ch.21 §21.10C).
         tx_history: request.tx_history(),
+        gasfree,
     };
     let protocol = CoinProtocol::TRX {
         network: network.clone(),
