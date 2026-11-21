@@ -1111,6 +1111,14 @@ the previous version used. The safe way:
 - **The TRON transaction history needs a TronGrid API key.** Without a keyed TronGrid node, or without
   `tx_history: true` in the activation request, `my_tx_history` answers as for a coin without a history. Detail:
   CRD ch.21 §21.10C.
+- **TRON on public TronGrid without an API key can be refused with HTTP 429.** In a mainnet withdrawal test with
+  the keyless public TronGrid endpoint, some requests were answered with HTTP 429 (too many requests). KDF counts
+  such an answer as a failed node and asks the next node of the list; when every node refuses, the method returns
+  the error (for example a transport error from `withdraw`, or "TRON broadcast failed" from
+  `send_raw_transaction`) and does not wait and try again. In the test, a broadcast refused this way sent nothing,
+  and repeating the request later succeeded. For regular use, set a TronGrid API key (`tron_api_key`) or use your
+  own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: CRD ch.21
+  §21.9.
 
 ## [0.4.0-beta.1] — 2026-11-14
 
