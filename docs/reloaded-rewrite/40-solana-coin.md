@@ -512,6 +512,23 @@ the reference's, and the text differs only in the cases R40.2A.4 lists
 the reference's text. A client that reads the members as decimal numbers
 sees no difference between the two.
 
+> *Reloaded status (clean side, 2026-11-21):* by the maintainer's decision
+> of 2026-11-21, neither option is taken as written: a sum or difference of
+> R40.2A.4 is written with the coin's full decimals, 9 for SOL and the
+> mint's decimals for a token amount. The members are `spent_by_me` and
+> `my_balance_change` of a SOL withdraw, `my_balance_change` of an SPL
+> withdraw, the `total_amount` of `fee_details` in an SPL withdraw, and
+> `required` of `NotSufficientPlatformBalanceForFee` and of a SOL
+> withdraw's `NotSufficientBalance`. Every value equals the reference's;
+> the text differs from R40.2A.4 where the reference writes fewer
+> decimals: `"1.500005000"` for `"1.500005"`, `"1.000000000"` for
+> `"1.000000"`, `"-1.500000"` for `"-1.5"` (a 6-decimal mint), `"0.000000"`
+> for `"0.0"` and `"0.00"`, `"0.002044280"` for `"0.00204428"`, and for a
+> SOL `NotSufficientBalance` `"1.000005000"` where R40.2A.4's error
+> sentence gives the shortest form. A value with more decimals than its
+> coin's keeps them all. Single figures and every `available` keep the
+> shortest form. T40.2A.4's sum text follows this note. Built in PR #456.
+
 **T40.2A.1** Every row of R40.2A.1's table, on each surface of R40.2A.3
 and on `enable_solana_with_tokens`.
 
@@ -2079,3 +2096,7 @@ with the shapes listed in §40.6 items 3-5.
   token of the additions judged forced or free); the repository's
   clean-room gate tool was not applicable because the additions embed no
   code blocks. *Measure:* 0.00, on the discretionary-expression basis.
+- *Clean-context addition (2026-11-21, forbidden corpus not consulted):*
+  the status note after D40.2A.1 records this repository's own code and
+  the maintainer's decision of 2026-11-21 on the text of withdraw sums. It
+  takes no forbidden-class input beyond the cleared rules it cites.

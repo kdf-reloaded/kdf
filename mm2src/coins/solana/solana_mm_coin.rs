@@ -1,7 +1,7 @@
 // solana_mm_coin — MmCoin trait implementation and withdraw logic.
 
 use super::*;
-use crate::solana::solana_common::{amount_to_units, truncate_amount, units_to_amount};
+use crate::solana::solana_common::{amount_to_units, truncate_amount, units_to_amount, with_at_least_decimals};
 
 /// `withdraw` of SOL (CRD ch.40 R40.6B.9). `fee`, `memo`, `from` and `broadcast` change nothing.
 async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult {
@@ -30,7 +30,8 @@ async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult
         if amount <= BigDecimal::from(0) {
             return MmError::err(WithdrawError::AmountTooLow { amount, threshold });
         }
-        let required = &amount + &fee_amount;
+        // R40.2A.4, error members: `required` is the sum of the amount and the fee, in the full decimals of SOL.
+        let required = with_at_least_decimals(&amount + &fee_amount, decimals);
         if required > balance_amount {
             return MmError::err(WithdrawError::NotSufficientBalance {
                 coin: coin.ticker.clone(),
@@ -54,7 +55,9 @@ async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult
     } else {
         0.into()
     };
-    let spent_by_me = &total_amount + &fee_amount;
+    // R40.2A.4 and D40.2A.1: the sum members carry the full decimals of SOL; the single figures stay as they are.
+    let spent_by_me = with_at_least_decimals(&total_amount + &fee_amount, decimals);
+    let my_balance_change = with_at_least_decimals(&received_by_me - &spent_by_me, decimals);
     Ok(TransactionDetails {
         unsigned: None,
         tx_json: None,
@@ -64,7 +67,7 @@ async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult
         from: vec![coin.my_address.clone()],
         to: vec![req.to],
         total_amount,
-        my_balance_change: &received_by_me - &spent_by_me,
+        my_balance_change,
         spent_by_me,
         received_by_me,
         block_height: 0,
