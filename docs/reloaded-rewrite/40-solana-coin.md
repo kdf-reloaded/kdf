@@ -103,6 +103,14 @@ including WASM**. There is no task-managed Solana family.
 > §40.3A: a platform activated through either surface takes tokens through
 > either token method, and `disable_coin` treats it the same.
 
+> *Reloaded status (clean side, 2026-11-19, browser builds):* both methods,
+> and `enable_solana_with_tokens` and `enable_spl`, are routed in browser
+> (WASM) builds as well (PR #430), with the same switch: while
+> `SOLANA_ACTIVATION_AVAILABLE` is `false` each answers its T40.9 refusal
+> there too instead of `NoSuchMethod`. The node client uses the HTTP
+> transport shared by both targets, so requests, answers and host-only node
+> names (R40.5A.1) are the same; the node pool of R40.1.5 runs unchanged.
+
 R40.1.2 **Platform coin configuration.** A Solana platform coin's
 coins-configuration `protocol` is `{"type": "SOLANA", "protocol_data": {}}`
 (an empty `protocol_data` object). The platform's decimals are fixed at 9
@@ -132,6 +140,9 @@ protocol unparsable (`TokenProtocolParseError`).
 > platform protocol is always written back as `{"type": "SOLANA"}`, the form
 > of ch. 36 R36.0.3. Each token keeps its `program_id`, but the token's
 > account, balance and transfers use it only from the Token-2022 package on.
+
+> *Reloaded status (clean side, 2026-11-19):* browser (WASM) builds read
+> every form above as native builds do (PR #430).
 
 R40.1.4 **Keys and addresses.** The Solana keypair shall be the ed25519 keypair
 whose 32-byte seed is the wallet's single-key (Iguana) secp256k1 private-key
@@ -1904,6 +1915,10 @@ session; see `docs/plans/solana-support.md`.
 > R40.2.5 and R40.3.4). Their WASM routing is the WASM package of
 > `docs/plans/solana-support.md`.
 
+> *Reloaded status (clean side, 2026-11-19, browser builds):* the WASM part
+> is built as well (PR #430; status note after R40.1.1); the compatibility
+> surface is now routed on all targets.
+
 D40.4 Switching Solana back on (planned for the next beta; maintainer decision
 2026-10-26): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable the Solana
 docker tests listed in `docs/DISABLED_TESTS.md` (group 6) and retire T40.9.
@@ -2076,6 +2091,9 @@ with the shapes listed in §40.6 items 3-5.
   D40.3 record this repository's own code and the maintainer's decisions of
   2026-11-15, 2026-11-18 and 2026-11-19. They take no forbidden-class input
   beyond the cleared rules they cite.
+- *Clean-context addition (2026-11-19, forbidden corpus not consulted):*
+  the browser-build status notes after R40.1.1, R40.1.3 and D40.3 record
+  this repository's own code. They take no forbidden-class input.
 - *Scoped addition (2026-11-21, Spec Reader round 0.5.0-20) -- §40.2A
   (the shortest form, R40.2A.1 -- R40.2A.5, the error members, D40.2A.1,
   T40.2A.1 -- T40.2A.4) and the status note after R40.2.3; the section's

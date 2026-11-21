@@ -291,8 +291,10 @@ fn maybe_warn_unsafe_rpc_wire_dump_enabled() {
 /// Refuses a node setting that the node cannot run with, naming the key (the node does not start).
 ///
 /// `fee_estimate_cache_secs` is an integer from 0 to 30 (CRD ch.38 R38.6.6j item 2).
+/// `reactivation_registered_token` is `"refuse"` or `"keep"`; absent or `null` is `"refuse"` (CRD ch.43 D43.1F.1).
 fn validate_node_settings(conf: &Json) -> Result<(), String> {
-    coins::request_fee_scope::explicit_fee_estimate_cache_secs(conf).map(|_| ())
+    coins::request_fee_scope::explicit_fee_estimate_cache_secs(conf)?;
+    coins::RegisteredTokenPolicy::from_conf(conf).map(|_| ())
 }
 
 #[cfg(test)]
@@ -316,6 +318,26 @@ mod node_settings_tests {
             let params = LpMainParams::with_conf(json!({ "fee_estimate_cache_secs": bad }));
             let err = block_on(lp_main(params, &|_| ())).unwrap_err();
             assert!(err.contains("fee_estimate_cache_secs"), "{bad}: {err}");
+        }
+    }
+
+    /// CRD ch.43 D43.1F.1: the member is optional and takes the two values only.
+    #[test]
+    fn reactivation_registered_token_takes_refuse_or_keep() {
+        validate_node_settings(&json!({})).unwrap();
+        validate_node_settings(&json!({ "reactivation_registered_token": null })).unwrap();
+        for value in ["refuse", "keep"] {
+            validate_node_settings(&json!({ "reactivation_registered_token": value })).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_bad_reactivation_registered_token_fails_the_node_start() {
+        for bad in [json!("Keep"), json!("none"), json!(true), json!(0)] {
+            let params = LpMainParams::with_conf(json!({ "reactivation_registered_token": bad }));
+            let err = block_on(lp_main(params, &|_| ())).unwrap_err();
+            assert!(err.contains("reactivation_registered_token"), "{bad}: {err}");
+            assert!(err.contains("refuse") && err.contains("keep"), "{bad}: {err}");
         }
     }
 }

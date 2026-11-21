@@ -94,7 +94,8 @@ or undo, and every change that needs a step from you.
   platform again, for example after the versioned `disable_coin` of the platform or after a token was activated by
   the legacy `enable`; the request's settings for it are not applied. A token registered for another platform is
   refused with `TokenIsAlreadyActivated` (HTTP 400) before anything is built.
-  - *What to do:* disable the token first, or leave it out of the request.
+  - *What to do:* disable the token first, leave it out of the request, or set `reactivation_registered_token` to
+    `"keep"` in `MM2.json` (see "Added" below).
   - Detail: PR #432; CRD ch.43 §43.1F R43.1F.4.
 
 - **RPC answers no longer have `<`, `>` and `&` replaced by `&lt;`, `&gt;` and `&amp;`.** Answers are sent as the
@@ -137,6 +138,12 @@ the previous version used. The safe way:
   servers, and `[]` turns the check off. When no server answers, the node logs a warning and goes
   on, unless `ntp_required` is `true`. Browser builds cannot send the queries and skip the check.
   Detail: PR #348; CRD ch.45 §45.6C.
+- **A setting that keeps a registered token named in a platform-with-tokens activation.** The `MM2.json` member
+  `reactivation_registered_token` is `"refuse"` (default, also when absent or `null`) or `"keep"`. With `"keep"`, a token that is already
+  registered for another platform and is named in `enable_eth_with_tokens` or another platform-with-tokens method is
+  kept silently and joins the platform, as in GLEEC KDF; a token whose coin configuration names another platform is
+  still refused with `PlatformCoinMismatch`. With `"refuse"` it is refused with `TokenIsAlreadyActivated`. Any other
+  value stops the node at start with an error that names the member. Detail: PR #435; CRD ch.43 §43.1F D43.1F.1.
 
 #### RPC interface
 
@@ -225,6 +232,12 @@ the previous version used. The safe way:
   Detail: PR #414; CRD ch.39 R39.8.0bd, T39.8.0k, ch.05 status note of 2026-11-18.
 
 #### Solana coins
+
+- **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
+  entries in both forms and route `enable_solana_with_tokens`, `enable_spl` and the two
+  `experimental::` methods as native builds do, with the same node pool. While Solana is switched
+  off they answer the same refusal as native builds instead of an unknown method. A Solana coin
+  cannot be traded in browser builds either. Detail: PR #430; CRD ch.40 R40.1.1, T40.1.
 
 - **The Solana activation methods of GLEEC KDF are routed.** `experimental::enable_solana_with_assets`
   activates a Solana platform with its tokens and `experimental::enable_solana_token` a single SPL
@@ -685,8 +698,12 @@ the previous version used. The safe way:
 
 ### Fixed
 
-#### EVM coins
+#### EVM, BCH, Sia and Lightning coins
 
+- **EVM transaction history could fail to start after an activation with `tx_history`.** The history collection
+  started just before the platform was registered, and its first check for the registered coin could run before
+  the registration, which ended the collection. It now starts after the registration, and a failed activation no
+  longer leaves it running. Detail: PR #435; CRD ch.55 D55.8.
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
@@ -1061,8 +1078,8 @@ the previous version used. The safe way:
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S6 in PR #425, S7 in PR #426; new package S6c (a rent-exempt guard for SOL withdraws); switch-on
-  lab rows for `disable_coin` and the Token-2022 refusal.
+  S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
+  withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
