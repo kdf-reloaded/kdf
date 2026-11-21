@@ -524,6 +524,14 @@ pub enum WithdrawFee {
         gas_limit: u64,
         gas_price_option: CosmosGasPriceOption,
     },
+    /// The form a TRON result's `fee_details` carries in `type` (CRD ch.21 R-F2). It exists only so that a request
+    /// with such a `fee` parses and a TRON withdraw can refuse it with `InvalidFeePolicy` like any other
+    /// descriptor (CRD ch.21 R-WP6): the TRON fee is always estimated (CRD ch.21 R-W3), so the form has no
+    /// members and any other member of the object is ignored. No family takes it: the other families that take
+    /// a fee descriptor refuse it as a fee type they do not take, ZCoin refuses every custom fee (CRD ch.49
+    /// R49.27a), a Tendermint request ignores it as it ignores any other foreign descriptor (CRD ch.49 R49.30,
+    /// D49.1), and Solana does not read the descriptor.
+    Tron,
 }
 /// The level named by a [`WithdrawFee::CosmosGasPriority`] descriptor (CRD ch.49 R49.29): the spellings are
 /// exactly these four, case-sensitive. `Low`, `Average` and `High` select position 0, 1 and 2 of the platform
@@ -579,6 +587,66 @@ pub struct WithdrawRequest {
     /// block. Absent is 60. Ignored by every other family.
     #[serde(default)]
     pub(crate) expiration_seconds: Option<u64>,
+    /// The fee rail of the withdraw (CRD ch.63 §63.3.4). Absent is `native`. `gasless` and `auto` are served for a
+    /// TRON coin only; every other family refuses them (CRD ch.63 R21).
+    #[serde(default)]
+    pub(crate) fee_method: Option<WithdrawFeeMethod>,
+    /// The constraints of the gasless rail (CRD ch.63 §63.3.4). Refused without `fee_method` `gasless` or `auto`.
+    #[serde(default)]
+    pub(crate) gasless: Option<GaslessWithdrawOptions>,
+}
+/// The fee rail a withdraw request selects (CRD ch.63 §63.3.4).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WithdrawFeeMethod {
+    /// The coin's own fee model: the withdraw as it is without the member.
+    Native,
+    /// The gasless rail is required: the fee is paid in the token, through a fee-delegation provider.
+    Gasless,
+    /// The native rail first; the gasless rail only when the native rail cannot be funded.
+    Auto,
+}
+/// The `gasless` object of a withdraw request (CRD ch.63 §63.3.4).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct GaslessWithdrawOptions {
+    /// The cap of this request on the provider fee, a decimal amount in token units. It is kept as sent, so that
+    /// a value that is not a decimal amount is answered as a fee-validation error of the withdraw (CRD ch.63
+    /// §63.9.4) and not as a request that does not decode; [`GaslessWithdrawOptions::max_fee_amount`] reads it.
+    #[serde(default)]
+    pub(crate) max_fee: Option<Json>,
+    /// How long the signed authorization stays valid, in seconds from signing. Zero is refused; absent is 300.
+    #[serde(default)]
+    pub(crate) deadline_seconds: Option<u64>,
+    /// With `fee_method` `gasless`: whether a deterministically unavailable gasless rail may be replaced by the
+    /// native rail (CRD ch.63 §63.8 step 6).
+    #[serde(default)]
+    pub(crate) fallback_to_native: bool,
+}
+impl GaslessWithdrawOptions {
+    /// `max_fee` as a decimal amount: `None` when the request gave none.
+    ///
+    /// # Errors
+    ///
+    /// [`WithdrawError::InvalidFeePolicy`] when the member is neither a JSON string nor a JSON number that reads
+    /// as a decimal amount, or is below zero (CRD ch.63 §63.9.4). The text does not repeat the value.
+    pub(crate) fn max_fee_amount(&self) -> Result<Option<BigDecimal>, WithdrawError> {
+        let amount = match &self.max_fee {
+            None | Some(Json::Null) => return Ok(None),
+            Some(value @ (Json::String(_) | Json::Number(_))) => json::from_value::<BigDecimal>(value.clone())
+                .map_err(|_| WithdrawError::InvalidFeePolicy("'gasless.max_fee' is not a decimal amount".to_owned()))?,
+            Some(_) => {
+                return Err(WithdrawError::InvalidFeePolicy(
+                    "'gasless.max_fee' is not a decimal amount".to_owned(),
+                ))
+            },
+        };
+        if amount < BigDecimal::from(0) {
+            return Err(WithdrawError::InvalidFeePolicy(
+                "'gasless.max_fee' is below zero".to_owned(),
+            ));
+        }
+        Ok(Some(amount))
+    }
 }
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -632,6 +700,8 @@ impl WithdrawRequest {
             fee,
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
         }
     }
 
@@ -645,8 +715,51 @@ impl WithdrawRequest {
             fee: None,
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
         }
     }
+
+    /// Whether the request asks for the gasless rail: `fee_method` is `gasless` or `auto`.
+    pub(crate) fn asks_for_gasless_rail(&self) -> bool {
+        matches!(
+            self.fee_method,
+            Some(WithdrawFeeMethod::Gasless | WithdrawFeeMethod::Auto)
+        )
+    }
+
+    /// The fee-rail check every withdraw passes before anything else is done with the request (CRD ch.63 §63.3.4,
+    /// R21), for a coin of any family, on the direct method and on the task route. `serves_gasless_rail` says
+    /// whether the coin is of the one family that has a gasless rail (a TRON coin).
+    ///
+    /// # Errors
+    ///
+    /// - [`WithdrawError::InvalidFeePolicy`] (HTTP 400) for `gasless` options without `fee_method` `gasless` or
+    ///   `auto`, for every coin;
+    /// - [`WithdrawError::Gasless`] with [`GaslessWithdrawError::Unavailable`] (HTTP 503) for `fee_method` `gasless`
+    ///   or `auto` on a coin without a gasless rail.
+    pub(crate) fn check_fee_rail(&self, serves_gasless_rail: bool) -> Result<(), WithdrawError> {
+        if !self.asks_for_gasless_rail() {
+            if self.gasless.is_some() {
+                return Err(WithdrawError::InvalidFeePolicy(
+                    "'gasless' options need 'fee_method' to be 'gasless' or 'auto'".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+        if !serves_gasless_rail {
+            return Err(WithdrawError::Gasless(GaslessWithdrawError::Unavailable(format!(
+                "{} has no gasless withdraw rail",
+                self.coin
+            ))));
+        }
+        Ok(())
+    }
+}
+/// [`WithdrawRequest::check_fee_rail`] for `coin`: only a TRON coin has a gasless rail.
+pub(crate) fn check_withdraw_fee_rail(coin: &MmCoinEnum, request: &WithdrawRequest) -> Result<(), WithdrawError> {
+    let serves_gasless_rail = matches!(coin, MmCoinEnum::EthCoin(eth) if eth.is_tron_family());
+    request.check_fee_rail(serves_gasless_rail)
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -683,6 +796,8 @@ pub enum TxFeeDetails {
     Tendermint(tendermint::TendermintFeeDetails),
     /// TRON fee breakdown: bandwidth + energy + optional activation.
     Tron(crate::eth::tron::fee::TronTxFeeDetails),
+    /// The fee of a TRC20 withdraw through the gasless rail, paid in the token (CRD ch.63 §63.3.5).
+    TronGasless(crate::eth::tron::fee::TronGaslessFeeDetails),
 }
 /// Deserialize the TxFeeDetails as an untagged enum.
 impl<'de> Deserialize<'de> for TxFeeDetails {
@@ -720,6 +835,11 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
         // family's entry (Sia has a `total_amount` but no `fee_amount`) and no other arm reads its entry (every
         // other family requires a member it lacks: `amount`, `coin`, `gas`, `miner_fee`, `bandwidth_used`).
         //
+        // `TronGasless` (CRD ch.63 §63.3.5) needs no particular place either: it requires `gasfree_address` and
+        // the fixed texts of `fee_method` and `provider_name`, which no other family's fee object has, and every
+        // other arm requires a member it lacks (`amount`, `gas`, `miner_fee`, `fee_amount`, `policy`,
+        // `bandwidth_used`).
+        //
         // `Slp { amount, coin: String }` is deliberately NOT added: its shape
         // is *identical* to Utxo's whenever `coin` is present, so no
         // placement in this list can distinguish the two structurally --
@@ -736,6 +856,7 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
             Solana(SolanaFeeDetails),
             Sia(siacoin::SiaFeeDetails),
             Tron(crate::eth::tron::fee::TronTxFeeDetails),
+            TronGasless(crate::eth::tron::fee::TronGaslessFeeDetails),
         }
 
         match Deserialize::deserialize(deserializer)? {
@@ -747,6 +868,7 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
             TxFeeDetailsUnTagged::Solana(f) => Ok(TxFeeDetails::Solana(f)),
             TxFeeDetailsUnTagged::Sia(f) => Ok(TxFeeDetails::Sia(f)),
             TxFeeDetailsUnTagged::Tron(f) => Ok(TxFeeDetails::Tron(f)),
+            TxFeeDetailsUnTagged::TronGasless(f) => Ok(TxFeeDetails::TronGasless(f)),
         }
     }
 }
@@ -761,6 +883,9 @@ impl From<EthTxFeeDetails> for TxFeeDetails {
 }
 impl From<crate::eth::tron::fee::TronTxFeeDetails> for TxFeeDetails {
     fn from(tron_details: crate::eth::tron::fee::TronTxFeeDetails) -> Self { TxFeeDetails::Tron(tron_details) }
+}
+impl From<crate::eth::tron::fee::TronGaslessFeeDetails> for TxFeeDetails {
+    fn from(details: crate::eth::tron::fee::TronGaslessFeeDetails) -> Self { TxFeeDetails::TronGasless(details) }
 }
 impl From<UtxoFeeDetails> for TxFeeDetails {
     fn from(utxo_details: UtxoFeeDetails) -> Self { TxFeeDetails::Utxo(utxo_details) }
@@ -842,7 +967,8 @@ impl Default for TransactionType {
 ///
 /// `Serialize` is written by hand (see [`TransactionDetailsWire`]): a result serializes exactly as it always did,
 /// `tx_hex` and `tx_hash` included even when empty, except the unsigned result of a watch-only Tendermint coin
-/// (`unsigned` is `Some`), which omits the two members (CRD ch.36 R36.14.17).
+/// and the sign-only result of the TRON gasless rail (`unsigned` is `Some`), which omit the two members (CRD ch.36
+/// R36.14.17, ch.63 R25).
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct TransactionDetails {
     /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction.
@@ -895,7 +1021,8 @@ pub struct TransactionDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) memo: Option<String>,
     /// The unsigned document a watch-only Tendermint coin answers instead of a signed transaction (CRD ch.36
-    /// R36.14.17). Its members sit flat in the result; `None` for every signed transaction and every other family.
+    /// R36.14.17), or the off-chain authorization of a sign-only TRON gasless withdraw (CRD ch.63 §63.8A). Its
+    /// members sit flat in the result; `None` for every signed transaction.
     #[serde(default, flatten)]
     pub(crate) unsigned: Option<UnsignedTransaction>,
 }
@@ -963,8 +1090,8 @@ pub struct UnsignedSignDoc {
     pub chain_id: String,
     pub account_number: u64,
 }
-/// What a watch-only Tendermint coin answers in place of `tx_hex` and `tx_hash` (CRD ch.36 R36.14.17). The members
-/// of the variant sit flat in the withdraw result.
+/// What a watch-only Tendermint coin (CRD ch.36 R36.14.17) and the TRON gasless rail (CRD ch.63 §63.8A) answer in
+/// place of `tx_hex` and `tx_hash`. The members of the variant sit flat in the withdraw result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum UnsignedTransaction {
@@ -976,6 +1103,9 @@ pub enum UnsignedTransaction {
         legacy_amino_json: Json,
         original_tx_type_url: String,
     },
+    /// The sign-only result of the TRON gasless rail (CRD ch.63 §63.8A, D63.8 (a)): a signed off-chain
+    /// authorization that is neither broadcast nor submitted to the provider.
+    TronGasFree(crate::eth::tron::gasfree::authorization::GasFreeRelayPayload),
 }
 #[derive(Clone, Copy, Debug)]
 pub struct BlockHeightAndTime {
@@ -983,8 +1113,9 @@ pub struct BlockHeightAndTime {
     pub(crate) timestamp: u64,
 }
 impl TransactionDetails {
-    /// Whether this is the unsigned result of a watch-only coin: nothing was signed or broadcast, and the caller's
-    /// own wallet signs the document (CRD ch.36 R36.14.17).
+    /// Whether this is a result without a transaction: the unsigned result of a watch-only coin, where nothing was
+    /// signed or broadcast and the caller's own wallet signs the document (CRD ch.36 R36.14.17), or the sign-only
+    /// result of the TRON gasless rail, whose authorization is not a transaction (CRD ch.63 R25).
     pub fn is_unsigned(&self) -> bool { self.unsigned.is_some() }
 
     /// Whether the transaction details block height should be updated (when tx is confirmed)
@@ -1356,6 +1487,29 @@ mod tx_fee_details_tests {
             policy: siacoin::SiaFeePolicy::Unknown,
             total_amount: "0.001".parse().unwrap(),
         }));
+    }
+
+    /// CRD ch.63 §63.3.5: the gasless fee details read back as themselves, with `trace_id` written as `null`.
+    #[test]
+    fn test_tron_gasless_fee_details_roundtrip() {
+        use crate::eth::tron::fee::{GaslessFeeMethod, GaslessProviderName, TronGaslessFeeDetails};
+        let details = TxFeeDetails::TronGasless(TronGaslessFeeDetails {
+            coin: "USDT-TRC20".to_owned(),
+            fee_method: GaslessFeeMethod::Gasless,
+            provider_name: GaslessProviderName::GasFree,
+            gasfree_address: "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye".to_owned(),
+            transfer_fee: "2".parse().unwrap(),
+            activation_fee: "0".parse().unwrap(),
+            total_token_fee: "2".parse().unwrap(),
+            signed_max_fee: Some("2.5".parse().unwrap()),
+            trace_id: None,
+        });
+        let document = json::to_value(&details).unwrap();
+        assert_eq!(document["type"], "TronGasless");
+        assert_eq!(document["fee_method"], "gasless");
+        assert_eq!(document["provider_name"], "gasfree");
+        assert!(document.as_object().unwrap().contains_key("trace_id") && document["trace_id"].is_null());
+        roundtrip(details);
     }
 
     #[test]

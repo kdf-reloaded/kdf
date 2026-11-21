@@ -34,7 +34,7 @@ use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens_for_task
                                        PlatformWithTokensActivationOps};
 use crate::prelude::CurrentBlock;
 use async_trait::async_trait;
-use coins::lp_coinfind;
+use coins::lp_coinfind_registered;
 use common::{log, SuccessResponse};
 use crypto::hw_rpc_task::{HwConnectStatuses, HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use mm2_core::mm_ctx::MmArc;
@@ -199,7 +199,8 @@ where
     // reported by the task. The public Tendermint page draws its platform, protocol and token configuration errors
     // as mmrpc-level answers but does not say which call returns them; the reference reports them in `status`, and
     // Reloaded does the same (CRD ch.48 R48.5.4, ch.36 R36.6.3).
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &request.ticker).await {
+    // A passive platform is registered: it answers `PlatformIsAlreadyActivated` until its re-activation is built.
+    if let Ok(Some(_)) = lp_coinfind_registered(&ctx, &request.ticker).await {
         return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
             request.ticker,
         ));

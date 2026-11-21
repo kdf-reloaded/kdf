@@ -62,7 +62,7 @@ fn solana_prerequisites() {
         println!("{:?}", token_accounts);
         let actual_token_pubkey = Pubkey::from_str(token_accounts[0].pubkey.as_str()).unwrap();
         let amount = block_on(client.get_token_account_balance(&actual_token_pubkey)).unwrap();
-        assert_ne!(amount.ui_amount_string.as_str(), "0");
+        assert_ne!(amount.ui_amount_string.as_deref(), Some("0"));
     }
 }
 
@@ -160,6 +160,8 @@ fn solana_transaction_simulations() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -190,6 +192,8 @@ fn solana_transaction_zero_balance() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -221,6 +225,8 @@ fn solana_transaction_simulations_not_enough_for_fees() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -257,6 +263,8 @@ fn solana_transaction_simulations_max() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),
@@ -288,6 +296,8 @@ fn solana_test_transactions() {
             .withdraw(WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 coin: "SOL".to_string(),
                 from: None,
                 to: sol_coin.my_address.clone(),

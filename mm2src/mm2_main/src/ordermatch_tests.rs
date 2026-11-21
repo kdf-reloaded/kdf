@@ -7807,12 +7807,12 @@ fn test_stale_pubkeys_keeps_real_per_order_state_until_order_cancelled() {
     assert_eq!(pubkeys, vec![order_pubkey]);
 }
 
-// ---- Saved orders with a Tendermint coin are cancelled at startup while Tendermint swaps are off ----
+// ---- Saved orders with a Tendermint or TRON coin are cancelled at startup while the family's swaps are off ----
 
 #[cfg(not(target_arch = "wasm32"))]
 mod tendermint_saved_orders {
     use super::*;
-    use crate::mm2::lp_ordermatch::ordermatch_trading::tendermint_order_cancel_message;
+    use crate::mm2::lp_ordermatch::ordermatch_trading::swaps_off_order_cancel_message;
 
     fn conf() -> Json {
         json::json!([
@@ -7930,20 +7930,146 @@ mod tendermint_saved_orders {
 
         // The log line names the order and the pair; a kept order produces none.
         assert_eq!(
-            tendermint_order_cancel_message(&ctx, "maker", &tendermint_base.uuid, "IRIS", "DOC").unwrap(),
+            swaps_off_order_cancel_message(&ctx, "maker", &tendermint_base.uuid, "IRIS", "DOC").unwrap(),
             format!(
                 "Cancelled saved maker order {} (IRIS/DOC): Tendermint swaps are not available in this build",
                 tendermint_base.uuid
             )
         );
         assert_eq!(
-            tendermint_order_cancel_message(&ctx, "maker", &tendermint_token_rel.uuid, "DOC", "IRIS-ATOM").unwrap(),
+            swaps_off_order_cancel_message(&ctx, "maker", &tendermint_token_rel.uuid, "DOC", "IRIS-ATOM").unwrap(),
             format!(
                 "Cancelled saved maker order {} (DOC/IRIS-ATOM): Tendermint swaps are not available in this build",
                 tendermint_token_rel.uuid
             )
         );
-        assert!(tendermint_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
+        assert!(swaps_off_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
+
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+
+    /// CRD ch.21 R-D1, R21.B3: the acceptance check that `process_taker_request` and `process_maker_reserved` run
+    /// before a match (`declining_coin_ticker`) declines a pair with a real TRX or TRC20 coin on either side, and
+    /// names that coin, whatever protocol information the counterparty sent. A pair without a TRON coin passes.
+    #[test]
+    fn the_match_handlers_decline_a_pair_with_a_tron_coin() {
+        use crate::mm2::lp_ordermatch::ordermatch_trading::declining_coin_ticker;
+        use coins::eth::tron::tron_coin_from_conf_and_request;
+        use coins::CoinProtocol;
+
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let tron = |ticker: &str, protocol: Json| {
+            let conf = json::json!({ "coin": ticker, "mm2": 1, "decimals": 6, "protocol": protocol });
+            let protocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).unwrap();
+            // Nothing listens on port 1 of the loopback interface; building the coin asks no node.
+            let request = json::json!({ "urls": ["http://127.0.0.1:1"] });
+            let coin = block_on(tron_coin_from_conf_and_request(
+                &ctx, ticker, &conf, &request, &[1u8; 32], protocol,
+            ))
+            .unwrap_or_else(|e| panic!("cannot build {ticker}: {e}"));
+            MmCoinEnum::from(coin)
+        };
+        let trx = tron(
+            "TRX",
+            json::json!({ "type": "TRX", "protocol_data": { "network": "Nile" } }),
+        );
+        let trc20 = tron(
+            "USDT-TRC20",
+            json::json!({ "type": "TRC20", "protocol_data": {
+                "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } }),
+        );
+        let plain = MmCoinEnum::Test(TestCoin::new("DOC"));
+        let other = MmCoinEnum::Test(TestCoin::new("MARTY"));
+
+        for info in [None, Some(Vec::new()), Some(vec![1u8, 2, 3])] {
+            for coin in [&trx, &trc20] {
+                let ticker = coin.ticker().to_owned();
+                assert_eq!(declining_coin_ticker(coin, &plain, &info, &info), Some(ticker.clone()));
+                assert_eq!(declining_coin_ticker(&plain, coin, &info, &info), Some(ticker));
+            }
+            assert_eq!(declining_coin_ticker(&plain, &other, &info, &info), None);
+        }
+    }
+
+    /// CRD ch.21 R-D1: a saved maker or taker order that names a TRX or TRC20 coin (by the coins-config protocol,
+    /// on either side, whatever `wallet_only` says there) is cancelled at startup while TRON swaps are switched
+    /// off; an unrelated order is kept.
+    #[test]
+    fn saved_orders_with_a_tron_coin_are_cancelled_at_startup() {
+        const { assert!(!coins::TRON_SWAPS_AVAILABLE) };
+        let dbdir = std::env::temp_dir().join(format!("kdf-tron-saved-orders-{}", Uuid::new_v4()));
+        let mut coins_conf = conf();
+        coins_conf.as_array_mut().unwrap().extend([
+            json::json!({"coin":"TRX","mm2":1,"wallet_only":false,
+                "protocol":{"type":"TRX","protocol_data":{"network":"Mainnet"}}}),
+            json::json!({"coin":"USDT-TRC20","mm2":1,"decimals":6,"protocol":{"type":"TRC20","protocol_data":{
+                "platform":"TRX","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}}),
+        ]);
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json::json!({ "coins": coins_conf, "dbdir": dbdir.to_str().unwrap() }))
+            .into_mm_arc();
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+
+        let tron_base = maker("TRX", "DOC");
+        let trc20_rel = maker("DOC", "USDT-TRC20");
+        let plain = maker("DOC", "MARTY");
+        let tron_taker = taker("MARTY", "TRX");
+        let trc20_taker = taker("USDT-TRC20", "DOC");
+        let plain_taker = taker("DOC", "MARTY");
+        for order in [&tron_base, &trc20_rel, &plain] {
+            block_on(save_my_new_maker_order(ctx.clone(), order)).unwrap();
+        }
+        for order in [&tron_taker, &trc20_taker, &plain_taker] {
+            block_on(save_my_new_taker_order(ctx.clone(), order)).unwrap();
+        }
+
+        let coins = block_on(orders_kick_start(&ctx)).unwrap();
+
+        // The coins needed for the kick-start come from the kept orders alone.
+        assert_eq!(
+            coins,
+            ["DOC", "MARTY"].iter().map(|c| c.to_string()).collect::<HashSet<_>>()
+        );
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let loaded = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
+        assert_eq!(loaded.keys().copied().collect::<Vec<_>>(), vec![plain.uuid]);
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert_eq!(taker_orders.keys().copied().collect::<Vec<_>>(), vec![
+            plain_taker.request.uuid
+        ]);
+
+        // Only the kept orders are left in the storage.
+        let storage = MyOrdersStorage::new(ctx.clone());
+        let saved: Vec<_> = block_on(storage.load_active_maker_orders())
+            .unwrap()
+            .into_iter()
+            .map(|o| o.uuid)
+            .collect();
+        assert_eq!(saved, vec![plain.uuid]);
+        let saved: Vec<_> = block_on(storage.load_active_taker_orders())
+            .unwrap()
+            .into_iter()
+            .map(|o| o.request.uuid)
+            .collect();
+        assert_eq!(saved, vec![plain_taker.request.uuid]);
+
+        // The log line names the order, the pair and the family; a kept order produces none.
+        assert_eq!(
+            swaps_off_order_cancel_message(&ctx, "maker", &tron_base.uuid, "TRX", "DOC").unwrap(),
+            format!(
+                "Cancelled saved maker order {} (TRX/DOC): TRON swaps are not available in this build",
+                tron_base.uuid
+            )
+        );
+        assert_eq!(
+            swaps_off_order_cancel_message(&ctx, "taker", &trc20_taker.request.uuid, "USDT-TRC20", "DOC").unwrap(),
+            format!(
+                "Cancelled saved taker order {} (USDT-TRC20/DOC): TRON swaps are not available in this build",
+                trc20_taker.request.uuid
+            )
+        );
+        assert!(swaps_off_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
 
         std::fs::remove_dir_all(&dbdir).ok();
     }

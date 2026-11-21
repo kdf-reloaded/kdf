@@ -16,45 +16,108 @@
 //! 6. Wrap raw + signature into a [`proto::Transaction`] and emit the
 //!    hex-encoded protobuf as `tx_hex`. The txid is the hash.
 //!
+//! A request may select the fee rail (CRD ch.63 §63.3.4, §63.8): `native` (the flow above, also when the member is
+//! absent), `gasless` (the sign-only rail of [`gasfree::withdraw`](super::gasfree::withdraw), which needs no TRX)
+//! or `auto` (the flow above first, the gasless rail only when the flow above cannot be funded).
+//!
 //! # Invariants
 //!
+//! - A sender without a local private key is refused before any node or provider is asked (CRD ch.63 R22).
+//! - The rail that ran is visible in the result: the native rail answers the `Tron` fee details, the gasless rail
+//!   the `TronGasless` ones (CRD ch.63 R24). Under `gasless` the native rail runs only with `fallback_to_native`.
 //! - No fee figure is assumed. A resource, parameter or dry-run read that fails, fails the withdraw.
 //! - Every balance and resource read is for the sender's address: the activated address, or the HD address a
 //!   `from` member selected.
 //! - A TRX transaction is built only when its amount plus its estimated fee fits the balance, and a TRC20
 //!   transaction only when the sender's TRX balance covers its estimated fee.
+//! - A TRC20 transfer whose dry run reverts is never signed.
 
 use super::api::{TronApiClient, TronApiError};
 use super::balance::{trc20_balance_units, trx_balance_sun};
 use super::fee::{estimate_trc20_transfer_fee, estimate_trx_transfer_fee, transaction_bandwidth, trc20_fee_limit_sun,
                  TronAccountResources, TronChainPrices, TronFeeError, TronFeeEstimate, TronTxFeeDetails};
+use super::gasfree::failure::GaslessMember;
+use super::gasfree::withdraw::{self as gasless_rail, FailureClass, GaslessTerms, RailEligibility, RailFailure};
 use super::proto::{self, TaposBlockData, DEFAULT_EXPIRATION_SEC};
 use super::sign::sign_transaction_raw;
 use super::tx_builder::{abi_encode_trc20_transfer, build_trc20_transfer, build_trx_transfer};
 use super::{TronAddress, TRX_DECIMALS};
 
 use crate::eth::{u256_to_big_decimal, wei_from_big_decimal, EthCoin, EthCoinType, EvmWithdrawSender};
-use crate::{BytesJson, TransactionDetails, WithdrawError, WithdrawRequest, WithdrawResult};
+use crate::rpc_command::init_withdraw::WithdrawTaskHandle;
+use crate::{BytesJson, TransactionDetails, WithdrawError, WithdrawFeeMethod, WithdrawRequest, WithdrawResult};
 
 use bigdecimal::BigDecimal;
+use common::log::warn;
 use common::now_ms;
 use ethereum_types::{H256, U256};
+use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use prost::Message as _;
+use serde_json::Value as Json;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How many times the amount of a TRX `max` withdraw is recomputed from the fee of the transaction that carries
 /// it. The fee depends on the amount only through the length of its encoding, so it settles within two rounds or
 /// alternates between two neighboring figures; see [`settle_max_amount`].
 const MAX_AMOUNT_ROUNDS: usize = 3;
 
+/// The top-level MM2.json boolean that lets a refusal of the controller check (CRD ch.63 R29) count as a
+/// deterministic unavailability for `fallback_to_native`. Absent is `false`.
+pub(crate) const GUARD_ALLOWS_FALLBACK_KEY: &str = "tron_gasfree_guard_allows_fallback";
+
+/// Whether the warning about a non-boolean [`GUARD_ALLOWS_FALLBACK_KEY`] has been logged.
+static GUARD_SWITCH_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// The value of [`GUARD_ALLOWS_FALLBACK_KEY`] in the configuration `conf`. Only the JSON value `true` switches it
+/// on. A value that is not a boolean counts as `false`; the first time one is read, one warning line says so.
+fn guard_allows_fallback_in(conf: &Json) -> bool {
+    match &conf[GUARD_ALLOWS_FALLBACK_KEY] {
+        Json::Bool(allowed) => *allowed,
+        Json::Null => false,
+        _ => {
+            if !GUARD_SWITCH_WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "MM2.json: '{}' is not a boolean and counts as false",
+                    GUARD_ALLOWS_FALLBACK_KEY
+                );
+            }
+            false
+        },
+    }
+}
+
+/// [`guard_allows_fallback_in`] the configuration of the node that runs `coin`.
+fn guard_allows_fallback(coin: &EthCoin) -> MmResult<bool, WithdrawError> {
+    let ctx = MmArc::from_weak(&coin.ctx)
+        .or_mm_err(|| WithdrawError::InternalError("MM context has been dropped".to_owned()))?;
+    Ok(guard_allows_fallback_in(&ctx.conf))
+}
+
+/// Whether `error` of the native rail is a funding failure, the only kind after which `auto` turns to the gasless
+/// rail (CRD ch.63 §63.8 step 1, R16): too little of the coin, too little TRX for the fee, or an amount below the
+/// minimum.
+fn is_funding_failure(error: &WithdrawError) -> bool {
+    matches!(
+        error,
+        WithdrawError::NotSufficientBalance { .. }
+            | WithdrawError::NotSufficientPlatformBalanceForFee { .. }
+            | WithdrawError::AmountTooLow { .. }
+    )
+}
+
 /// Entry point for TRX / TRC20 withdrawals. `sender` is the address the transaction is sent from and the key that
 /// signs it: the activated address, or the HD address a `from` member selected (CRD ch.21 R21.10B.4, ch.47).
 ///
 /// # Errors
 ///
-/// Before a node is asked: [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor (the TRON fee is estimated
-/// from the account's bandwidth and energy, CRD ch.21 R-W3, and no `WithdrawFee` variant describes it) and
-/// [`WithdrawError::UnsupportedError`] for a `memo` (CRD ch.21 R21.10B.7, ch.49 R49.27a).
+/// Before a node is asked: [`WithdrawError::UnsupportedError`] for a sender without a local private key (CRD ch.63
+/// R22); [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor (the TRON fee is always estimated from the
+/// account's bandwidth and energy, CRD ch.21 R-W3; the `WithdrawFee::Tron` form exists only so that it can be refused
+/// here, CRD ch.21 R-WP6), for `gasless` options without `fee_method` `gasless` or `auto`, for a `gasless.max_fee` that
+/// is not a decimal amount and for a `gasless.deadline_seconds` of zero (CRD ch.63 §63.9.4); and
+/// [`WithdrawError::UnsupportedError`] for a `memo` (CRD ch.21 R21.10B.7, ch.49 R49.27a) and for `max` with
+/// `fee_method` `gasless` (CRD ch.63 R14).
 ///
 /// From the amounts (CRD ch.21 R21.10B.7): [`WithdrawError::ZeroBalanceToWithdrawMax`],
 /// [`WithdrawError::AmountTooLow`], [`WithdrawError::NotSufficientBalance`] and, for a TRC20 transfer whose
@@ -63,8 +126,32 @@ const MAX_AMOUNT_ROUNDS: usize = 3;
 /// From the estimate: [`WithdrawError::Transport`] for every failed node read, a dry run without a positive
 /// energy figure included; [`WithdrawError::InternalError`] when a TRX transfer creates the recipient's account
 /// and the node reports no fee for that; [`WithdrawError::UnsupportedError`] when the energy of a TRC20 transfer
-/// costs more than the highest `fee_limit` (CRD ch.21 D21.10B.1).
+/// costs more than the highest `fee_limit` (CRD ch.21 D21.10B.1), and when the dry run of a TRC20 transfer
+/// reverts: the token contract refuses the transfer, and nothing is signed (CRD ch.21 R21.10B.13 and its finding).
+///
+/// From the gasless rail: the errors of [`gasless_rail::GaslessRail::run`], and `Gasless`/`Unavailable` for a
+/// coin the rail does not serve (CRD ch.63 §63.9).
 pub(crate) async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest, sender: EvmWithdrawSender) -> WithdrawResult {
+    withdraw_tron_with_progress(coin, req, sender, None).await
+}
+
+/// [`withdraw_tron`] for the task that `progress` is the handle of: the gasless rail reports its phases to it (CRD
+/// ch.63 §63.3.6).
+pub(crate) async fn withdraw_tron_with_progress(
+    coin: EthCoin,
+    req: WithdrawRequest,
+    sender: EvmWithdrawSender,
+    progress: Option<&WithdrawTaskHandle>,
+) -> WithdrawResult {
+    // CRD ch.63 R22: no rail runs, and nothing is read, for a signing policy that holds no local key (a hardware
+    // wallet, WalletConnect, a browser-extension wallet).
+    if sender.local_secret(&coin).is_none() {
+        return MmError::err(WithdrawError::UnsupportedError(
+            "A TRON withdraw needs a local private key: it is not supported under a hardware-wallet, WalletConnect \
+             or browser-extension signing policy"
+                .to_owned(),
+        ));
+    }
     if let Some(fee) = &req.fee {
         return MmError::err(WithdrawError::InvalidFeePolicy(format!(
             "TRON withdraw takes no 'fee' descriptor, its fee is estimated from the account's bandwidth and \
@@ -75,6 +162,21 @@ pub(crate) async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest, sender: E
     if req.memo.is_some() {
         return MmError::err(WithdrawError::UnsupportedError(
             "A TRON withdraw takes no 'memo'".to_owned(),
+        ));
+    }
+    // The shared dispatch has made this check already (CRD ch.63 R21); a caller that comes another way gets the
+    // same answer.
+    req.check_fee_rail(true)?;
+    // Absent is `native` (CRD ch.63 §63.3.4).
+    let fee_method = req.fee_method.unwrap_or(WithdrawFeeMethod::Native);
+    // The request-shape rejections of CRD ch.63 §63.9.4 come before any node or provider request.
+    let terms = match fee_method {
+        WithdrawFeeMethod::Native => None,
+        WithdrawFeeMethod::Gasless | WithdrawFeeMethod::Auto => Some(GaslessTerms::from_request(&req)?),
+    };
+    if fee_method == WithdrawFeeMethod::Gasless && req.max {
+        return MmError::err(WithdrawError::UnsupportedError(
+            "A gasless withdraw takes no 'max': the provider's fee is paid from the same token balance".to_owned(),
         ));
     }
 
@@ -93,14 +195,80 @@ pub(crate) async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest, sender: E
         ));
     }
 
+    let terms = match (fee_method, terms) {
+        (WithdrawFeeMethod::Gasless | WithdrawFeeMethod::Auto, Some(terms)) => terms,
+        _ => return withdraw_native(&coin, &api, &signer, sender, receiver, &req).await,
+    };
+
+    if fee_method == WithdrawFeeMethod::Auto {
+        // CRD ch.63 R16: the native rail first. Only a funding failure of a request without `max` turns to the
+        // gasless rail; if that rail does not apply to the coin, the native error stands.
+        let native_error = match withdraw_native(&coin, &api, &signer, sender, receiver, &req).await {
+            Ok(details) => return Ok(details),
+            Err(error) => error,
+        };
+        if req.max || !is_funding_failure(native_error.get_inner()) {
+            return Err(native_error);
+        }
+        let RailEligibility::Applicable(rail) = gasless_rail::resolve(&coin).await else {
+            return Err(native_error);
+        };
+        // The rail was attempted: its error is the answer.
+        return rail
+            .run(&coin, &api, &signer, &sender, &receiver, &req, &terms, progress)
+            .await
+            .map_err(|failure| MmError::new(failure.error));
+    }
+
+    // `gasless`: the rail is required.
+    let failure = match gasless_rail::resolve(&coin).await {
+        RailEligibility::Applicable(rail) => {
+            match rail
+                .run(&coin, &api, &signer, &sender, &receiver, &req, &terms, progress)
+                .await
+            {
+                Ok(details) => return Ok(details),
+                Err(failure) => failure,
+            }
+        },
+        // The rail is not configured for the coin: a deterministic unavailability (CRD ch.63 §63.8 step 6).
+        RailEligibility::NotApplicable(reason) => RailFailure {
+            error: gasless_rail::gasless_error(GaslessMember::Unavailable, format!("{}: {}", coin.ticker, reason)),
+            class: FailureClass::Deterministic,
+        },
+    };
+    // CRD ch.63 §63.8 step 6, R24: the native rail replaces the gasless one only with the request's consent and
+    // only after a deterministic unavailability. The refusal of the controller check (R29) is one only when the
+    // operator's switch says so.
+    let falls_back = terms.fallback_to_native
+        && match failure.class {
+            FailureClass::Deterministic => true,
+            FailureClass::Guard => guard_allows_fallback(&coin)?,
+            FailureClass::Other => false,
+        };
+    if !falls_back {
+        return MmError::err(failure.error);
+    }
+    withdraw_native(&coin, &api, &signer, sender, receiver, &req).await
+}
+
+/// The native rail: the TRX or TRC20 transfer whose fee is paid in TRX (CRD ch.21 R21.10B.7).
+async fn withdraw_native(
+    coin: &EthCoin,
+    api: &TronApiClient,
+    signer: &EvmWithdrawSender,
+    sender: TronAddress,
+    receiver: TronAddress,
+    req: &WithdrawRequest,
+) -> WithdrawResult {
     match &coin.coin_type {
-        EthCoinType::Tron => withdraw_native_trx(coin.clone(), api, signer, sender, receiver, req).await,
+        EthCoinType::Tron => withdraw_native_trx(coin.clone(), api.clone(), signer, sender, receiver, req).await,
         EthCoinType::Trc20 { platform, token_addr } => {
             let token = Trc20Token {
                 contract: TronAddress::from_evm_address(*token_addr),
                 platform: platform.clone(),
             };
-            withdraw_trc20_token(coin.clone(), api, signer, sender, receiver, token, req).await
+            withdraw_trc20_token(coin.clone(), api.clone(), signer, sender, receiver, token, req).await
         },
         _ => MmError::err(WithdrawError::InternalError(
             "withdraw_tron invoked on non-TRON coin".to_owned(),
@@ -174,10 +342,10 @@ fn expiration_ms(block_ms: i64, expiration_seconds: Option<u64>) -> MmResult<i64
 async fn withdraw_native_trx(
     coin: EthCoin,
     api: TronApiClient,
-    signer: EvmWithdrawSender,
+    signer: &EvmWithdrawSender,
     sender: TronAddress,
     receiver: TronAddress,
-    req: WithdrawRequest,
+    req: &WithdrawRequest,
 ) -> WithdrawResult {
     let (balance, balance_dec) = fetch_trx_balance(&api, &sender).await?;
     let balance_sun = u256_to_u64(balance)?;
@@ -266,7 +434,7 @@ async fn withdraw_native_trx(
     // The fee is paid in the coin that is sent.
     let spent_by_me = &amount_dec + &fee_details.total_fee;
 
-    let (hash, tx_bytes) = sign_transaction(&coin, &signer, raw)?;
+    let (hash, tx_bytes) = sign_transaction(&coin, signer, raw)?;
     Ok(transaction_details(
         &coin,
         &sender,
@@ -282,25 +450,26 @@ async fn withdraw_native_trx(
 async fn withdraw_trc20_token(
     coin: EthCoin,
     api: TronApiClient,
-    signer: EvmWithdrawSender,
+    signer: &EvmWithdrawSender,
     sender: TronAddress,
     receiver: TronAddress,
     token: Trc20Token,
-    req: WithdrawRequest,
+    req: &WithdrawRequest,
 ) -> WithdrawResult {
     let decimals = coin.decimals;
 
     let (balance_units, balance_dec) = fetch_trc20_balance(&api, &token.contract, &sender, decimals).await?;
 
-    // `max` sends the whole token balance: the fee is paid in TRX.
-    let (amount_units_u256, amount_dec) = if req.max {
+    // `max` sends the whole token balance: the fee is paid in TRX. A token amount is a 256-bit value from the
+    // request to the call data; only TRX amounts, in SUN, are held in 64 bits.
+    let (amount_units, amount_dec) = if req.max {
         (balance_units, balance_dec.clone())
     } else {
         let amount = wei_from_big_decimal(&req.amount, decimals).mm_err(Into::into)?;
         (amount, req.amount.clone())
     };
 
-    if amount_units_u256 > balance_units {
+    if amount_units > balance_units {
         return MmError::err(WithdrawError::NotSufficientBalance {
             coin: coin.ticker.clone(),
             available: balance_dec,
@@ -308,7 +477,6 @@ async fn withdraw_trc20_token(
         });
     }
 
-    let amount_units = u256_to_u64(amount_units_u256)?;
     let inputs = read_withdraw_inputs(&api, &sender, req.expiration_seconds).await?;
 
     let energy = dry_run_trc20_energy(&api, &sender, &token.contract, &receiver, amount_units).await?;
@@ -343,7 +511,7 @@ async fn withdraw_trc20_token(
     // The fee is paid in the platform coin, so it is no part of what is spent of the token.
     let spent_by_me = amount_dec.clone();
 
-    let (hash, tx_bytes) = sign_transaction(&coin, &signer, raw)?;
+    let (hash, tx_bytes) = sign_transaction(&coin, signer, raw)?;
     Ok(transaction_details(
         &coin,
         &sender,
@@ -487,6 +655,10 @@ async fn fetch_trc20_balance(
 ///
 /// # Errors
 ///
+/// [`WithdrawError::UnsupportedError`] when the dry run reverts (CRD ch.21 R21.10B.13 and its finding): the token
+/// contract refuses this transfer, whichever node is asked, so no other node is asked and the caller signs
+/// nothing. The text carries the node's revert message, or the name of the simulated result.
+///
 /// [`WithdrawError::Transport`] when the read fails or the answer has no positive `energy_used`
 /// (CRD ch.21 R21.10B.3). No figure stands in for a missing one.
 async fn dry_run_trc20_energy(
@@ -494,20 +666,42 @@ async fn dry_run_trc20_energy(
     sender: &TronAddress,
     contract: &TronAddress,
     receiver: &TronAddress,
-    amount_units: u64,
+    amount_units: U256,
 ) -> MmResult<u64, WithdrawError> {
     let data = abi_encode_trc20_transfer(receiver, amount_units);
     // Strip the 4-byte selector: triggerconstantcontract wants parameters only.
     let param_hex = hex::encode(&data[4..]);
     let resp = api
-        .trigger_constant_contract(sender, contract, "transfer(address,uint256)", &param_hex)
+        .trigger_constant_dry_run(sender, contract, "transfer(address,uint256)", &param_hex)
         .await
-        .map_to_mm(node_error)?;
+        .map_to_mm(dry_run_error)?;
     match resp.energy_used {
         Some(energy) if energy > 0 => Ok(energy),
         _ => MmError::err(WithdrawError::Transport(
             "the dry run of the TRC20 transfer reports no positive energy_used".to_owned(),
         )),
+    }
+}
+
+/// The most characters of a node's revert reason a withdraw error shows.
+const REVERT_REASON_MAX_CHARS: usize = 200;
+
+/// The withdraw error of a failed energy dry run. A revert is the token contract's refusal of the transfer: a
+/// request the caller has to change (CRD ch.21 R21.10B.13 and its finding, ch.49 R49.27a). The reason is node
+/// text: the node client has removed the node's URL from it, and it is cut to [`REVERT_REASON_MAX_CHARS`] here.
+/// Every other failure is a failed node read.
+fn dry_run_error(e: TronApiError) -> WithdrawError {
+    match e {
+        TronApiError::ContractRevert(reason) => {
+            let mut shown: String = reason.chars().take(REVERT_REASON_MAX_CHARS).collect();
+            if shown.len() < reason.len() {
+                shown.push_str("...");
+            }
+            WithdrawError::UnsupportedError(format!(
+                "the token contract refused this transfer (its dry run reverted): {shown}"
+            ))
+        },
+        other => node_error(other),
     }
 }
 
@@ -533,6 +727,7 @@ fn sun_to_trx(sun: u64) -> MmResult<BigDecimal, WithdrawError> {
     u256_to_big_decimal(U256::from(sun), TRX_DECIMALS).mm_err(Into::into)
 }
 
+/// A TRX amount in SUN as the 64-bit value the protocol carries. Token amounts never pass through here.
 fn u256_to_u64(v: U256) -> MmResult<u64, WithdrawError> {
     if v > U256::from(u64::MAX) {
         return MmError::err(WithdrawError::InternalError(
@@ -647,6 +842,35 @@ mod tests {
         assert_eq!(at(Some(86_400)), Ok(1_700_086_400_000));
         assert!(at(Some(u64::MAX)).is_err());
         assert!(at(Some(i64::MAX as u64 / 1000)).is_err());
+    }
+
+    #[test]
+    fn a_reverting_dry_run_maps_to_the_contracts_refusal_with_a_bounded_reason() {
+        match dry_run_error(TronApiError::ContractRevert("REVERT opcode executed".to_owned())) {
+            WithdrawError::UnsupportedError(text) => assert_eq!(
+                text,
+                "the token contract refused this transfer (its dry run reverted): REVERT opcode executed"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // A long reason is cut at 200 characters, on a character boundary.
+        match dry_run_error(TronApiError::ContractRevert("\u{e9}".repeat(500))) {
+            WithdrawError::UnsupportedError(text) => {
+                let reason = text.rsplit(": ").next().unwrap_or_default();
+                assert_eq!(reason, format!("{}...", "\u{e9}".repeat(200)));
+            },
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // Exactly 200 characters are shown whole.
+        match dry_run_error(TronApiError::ContractRevert("x".repeat(200))) {
+            WithdrawError::UnsupportedError(text) => assert!(text.ends_with(&"x".repeat(200)), "{text}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // Any other failure of the dry run is a failed node read.
+        assert!(matches!(
+            dry_run_error(TronApiError::Timeout("cutoff".to_owned())),
+            WithdrawError::Transport(_)
+        ));
     }
 
     #[test]

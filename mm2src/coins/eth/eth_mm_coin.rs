@@ -47,7 +47,38 @@ impl InitWithdrawCoin for EthCoin {
         task_handle
             .update_in_progress_status(WithdrawInProgressStatus::GeneratingTransaction)
             .mm_err(WithdrawError::from)?;
-        withdraw_impl(ctx, self.clone(), req).await
+        withdraw_impl_with_progress(ctx, self.clone(), req, Some(task_handle)).await
+    }
+}
+
+impl EthCoin {
+    /// Whether the coin is kept out of orders and swaps by the TRON swap switch: a TRX or TRC20 coin while
+    /// `tron_swaps_available` is `false` (CRD ch.21 R-D1, R21.B3). Never an EVM coin.
+    fn tron_swaps_switched_off(&self, tron_swaps_available: bool) -> bool {
+        self.is_tron_family() && !tron_swaps_available
+    }
+
+    /// [`MmCoin::wallet_only`] with the TRON swap switch given, so a test can evaluate the answer with swaps on.
+    pub(crate) fn wallet_only_with_switch(&self, ctx: &MmArc, tron_swaps_available: bool) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.signer, EthSigner::Metamask(_)) {
+            return true;
+        }
+        if self.tron_swaps_switched_off(tron_swaps_available) {
+            return true;
+        }
+        // CRD ch.35 R35.2.7 -- a custom token (inline `protocol`, no coins-config entry) is always
+        // wallet-only; a config token follows its config entry.
+        if self.custom_token {
+            return true;
+        }
+        let coin_conf = crate::coin_conf(ctx, self.ticker());
+        coin_conf["wallet_only"].as_bool().unwrap_or(false)
+    }
+
+    /// [`MmCoin::is_coin_protocol_supported`] with the TRON swap switch given.
+    pub(crate) fn protocol_supported_with_switch(&self, tron_swaps_available: bool) -> bool {
+        !self.tron_swaps_switched_off(tron_swaps_available)
     }
 }
 
@@ -64,19 +95,11 @@ impl MmCoin for EthCoin {
     /// all gate on `wallet_only`) -- with a clean structured error, instead of
     /// letting it reach and abort inside a later HTLC key-derivation / signing
     /// path. WASM-only: the MetaMask policy exists only on the browser target.
-    fn wallet_only(&self, ctx: &MmArc) -> bool {
-        #[cfg(target_arch = "wasm32")]
-        if matches!(self.signer, EthSigner::Metamask(_)) {
-            return true;
-        }
-        // CRD ch.35 R35.2.7 -- a custom token (inline `protocol`, no coins-config entry) is always
-        // wallet-only; a config token follows its config entry.
-        if self.custom_token {
-            return true;
-        }
-        let coin_conf = crate::coin_conf(ctx, self.ticker());
-        coin_conf["wallet_only"].as_bool().unwrap_or(false)
-    }
+    ///
+    /// A TRX or TRC20 coin is wallet-only while [`crate::TRON_SWAPS_AVAILABLE`] is `false`, whatever its
+    /// coins-config entry says (CRD ch.21 R-D1, R21.10B.9, R21.B3): Reloaded has no TRON swap. Only order
+    /// placement asks this.
+    fn wallet_only(&self, ctx: &MmArc) -> bool { self.wallet_only_with_switch(ctx, crate::TRON_SWAPS_AVAILABLE) }
 
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(get_raw_transaction_impl(self.clone(), req).boxed().compat())
@@ -87,7 +110,15 @@ impl MmCoin for EthCoin {
         // CRD R50.24 / R49.6: the direct legacy `withdraw` method does not support
         // Trezor user-action signing; clients must use the `task::withdraw` API.
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-        if matches!(self.signer, EthSigner::Trezor(_)) {
+        if let EthSigner::Trezor(signer) = &self.signer {
+            if req.from.is_some() && matches!(self.coin_type, EthCoinType::Erc20 { .. }) {
+                let refusal = crate::eth::eth_trezor_withdraw::refuse_direct_trezor_token_withdraw(
+                    self.clone(),
+                    signer.clone(),
+                    req,
+                );
+                return Box::new(Box::pin(refusal).compat());
+            }
             return Box::new(futures01::future::err(MmError::new(WithdrawError::UnsupportedError(
                 "Unsupported under the Trezor signing policy: Trezor EVM withdrawals require the \
                      'task::withdraw' API for device user-action signing"
@@ -322,7 +353,8 @@ impl MmCoin for EthCoin {
                 (0.into(), data, token_addr, platform, self.gas_limit.eth_send_erc20)
             },
             // ETH-style fee preimage; TRON dex-fee preimage flows through the
-            // dedicated TRON estimator. Activation gating prevents this branch. P10.2.5.
+            // dedicated TRON estimator. TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return MmError::err(TradePreimageError::InternalError(
                     "TRON dex-fee preimage not yet wired (pending P10.2.5)".to_owned(),
@@ -449,7 +481,12 @@ impl MmCoin for EthCoin {
 
     fn coin_protocol_info(&self) -> Vec<u8> { Vec::new() }
 
-    fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { true }
+    /// Declines every new match for a TRX or TRC20 coin while [`crate::TRON_SWAPS_AVAILABLE`] is `false`, so an
+    /// order saved earlier, or a peer's request against one, cannot start a swap (CRD ch.21 R-D1, R21.B3). An EVM
+    /// coin accepts every counterparty, as before. This is asked only when an order is matched.
+    fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool {
+        self.protocol_supported_with_switch(crate::TRON_SWAPS_AVAILABLE)
+    }
 }
 
 #[async_trait]

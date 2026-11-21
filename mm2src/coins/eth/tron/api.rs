@@ -50,6 +50,11 @@ pub enum TronApiError {
     /// A 2xx answer that is the node's error form: a JSON object with a top-level `Error` string.
     #[display(fmt = "Node error: {}", _0)]
     NodeError(String),
+    /// A dry run whose answer carries a revert indication (CRD ch.21 R21.10B.13 and its finding), with the node's
+    /// revert message or the name of the simulated result. The outcome belongs to the contract and not to the
+    /// node, so no other node is asked.
+    #[display(fmt = "Contract call reverted: {}", _0)]
+    ContractRevert(String),
 }
 
 impl std::error::Error for TronApiError {}
@@ -80,6 +85,7 @@ impl TronApiError {
             TronApiError::InvalidResponse(text) => TronApiError::InvalidResponse(scrub(text)),
             TronApiError::AllNodesFailed(text) => TronApiError::AllNodesFailed(scrub(text)),
             TronApiError::NodeError(text) => TronApiError::NodeError(scrub(text)),
+            TronApiError::ContractRevert(text) => TronApiError::ContractRevert(scrub(text)),
         }
     }
 }
@@ -276,10 +282,13 @@ pub struct TriggerConstantContractRequest {
 /// `/wallet/triggerconstantcontract` response.
 #[derive(Debug, Deserialize)]
 pub struct TriggerConstantContractResponse {
-    /// The node's own status object (a contract failure is reported here); only its presence is used.
+    /// The node's own status object (a contract failure is reported here). Its presence marks an answer; a dry
+    /// run also reads its success flag and its message.
     pub result: Option<serde_json::Value>,
     pub constant_result: Option<Vec<String>>,
     pub energy_used: Option<u64>,
+    /// The simulated transaction. Only the execution results in its `ret` list are read, and only by a dry run.
+    pub transaction: Option<serde_json::Value>,
 }
 
 /// `/wallet/broadcasthex` request.
@@ -428,6 +437,56 @@ fn check_trigger_answer(answer: &TriggerConstantContractResponse) -> Result<(), 
         Err(TronApiError::InvalidResponse(
             "triggerconstantcontract answer carries no result".to_owned(),
         ))
+    }
+}
+
+/// The revert indication of a dry-run answer, if it carries one (CRD ch.21 R21.10B.13 and its finding): the reason
+/// to show, which is the node's revert message, or the name of the simulated result when there is no message.
+///
+/// Either marker suffices. (i) The status object has the success flag `result: true` and a non-empty `message`;
+/// a node answers a reverted call so, with a positive `energy_used` (measured on a public mainnet node,
+/// 2026-11-20: `{"result": true, "message": "REVERT opcode executed"}`). (ii) An entry of `transaction.ret` names
+/// an execution result (`ret`, or `contractRet`) other than `SUCCESS`; a successful call has the entry `{}`. An
+/// empty `constant_result` is no marker on its own.
+fn dry_run_revert(answer: &TriggerConstantContractResponse) -> Option<String> {
+    use serde_json::Value;
+
+    let status = answer.result.as_ref().and_then(Value::as_object);
+    let flag_is_true = status.is_some_and(|status| status.get("result") == Some(&Value::Bool(true)));
+    let message = status
+        .and_then(|status| status.get("message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty());
+    let message = if flag_is_true { message } else { None };
+
+    let simulated = answer
+        .transaction
+        .as_ref()
+        .and_then(|transaction| transaction.get("ret"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| [entry.get("ret"), entry.get("contractRet")])
+        .flatten()
+        .filter(|name| !name.is_null())
+        .map(|name| name.as_str().map_or_else(|| name.to_string(), str::to_owned))
+        .find(|name| name != "SUCCESS");
+
+    match (message, simulated) {
+        (Some(message), _) => Some(message.to_owned()),
+        (None, Some(simulated)) => Some(format!("simulated result {simulated}")),
+        (None, None) => None,
+    }
+}
+
+/// The check of a dry-run answer: the endpoint's own shape ([`check_trigger_answer`]), then the revert indication,
+/// which ends the request at this node ([`TronApiError::ContractRevert`] is not a node failure).
+fn check_dry_run_answer(answer: &TriggerConstantContractResponse) -> Result<(), TronApiError> {
+    check_trigger_answer(answer)?;
+    match dry_run_revert(answer) {
+        Some(reason) => Err(TronApiError::ContractRevert(reason)),
+        None => Ok(()),
     }
 }
 
@@ -743,6 +802,31 @@ impl TronApiClient {
             function_selector,
             parameter_hex,
             check_trigger_answer,
+        )
+        .await
+    }
+
+    /// Like [`Self::trigger_constant_contract`] for the dry run of a call that is going to be sent (CRD ch.21
+    /// R21.10B.13 and its finding).
+    ///
+    /// # Errors
+    ///
+    /// [`TronApiError::ContractRevert`] when the answer carries a revert indication (a revert message beside a true
+    /// success flag, or a simulated execution result other than success), with the node's URL removed from the
+    /// reason; no other node is asked then. The errors of the walk otherwise.
+    pub async fn trigger_constant_dry_run(
+        &self,
+        owner_address: &TronAddress,
+        contract_address: &TronAddress,
+        function_selector: &str,
+        parameter_hex: &str,
+    ) -> Result<TriggerConstantContractResponse, TronApiError> {
+        self.trigger_constant_contract_checked(
+            owner_address,
+            contract_address,
+            function_selector,
+            parameter_hex,
+            check_dry_run_answer,
         )
         .await
     }
@@ -1072,6 +1156,63 @@ mod tests {
         let resp: TriggerConstantContractResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.constant_result.unwrap().len(), 1);
         assert_eq!(resp.energy_used, Some(685));
+    }
+
+    /// The answer forms are those a public mainnet node gave for a USDT `transfer(address,uint256)` on 2026-11-20.
+    #[test]
+    fn a_dry_run_answer_is_read_for_its_revert_indication() {
+        let reason_of = |json: &str| {
+            let answer: TriggerConstantContractResponse = serde_json::from_str(json).unwrap();
+            dry_run_revert(&answer)
+        };
+        let word = "0000000000000000000000000000000000000000000000000000000000000001";
+
+        // A successful call: no message, an empty simulated result.
+        let success = format!(
+            r#"{{"result":{{"result":true}},"energy_used":64285,"energy_penalty":49635,"constant_result":["{word}"],"logs":[{{"address":"a614f803b6fd780986a42c78ec9c7f77e6ded13c","data":"{word}","topics":["{word}"]}}],"transaction":{{"ret":[{{}}],"visible":true,"txID":"{word}","raw_data":{{}},"raw_data_hex":"0a02"}}}}"#
+        );
+        assert_eq!(reason_of(&success), None);
+        assert_eq!(
+            reason_of(r#"{"result":{"result":true},"transaction":{"ret":[{"ret":"SUCCESS"}]}}"#),
+            None
+        );
+        // An empty `constant_result` alone, an empty message, and a message beside a flag that is not true.
+        assert_eq!(reason_of(r#"{"result":{"result":true},"constant_result":[""]}"#), None);
+        assert_eq!(reason_of(r#"{"result":{"result":true,"message":" "}}"#), None);
+        assert_eq!(reason_of(r#"{"result":{"code":"OTHER_ERROR","message":"no"}}"#), None);
+        assert_eq!(reason_of(r#"{"constant_result":["00"],"energy_used":1}"#), None);
+
+        // A reverted call carries both markers; the message is the reason.
+        let reverted = r#"{"result":{"result":true,"message":"REVERT opcode executed"},"energy_used":8624,"energy_penalty":6640,"constant_result":[""],"transaction":{"ret":[{"ret":"FAILED"}],"visible":true}}"#;
+        assert_eq!(reason_of(reverted), Some("REVERT opcode executed".to_owned()));
+        // Either marker alone.
+        assert_eq!(
+            reason_of(r#"{"result":{"result":true,"message":"REVERT opcode executed"},"energy_used":8624}"#),
+            Some("REVERT opcode executed".to_owned())
+        );
+        for (ret, name) in [
+            (r#"{"ret":"FAILED"}"#, "FAILED"),
+            (r#"{"contractRet":"REVERT"}"#, "REVERT"),
+            (r#"{"ret":"SUCCESS","contractRet":"OUT_OF_ENERGY"}"#, "OUT_OF_ENERGY"),
+            (r#"{"ret":1}"#, "1"),
+        ] {
+            let answer =
+                format!(r#"{{"result":{{"result":true}},"energy_used":8624,"transaction":{{"ret":[{{}},{ret}]}}}}"#);
+            assert_eq!(reason_of(&answer), Some(format!("simulated result {name}")), "{ret}");
+        }
+    }
+
+    #[test]
+    fn a_revert_reason_is_scrubbed_of_node_urls_and_ends_the_request() {
+        let node = "https://user:secret@tron.example.org:8090/APIKEY";
+        let url = format!("{node}/wallet/triggerconstantcontract");
+        let reverted = TronApiError::ContractRevert(format!("refused, see {url} or {node}"));
+        assert!(!is_retryable(&reverted));
+        let text = reverted.without_node_urls(&[&url, node]).to_string();
+        for secret in ["user", "secret", "APIKEY"] {
+            assert!(!text.contains(secret), "a credential part is rendered");
+        }
+        assert!(text.starts_with("Contract call reverted: refused, see "), "{text}");
     }
 
     #[test]

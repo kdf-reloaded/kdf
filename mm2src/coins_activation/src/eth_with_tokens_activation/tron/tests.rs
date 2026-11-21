@@ -1,8 +1,7 @@
 //! Tests of the TRON platform on the mmrpc 2.0 route (CRD ch.21 R-A2, R21.10B.2, R21.10B.4, R21.10B.5,
 //! R21.10B.8, T21.10B.1 -- T21.10B.4, T21.10B.8, T21.10B.9, D21.10B.3 (b), F21.B3, D21.B7).
 //!
-//! The activation routines run end to end against a loopback stub of a TRON node. The build switch
-//! `TRON_ACTIVATION_AVAILABLE` stays `false`; a context opens the gate for itself with [`TRON_TEST_OVERRIDE_KEY`].
+//! The activation routines run end to end against a loopback stub of a TRON node.
 
 use super::*;
 use crate::erc20_token_activation::{enable_evm_token, EnableEvmTokenRequest, EvmTokenActivationResult};
@@ -250,8 +249,8 @@ fn coins_conf() -> Json {
     ])
 }
 
-/// A single-key context whose TRON gate is open.
-fn tron_ctx() -> MmArc { tron_ctx_with(json!({ (TRON_TEST_OVERRIDE_KEY): true })) }
+/// A single-key context.
+fn tron_ctx() -> MmArc { tron_ctx_with(json!({})) }
 
 /// A single-key context with the `extra` top-level `MM2.json` settings.
 fn tron_ctx_with(extra: Json) -> MmArc {
@@ -265,8 +264,8 @@ fn tron_ctx_with(extra: Json) -> MmArc {
     ctx
 }
 
-/// A global-HD context whose TRON gate is open, with an in-memory HD wallet database.
-fn tron_hd_ctx() -> MmArc { tron_hd_ctx_with(json!({ (TRON_TEST_OVERRIDE_KEY): true })) }
+/// A global-HD context with an in-memory HD wallet database.
+fn tron_hd_ctx() -> MmArc { tron_hd_ctx_with(json!({})) }
 
 /// A global-HD context with the `extra` top-level `MM2.json` settings and an in-memory HD wallet database.
 fn tron_hd_ctx_with(extra: Json) -> MmArc {
@@ -384,41 +383,85 @@ fn token_failure(ctx: &MmArc, ticker: &str) -> (Json, StatusCode) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// The gate
+// TRON is switched on as a wallet-only family (CRD ch.21 D6, R-D1, R21.B3)
 // ---------------------------------------------------------------------------------------------------------------
 
-/// While `TRON_ACTIVATION_AVAILABLE` is `false` and no override is set, the mmrpc route answers the refusal of the
-/// legacy routes and registers nothing; no node is contacted. The inner routine below the gate is what the other
-/// tests of this module run.
-#[test]
-fn the_gate_refuses_every_mmrpc_route_while_tron_is_switched_off() {
-    const { assert!(!TRON_ACTIVATION_AVAILABLE, "the build switch stays off") };
-    let node = untouched_stub();
-    let ctx = tron_ctx_with(json!({}));
-    assert!(!tron_activation_available(&ctx));
+/// Polls a token task to its terminal status.
+fn poll_token_task(ctx: &MmArc, task_id: u64) -> Json {
+    for _ in 0..400 {
+        let polled = block_on(init_token_status::<EthCoin>(
+            ctx.clone(),
+            serde_json::from_value::<RpcTaskStatusRequest>(json!({ "task_id": task_id, "forget_if_finished": false }))
+                .unwrap(),
+        ))
+        .unwrap_or_else(|e| panic!("status failed: {e}"));
+        let status = serde_json::to_value(&polled).unwrap();
+        if matches!(status["status"].as_str(), Some("Ok") | Some("Error")) {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the token task did not finish");
+}
 
-    // The platform route, with and without tokens.
-    for extra in [json!({}), json!({ "erc20_tokens_requests": tokens(&["USDT-TRC20"]) })] {
-        let (body, status) = failure(&ctx, request("TRX", std::slice::from_ref(&node.url), extra));
-        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
-        assert_eq!(body["error_data"]["error"], TRON_NOT_AVAILABLE, "{body}");
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    // The single-token route, and the token task.
-    let (body, status) = token_failure(&ctx, "USDT-TRC20");
-    assert_eq!(body["error_type"], "Internal", "{body}");
-    assert_eq!(body["error_data"], TRON_NOT_AVAILABLE, "{body}");
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let init = serde_json::from_value(json!({ "ticker": "USDT-TRC20", "activation_params": {} })).unwrap();
-    match block_on(init_token::<EthCoin>(ctx.clone(), init)) {
-        Ok(_) => panic!("the token task must not start"),
-        Err(e) => {
-            assert_eq!(serde_json::to_value(e.get_inner()).unwrap()["error_type"], "Internal");
-            assert_eq!(e.get_inner().status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-        },
-    }
-    assert_eq!(node.request_count(), 0, "a refused route contacts no node");
-    assert!(!is_registered(&ctx, "TRX") && !is_registered(&ctx, "USDT-TRC20"));
+/// Every mmrpc 2.0 route activates TRON in a plain context, with no setting that opens anything: the one-shot
+/// and the task platform routes with a TRC20 token in the request, and `enable_erc20` and `task::enable_erc20`
+/// for a token added later. The platform is `TRXT`, whose config does not say `wallet_only`, and neither does the
+/// token's: both are registered and both report wallet-only, because Reloaded has no TRON swap
+/// (`coins::TRON_SWAPS_AVAILABLE`).
+#[test]
+fn every_mmrpc_route_activates_tron_as_a_wallet_only_coin() {
+    const { assert!(coins::TRON_ACTIVATION_AVAILABLE && !coins::TRON_SWAPS_AVAILABLE) };
+    let node = TronStub::start(healthy);
+    let trading = |tokens_requests: Json| {
+        request(
+            "TRXT",
+            std::slice::from_ref(&node.url),
+            json!({ "swap_contract_address": USDT_CONTRACT, "erc20_tokens_requests": tokens_requests }),
+        )
+    };
+    let assert_wallet_only = |ctx: &MmArc, tickers: &[&str]| {
+        for ticker in tickers {
+            let coin = registered(ctx, ticker);
+            assert!(coin.is_tron_family(), "{ticker}");
+            assert_eq!(coins::coin_conf(ctx, ticker)["wallet_only"], Json::Null, "{ticker}");
+            assert!(coin.wallet_only(ctx), "{ticker} must be wallet-only");
+            assert!(!coin.is_coin_protocol_supported(&None), "{ticker} must decline a match");
+        }
+    };
+    // `TRXT` is the platform of the token configs of this test.
+    let with_trxt_tokens = || {
+        let mut conf = coins_conf();
+        for coin in conf.as_array_mut().expect("an array") {
+            if coin["protocol"]["type"] == "TRC20" && coin["protocol"]["protocol_data"]["platform"] == "TRX" {
+                coin["protocol"]["protocol_data"]["platform"] = json!("TRXT");
+            }
+        }
+        tron_ctx_with(json!({ "coins": conf }))
+    };
+
+    // `enable_eth_with_tokens`.
+    let ctx = with_trxt_tokens();
+    let result = activated(&ctx, trading(tokens(&["USDT-TRC20"])));
+    assert_eq!(result["current_block"], 4242, "{result}");
+    assert_wallet_only(&ctx, &["TRXT", "USDT-TRC20"]);
+
+    // `task::enable_eth::init` and `status`.
+    let ctx = with_trxt_tokens();
+    let status = run_task(&ctx, trading(tokens(&["USDT-TRC20"])));
+    assert_eq!(status["status"], "Ok", "{status}");
+    assert_wallet_only(&ctx, &["TRXT", "USDT-TRC20"]);
+
+    // `enable_erc20` and `task::enable_erc20::init` on an active platform.
+    let ctx = with_trxt_tokens();
+    activated(&ctx, trading(json!([])));
+    let result = enable_token(&ctx, "USDT-TRC20").unwrap_or_else(|e| panic!("enable_erc20 failed: {e}"));
+    assert_eq!(serde_json::to_value(&result).unwrap()["platform_coin"], "TRXT");
+    let init = serde_json::from_value(json!({ "ticker": "NODEC-TRC20", "activation_params": {} })).unwrap();
+    let response = block_on(init_token::<EthCoin>(ctx.clone(), init)).unwrap_or_else(|e| panic!("init failed: {e}"));
+    let status = poll_token_task(&ctx, response.task_id);
+    assert_eq!(status["status"], "Ok", "{status}");
+    assert_wallet_only(&ctx, &["TRXT", "USDT-TRC20", "NODEC-TRC20"]);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1467,27 +1510,9 @@ fn the_key_policy_refusals_hold_under_a_global_hd_login() {
     }
 }
 
-/// The availability constant still refuses every route while it is `false`, under a global-HD login as well: no
-/// node is contacted, no key is derived and nothing is registered.
-#[test]
-fn the_gate_refuses_an_hd_activation_while_tron_is_switched_off() {
-    const { assert!(!TRON_ACTIVATION_AVAILABLE, "the build switch stays off") };
-    let node = untouched_stub();
-    let ctx = tron_hd_ctx_with(json!({}));
-    assert!(!tron_activation_available(&ctx));
-    let wire = failure(&ctx, hd_request(&node, json!({})));
-    assert_eq!(wire.0["error_type"], "PlatformCoinCreationError", "{:?}", wire.0);
-    assert_eq!(wire.0["error_data"]["error"], TRON_NOT_AVAILABLE, "{:?}", wire.0);
-    let status = run_task(&ctx, hd_request(&node, json!({})));
-    assert_eq!(status["status"], "Error", "{status}");
-    assert_eq!(node.request_count(), 0);
-    assert!(!is_registered(&ctx, "TRX"));
-}
-
 /// The legacy `enable` route keeps the node's internal key under a global-HD login (a Reloaded extension, as the EVM
-/// and UTXO legacy routes do), so its address differs from the HD route's address for the same seed. The legacy
-/// entry itself sits behind the availability constant; this test drives the builder it calls with the key it passes,
-/// `mm2_internal_privkey_slice`.
+/// and UTXO legacy routes do), so its address differs from the HD route's address for the same seed. This test
+/// drives the builder the legacy entry calls with the key it passes, `mm2_internal_privkey_slice`.
 #[test]
 fn the_legacy_route_under_a_global_hd_login_keeps_the_internal_key() {
     let ctx = tron_hd_ctx();
@@ -1637,7 +1662,7 @@ fn swap_contracts_follow_the_wallet_only_rule_and_take_both_tron_forms() {
     }
 
     // The v2 contracts are required while trading protocol v2 is on, and take both forms.
-    let ctx = tron_ctx_with(json!({ (TRON_TEST_OVERRIDE_KEY): true, "use_trading_proto_v2": true }));
+    let ctx = tron_ctx_with(json!({ "use_trading_proto_v2": true }));
     let wire = failure(
         &ctx,
         request(
@@ -1855,3 +1880,9 @@ fn task_enable_erc20_activates_a_trc20_token_and_reports_base58check() {
     );
     assert!(is_registered(&ctx, "USDT-TRC20"));
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// TRON GasFree: the activation binding and the custody address in the reports (CRD ch.63)
+// ---------------------------------------------------------------------------------------------------------------
+
+mod gasfree;

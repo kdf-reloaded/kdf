@@ -175,9 +175,10 @@ impl Qrc20Coin {
                 let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
                 let coins = coins_ctx.coins.lock().await;
                 // The ticker has to be registered, and registered as this instance: the token may have been disabled
-                // and enabled again (CRD ch.38 D38.6.4Q.5 status note, item 2).
+                // and enabled again (CRD ch.38 D38.6.4Q.5 status note, item 2). A passive platform is still
+                // registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
                 let registered = matches!(
-                    coins.get(&self.utxo.conf.ticker),
+                    coins.registered().get(&self.utxo.conf.ticker),
                     Some(MmCoinEnum::Qrc20Coin(registered)) if Arc::ptr_eq(&registered.0, &self.0)
                 );
                 if !registered {

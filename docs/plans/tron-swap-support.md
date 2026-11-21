@@ -19,6 +19,11 @@
 > planned to return in the next beta; turning activation back on (ch.21 D6)
 > comes before, and is part of, any revival of this branch.
 
+> **Status (2026-11-20).** TRON activation is switched on again, as a
+> wallet-only coin family: `TRON_ACTIVATION_AVAILABLE` is `true`, and swaps stay
+> off behind `TRON_SWAPS_AVAILABLE` (`false`) (CRD ch.21 D6 and its status
+> note; plan `tron-support`). The box above describes the tree until that date.
+
 ## Relation to the TRON work (2026-11-08)
 
 TRON swaps are being built for 0.4.0 as a series of new PRs, from CRD ch.21 §21.11B and the maintainer decisions of

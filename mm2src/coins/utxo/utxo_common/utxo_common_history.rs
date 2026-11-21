@@ -368,7 +368,8 @@ where
         {
             let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
             let coins = coins_ctx.coins.lock().await;
-            if !coins.contains_key(&coin.as_ref().conf.ticker) {
+            // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
+            if !coins.registered().contains(&coin.as_ref().conf.ticker) {
                 log_tag!(ctx, "", "tx_history", "coin" => coin.as_ref().conf.ticker; fmt = "Loop stopped");
                 if let Some(ref script_hash) = watched_script_hash {
                     wake_rx.close();

@@ -1982,6 +1982,59 @@ names.
 >    collector (chapter 55 D55.8); the reference's EVM platform-with-tokens
 >    activation never does, at a first activation or a re-activation.
 
+> *Reloaded status (clean side, 2026-11-18; Reloaded-original, its own code):*
+> the passive platform state is built for the legacy `disable_coin`; the
+> re-activation and the NFT chain of this section are not built yet.
+>
+> 1. *Legacy `disable_coin`.* It reads `force_disable` (R43.1E.1) and answers
+>    `passivized` (R43.1E.2). An unforced call for a platform with at least one
+>    dependent cancels the platform's own orders and makes it passive
+>    (R43.1E.5 item 3); a forced call removes the platform and every dependent
+>    (item 4), and under D43.1E.2 (b) it first checks the platform and every
+>    dependent for running swaps and orders being matched, and refuses the whole
+>    call if any is in use. A passive platform is registered, listed by
+>    `get_enabled_coins` in both forms, and not active for any other look-up
+>    (R43.1E.6, R43.1F.10 item 1); its history collection goes on, the TRON
+>    platform history included (its process finds its platform and its tokens
+>    on the registered view, R43.1E.6 item 3). The EVM and TRON history
+>    processes check their registration on each pass and end at their next
+>    pass once their coin is removed.
+> 2. *Versioned form.* The `disable_coin` of §43.1R is as it was (the
+>    maintainer's decision on its scope): it does not read `force_disable`, has
+>    no `passivized`, removes the requested coin, and answers `NoSuchCoin` for a
+>    passive platform. A platform it removes leaves its dependents registered.
+> 3. *Locks (D43.1F.2 (b)).* `disable_coin`, in both forms, takes the
+>    activation lock of the requested ticker (chapter 55 R55.1.12), the legacy
+>    forced call that of every dependent too, and the token and layer-two
+>    activations, one-shot and task forms, take the lock of their platform with
+>    their own, and check the platform again once the locks are held. Each
+>    ticker's lock is a shared/exclusive lock: the token and layer-two
+>    activations take their platform's lock shared (so several tokens of one
+>    platform activate in parallel), and `disable_coin` and each ticker's own
+>    activation take it exclusively.
+> 4. *Token and layer-two activations on a passive platform (R43.1F.6).* They
+>    answer `PlatformCoinIsNotActivated`, naming the platform, and for the
+>    Lightning task `init` naming the Lightning ticker; a legacy `enable` of an
+>    ERC20 token is accepted and does not join the set.
+> 5. *Token look-ups (D43.1F.3 (b)).* A Reloaded EVM token keeps its swap
+>    gas-fee policy in its own instance and looks its platform up by no ticker,
+>    so a token's orders, swaps and fee estimates work while its platform is
+>    passive; nothing changed in the EVM token code for it. A TRC20 token looks
+>    its platform up by ticker for its HD methods, its GasFree address and
+>    `withdraw`, gasless included; that look-up is the token's own and finds a
+>    passive platform.
+> 6. *Standalone tasks (D43.1F.4 (b)).* The `init` of a standalone activation
+>    task refuses the ticker of a passive platform with `CoinIsAlreadyActivated`
+>    and builds nothing.
+> 7. *Not yet built.* The platform-with-tokens re-activation (R43.1F.2,
+>    R43.1F.3: until it follows, those methods answer `PlatformIsAlreadyActivated`
+>    for a passive platform and a legacy `enable` or `electrum` is refused as
+>    already activated), the NFT chain as a dependent (R43.1F.8), the token
+>    record timing (D43.1F.2), the `reactivation_registered_token` setting
+>    (D43.1F.1), the rule that `tx_history` is ignored on re-activation
+>    (D43.1F.5), and ending the other background work of a removed coin
+>    (R43.1E.5 items 2 and 4).
+
 **D43.1F.1** *(Open, 2026-11-18.)* **A requested token that is already
 registered.** Options: (a) reproduce the reference: keep the registered
 instance silently, case by case as R43.1F.4; (b) keep it when it is already

@@ -41,7 +41,7 @@ fn u256_to_trezor_be(v: U256) -> Vec<u8> {
 /// present the HD selector is validated and resolved per R49.2 (R50.8), failing
 /// with the ch. 49 sender-selector discriminants (R50.19). This runs before any
 /// device exchange, so a bad selector never triggers a device prompt.
-async fn resolve_evm_trezor_withdraw_sender(
+pub(crate) async fn resolve_evm_trezor_withdraw_sender(
     coin: &EthCoin,
     req: &WithdrawRequest,
     signer: &EthTrezorSigner,
@@ -51,7 +51,10 @@ async fn resolve_evm_trezor_withdraw_sender(
         None => return Ok((signer.address, signer.derivation_path.clone())),
     };
 
-    let hd_wallet = match coin.derivation_method() {
+    // A token's `from` selects an address of its platform's HD wallet (CRD ch.49 R49.34); only the address and its
+    // derivation path are taken from it, no key.
+    let wallet_coin = coin.hd_serving_coin().await.map_to_mm(WithdrawError::InternalError)?;
+    let hd_wallet = match wallet_coin.derivation_method() {
         DerivationMethod::HDWallet(hd_wallet) => hd_wallet,
         DerivationMethod::Iguana(_) => {
             let error = "'from' is not supported if the EVM coin is initialized with a single private key";
@@ -88,7 +91,7 @@ async fn resolve_evm_trezor_withdraw_sender(
     let is_address_activated = hd_account
         .is_address_activated(chain, address_id)
         .mm_err(|e| WithdrawError::UnexpectedFromAddress(e.to_string()))?;
-    let hd_address = coin
+    let hd_address = wallet_coin
         .derive_address(&hd_account, chain, address_id)
         .mm_err(|e| WithdrawError::UnexpectedFromAddress(e.to_string()))?;
     if !is_address_activated {
@@ -147,6 +150,23 @@ pub(crate) fn ensure_trezor_withdraw_supported(coin: &EthCoin) -> MmResult<(), W
         ));
     }
     Ok(())
+}
+
+/// The direct `withdraw` of an ERC-20 token under the Trezor policy with `from` (CRD ch.49 R49.34 item 2). The
+/// direct route cannot sign on a device and is refused with `UnsupportedError`, but that refusal comes at the signing
+/// step: the request's own errors and the selector errors are answered first, before any balance or nonce query.
+pub(crate) async fn refuse_direct_trezor_token_withdraw(
+    coin: EthCoin,
+    signer: EthTrezorSigner,
+    req: WithdrawRequest,
+) -> WithdrawResult {
+    validate_evm_withdraw_request(&coin, &req)?;
+    resolve_evm_trezor_withdraw_sender(&coin, &req, &signer).await?;
+    MmError::err(WithdrawError::UnsupportedError(
+        "Unsupported under the Trezor signing policy: Trezor EVM withdrawals require the 'task::withdraw' API for \
+         device user-action signing"
+            .to_owned(),
+    ))
 }
 
 /// The EVM Trezor withdrawal task path (R49.6). Builds the unsigned legacy

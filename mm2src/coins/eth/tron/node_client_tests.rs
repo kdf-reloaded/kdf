@@ -483,6 +483,45 @@ fn a_transient_code_moves_on_and_any_other_code_is_final() {
     block_on(client.trigger_constant_contract(&address(), &address(), "f()", "")).expect("the second node answers");
 }
 
+/// CRD ch.21 R21.10B.13 and its finding: a dry run that reverts ends the request at the node that answered it. The
+/// answer forms are those a public mainnet node gave on 2026-11-20.
+#[test]
+fn a_reverting_dry_run_is_final_and_asks_no_other_node() {
+    let word = "0000000000000000000000000000000000000000000000000000000000000001";
+    let succeeded: &'static str = Box::leak(
+        format!(
+            r#"{{"result":{{"result":true}},"energy_used":64285,"energy_penalty":49635,"constant_result":["{word}"],"logs":[{{"data":"{word}"}}],"transaction":{{"ret":[{{}}]}}}}"#
+        )
+        .into_boxed_str(),
+    );
+    let reverted = r#"{"result":{"result":true,"message":"REVERT opcode executed"},"energy_used":8624,"energy_penalty":6640,"constant_result":[""],"transaction":{"ret":[{"ret":"FAILED"}]}}"#;
+    let dry_run = |client: &TronApiClient| {
+        block_on(client.trigger_constant_dry_run(&address(), &address(), "transfer(address,uint256)", ""))
+    };
+
+    let (reverting, never_asked) = (fixed(200, reverted), fixed(200, succeeded));
+    let client = client_over(&[&reverting, &never_asked], 5.);
+    match dry_run(&client) {
+        Err(TronApiError::ContractRevert(reason)) => assert_eq!(reason, "REVERT opcode executed"),
+        other => panic!("expected the contract's revert, got {other:?}"),
+    }
+    assert_eq!(reverting.requests().len(), 1);
+    assert!(never_asked.requests().is_empty());
+    // The node order is unchanged: the reverting node answered, it did not fail.
+    assert_eq!(client.order_labels(), labels(&[&reverting, &never_asked]));
+
+    // A node failure before it still moves on, and the revert of the next node is final.
+    let (down, reverting, never_asked) = (fixed(500, "down"), fixed(200, reverted), fixed(200, succeeded));
+    let client = client_over(&[&down, &reverting, &never_asked], 5.);
+    assert!(matches!(dry_run(&client), Err(TronApiError::ContractRevert(_))));
+    assert!(never_asked.requests().is_empty());
+
+    // A successful dry run is an answer with its energy figure.
+    let healthy = fixed(200, succeeded);
+    let client = client_over(&[&healthy], 5.);
+    assert_eq!(dry_run(&client).expect("an answer").energy_used, Some(64_285));
+}
+
 #[test]
 fn endpoint_checks_move_on_to_the_next_node() {
     let id = "0000000003456789abcdef0123456789abcdef0123456789abcdef0123456789";

@@ -323,6 +323,12 @@ R40.2.3 **Success result** (HTTP 200):
 
 All balances are decimal strings.
 
+> *Status note (Spec Reader round 0.5.0-20, 2026-11-21; passed the KDF
+> Dirty Gate with §40.2A):* the form of these strings — zero, trailing
+> zeros, large values, a token with 0 decimals — and the form of the amounts
+> in a withdraw answer are stated in §40.2A. No sentence of R40.2.3 is
+> changed.
+
 R40.2.4 **Errors** (all mmrpc-level):
 
 | `error_type` | Returned when | `error_data` | HTTP |
@@ -375,6 +381,169 @@ proceed as with `false`.
 > method sends no commitment level and the node's default applies. A token
 > activated from an inline `protocol` is wallet-only. A wallet without a
 > token account reads `"0"` (D40.6B.2 (a)).
+
+## 40.2A The string form of balances and amounts (reference behavior)
+
+> *Status note (Spec Reader round 0.5.0-20, 2026-11-21; passed the KDF
+> Dirty Gate on 2026-11-21, measure 0.00; attestation in §40.12):* this
+> section was written by the KDF Spec Reader under the
+> two-team procedure of chapter 01 §1.4A, from four inputs: (1) the
+> reference at the rows `v3.0.0-beta`, `v2.6.0-beta` and
+> `main (as of 2026-10-07)` of chapter 02 §2.15A, which agree on everything
+> below, so "the reference" means all three; (2) the published behavior of
+> the public decimal-number library those rows pin, at the one version all
+> three pin; (3) observations of the public Solana mainnet JSON-RPC endpoint
+> made on 2026-11-21 (chapter 01 R6); (4) this chapter. No row was added to
+> chapter 02 §2.15A. The section completes R40.2.3, R40.3.3, R40.4.1,
+> R40.6B.9, R40.6B.10 and R40.6B.12 and edits none of them. Nothing of the
+> reference is quoted; member names, `error_type` values and public JSON-RPC
+> names are the interface. This note is the section's provenance record
+> (section-scoped; §40.12 is unchanged).
+
+*One term.* The **shortest form** of an amount is the decimal text of its
+exact value with no zeros after the last non-zero decimal, no decimal point
+when the value is whole, a single `0` before the point when the value is
+below one, no exponent and no digit grouping. Zero is `"0"`. A negative
+value has a leading `-`.
+
+**R40.2A.1** *SOL balance.* The string is the exact value of the lamport
+count divided by 10^9, in the shortest form. It is never padded to nine
+decimals and never rounded, at any size: every lamport count a node can
+report is rendered with all its digits.
+
+| Lamports | String |
+| --- | --- |
+| 0 | `"0"` |
+| 1 | `"0.000000001"` |
+| 5000 | `"0.000005"` |
+| 1000000000 | `"1"` |
+| 1500000000 | `"1.5"` |
+| 10000000000 | `"10"` |
+| 12345678901234 | `"12345.678901234"` |
+| 18446744073709551615 | `"18446744073.709551615"` |
+
+**R40.2A.2** *SPL token balance.* The string is the node's own
+`uiAmountString` member of the `getTokenAccountBalance` answer (R40.4.1),
+passed on digit for digit. The reference does not compute it from the raw
+amount and the decimals, and it neither trims, pads nor rounds it: zeros
+the node sends after the last non-zero decimal would be kept. The form is
+therefore the node's:
+
+- *Observed.* The public mainnet endpoint on 2026-11-21 (a node reporting
+  API version 4.4.0) sends the shortest form: for a raw amount of
+  4572211441380 at 8 decimals it sent `"45722.1144138"`, and for a raw
+  amount of 8799429046467041142 at 5 decimals `"87994290464670.41142"`,
+  every digit kept.
+- *Not observed in this round.* A zero amount and a token with 0 decimals.
+  The published Solana node software forms the string the same way for
+  both: `"0"` for zero whatever the decimals, and a whole number without a
+  decimal point for a token with 0 decimals.
+- On such a node the token string equals the shortest form of the raw
+  amount divided by 10^decimals, the decimals being those of the mint.
+- The token's configured `protocol_data.decimals` takes no part in the
+  balance string. Where it differs from the mint's decimals the balance
+  still shows the mint's scale, while a withdraw scales by the configured
+  value (R40.6B.10).
+- The zero of an unknown mint (R40.2.3) is `"0"` and does not come from a
+  node string.
+
+**R40.2A.3** *Where the form applies.* One balance read serves every
+surface, so the same string appears in:
+
+| Surface | Member |
+| --- | --- |
+| `experimental::enable_solana_with_assets` | `balance.spendable`; each `tokens_balances.<ticker>.spendable` |
+| `experimental::enable_solana_token` | `balance.spendable` |
+| `my_balance` | `balance` |
+
+The unspendable member (`unspendable`, and `unspendable_balance` of
+`my_balance`) is `"0"` for both kinds on every surface; it has no other
+value. No surface pads or rounds differently from another.
+
+**R40.2A.4** *Amounts in a withdraw answer.* All are exact; none is
+rounded. Their form depends on how the member is made:
+
+- *One converted figure: the shortest form.* `total_amount` (both kinds);
+  `received_by_me` (the amount, or `"0"`); `spent_by_me` of an SPL
+  withdraw; `fee_amount`; `rent_amount` (`"0"` when no account is created
+  and in every SOL withdraw); the `total_amount` of `fee_details` in a SOL
+  withdraw, which equals `fee_amount`.
+- *A sum or a difference: not reduced.* It shows as many decimals as the
+  operand that has more of them, so it can end in zeros and a zero result
+  can read `"0.0"`. This applies to `spent_by_me` of a SOL withdraw
+  (amount plus fee), to `my_balance_change` of both kinds, and to the
+  `total_amount` of `fee_details` in an SPL withdraw (fee plus rent).
+
+| Case | Member | String |
+| --- | --- | --- |
+| SOL, amount 1.5, fee 0.000005, to another address | `spent_by_me` / `my_balance_change` | `"1.500005"` / `"-1.500005"` |
+| SOL, amount 0.999995, fee 0.000005, to another address | `spent_by_me` / `my_balance_change` | `"1.000000"` / `"-1.000000"` |
+| SOL, amount 0.123456789, fee 0.000005, to the wallet itself | `received_by_me` / `spent_by_me` / `my_balance_change` | `"0.123456789"` / `"0.123461789"` / `"-0.000005000"` |
+| SPL, amount 1.5, to another address | `my_balance_change` | `"-1.5"` |
+| SPL, amount 1.5, to the wallet itself | `my_balance_change` | `"0.0"` |
+| SPL, amount 0.25, to the wallet itself | `my_balance_change` | `"0.00"` |
+| SPL, amount 2, to the wallet itself | `my_balance_change` | `"0"` |
+| SPL, fee 0.000005, no account created | `fee_details.total_amount` | `"0.000005"` |
+| SPL, fee 0.000005, rent 0.00203928 | `fee_details.total_amount` | `"0.00204428"` |
+
+The amounts in the table are worked examples of the rule, not values taken
+from a run or from any reference test.
+
+*Error members.* `NotSufficientBalance` of a SOL withdraw: `available` and
+`required` in the shortest form. Of an SPL withdraw: `available` is the
+token balance string of R40.2A.2 and `required` the shortest form.
+`NotSufficientPlatformBalanceForFee`: `available` is the SOL balance of
+R40.2A.1 and `required` the fee-plus-rent sum, in the form of a sum. The
+`threshold` of `AmountTooLow` is `"0.000000001"`.
+
+**R40.2A.5** *Requirement.* On every surface, R40.3A.2 and R40.3A.4
+included, this project shall render a SOL balance as R40.2A.1 states, and
+a token balance as a string equal to the shortest form of the token
+account's raw amount divided by 10^decimals of the mint, which is what
+R40.2A.2 gives on today's nodes. No limit on significant digits and no
+rounding may be applied: a balance of 12345678901234 lamports is
+`"12345.678901234"`. Every amount of a withdraw answer shall be exact.
+Whether the padded forms of R40.2A.4's sums are reproduced is D40.2A.1.
+
+**D40.2A.1** *The padded sums of R40.2A.4.* (a) This project answers the
+shortest form in those members too: every value is numerically equal to
+the reference's, and the text differs only in the cases R40.2A.4 lists
+(`"1"` for `"1.000000"`, `"0"` for `"0.0"`). (b) This project reproduces
+the reference's text. A client that reads the members as decimal numbers
+sees no difference between the two.
+
+> *Reloaded status (clean side, 2026-11-21):* by the maintainer's decision
+> of 2026-11-21, neither option is taken as written: a sum or difference of
+> R40.2A.4 is written with the coin's full decimals, 9 for SOL and the
+> mint's decimals for a token amount. The members are `spent_by_me` and
+> `my_balance_change` of a SOL withdraw, `my_balance_change` of an SPL
+> withdraw, the `total_amount` of `fee_details` in an SPL withdraw, and
+> `required` of `NotSufficientPlatformBalanceForFee` and of a SOL
+> withdraw's `NotSufficientBalance`. Every value equals the reference's;
+> the text differs from R40.2A.4 where the reference writes fewer
+> decimals: `"1.500005000"` for `"1.500005"`, `"1.000000000"` for
+> `"1.000000"`, `"-1.500000"` for `"-1.5"` (a 6-decimal mint), `"0.000000"`
+> for `"0.0"` and `"0.00"`, `"0.002044280"` for `"0.00204428"`, and for a
+> SOL `NotSufficientBalance` `"1.000005000"` where R40.2A.4's error
+> sentence gives the shortest form. A value with more decimals than its
+> coin's keeps them all. Single figures and every `available` keep the
+> shortest form. T40.2A.4's sum text follows this note. Built in PR #456.
+
+**T40.2A.1** Every row of R40.2A.1's table, on each surface of R40.2A.3
+and on `enable_solana_with_tokens`.
+
+**T40.2A.2** Token balances from a raw amount and the mint's decimals:
+1500000 at 6 gives `"1.5"`; 0 at 6 gives `"0"`; 7 at 0 gives `"7"`;
+4572211441380 at 8 gives `"45722.1144138"`; 123456789012345678 at 9 gives
+`"123456789.012345678"`.
+
+**T40.2A.3** The unspendable member is `"0"` for SOL and for a token on
+every surface of R40.2A.3.
+
+**T40.2A.4** A SOL withdraw of 12345.678901234 SOL answers that text as
+`total_amount`, and `spent_by_me` equal in value to the amount plus the
+fee with no digit lost; the text of a sum follows the option chosen in
+D40.2A.1.
 
 ## 40.3 `experimental::enable_solana_token`
 
@@ -1907,3 +2076,27 @@ with the shapes listed in §40.6 items 3-5.
   D40.3 record this repository's own code and the maintainer's decisions of
   2026-11-15, 2026-11-18 and 2026-11-19. They take no forbidden-class input
   beyond the cleared rules they cite.
+- *Scoped addition (2026-11-21, Spec Reader round 0.5.0-20) -- §40.2A
+  (the shortest form, R40.2A.1 -- R40.2A.5, the error members, D40.2A.1,
+  T40.2A.1 -- T40.2A.4) and the status note after R40.2.3; the section's
+  own head note is its provenance record, and this item carries the
+  clearance only.* **KDF Dirty Gate: PASS on 2026-11-21, measure 0.00, no
+  findings** (chapter 01 R40; the attestation closes this item).
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-21, measure
+  0.00, no findings, in a main pass and a delta pass after one
+  informative note was deleted (the main pass measured 0.03, from that
+  note only; the delta pass compared bytes: the status note after R40.2.3
+  identical, §40.2A equal to the first-passed text without that note and
+  one blank line). *Extent:* the Solana coin subsystem -- the SOL and SPL
+  balance reads, the SOL and SPL withdraw amount and fee formation, the
+  withdraw error members and the two Solana activation surfaces -- at the
+  rows `v3.0.0-beta`, `v2.6.0-beta` and `main (as of 2026-10-07)`, seven
+  files per state; on the candidate side, the two additions only.
+  *Method:* reading plus mechanical comparison (every identifier-shaped
+  token of the additions judged forced or free); the repository's
+  clean-room gate tool was not applicable because the additions embed no
+  code blocks. *Measure:* 0.00, on the discretionary-expression basis.
+- *Clean-context addition (2026-11-21, forbidden corpus not consulted):*
+  the status note after D40.2A.1 records this repository's own code and
+  the maintainer's decision of 2026-11-21 on the text of withdraw sums. It
+  takes no forbidden-class input beyond the cleared rules it cites.

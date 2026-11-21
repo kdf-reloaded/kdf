@@ -514,7 +514,7 @@ fn ctx_with_hw(material_client: TrezorClient, internal_pubkey: H264) -> MmArc {
         "netid": mm2_net_config::SUPPORTED_NETIDS[0],
         "coins": [
             {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80,"mm2":1},
-            {"coin":"JST","name":"jst","rpcport":80,"mm2":1,"protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
+            {"coin":"JST","name":"jst","rpcport":80,"mm2":1,"decimals":18,"protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
         ]
     });
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
@@ -571,6 +571,7 @@ fn build_trezor_coin(
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -630,6 +631,20 @@ fn device_trezor_hd_coin(
     leaf_address: Address,
     leaf_public: Public,
 ) -> EthCoin {
+    device_trezor_hd_coin_with_addresses(ctx, coin_type, url, account_xpub, leaf_address, leaf_public, 1)
+}
+
+/// Same as [`device_trezor_hd_coin`], with `external_addresses_number` known
+/// external addresses on account 0 (address 0 stays the default address).
+fn device_trezor_hd_coin_with_addresses(
+    ctx: &MmArc,
+    coin_type: EthCoinType,
+    url: String,
+    account_xpub: Secp256k1ExtendedPublicKey,
+    leaf_address: Address,
+    leaf_public: Public,
+    external_addresses_number: u32,
+) -> EthCoin {
     let ticker = match coin_type {
         EthCoinType::Eth => "ETH",
         EthCoinType::Erc20 { .. } => "JST",
@@ -642,7 +657,7 @@ fn device_trezor_hd_coin(
         account_id: 0,
         extended_pubkey: account_xpub,
         account_derivation_path,
-        external_addresses_number: 1,
+        external_addresses_number,
     };
     let mut accounts = BTreeMap::new();
     accounts.insert(0, account);
@@ -744,6 +759,8 @@ fn emulator_trezor_withdraw_native_no_from() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -781,8 +798,8 @@ fn emulator_trezor_withdraw_native_no_from() {
     );
 }
 
-/// T50.2: ERC20 Trezor withdraw with a derivation-path `from` selector resolving
-/// to the activated default HD address. Exercises the `transfer(address,uint256)`
+/// T50.2 / T49.9: ERC20 Trezor withdraw with a derivation-path `from` selector resolving
+/// to a non-default activated HD address (external address 1) of the token's platform. Exercises the `transfer(address,uint256)`
 /// ABI payload (the `EthereumTxAck` streaming path) and device signing.
 #[test]
 fn emulator_trezor_withdraw_erc20_with_from_path() {
@@ -804,24 +821,56 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
         "0x0",
         "0x00000000000000000000000000000000000000000000003635c9adc5dea00000",
     );
-    let coin = device_trezor_hd_coin(
+    // The token is built the way the token activation builds it, from its platform coin, and so carries the
+    // single-address derivation method of an activated token (CRD ch.49 R49.34, T49.9). The platform is registered,
+    // as `from` is resolved against its HD wallet.
+    let platform = device_trezor_hd_coin_with_addresses(
         &ctx,
-        EthCoinType::Erc20 {
-            platform: "ETH".to_string(),
-            token_addr: Address::from_str(TOKEN_ADDR.trim_start_matches("0x")).unwrap(),
-        },
+        EthCoinType::Eth,
         node.url.clone(),
         material.eth_account_xpub.clone(),
         device_addr,
         material.eth_public,
+        2,
     );
+    let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+    block_on(coins_ctx.add_coin(MmCoinEnum::EthCoin(platform.clone()))).unwrap();
+    let coin = block_on(platform.erc20_token_from_conf_or_contract(
+        "JST".to_string(),
+        Address::from_str(TOKEN_ADDR.trim_start_matches("0x")).unwrap(),
+        1,
+        false,
+    ))
+    .expect("the token builds from its platform coin");
+    assert!(
+        matches!(coin.derivation_method, DerivationMethod::Iguana(_)),
+        "an activated token carries the single-address derivation method"
+    );
+
+    // The selected, non-default address: external address 1 of account 0, derived from the account xpub.
+    let selected_public = pubkey_from_extended(
+        &material
+            .eth_account_xpub
+            .derive_child(ChildNumber::new(0, false).unwrap())
+            .unwrap()
+            .derive_child(ChildNumber::new(1, false).unwrap())
+            .unwrap(),
+    );
+    let selected_addr = public_to_address(&selected_public);
+    assert_ne!(
+        selected_addr, device_addr,
+        "address 1 must differ from the default address"
+    );
+    println!("SELECTED_ADDR = {:#x}", selected_addr);
 
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::DerivationPath {
-            derivation_path: EVM_PATH.to_string(),
+            derivation_path: "m/44'/60'/0'/0/1".to_string(),
         }),
         to: RECIPIENT.to_string(),
         coin: "JST".to_string(),
@@ -835,7 +884,13 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
     let _confirm = ConfirmLoop::spawn(120);
     let details = drive_withdraw(&ctx, coin, req, Duration::from_secs(120)).expect("erc20 withdraw Ok");
 
-    let expected_from = checksum_address(&format!("{:#02x}", device_addr));
+    let expected_from = checksum_address(&format!("{:#02x}", selected_addr));
+    let default_from = checksum_address(&format!("{:#02x}", device_addr));
+    assert_ne!(
+        details.from,
+        vec![default_from],
+        "`from` must not be the default address"
+    );
     println!("FROM = {:?}", details.from);
     println!("TX_HASH = {}", details.tx_hash);
     assert_eq!(details.from, vec![expected_from]);
@@ -846,8 +901,8 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
     println!("RECOVERED_SENDER = {:#x}", signed.sender());
     assert_eq!(
         signed.sender(),
-        device_addr,
-        "recovered sender must be the resolved address"
+        selected_addr,
+        "recovered sender must be the selected address"
     );
 
     // The signed payload data must be the ERC20 transfer(address,uint256) call:
@@ -893,6 +948,8 @@ fn emulator_trezor_withdraw_tron_unsupported() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -939,6 +996,8 @@ fn emulator_trezor_withdraw_bad_from_selector() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: Some(crate::WithdrawFrom::DerivationPath {
             derivation_path: "m/44'/0'/0'/0/0".to_string(),
@@ -1119,6 +1178,8 @@ fn emulator_trezor_withdraw_passphrase_user_action() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -1216,6 +1277,8 @@ fn emulator_trezor_withdraw_passphrase_action_mismatch() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),
@@ -1388,6 +1451,8 @@ fn emulator_trezor_activate_eth_native() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: RECIPIENT.to_string(),

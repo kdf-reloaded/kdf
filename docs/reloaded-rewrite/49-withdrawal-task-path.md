@@ -39,6 +39,27 @@ shape.
 > They are inert for every non-Tron coin. Chapter 63 passed the KDF Dirty Gate
 > on 2026-11-08.
 
+> *Status note (2026-11-20), the fee-rail members as built (clean side).* The
+> shared request has the optional members `fee_method` and `gasless`, and the
+> structured withdrawal error has the arm `Gasless`, whose `error_data` is an
+> object with its own `error_type` (chapter 63 §63.9.1). The direct `withdraw`
+> method and `task::withdraw::init` check the two members right after the coin
+> is found: on a coin that is not a TRON coin `fee_method` `gasless` or `auto`
+> answers `Gasless`/`Unavailable` (HTTP 503), and on every coin `gasless`
+> options without one of those two values answer `InvalidFeePolicy` (HTTP
+> 400). On the task route the `init` call itself answers both. A request
+> without the two members is served as before. The task status vocabulary
+> gained `FetchingGaslessQuote` and `SigningGaslessAuthorization` (chapter 63
+> §63.3.6). TRON stays switched off, so only the two refusals can be met
+> today.
+
+> *Status note (2026-11-20, Reloaded-original), TRON switched on.* The last
+> sentence of the note above describes the tree before TRON activation was
+> switched on ([Chapter 21](21-tron-integration.md) D6 and its status note of
+> this date). With it on, a request for an activated TRC20 token reaches the
+> sign-only gasless rail of chapter 63 §63.8A, and the two task progress
+> values can be met.
+
 > **The `fee` descriptor's EVM forms (cross-reference).** The descriptor is a
 > single enumeration shared by every coin family, tagged by a `type` member.
 > Its EVM forms, the rule for an absent descriptor, the gas-limit estimation
@@ -421,6 +442,34 @@ sender-resolution step, on the direct `withdraw` method and on
 > R49.34. Closing the gap means resolving a token's HD surfaces against its
 > platform's HD wallet (R49.32's last paragraph, R49.34 item 1).
 
+*Status note (2026-11-20), ERC-20 `from` under HD (as built).* Item (b) of
+the Reloaded status above is closed for its `from` half and for the token
+ticker of the HD address methods. A token activated through the public
+routines on a software-HD platform now accepts `from` on `withdraw` and
+`task::withdraw::init`: the selector is resolved against the platform's HD
+wallet (R49.34 items 1 and 3, refused before any balance or nonce query), the
+token's balance, the nonce and the signing key are those of the selected
+address, and `from` of the result is that address (R49.5, R49.34 item 2). A
+token on a single-key platform keeps the refusal of R49.3. Under the Trezor
+policy, the task route resolves the selector in the platform's wallet and signs
+at the selected path (T49.9); the direct route answers the selector errors
+first and then `UnsupportedError` (R49.34 item 2). T49.9's emulator test now
+builds the token through the platform coin's token builder, so it carries the
+single-address derivation of an activated token. The software route is covered
+by `evm_hd_p1_a_token_withdraw_with_from_is_sent_from_the_selected_address_on_both_routes`,
+`evm_hd_p1_a_token_withdraw_without_from_is_sent_from_the_activated_address`,
+`evm_hd_p1_a_token_selector_that_does_not_resolve_is_refused_before_any_query`
+and `evm_hd_p1_a_token_on_a_single_key_platform_refuses_from_with_the_existing_text`
+(T49.32). `get_new_address` on an EVM coin used to write the address in an
+abbreviated form; it now writes the full EIP-55 string (R49.33), like the other
+answers. `get_new_address`, `account_balance`, `task::account_balance::init`
+and `task::scan_for_new_addresses::init` asked for a token ticker are served
+from the platform's wallet with that token's balance only, and the scan counts
+an address as used by its nonce or that token's balance (R49.32, last
+paragraph). Still open from item (a): the platform ticker's maps carry the
+platform ticker only, its scan rule is unchanged, and the intervening unused
+entries of a scan carry a zero entry.
+
 > **Code-quality finding (informative; this repository).** The Trezor
 > emulator test that stands for T49.9 builds the ERC-20 coin directly with
 > an HD derivation instead of activating it on a Trezor platform. It
@@ -629,6 +678,13 @@ that decision.
 *2026-11-10 (clean-side note): a TRON withdraw now refuses any `fee` descriptor with `InvalidFeePolicy`
 (ch.21 R-WP6); Solana still does not read it.*
 
+*2026-11-20 (clean-side note): the shared fee descriptor has one more form, `Tron`, without members; other members
+of the object are ignored. A TRON withdraw refuses it with `InvalidFeePolicy` like any other form (ch.21 R-WP6).
+The UTXO, SLP, EVM, QRC20 and Siacoin withdraw paths refuse it through their existing wrong-fee-type arm
+(`InvalidFeePolicy`; the NFT withdraw's `InvalidRequest`), and the shielded coin refuses any `fee` as before. A
+Tendermint request ignores it without error, like any other foreign form (D49.1, option (b)), and Solana does not
+read it. Before, a request with such a `fee` failed request parsing.*
+
 ## 49.3 Status request and retention
 
 R49.11. `task::withdraw::status` shall accept:
@@ -831,6 +887,14 @@ absence is not an error.
 > members are stated by [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8A
 > (R25-R28). R49.25's "mandatory for a completed withdrawal transaction" does
 > not reach that result. §63.8A passed the KDF Dirty Gate on 2026-11-19.
+
+> **Gasless submission (pointer, 2026-11-21).** What the reference has of
+> submitting and tracing a signed gasless authorization -- no RPC does either;
+> three task progress values are declared and never reported; the task cancel
+> has no gasless-specific part -- is stated by
+> [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8B (R30-R35), with the
+> wire form of the three values in R33. §63.8B passed the KDF Dirty Gate on
+> 2026-11-21.
 
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
@@ -1226,3 +1290,18 @@ addresses.
   chapter 63 §63.8A for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
   2026-11-19, measure 0.01, no findings**, as recorded for §63.8A in chapter
   63's provenance footer.
+- *Status note added 2026-11-20 (after the fee-rail pointer of §49.2).*
+  Reloaded-original, clean side: it records the two request members, the
+  `Gasless` error arm and the two task progress values as built; no
+  forbidden-class input.
+- *Status note added 2026-11-20 (TRON switched on; after the note of the
+  item above).* Reloaded-original, clean side: it corrects, from chapter 21
+  D6 and this repository's code, what that note says about TRON being
+  switched off; no forbidden-class input. No cleared sentence was edited.
+- *Pointer added 2026-11-21 (Spec Reader round 0.5.0-19) -- after the
+  sign-only gasless result pointer of 2026-11-19.* It names chapter 63
+  §63.8B (R30 -- R35) and R33 for what the reference has of submitting
+  and tracing a signed gasless authorization; it travels with chapter 63
+  §63.8B for the KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-21,
+  measure 0.02, no findings**, as recorded for §63.8B in chapter 63's
+  provenance footer.
