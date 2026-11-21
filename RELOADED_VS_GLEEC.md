@@ -810,6 +810,19 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.63 R29, §63.3.3.
 
+- **The result of a gasless TRON withdraw carries each member name once.** No released GLEEC KDF version that the
+  CRD records carries GasFree; the reference's GasFree work is an open, unmerged draft (as of 2026-05-04, CRD ch.63
+  §63.0). In that draft the result of a gasless TRC20 withdraw holds the names `coin` and
+  `from` twice in one JSON object: `from` once as the request's HD selector and once as the array of sending
+  addresses, so a client whose JSON reader keeps the last of two equal names never sees the selector. Reloaded
+  writes each name once: `coin` once, `from` always as the array with the sending address, and no selector. The
+  other members of the signed authorization's envelope (`relay_type`, `chain_id`, `from_address`,
+  `gasfree_address`, `verifying_contract`, `signed_authorization`, `created_at`) are the draft's, at the top level
+  of the result, and the result has no `tx_hex` and no `tx_hash`. It also has no `memo` member, where the draft
+  writes `null`: Reloaded omits an absent memo in every withdraw result outside the Tendermint family. A client that
+  needs the selector has it in its own request. No peer sees the result, so no switch exists. CRD ch.63 §63.8A,
+  D63.8.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
@@ -840,9 +853,11 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   form and no order; Reloaded refuses one check earlier, and its text names the
   wallet-only ticker. No switch exists: the build constant
   `TRON_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false` (CRD ch.21 R-D1,
-  R21.10B.9, R21.B3). Gasless TRC20 transfers through GasFree are not available
-  yet; the provider setting of the activation and the `gasfree_address` of the
-  reports are (CRD ch.63 §63.3.1 to §63.3.3).
+  R21.10B.9, R21.B3). Gasless TRC20 transfers through GasFree are signed but
+  not submitted yet: the provider setting of the activation, the
+  `gasfree_address` of the reports and the gasless withdraw are available, and
+  that withdraw returns a signed authorization the node does not hand to the
+  provider (CRD ch.63 §63.3.1 to §63.3.6, §63.8A).
 - **A Tendermint activation refuses a hardware key policy.** A request that names the `Trezor` `priv_key_policy`
   fails before any node is contacted, with a `PlatformCoinCreationError` (HTTP 500) that says the hardware key policy
   is not supported for Tendermint coins and to activate with the local key; GLEEC KDF ignores the member and activates

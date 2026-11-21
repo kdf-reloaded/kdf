@@ -251,6 +251,8 @@ fn withdraw_eth_and_erc20() {
         .withdraw(WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             coin: "ETH".into(),
             from: None,
             to: recipient.into(),
@@ -282,6 +284,8 @@ fn withdraw_eth_and_erc20() {
         .withdraw(WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             coin: "TEST".into(),
             from: None,
             to: recipient.into(),

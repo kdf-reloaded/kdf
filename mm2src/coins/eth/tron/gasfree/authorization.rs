@@ -18,7 +18,6 @@ use ethereum_types::{H256, U256};
 use mm2_eth::keys::{sign, KeyPair, Secret};
 use mm2_eth::typed_data::{hash_typed_data, Eip712, FieldKind, TypeDef};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as Json;
 use std::fmt;
 
 /// The only authorization version (R5).
@@ -36,7 +35,7 @@ const PERMIT_TYPE: &str = "PermitTransfer(address token,address serviceProvider,
 
 /// The values of one `PermitTransfer` (§63.6). Amounts are in the token's smallest unit.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PermitTransfer {
+pub struct PermitTransfer {
     /// The TRC20 token contract.
     pub token: TronAddress,
     /// The fee-paying provider.
@@ -119,15 +118,39 @@ struct MessageValues {
 /// The 20-byte payload of `address` in hex, the form of an `address` member of the typed data.
 fn address_hex(address: &TronAddress) -> String { hex::encode(address.to_evm_address().as_bytes()) }
 
-/// The full typed-data hash of `permit` on `network`, the digest that is signed (§63.6): the result of the
-/// shared typed-data encoder, required to equal `keccak256(0x1901 ‖ domain separator ‖ struct hash)` as this
-/// module computes them.
+/// The full typed-data hash of `permit` on `network`, the digest that is signed (§63.6):
+/// `keccak256(0x1901 ‖ domain separator ‖ struct hash)`, with every `uint256` member as its 32-byte big-endian
+/// word, so `value` and `maxFee` take the whole 256-bit range.
+///
+/// The shared typed-data encoder computes the same hash from the typed-data document, for integers up to 128
+/// bits. Whenever `value` and `maxFee` fit that range, its result is required to equal this module's.
 ///
 /// # Errors
 ///
-/// [`GasFreeError::Authorization`] when the encoder refuses a value (it takes integers up to 128 bits) or the
-/// two computations disagree.
+/// [`GasFreeError::Authorization`] when the shared encoder refuses the document or the two computations disagree.
 pub(crate) fn typed_data_hash(network: &Network, permit: &PermitTransfer) -> Result<[u8; 32], GasFreeError> {
+    let mut preimage = Vec::with_capacity(2 + 32 + 32);
+    preimage.extend_from_slice(&[0x19, 0x01]);
+    preimage.extend_from_slice(&domain_separator(network));
+    preimage.extend_from_slice(&struct_hash(permit));
+    let digest = keccak(&preimage);
+
+    // The cross-check is deliberately partial: the shared encoder cannot take an integer above 128 bits, so it runs
+    // only when both amounts fit. Above that range the struct encoding is covered by the test that pins it by hand
+    // (`a_value_above_128_bits_is_hashed_as_its_whole_256_bit_word`).
+    let shared_encoder_range = U256::from(u128::MAX);
+    let in_shared_range = permit.value <= shared_encoder_range && permit.max_fee <= shared_encoder_range;
+    if in_shared_range && shared_encoder_hash(network, permit)? != digest {
+        return Err(GasFreeError::Authorization(
+            "the two computations of the typed-data hash disagree".to_owned(),
+        ));
+    }
+    Ok(digest)
+}
+
+/// The typed-data hash of `permit` as the shared typed-data encoder computes it from the typed-data document. The
+/// encoder takes integers up to 128 bits.
+fn shared_encoder_hash(network: &Network, permit: &PermitTransfer) -> Result<[u8; 32], GasFreeError> {
     let constants = gasfree_network(network);
 
     let mut domain_type = TypeDef::domain();
@@ -174,18 +197,7 @@ pub(crate) fn typed_data_hash(network: &Network, permit: &PermitTransfer) -> Res
             nonce: permit.nonce.to_string(),
         },
     };
-    let encoded = hash_typed_data(typed_data).map_err(|e| GasFreeError::Authorization(e.to_string()))?;
-
-    let mut preimage = Vec::with_capacity(2 + 32 + 32);
-    preimage.extend_from_slice(&[0x19, 0x01]);
-    preimage.extend_from_slice(&domain_separator(network));
-    preimage.extend_from_slice(&struct_hash(permit));
-    if keccak(&preimage) != encoded {
-        return Err(GasFreeError::Authorization(
-            "the two computations of the typed-data hash disagree".to_owned(),
-        ));
-    }
-    Ok(encoded)
+    hash_typed_data(typed_data).map_err(|e| GasFreeError::Authorization(e.to_string()))
 }
 
 /// A `PermitTransfer` with the user's signature over it.
@@ -196,7 +208,7 @@ pub(crate) fn typed_data_hash(network: &Network, permit: &PermitTransfer) -> Res
 /// rejects an unknown member and a `version` other than 1.
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(try_from = "SignedPermitDocument", into = "SignedPermitDocument")]
-pub(crate) struct SignedPermit {
+pub struct SignedPermit {
     permit: PermitTransfer,
     /// `r ‖ s ‖ v`, `v` in 27/28. A secret-like value: only the artifact and the submit payload carry it (R9).
     sig: [u8; 65],
@@ -368,57 +380,48 @@ impl TryFrom<SignedPermitDocument> for SignedPermit {
 
 /// The relay-type discriminator of the off-chain payload (§63.8 step 5).
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) enum RelayType {
+pub enum RelayType {
     #[serde(rename = "tron_gasfree")]
     TronGasFree,
 }
 
-/// The off-chain payload a sign-only gasless withdraw returns (§63.8 step 5): the signed authorization with the
-/// values a relay needs beside it. It is not a transaction and is not broadcast.
+/// The off-chain payload a sign-only gasless withdraw returns (§63.8 step 5, §63.8A): the signed authorization with
+/// the values a relay needs beside it. It is not a transaction and is not broadcast.
+///
+/// Its members sit at the top level of the withdraw result, beside the shared members (R25). Under D63.8 (a) each
+/// member name stands once in the result: the payload has no `coin` of its own (the result's shared `coin` is the
+/// ticker of the token) and no `from` selector (the result's `from` is the array with the sending address).
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct GasFreeRelayPayload {
-    pub relay_type: RelayType,
+pub struct GasFreeRelayPayload {
+    pub(crate) relay_type: RelayType,
     /// The network's EIP-712 chain id, as a decimal string.
     #[serde(with = "decimal_u64")]
-    pub chain_id: u64,
-    /// The coin's ticker.
-    pub coin: String,
-    /// The HD selector of the sending address as the withdraw request gave it, if it gave one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<Json>,
-    pub from_address: TronAddress,
+    pub(crate) chain_id: u64,
+    /// The sending address; it equals the `user` of the signed authorization.
+    pub(crate) from_address: TronAddress,
     /// The derived custody address of `from_address` (§63.5).
-    pub gasfree_address: TronAddress,
+    pub(crate) gasfree_address: TronAddress,
     /// The controller contract of the network.
-    pub verifying_contract: TronAddress,
+    pub(crate) verifying_contract: TronAddress,
+    pub(crate) signed_authorization: SignedPermit,
     /// When the payload was created: Unix seconds, written as RFC 3339 in UTC with whole seconds.
     #[serde(with = "rfc3339_seconds")]
-    pub created_at: u64,
-    pub signed_authorization: SignedPermit,
+    pub(crate) created_at: u64,
 }
 
 impl GasFreeRelayPayload {
     /// The payload for `signed` on `network`, created at `created_at` (Unix seconds).
-    pub(crate) fn new(
-        network: &Network,
-        coin: &str,
-        from: Option<Json>,
-        signed: SignedPermit,
-        created_at: u64,
-    ) -> Self {
+    pub(crate) fn new(network: &Network, signed: SignedPermit, created_at: u64) -> Self {
         let constants = gasfree_network(network);
         let user = signed.permit.user;
         GasFreeRelayPayload {
             relay_type: RelayType::TronGasFree,
             chain_id: constants.chain_id,
-            coin: coin.to_owned(),
-            from,
             from_address: user,
             gasfree_address: derive_custody(network, &user).address,
             verifying_contract: constants.controller(),
-            created_at,
             signed_authorization: signed,
+            created_at,
         }
     }
 }
@@ -531,7 +534,7 @@ mod tests {
                                      MESSAGE_SERVICE_PROVIDER, USERS};
     use super::*;
     use mm2_eth::keys::{verify_address, Signature};
-    use serde_json::json;
+    use serde_json::{json, Value as Json};
     use std::str::FromStr;
 
     fn permit_of(message: &MessageVector) -> PermitTransfer {
@@ -590,12 +593,52 @@ mod tests {
         }
     }
 
+    /// A `value` and a `maxFee` above 2^128 are encoded as their 32-byte big-endian words and signed: the hash is
+    /// the one of the whole number, not of its low 128 bits.
     #[test]
-    fn a_value_the_encoder_cannot_take_is_refused() {
+    fn a_value_above_128_bits_is_hashed_as_its_whole_256_bit_word() {
+        let low = U256::from(MESSAGES[0].value);
+        let wide = (U256::one() << 200) + low;
+        assert_eq!(wide.low_u128(), low.low_u128());
+        let mut word = [0u8; 32];
+        word[6] = 1;
+        word[24..].copy_from_slice(&MESSAGES[0].value.to_be_bytes());
+        assert_eq!(u256_word(wide), word);
+
         let mut permit = permit_of(&MESSAGES[0]);
-        permit.value = U256::MAX;
-        let error = typed_data_hash(&Network::Nile, &permit).expect_err("an oversized value");
-        assert!(matches!(error, GasFreeError::Authorization(_)));
+        let narrow_hash = typed_data_hash(&Network::Nile, &permit).expect("a typed-data hash");
+        permit.value = wide;
+        let wide_hash = typed_data_hash(&Network::Nile, &permit).expect("a typed-data hash of a wide value");
+        assert_ne!(wide_hash, narrow_hash);
+        // The struct hash holds the whole word at the position of `value`.
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&keccak(PERMIT_TYPE.as_bytes()));
+        for address in [&permit.token, &permit.service_provider, &permit.user, &permit.receiver] {
+            encoded.extend_from_slice(&address_word(address));
+        }
+        encoded.extend_from_slice(&word);
+        for number in [
+            permit.max_fee,
+            U256::from(permit.deadline),
+            U256::one(),
+            U256::from(permit.nonce),
+        ] {
+            encoded.extend_from_slice(&u256_word(number));
+        }
+        assert_eq!(struct_hash(&permit), keccak(&encoded));
+
+        permit.max_fee = U256::MAX;
+        let widest = typed_data_hash(&Network::Nile, &permit).expect("a typed-data hash of a wide fee cap");
+        assert_ne!(widest, wide_hash);
+        // It signs, and the signature recovers to the user for that hash.
+        let now_s = permit.deadline - 1;
+        let signed = sign_permit(&Network::Nile, permit, &secret(1), now_s).expect("the user signs");
+        let signature = Signature::from_str(&signed.sig_hex()).expect("65 bytes");
+        let user = signed.permit().user.to_evm_address();
+        assert!(matches!(
+            verify_address(&user, &signature, &H256::from(widest)),
+            Ok(true)
+        ));
     }
 
     #[test]
@@ -638,7 +681,7 @@ mod tests {
     #[test]
     fn debug_hides_the_signature() {
         let signed = signed_first_message();
-        let payload = GasFreeRelayPayload::new(&Network::Nile, "USDT-TRC20", None, signed.clone(), 1_726_207_000);
+        let payload = GasFreeRelayPayload::new(&Network::Nile, signed.clone(), 1_726_207_000);
         let sig_hex = signed.sig_hex();
         for rendered in [format!("{signed:?}"), format!("{payload:?}")] {
             let rendered = rendered.to_ascii_lowercase();
@@ -717,37 +760,26 @@ mod tests {
         );
     }
 
+    /// §63.8A R26, D63.8 (a): the payload has the members of R26 without the `coin` and the `from` selector, which
+    /// the withdraw result carries once as its shared members.
     #[test]
     fn the_relay_payload_carries_the_wrapper_members_and_round_trips() {
         let signed = signed_first_message();
-        let from = json!({ "derivation_path": "m/44'/195'/0'/0/0" });
-        let payload = GasFreeRelayPayload::new(
-            &Network::Nile,
-            "USDT-TRC20",
-            Some(from.clone()),
-            signed.clone(),
-            1_726_207_632,
-        );
+        let payload = GasFreeRelayPayload::new(&Network::Nile, signed.clone(), 1_726_207_632);
         let document = serde_json::to_value(&payload).expect("a document");
         let expected = json!({
             "relay_type": "tron_gasfree",
             "chain_id": "3448148188",
-            "coin": "USDT-TRC20",
-            "from": from,
             "from_address": MESSAGES[0].user,
             "gasfree_address": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
             "verifying_contract": "THQGuFzL87ZqhxkgqYEryRAd7gqFqL5rdc",
-            "created_at": "2024-09-13T06:07:12Z",
             "signed_authorization": serde_json::to_value(&signed).expect("a document"),
+            "created_at": "2024-09-13T06:07:12Z",
         });
         assert!(document == expected, "the document differs from the expected one");
+        assert!(document.get("coin").is_none() && document.get("from").is_none());
         let back: GasFreeRelayPayload = serde_json::from_value(document.clone()).expect("the document reads back");
         assert!(back == payload, "the document does not read back as it was written");
-
-        // Without a selector the member is omitted, never null.
-        let without = GasFreeRelayPayload::new(&Network::Nile, "USDT-TRC20", None, signed, 1_726_207_632);
-        let without = serde_json::to_value(&without).expect("a document");
-        assert!(without.get("from").is_none(), "an absent selector is written");
 
         let with = |member: &str, value: Json| {
             let mut changed = document.clone();
@@ -766,7 +798,6 @@ mod tests {
             !with("created_at", json!("2024-09-13 06:07:12")),
             "another time form is accepted"
         );
-        assert!(!with("unknown_member", json!(1)), "an unknown member is accepted");
     }
 
     #[test]

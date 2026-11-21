@@ -374,6 +374,8 @@ fn t5_max_native_withdrawal_deducts_eth_send_coins() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 0.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_owned(),

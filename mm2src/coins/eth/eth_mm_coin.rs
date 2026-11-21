@@ -47,7 +47,7 @@ impl InitWithdrawCoin for EthCoin {
         task_handle
             .update_in_progress_status(WithdrawInProgressStatus::GeneratingTransaction)
             .mm_err(WithdrawError::from)?;
-        withdraw_impl(ctx, self.clone(), req).await
+        withdraw_impl_with_progress(ctx, self.clone(), req, Some(task_handle)).await
     }
 }
 

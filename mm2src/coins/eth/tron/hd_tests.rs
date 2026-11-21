@@ -41,13 +41,13 @@ const RECEIVER: &str = "TNPeeaaFB7K9cmo4uQpcU32zGK8G1NYqeL";
 // with a stand-alone BIP-39 / BIP-32 / keccak-256 / base58check implementation written for this test (pure Python,
 // not taken from any web source), and every test that uses them also recomputes the address from the seed with the
 // crypto crate (`independent_address`), so a wrong literal fails there.
-const ADDRESS_0: &str = "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH";
-const ADDRESS_1: &str = "TSeJkUh4Qv67VNFwY8LaAxERygNdy6NQZK";
+pub(super) const ADDRESS_0: &str = "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH";
+pub(super) const ADDRESS_1: &str = "TSeJkUh4Qv67VNFwY8LaAxERygNdy6NQZK";
 const ADDRESS_2: &str = "TYJPRrdB5APNeRs4R7fYZSwW3TcrTKw2gx";
 /// The secret key at `m/44'/195'/0'/0/0`, as `show_priv_key` answers it.
 const SECRET_0: &str = "0xb5a4cea271ff424d7c31dc12a3e43e401df7a40d7412a15750f3f0b6b5449a28";
 
-fn hd_ctx() -> MmArc {
+pub(super) fn hd_ctx() -> MmArc {
     let conf = json!({
         "enable_hd": true,
         "coins": [
@@ -74,7 +74,7 @@ fn hd_ctx() -> MmArc {
     ctx
 }
 
-fn global_hd(ctx: &MmArc) -> GlobalHDAccountArc {
+pub(super) fn global_hd(ctx: &MmArc) -> GlobalHDAccountArc {
     match CryptoCtx::from_ctx(ctx).expect("a crypto context").key_pair_policy() {
         KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd.clone(),
         KeyPairPolicy::Iguana => panic!("an HD context is expected"),
@@ -206,7 +206,7 @@ impl HDXPubExtractor for NoDevice {
 
 /// Enables the wallet of `coin`: account 0 is created, the enabled address listed, and the first `min` addresses
 /// of the account known. No scan.
-async fn enable_wallet(coin: &EthCoin, min: u32) {
+pub(super) async fn enable_wallet(coin: &EthCoin, min: u32) {
     let DerivationMethod::HDWallet(hd_wallet) = &coin.derivation_method else {
         panic!("an HD wallet is expected");
     };
