@@ -94,6 +94,7 @@ fn coin_over_entries_and_conf(
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
         tron_api: None,
+        tron_gasfree: None,
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
@@ -373,6 +374,8 @@ fn t5_max_native_withdrawal_deducts_eth_send_coins() {
     let req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 0.into(),
         from: None,
         to: "0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94".to_owned(),

@@ -162,6 +162,9 @@ impl GasFreeProvider {
         })
     }
 
+    /// The bound of one call, in milliseconds (R20).
+    pub(crate) fn request_timeout_ms(&self) -> u64 { self.request_timeout_ms }
+
     /// The request path of `operation`: `/<network segment>/api/v1/<operation>` (§63.4.1). This is the path the
     /// request is sent to and the path its authentication signs.
     fn request_path(&self, operation: &str) -> String { format!("/{}/{}/{}", self.path_segment, API_PREFIX, operation) }
