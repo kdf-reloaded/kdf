@@ -481,11 +481,11 @@ every ERC-20 token registered on the platform at call time, zero balances
 included (R49.32 item 1); a token removed by `disable_coin` is no longer
 registered and no longer appears. The totals of `task::account_balance::init`
 sum each ticker over the listed addresses. If the balance query of the platform
-or of any one token fails, the request fails with no partial map. `get_new_address`
-stores the new address (the known count rises by one) before any balance is
-asked, so when a balance query fails the request fails and the address stays
-known; that was already so for a failing platform balance, and it is now more
-likely because each token's balance is asked as well. In the scan
+or of any one token fails, the request fails with no partial map.
+`get_new_address` stores the new address (the known count rises by one) before
+any balance is asked, so when a balance query fails the request fails and the
+address stays known; that was already so for a failing platform balance, and it
+is now more likely because each token's balance is asked as well. In the scan
 answer, the unused addresses between the end of the known range and a newly
 found used address carry an empty map (item 2), and an
 address is used when its nonce is non-zero, its platform balance is non-zero,
