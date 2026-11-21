@@ -1,6 +1,6 @@
 # Plan: Tron GasFree fee-delegated TRC20 withdraw rail
 
-**Status:** in progress — **Last reviewed:** 2026-11-19
+**Status:** in progress — **Last reviewed:** 2026-11-20
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a complete, test-covered GasFree implementation and an
@@ -76,6 +76,17 @@ new PRs, and the branch stays until the second PR below has landed.
     shared request, balance or error fields; unreachable from every RPC.
   - Then: the activation binding, the fields at every placement ch.63 R18 lists, and the withdraw dispatcher.
   - Then: submission and settlement tracking (ch.63 D63.6), as a Reloaded extension.
+
+> **Activation binding and report fields built (2026-11-20).** The platform
+> activation reads `tron_gasless_provider` and a TRC20 token activation reads
+> `gasless`, on the one-shot and task forms (ch.63 §63.3.1, §63.3.2). The
+> validated provider binding is kept on the TRX platform coin and the token's
+> fee cap, in base units, on the token coin. `gasfree_address` is shown at the
+> placements ch.63 R18 lists, attached in one place, after the controller check
+> of R29 (the status note after ch.63 §63.3.3). TRON activation is on since
+> 2026-11-20 (`TRON_ACTIVATION_AVAILABLE`), so all of it is reachable in a
+> build. Not built: the `fee_method` and `gasless`
+> members of the withdraw request, the withdraw dispatcher, and submission.
 
 ## Blocker: the derived custody address is knowingly wrong
 

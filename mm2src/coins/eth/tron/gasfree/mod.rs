@@ -8,6 +8,8 @@
 //! - [`authorization`]: the `PermitTransfer` typed data, its signer and the signed artifact (§63.6, §63.8 step 5);
 //! - [`provider`] and [`provider_payloads`]: the provider's REST client and its typed payloads (§63.4);
 //! - [`preflight`]: the preflight decision (§63.7);
+//! - [`binding`]: the provider binding of a platform coin and the `gasless` block of a token coin as an activation
+//!   gives them (§63.3.1, §63.3.2), and the custody address a report shows (§63.3.3, R18);
 //! - [`failure`]: the error type of the group and its collapse onto the withdraw RPC's arms (§63.9).
 //!
 //! # Invariants
@@ -17,10 +19,12 @@
 //! - The provider credentials and the raw bytes of a signature never reach a log line, an error text or a `Debug`
 //!   rendering (R9).
 
-// Nothing outside this group calls it yet: the withdraw and activation wiring is the first caller.
+// The activation stores the settings and the reports show the custody address; the provider client, the preflight
+// and the signer have no caller yet: the withdraw wiring is their first one.
 #![allow(dead_code)]
 
 pub(crate) mod authorization;
+pub(crate) mod binding;
 pub(crate) mod custody;
 pub(crate) mod failure;
 pub(crate) mod networks;

@@ -800,6 +800,16 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   answers the same, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
   CRD ch.21 R21.10B.10 to R21.10B.13.
 
+- **A TRON GasFree custody address is checked against the GasFree controller before it is shown or used.** No
+  released GLEEC KDF version that the CRD records carries GasFree; the reference's GasFree work is an open, unmerged
+  draft (as of 2026-05-04, CRD ch.63 §63.0), and this check is a KDF Reloaded addition.
+  Reloaded compares it with the answer of the controller contract's `getGasFreeAddress` and keeps a confirmation for
+  10 minutes. In the answers that carry `gasfree_address`, an address the controller contradicts is left out, with a
+  warning in the log; when the controller cannot be read, the derived address is shown. Before a gasless transfer is
+  signed, a contradicted address refuses the gasless rail and leaves the native one. A safety divergence: no switch;
+  row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.63 R29, §63.3.3.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
@@ -831,7 +841,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   wallet-only ticker. No switch exists: the build constant
   `TRON_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false` (CRD ch.21 R-D1,
   R21.10B.9, R21.B3). Gasless TRC20 transfers through GasFree are not available
-  yet.
+  yet; the provider setting of the activation and the `gasfree_address` of the
+  reports are (CRD ch.63 §63.3.1 to §63.3.3).
 - **A Tendermint activation refuses a hardware key policy.** A request that names the `Trezor` `priv_key_policy`
   fails before any node is contacted, with a `PlatformCoinCreationError` (HTTP 500) that says the hardware key policy
   is not supported for Tendermint coins and to activate with the local key; GLEEC KDF ignores the member and activates

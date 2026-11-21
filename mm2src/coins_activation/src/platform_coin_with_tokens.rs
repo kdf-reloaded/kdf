@@ -102,6 +102,9 @@ pub enum InitTokensAsMmCoinsError {
     CustomTokenError(CustomTokenError),
     /// The nodes gave no usable answer while a token was being built (CRD R35.1.6).
     Transport(String),
+    /// A token entry of the request holds a member its platform cannot serve: the `gasless` block of a TRC20 token
+    /// (CRD ch.63 §63.3.2).
+    InvalidPayload(String),
 }
 
 impl From<CoinConfWithProtocolError> for InitTokensAsMmCoinsError {
@@ -375,6 +378,7 @@ impl From<InitTokensAsMmCoinsError> for EnablePlatformCoinWithTokensError {
             InitTokensAsMmCoinsError::PlatformCoinMismatch => EnablePlatformCoinWithTokensError::PlatformCoinMismatch,
             InitTokensAsMmCoinsError::CustomTokenError(e) => EnablePlatformCoinWithTokensError::CustomTokenError(e),
             InitTokensAsMmCoinsError::Transport(e) => EnablePlatformCoinWithTokensError::Transport(e),
+            InitTokensAsMmCoinsError::InvalidPayload(e) => EnablePlatformCoinWithTokensError::InvalidPayload(e),
         }
     }
 }

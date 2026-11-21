@@ -367,6 +367,10 @@ pub struct MyBalanceRpcResponse {
     pub balance: BigDecimal,
     pub unspendable_balance: BigDecimal,
     pub address: String,
+    /// The TRON GasFree custody address of `address` (CRD ch.63 §63.3.3): present for a TRON coin whose platform has
+    /// a GasFree provider, omitted for every other coin, which leaves the legacy body unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gasfree_address: Option<String>,
 }
 
 /// The typed core of `my_balance`: the spendable and the unspendable balance and the address of a coin.
@@ -391,11 +395,17 @@ pub async fn my_balance_core(
     };
     let balance = coin.my_balance().compat().await.mm_err(MyBalanceRpcError::from)?;
     let address = coin.my_address().map_to_mm(MyBalanceRpcError::InternalError)?;
+    // The EVM family alone knows the field; its one report rule decides the value (CRD ch.63 §63.3.3, R18).
+    let gasfree_address = match &coin {
+        MmCoinEnum::EthCoin(eth_coin) => eth_coin.enabled_address_gasfree().await,
+        _ => None,
+    };
     Ok(MyBalanceRpcResponse {
         coin: ticker,
         balance: balance.spendable,
         unspendable_balance: balance.unspendable,
         address,
+        gasfree_address,
     })
 }
 

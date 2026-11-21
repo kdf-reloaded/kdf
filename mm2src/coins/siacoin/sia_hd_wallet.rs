@@ -632,6 +632,7 @@ async fn scan_for_new_addresses_impl(
                         .mm_err(Into::into)?;
                     balances.push(HDAddressBalance {
                         address: empty_address.address.to_string(),
+                        gasfree_address: None,
                         derivation_path: RpcDerivationPath(empty_address.derivation_path),
                         chain,
                         balance: coin_balance_map_for_ticker(coin.ticker(), CoinBalance::default()),
@@ -639,6 +640,7 @@ async fn scan_for_new_addresses_impl(
                 }
                 balances.push(HDAddressBalance {
                     address: checking_address.to_string(),
+                    gasfree_address: None,
                     derivation_path: RpcDerivationPath(checking_address_der_path),
                     chain,
                     balance: coin_balance_map_for_ticker(coin.ticker(), non_empty_balance),

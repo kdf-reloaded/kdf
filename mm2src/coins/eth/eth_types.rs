@@ -483,6 +483,10 @@ pub struct EthCoinImpl {
     /// `coin_type` is [`EthCoinType::Tron`] or [`EthCoinType::Trc20`].
     /// `None` for ETH/ERC20 coins.
     pub(crate) tron_api: Option<crate::eth::tron::api::TronApiClient>,
+    /// What the coin holds of TRON GasFree (CRD ch.63 §63.3.1, §63.3.2): the provider binding of a TRX platform
+    /// coin activated with a `tron_gasless_provider`, or the enabled `gasless` block of a TRC20 token coin. `None`
+    /// for every other coin.
+    pub(crate) tron_gasfree: Option<crate::eth::tron::gasfree::binding::CoinGasFree>,
     /// Optional address of the maker-side NFT swap V2 contract
     /// (`EtomicSwapMakerV2-NFT`). Populated from coin activation when
     /// the chain has an NFT HTLC contract deployed; `None` disables

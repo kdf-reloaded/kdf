@@ -1183,3 +1183,113 @@ fn disabling_a_platform_drops_its_dependent_set_and_its_tokens_stay_registered()
     // The platform is not registered: disabling the token has no platform record to change and still succeeds.
     block_on(coins::disable_coin(&ctx, "USDT-ERC20")).expect("the remaining token is disabled");
 }
+
+// ---------------------------------------------------------------------------
+// CRD ch.63 T9, T10: TRON GasFree members on an EVM chain
+// ---------------------------------------------------------------------------
+
+/// CRD ch.63 T9 (§63.3.2, R1): an enabled `gasless` block on a token that is not a TRC20 token is an invalid
+/// payload on the one-shot route and in the platform request, and the invalid-payload class token `Transport` in
+/// the status of the token task (R35.3A.6); `enabled: false` behaves as an absent block. An NFT refuses it too.
+#[test]
+fn an_enabled_gasless_block_is_refused_on_an_evm_chain() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_platform(iguana_ctx(), &node);
+    let gasless = |block: Json| json!({ "ticker": "USDT-ERC20", "activation_params": { "gasless": block } });
+
+    string_error(
+        &failure(&ctx, token_request(gasless(json!({ "enabled": true })))),
+        "InvalidPayload",
+        StatusCode::BAD_REQUEST,
+    );
+    string_error(
+        &failure(
+            &ctx,
+            token_request(gasless(json!({ "enabled": true, "transfer_max_fee": "1" }))),
+        ),
+        "InvalidPayload",
+        StatusCode::BAD_REQUEST,
+    );
+    let status = run_task(&ctx, gasless(json!({ "enabled": true })));
+    assert_eq!(status["status"], "Error");
+    assert_eq!(status["details"]["error_type"], "Transport");
+    assert!(block_on(coins::lp_coinfind(&ctx, "USDT-ERC20")).unwrap().is_none());
+    string_error(
+        &failure(
+            &ctx,
+            nft(
+                "NFT_ETH",
+                json!({ "provider": provider("https://indexer.example.com/")["provider"], "gasless": { "enabled": true } }),
+            ),
+        ),
+        "InvalidPayload",
+        StatusCode::BAD_REQUEST,
+    );
+
+    // A disabled block, with whatever else it holds, is an absent block.
+    enable(
+        &ctx,
+        token_request(gasless(json!({ "enabled": false, "transfer_max_fee": "-1" }))),
+    )
+    .unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+    let status = run_task(
+        &ctx,
+        json!({ "ticker": "DAI-ERC20", "activation_params": { "gasless": {} } }),
+    );
+    assert_eq!(status["status"], "Ok", "{}", status);
+
+    // In the platform request.
+    let request: EnablePlatformCoinWithTokensReq<EthWithTokensActivationRequest> = serde_json::from_value(json!({
+        "ticker": PLATFORM,
+        "nodes": [{ "url": node.url }],
+        "erc20_tokens_requests": [{ "ticker": "USDT-ERC20", "gasless": { "enabled": true } }],
+        "swap_contract_address": SWAP_CONTRACT,
+    }))
+    .unwrap();
+    let error = error_of(
+        block_on(enable_platform_coin_with_tokens::<EthCoin>(iguana_ctx(), request)),
+        "an enabled gasless block on an ERC-20 token",
+    );
+    let wire = wire(&error);
+    assert_eq!(wire.0["error_type"], "InvalidPayload", "{:?}", wire.0);
+    assert_eq!(wire.1, StatusCode::BAD_REQUEST);
+}
+
+/// CRD ch.63 T10 (R18): no answer of an EVM coin carries `gasfree_address`; the member is absent from the JSON
+/// text, not `null`.
+#[test]
+fn no_answer_of_an_evm_coin_carries_a_gasfree_address() {
+    // Single key: the platform-with-tokens result, the one-shot and the task-based token result.
+    let node = node_with(Arc::default());
+    let ctx = iguana_ctx();
+    let request: EnablePlatformCoinWithTokensReq<EthWithTokensActivationRequest> = serde_json::from_value(json!({
+        "ticker": PLATFORM,
+        "nodes": [{ "url": node.url }],
+        "erc20_tokens_requests": [{ "ticker": "DAI-ERC20" }],
+        "swap_contract_address": SWAP_CONTRACT,
+    }))
+    .unwrap();
+    let result = block_on(enable_platform_coin_with_tokens::<EthCoin>(ctx.clone(), request))
+        .unwrap_or_else(|e| panic!("the platform activation failed: {}", e));
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(text.contains("eth_addresses_infos"), "{}", text);
+    assert!(!text.contains("gasfree_address"), "{}", text);
+
+    let result = enable(&ctx, erc20("USDT-ERC20")).unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+    assert!(!serde_json::to_string(&result).unwrap().contains("gasfree_address"));
+    block_on(coins::disable_coin(&ctx, "USDT-ERC20")).expect("the token is disabled");
+    let status = run_task(&ctx, json!({ "ticker": "USDT-ERC20", "activation_params": {} }));
+    assert_eq!(status["status"], "Ok", "{}", status);
+    assert!(!status.to_string().contains("gasfree_address"), "{}", status);
+
+    // Global HD: the one-shot and the task-based token result over the known addresses.
+    let (_node, hd_ctx) = hd_platform_with_addresses(3, 7_000_000);
+    let result = enable(&hd_ctx, erc20("USDT-ERC20")).unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+    let result = serde_json::to_value(&result).unwrap();
+    assert_eq!(result["balances"].as_object().map(|balances| balances.len()), Some(3));
+    assert!(!result.to_string().contains("gasfree_address"), "{}", result);
+    let status = run_task(&hd_ctx, json!({ "ticker": "DAI-ERC20", "activation_params": {} }));
+    assert_eq!(status["status"], "Ok", "{}", status);
+    assert_eq!(status["details"]["wallet_balance"]["wallet_type"], "HD");
+    assert!(!status.to_string().contains("gasfree_address"), "{}", status);
+}

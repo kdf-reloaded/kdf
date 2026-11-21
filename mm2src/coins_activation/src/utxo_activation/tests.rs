@@ -292,6 +292,7 @@ fn success_object_hd_form_keys_every_balance_by_the_ticker() {
             total_balance: coin_balance_map_for_ticker("RIN", balance("2", "1")),
             addresses: vec![HDAddressBalance {
                 address: "Raddress".to_owned(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(address_path),
                 chain: Bip44Chain::External,
                 balance: coin_balance_map_for_ticker("RIN", balance("2", "1")),
