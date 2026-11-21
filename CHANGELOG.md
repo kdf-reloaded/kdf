@@ -861,7 +861,24 @@ the previous version used. The safe way:
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); ZEC fees under ZIP 317 (Z10, PR #431); the coins entry follows. Z1–Z8 done.
 
-## [0.4.1-beta.1] — patch release on the 0.4 line (date set at release)
+## [0.4.1-beta.1] — 2026-11-21
+
+<!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
+<!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
+
+### Upgrade note: a shielded wallet database already migrated by a development build
+
+**0.4.1-beta.1 cannot open a shielded (ARRR, Pirate) wallet database that a newer development
+build has already migrated.** This concerns only a data directory that a development build of
+the next version has run on. A data directory that only ran 0.4.0-beta.1 is not affected.
+
+To use such a wallet with 0.4.1-beta.1, stop the node, copy the
+`<TICKER>_RELOADED_WALLET.db.pre-upgrade.<ms>.bak` file that the development build wrote next to
+the wallet database over `<TICKER>_RELOADED_WALLET.db`, delete `<TICKER>_RELOADED_WALLET.db-wal`
+and `<TICKER>_RELOADED_WALLET.db-shm` if they exist, and start 0.4.1-beta.1. Anything the wallet
+recorded after the migration is not in the backup; the node scans it again. The changelog of the
+development line describes the migration and its backup under "Breaking changes and upgrade
+notes".
 
 ### Changed
 
