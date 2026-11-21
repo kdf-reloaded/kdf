@@ -341,14 +341,15 @@ impl HDWalletRpcOps for EthCoin {
         &self,
         params: GetNewHDAddressParams,
     ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
-        // A TRC20 token asks the HD wallet of its platform (CRD ch.21 R21.10B.4).
+        // A token asks the HD wallet of its platform (CRD ch.21 R21.10B.4, ch.49 R49.32). The address is written
+        // in the coin's own form (R49.33); the common implementation would abbreviate a 20-byte address.
         let serving = self.hd_serving_coin().await.map_to_mm(HDWalletRpcError::Internal)?;
-        if serving.tron_api.is_some() {
-            let mut response = tron_get_new_address_rpc(&serving, params).await?;
-            self.keep_own_ticker_if_trc20(&mut response.new_address.balance);
-            return Ok(response);
-        }
-        hd_wallet::common_impl::get_new_address_rpc(self, params).await
+        let mut response = hd_get_new_address_rpc(&serving, params).await?;
+        self.keep_own_ticker_if_trc20(&mut response.new_address.balance);
+        self.narrow_to_erc20_ticker(std::slice::from_mut(&mut response.new_address))
+            .await
+            .mm_err(HDWalletRpcError::from)?;
+        Ok(response)
     }
 }
 
@@ -376,6 +377,9 @@ pub struct EthAddressScanner {
     /// The used-address rule of a TRON platform (CRD ch.21 R21.10B.4), which asks the TRON node and not the
     /// placeholder provider.
     tron: Option<TronUsedAddressProbe>,
+    /// The used-address rule of an ERC-20 ticker (CRD ch.49 R49.32): the token's balance stands in for the
+    /// platform balance.
+    token: Option<(EthCoin, Erc20TokenInfo)>,
 }
 
 #[async_trait]
@@ -393,6 +397,11 @@ impl HDAddressBalanceScanner for EthAddressScanner {
             .map_err(|e| BalanceError::Transport(format!("{}", e)))?;
         if nonce != 0 {
             return Ok(true);
+        }
+        if let Some((token, info)) = &self.token {
+            let balance = token.erc20_balance_of(info, *address).await?;
+            let zero = BigDecimal::from(0);
+            return Ok(balance.spendable != zero || balance.unspendable != zero);
         }
         let balance = assert_send_future(self.provider.get_balance(alloy_addr).into_future())
             .await
@@ -423,6 +432,7 @@ impl HDWalletBalanceOps for EthCoin {
         Ok(EthAddressScanner {
             provider: self.alloy_provider(),
             tron,
+            token: None,
         })
     }
 
@@ -644,7 +654,10 @@ impl AccountBalanceRpcOps for EthCoin {
             .await
             .map_to_mm(HDAccountBalanceRpcError::Internal)?;
         let mut response = account_balance::common_impl::account_balance_rpc(&serving, params).await?;
-        if matches!(self.coin_type, EthCoinType::Trc20 { .. }) {
+        self.narrow_to_erc20_ticker(&mut response.addresses)
+            .await
+            .mm_err(HDAccountBalanceRpcError::from)?;
+        if matches!(self.coin_type, EthCoinType::Trc20 { .. } | EthCoinType::Erc20 { .. }) {
             response.page_balance = response
                 .addresses
                 .iter()
@@ -682,6 +695,12 @@ impl InitAccountBalanceRpcOps for EthCoin {
             .map_to_mm(HDAccountBalanceRpcError::Internal)?;
         let mut response = init_account_balance_mod::common_impl::init_account_balance_rpc(&serving, params).await?;
         self.keep_own_ticker_if_trc20(&mut response.total_balance);
+        if self.erc20_ticker_info().is_some() {
+            self.narrow_to_erc20_ticker(&mut response.addresses)
+                .await
+                .mm_err(HDAccountBalanceRpcError::from)?;
+            response.total_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &response.addresses);
+        }
         for address in response.addresses.iter_mut() {
             self.keep_own_ticker_if_trc20(&mut address.balance);
         }
@@ -706,13 +725,13 @@ impl InitCreateHDAccountRpcOps for EthCoin {
 }
 
 // -------------------------------------------------------------------
-// TRON: get_new_address and the scan task (CRD ch.21 R21.10B.4)
+// get_new_address in the coin's address form, and the scan task (CRD ch.21 R21.10B.4, ch.49 R49.33)
 // -------------------------------------------------------------------
 
-/// `get_new_address` of a TRON platform: the common derivation, with the address in base58check and the balance
-/// map over the platform and its enabled tokens. The common implementation renders an address with its `Display`,
-/// which abbreviates a 20-byte address.
-async fn tron_get_new_address_rpc(
+/// `get_new_address` of an HD platform: the common derivation, with the address in the coin's form (base58check for
+/// TRON, the EIP-55 string for an EVM coin) and the balance map of [`EthCoin::hd_balance_map`]. The common
+/// implementation renders an address with its `Display`, which abbreviates a 20-byte address.
+async fn hd_get_new_address_rpc(
     coin: &EthCoin,
     params: GetNewHDAddressParams,
 ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
@@ -742,8 +761,9 @@ async fn tron_get_new_address_rpc(
 use crate::rpc_command::init_scan_for_new_addresses::{self, InitScanAddressesRpcOps, ScanAddressesParams,
                                                       ScanAddressesResponse};
 
-/// `task::scan_for_new_addresses::init` is served for TRX and TRC20 tickers only (CRD ch.21 R21.10B.4); the task
-/// dispatcher does not route an EVM coin here.
+/// `task::scan_for_new_addresses::init` of an HD platform and of a token ticker (CRD ch.21 R21.10B.4, ch.49
+/// R49.32). A token ticker is served from its platform's wallet and counts an address as used by its nonce or that
+/// token's balance.
 #[async_trait]
 impl InitScanAddressesRpcOps for EthCoin {
     async fn init_scan_for_new_addresses_rpc(
@@ -754,13 +774,53 @@ impl InitScanAddressesRpcOps for EthCoin {
             .hd_serving_coin()
             .await
             .map_to_mm(HDAccountBalanceRpcError::Internal)?;
-        let mut response =
-            init_scan_for_new_addresses::common_impl::scan_for_new_addresses_rpc(&serving, params).await?;
+        let mut response = match self.erc20_ticker_info() {
+            Some(info) => scan_for_erc20_ticker(self, info, &serving, params).await?,
+            None => init_scan_for_new_addresses::common_impl::scan_for_new_addresses_rpc(&serving, params).await?,
+        };
         for address in response.new_addresses.iter_mut() {
             self.keep_own_ticker_if_trc20(&mut address.balance);
         }
         Ok(response)
     }
+}
+
+/// The scan of an ERC-20 ticker: the platform's wallet is scanned with an address counted as used by its nonce or the
+/// token's balance, and each entry then reports that token only.
+async fn scan_for_erc20_ticker(
+    token: &EthCoin,
+    info: Erc20TokenInfo,
+    platform: &EthCoin,
+    params: ScanAddressesParams,
+) -> MmResult<ScanAddressesResponse, HDAccountBalanceRpcError> {
+    use std::ops::DerefMut;
+
+    let hd_wallet = platform.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
+    let account_id = params.account_index;
+    let mut hd_account = hd_wallet
+        .get_account_mut(account_id)
+        .await
+        .or_mm_err(|| HDAccountBalanceRpcError::CoinIsActivatedNotWithHDWallet)?;
+    let account_derivation_path = hd_account.account_derivation_path();
+    let address_scanner = EthAddressScanner {
+        provider: platform.alloy_provider(),
+        tron: None,
+        token: Some((token.clone(), info)),
+    };
+    let gap_limit = params.gap_limit.unwrap_or_else(|| hd_wallet.gap_limit());
+    let mut new_addresses = platform
+        .scan_for_new_addresses(hd_wallet, hd_account.deref_mut(), &address_scanner, gap_limit)
+        .await
+        .mm_err(Into::into)?;
+    token
+        .narrow_to_erc20_ticker(&mut new_addresses)
+        .await
+        .mm_err(HDAccountBalanceRpcError::from)?;
+    Ok(ScanAddressesResponse {
+        account_index: account_id,
+        derivation_path: RpcDerivationPath(account_derivation_path),
+        new_addresses,
+    })
 }
 
 // -------------------------------------------------------------------
@@ -889,16 +949,40 @@ impl EthCoin {
         }
     }
 
-    /// The coin whose HD wallet serves the HD RPC methods asked of this coin: the platform for a TRC20 token (a
-    /// token coin carries the enabled address only, CRD ch.21 R21.10B.4), this coin otherwise.
+    /// The token this coin is when it is an ERC-20 token: the HD methods asked of it answer that token only.
+    fn erc20_ticker_info(&self) -> Option<Erc20TokenInfo> {
+        match self.coin_type {
+            EthCoinType::Erc20 { .. } => self.erc20_token_info(),
+            _ => None,
+        }
+    }
+
+    /// Replaces the balance map of each entry of an HD method's answer with this token's own balance when the method
+    /// was asked for an ERC-20 ticker (CRD ch.49 R49.32, last paragraph). The platform's wallet serves the method
+    /// and reports the platform ticker; an ERC-20 ticker answers its `balanceOf` only, and leaves any other coin's
+    /// answer as it is.
+    async fn narrow_to_erc20_ticker(&self, entries: &mut [HDAddressBalance]) -> BalanceResult<()> {
+        let Some(info) = self.erc20_ticker_info() else {
+            return Ok(());
+        };
+        for entry in entries.iter_mut() {
+            let address = super::addr_from_str(&entry.address).map_to_mm(BalanceError::Internal)?;
+            let balance = self.erc20_balance_of(&info, address).await?;
+            entry.balance = coin_balance_map_for_ticker(self.ticker(), balance);
+        }
+        Ok(())
+    }
+
+    /// The coin whose HD wallet serves the HD RPC methods asked of this coin: the platform for a token (a token
+    /// coin carries the enabled address only, CRD ch.21 R21.10B.4, ch.49 R49.34), this coin otherwise.
     ///
     /// The token's own look-up of its platform finds a passive platform (CRD ch.43 D43.1F.3 (b)).
     ///
     /// # Errors
     ///
-    /// The text of why the platform of a TRC20 token cannot be found.
+    /// The text of why the platform of a token cannot be found.
     pub(crate) async fn hd_serving_coin(&self) -> Result<EthCoin, String> {
-        let EthCoinType::Trc20 { platform, .. } = &self.coin_type else {
+        let (EthCoinType::Trc20 { platform, .. } | EthCoinType::Erc20 { platform, .. }) = &self.coin_type else {
             return Ok(self.clone());
         };
         let ctx = MmArc::from_weak(&self.ctx).ok_or_else(|| "MM context has been dropped".to_owned())?;

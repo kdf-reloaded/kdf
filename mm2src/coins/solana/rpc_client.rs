@@ -444,7 +444,8 @@ pub struct TokenAmount {
     pub decimals: u8,
     #[serde(default)]
     pub ui_amount: Option<f64>,
-    pub ui_amount_string: String,
+    #[serde(default)]
+    pub ui_amount_string: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -578,7 +579,7 @@ mod tests {
             Envelope::Ok { result, .. } => {
                 assert_eq!(result.value.amount, "100");
                 assert_eq!(result.value.decimals, 6);
-                assert_eq!(result.value.ui_amount_string, "0.0001");
+                assert_eq!(result.value.ui_amount_string.as_deref(), Some("0.0001"));
             },
             _ => panic!(),
         }

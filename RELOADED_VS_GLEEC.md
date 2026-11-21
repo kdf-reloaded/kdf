@@ -181,6 +181,15 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
     decimals as its threshold, not one lamport.
   No switch: none of these is a compatibility target. CRD ch.40 D40.6B.2 to
   D40.6B.6; PR #425.
+- **Sums in Solana withdraw answers.** Members that add or subtract two
+  amounts carry the coin's full decimals: `spent_by_me` and
+  `my_balance_change` of a SOL withdraw, `my_balance_change` of an SPL
+  withdraw, an SPL withdraw's `fee_details.total_amount`, and `required` of
+  `NotSufficientPlatformBalanceForFee` and of a SOL `NotSufficientBalance`.
+  Reloaded writes `"1.000000000"` where GLEEC KDF writes `"1.000000"` or
+  `"1"`; the values are equal. No switch: a client that reads them as
+  decimal numbers sees no difference. CRD ch.40 R40.2A.4, D40.2A.1;
+  PR #456.
 
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the
@@ -780,7 +789,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   fewer addresses; not visible to peers). The legacy `enable` method keeps the node's internal key under a global-HD login, as Reloaded's
   EVM and UTXO legacy routes do, so its TRON address differs from the HD route's address for the same seed; GLEEC KDF
   refuses TRON on the legacy method, so a GLEEC client never reaches it. `withdraw` of a TRON coin takes an HD `from`
-  and signs with that key, and refuses `from` on a single-key coin (it was ignored before). A TRC20 withdraw under a global-HD login takes an HD `from` resolved in the platform's HD wallet (any activated address of the platform); this is a Reloaded extension, and an EVM ERC-20 coin in Reloaded refuses `from`. No switch; row in
+  and signs with that key, and refuses `from` on a single-key coin (it was ignored before). A TRC20 withdraw under a global-HD login takes an HD `from` resolved in the platform's HD wallet (any activated address of the platform); this is a Reloaded extension for TRON. An EVM ERC-20 withdraw under a global-HD login resolves `from` in the platform's HD wallet in the same way, as GLEEC KDF does (CRD ch.49 R49.34). No switch; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.21 R-A2, R21.10B.4.
 
 - **`convertaddress` for a TRON coin converts between the base58check and the `41...` hex form.**

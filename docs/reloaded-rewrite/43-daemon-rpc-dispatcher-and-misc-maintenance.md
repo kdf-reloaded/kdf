@@ -2020,10 +2020,10 @@ names.
 > 5. *Token look-ups (D43.1F.3 (b)).* A Reloaded EVM token keeps its swap
 >    gas-fee policy in its own instance and looks its platform up by no ticker,
 >    so a token's orders, swaps and fee estimates work while its platform is
->    passive; nothing changed in the EVM token code for it. A TRC20 token looks
->    its platform up by ticker for its HD methods, its GasFree address and
->    `withdraw`, gasless included; that look-up is the token's own and finds a
->    passive platform.
+>    passive; nothing changed in the EVM token code for it. A TRC20 or ERC-20
+>    token looks its platform up by ticker for its HD methods and `withdraw`,
+>    and a TRC20 token also for its GasFree address and a gasless `withdraw`;
+>    that look-up is the token's own and finds a passive platform.
 > 6. *Standalone tasks (D43.1F.4 (b)).* The `init` of a standalone activation
 >    task refuses the ticker of a passive platform with `CoinIsAlreadyActivated`
 >    and builds nothing.
