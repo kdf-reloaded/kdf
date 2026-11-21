@@ -8,19 +8,20 @@ use crate::eth::abi::Token;
 
 use super::address::TronAddress;
 use super::proto::{ContractType, TaposBlockData, TransactionContract, TransactionRaw, TransferContract,
-                   TriggerSmartContract, DEFAULT_EXPIRATION_SEC, TRANSFER_CONTRACT_TYPE_URL,
-                   TRIGGER_SMART_CONTRACT_TYPE_URL};
+                   TriggerSmartContract, TRANSFER_CONTRACT_TYPE_URL, TRIGGER_SMART_CONTRACT_TYPE_URL};
 
+use ethereum_types::U256;
 use prost::Message;
 
 /// ABI-encode a TRC20 `transfer(address, uint256)` call.
 ///
-/// Produces the 4-byte selector + 32-byte address + 32-byte amount (68 bytes total).
-pub fn abi_encode_trc20_transfer(to: &TronAddress, amount_sun: u64) -> Vec<u8> {
+/// Produces the 4-byte selector + 32-byte address + 32-byte amount (68 bytes total). The amount is in the token's
+/// smallest unit and fills the whole 32-byte big-endian word, as the token standard's `uint256` does.
+pub fn abi_encode_trc20_transfer(to: &TronAddress, amount_units: U256) -> Vec<u8> {
     // TRC20 uses the same ABI as ERC20: transfer(address,uint256)
     // Selector: 0xa9059cbb
     let selector: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
-    let tokens = crate::eth::abi::encode(&[Token::Address(to.to_evm_address()), Token::Uint(amount_sun.into())]);
+    let tokens = crate::eth::abi::encode(&[Token::Address(to.to_evm_address()), Token::Uint(amount_units)]);
     let mut data = Vec::with_capacity(4 + tokens.len());
     data.extend_from_slice(&selector);
     data.extend_from_slice(&tokens);
@@ -46,12 +47,14 @@ pub fn tapos_from_block(block_num: u64, block_id: &[u8; 32]) -> TaposBlockData {
 /// - `amount_sun`: amount in SUN (1 TRX = 1,000,000 SUN)
 /// - `tapos`: TAPOS block data for anti-replay
 /// - `now_ms`: current timestamp in milliseconds since epoch
+/// - `expiration_ms`: the time the transaction expires at, in milliseconds since epoch
 pub fn build_trx_transfer(
     from: &TronAddress,
     to: &TronAddress,
     amount_sun: i64,
     tapos: &TaposBlockData,
     now_ms: i64,
+    expiration_ms: i64,
 ) -> TransactionRaw {
     let contract = TransferContract {
         owner_address: from.to_bytes().to_vec(),
@@ -65,7 +68,7 @@ pub fn build_trx_transfer(
     TransactionRaw {
         ref_block_bytes: tapos.ref_block_bytes.clone(),
         ref_block_hash: tapos.ref_block_hash.clone(),
-        expiration: now_ms + (DEFAULT_EXPIRATION_SEC as i64 * 1000),
+        expiration: expiration_ms,
         contract: vec![TransactionContract {
             r#type: ContractType::TransferContract as i32,
             parameter: Some(any),
@@ -80,20 +83,23 @@ pub fn build_trx_transfer(
 /// - `from`: sender TRON address
 /// - `contract_addr`: TRC20 token contract address
 /// - `to`: recipient TRON address
-/// - `amount_sun`: token amount in smallest unit
+/// - `amount_units`: token amount in smallest unit, a 256-bit value
 /// - `tapos`: TAPOS block data for anti-replay
 /// - `now_ms`: current timestamp in milliseconds since epoch
+/// - `expiration_ms`: the time the transaction expires at, in milliseconds since epoch
 /// - `fee_limit_sun`: maximum TRX fee in SUN (energy cost limit)
+#[allow(clippy::too_many_arguments)]
 pub fn build_trc20_transfer(
     from: &TronAddress,
     contract_addr: &TronAddress,
     to: &TronAddress,
-    amount_sun: u64,
+    amount_units: U256,
     tapos: &TaposBlockData,
     now_ms: i64,
+    expiration_ms: i64,
     fee_limit_sun: i64,
 ) -> TransactionRaw {
-    let data = abi_encode_trc20_transfer(to, amount_sun);
+    let data = abi_encode_trc20_transfer(to, amount_units);
     let trigger = TriggerSmartContract {
         owner_address: from.to_bytes().to_vec(),
         contract_address: contract_addr.to_bytes().to_vec(),
@@ -107,7 +113,7 @@ pub fn build_trc20_transfer(
     TransactionRaw {
         ref_block_bytes: tapos.ref_block_bytes.clone(),
         ref_block_hash: tapos.ref_block_hash.clone(),
-        expiration: now_ms + (DEFAULT_EXPIRATION_SEC as i64 * 1000),
+        expiration: expiration_ms,
         contract: vec![TransactionContract {
             r#type: ContractType::TriggerSmartContract as i32,
             parameter: Some(any),
@@ -121,6 +127,7 @@ pub fn build_trc20_transfer(
 mod tests {
     use super::*;
     use crate::eth::tron::address::TronAddress;
+    use crate::eth::tron::proto::DEFAULT_EXPIRATION_SEC;
     use prost::Message as _;
 
     fn dummy_tapos() -> TaposBlockData {
@@ -129,6 +136,9 @@ mod tests {
             ref_block_hash: vec![0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a],
         }
     }
+
+    /// The expiry the tests build with: the default lifetime after `now_ms`.
+    fn expiry(now_ms: i64) -> i64 { now_ms + DEFAULT_EXPIRATION_SEC as i64 * 1000 }
 
     fn test_address_a() -> TronAddress { TronAddress::from_hex("410000000000000000000000000000000000000001").unwrap() }
 
@@ -157,7 +167,7 @@ mod tests {
         let tapos = dummy_tapos();
         let now_ms = 1700000000000i64;
 
-        let raw = build_trx_transfer(&from, &to, 1_000_000, &tapos, now_ms);
+        let raw = build_trx_transfer(&from, &to, 1_000_000, &tapos, now_ms, expiry(now_ms));
 
         assert_eq!(raw.ref_block_bytes, tapos.ref_block_bytes);
         assert_eq!(raw.ref_block_hash, tapos.ref_block_hash);
@@ -181,7 +191,7 @@ mod tests {
         let from = test_address_a();
         let to = test_address_b();
         let tapos = dummy_tapos();
-        let raw = build_trx_transfer(&from, &to, 5_000_000, &tapos, 1700000000000);
+        let raw = build_trx_transfer(&from, &to, 5_000_000, &tapos, 1700000000000, expiry(1700000000000));
 
         let encoded = raw.encode_to_vec();
         let decoded = TransactionRaw::decode(encoded.as_slice()).unwrap();
@@ -191,10 +201,38 @@ mod tests {
     #[test]
     fn test_abi_encode_trc20_transfer() {
         let to = test_address_b();
-        let data = abi_encode_trc20_transfer(&to, 1_000_000);
+        let data = abi_encode_trc20_transfer(&to, U256::from(1_000_000u64));
         // 4-byte selector + 32-byte address + 32-byte uint256 = 68 bytes.
         assert_eq!(data.len(), 68);
         assert_eq!(&data[..4], &[0xa9, 0x05, 0x9c, 0xbb]);
+    }
+
+    /// An amount that fits 64 bits keeps the call data it always had: the selector, the recipient's 20 bytes
+    /// right-aligned in a word, and 1 000 000 = 0x0f4240 right-aligned in a word.
+    #[test]
+    fn test_abi_encode_trc20_transfer_small_amount_bytes() {
+        let data = abi_encode_trc20_transfer(&test_address_b(), U256::from(1_000_000u64));
+        let expected = concat!(
+            "a9059cbb",
+            "0000000000000000000000000000000000000000000000000000000000000002",
+            "00000000000000000000000000000000000000000000000000000000000f4240",
+        );
+        assert_eq!(hex::encode(data), expected);
+    }
+
+    /// 10^24 units (a million whole tokens of 18 decimals) do not fit 64 bits. 10^24 = 0xd3c21bcecceda1000000,
+    /// ten bytes, right-aligned in the amount word.
+    #[test]
+    fn test_abi_encode_trc20_transfer_amount_above_64_bits() {
+        let amount = U256::from(1_000_000_000_000_000_000_000_000u128);
+        let data = abi_encode_trc20_transfer(&test_address_b(), amount);
+        let expected = concat!(
+            "a9059cbb",
+            "0000000000000000000000000000000000000000000000000000000000000002",
+            "00000000000000000000000000000000000000000000d3c21bcecceda1000000",
+        );
+        assert_eq!(data.len(), 68);
+        assert_eq!(hex::encode(data), expected);
     }
 
     #[test]
@@ -206,7 +244,16 @@ mod tests {
         let now_ms = 1700000000000i64;
         let fee_limit = 100_000_000i64;
 
-        let raw = build_trc20_transfer(&from, &contract_addr, &to, 5_000_000, &tapos, now_ms, fee_limit);
+        let raw = build_trc20_transfer(
+            &from,
+            &contract_addr,
+            &to,
+            U256::from(5_000_000u64),
+            &tapos,
+            now_ms,
+            expiry(now_ms),
+            fee_limit,
+        );
 
         assert_eq!(raw.fee_limit, fee_limit);
         assert_eq!(raw.contract.len(), 1);
@@ -229,6 +276,7 @@ mod tests {
             1_000_000,
             &dummy_tapos(),
             1700000000000,
+            expiry(1700000000000),
         );
         let contract_bytes = raw.contract[0].encode_to_vec();
         assert_eq!(&contract_bytes[..3], &[0x08, 0x01, 0x12]);
@@ -241,9 +289,10 @@ mod tests {
             &test_address_a(),
             &contract_addr,
             &test_address_b(),
-            5_000_000,
+            U256::from(5_000_000u64),
             &dummy_tapos(),
             1700000000000,
+            expiry(1700000000000),
             100_000_000,
         );
         let contract_bytes = raw.contract[0].encode_to_vec();
@@ -258,6 +307,7 @@ mod tests {
             1_000_000,
             &dummy_tapos(),
             1700000000000,
+            expiry(1700000000000),
         );
         let contract_bytes = raw.contract[0].encode_to_vec();
         let raw_bytes = raw.encode_to_vec();

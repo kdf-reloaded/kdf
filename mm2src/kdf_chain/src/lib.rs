@@ -26,7 +26,7 @@ pub use primitives::{bytes, compact, hash, U256};
 pub use raw_header::{RawBlockHeader, RawHeaderError};
 pub use read_hash::{HashedData, ReadAndHash};
 pub use repr::RepresentH256;
-pub use transaction::{JoinSplit, OrchardAction, OrchardBundle, OutPoint, SaplingBundleV5, SaplingSpendV5,
+pub use transaction::{JoinSplit, OpaqueTx, OrchardAction, OrchardBundle, OutPoint, SaplingBundleV5, SaplingSpendV5,
                       ShieldedOutput, ShieldedSpend, Transaction, TransactionInput, TransactionOutput, TxHashAlgo};
 
 pub type ShortTransactionId = hash::H48;

@@ -269,7 +269,7 @@ pub fn wait_for_confirmations(
     wait_until: u64,
     check_every: u64,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-    let mut tx: UtxoTx = try_fus!(deserialize(tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_fus!(read_utxo_tx(tx).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
     coin.rpc_client.wait_for_confirmations(
         tx.hash().reversed().into(),
@@ -288,7 +288,7 @@ pub fn wait_for_output_spend(
     from_block: u64,
     wait_until: u64,
 ) -> TransactionFut {
-    let mut tx: UtxoTx = try_tx_fus!(deserialize(tx_bytes).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_tx_fus!(read_utxo_tx(tx_bytes).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
     let tx_hash = tx.hash();
     let script_pubkey = tx.outputs[output_index].script_pubkey.clone();
@@ -377,7 +377,8 @@ pub fn min_trading_vol(coin: &UtxoCoinFields) -> MmNumber {
 }
 
 /// The minimum trading volume in base units: `max(10 * dust, 10 * F)`, where `F` is zero for a
-/// dynamic-fee coin and `floor(fee_per_kb * 496 / 1000)` for a fixed-fee coin. The only rounding is the
+/// dynamic-fee coin, `floor(fee_per_kb * 496 / 1000)` for a fixed-fee coin and the ZIP 317 fee of the standard
+/// HTLC claim for a ZIP 317 coin. The only rounding is the
 /// truncation inside `F`.
 fn utxo_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
     let dust_based = dust_amount.saturating_mul(10);
@@ -392,6 +393,9 @@ fn utxo_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
         },
         // CRD ch.38 R38.6.6e: `F = r` for the whole-kilobyte policy (the representative size is under 1 kB).
         TxFee::FixedPerStartedKb(fee_per_kb) => fee_per_kb.saturating_mul(10),
+        // The ZIP 317 rule: `F` is the conventional fee of the standard version-one HTLC claim (one P2SH input,
+        // one P2PKH output), which is the transaction this figure stands for.
+        TxFee::Zip317 { .. } => super::utxo_common_swap::v1_claim_spend_bytes().fee().saturating_mul(10),
     };
 
     std::cmp::max(dust_based, fee_based)

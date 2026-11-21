@@ -1,6 +1,6 @@
 # Plan: Tron GasFree fee-delegated TRC20 withdraw rail
 
-**Status:** parked (branch-only; gated on pinning the GasFree proxy creation bytecode) — **Last reviewed:** 2026-11-08
+**Status:** in progress — **Last reviewed:** 2026-11-20
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a complete, test-covered GasFree implementation and an
@@ -18,6 +18,11 @@
 > 2026-11-08 (plan `tron-support`); turning
 > activation back on (ch.21 D6) precedes the activation-time steps below and is
 > part of any revival of this plan.
+
+> **Status (2026-11-20).** TRON activation is switched on again, as a
+> wallet-only coin family: `TRON_ACTIVATION_AVAILABLE` is `true`, and swaps stay
+> off behind `TRON_SWAPS_AVAILABLE` (`false`) (CRD ch.21 D6 and its status
+> note; plan `tron-support`). The box above describes the tree until that date.
 
 ## Relation to the TRON work (2026-11-08)
 
@@ -65,10 +70,42 @@ new PRs, and the branch stays until the second PR below has landed.
 - **Withdraw task path.** dev ch.49 R49.9 refuses TRON withdrawals under hardware signing. The gasless rail states how
   it relates to `task::withdraw`.
 - **PRs.**
-  - First, after the amended chapter passes the gate: the chapter with its gate verdict in the text, and the module
-    with the pinned and verified bytecode. No shared request or balance fields; unreachable.
-  - Then, after the activation route: the activation binding, the request and balance fields, the withdraw
-    dispatcher, and submission with settlement tracking, all in the release that carries the fields.
+  - First: the module group `mm2src/coins/eth/tron/gasfree/` with the pinned and verified bytecode: the
+    per-network constants, the custody-address derivation and its check against the controller (ch.63 R29), the
+    `PermitTransfer` signer and artifact, the provider client with its payloads, and the preflight decision. No
+    shared request, balance or error fields; unreachable from every RPC.
+  - Then: the activation binding, the fields at every placement ch.63 R18 lists, and the withdraw dispatcher.
+  - Then: submission and settlement tracking (ch.63 D63.6), as a Reloaded extension.
+
+> **Activation binding and report fields built (2026-11-20).** The platform
+> activation reads `tron_gasless_provider` and a TRC20 token activation reads
+> `gasless`, on the one-shot and task forms (ch.63 §63.3.1, §63.3.2). The
+> validated provider binding is kept on the TRX platform coin and the token's
+> fee cap, in base units, on the token coin. `gasfree_address` is shown at the
+> placements ch.63 R18 lists, attached in one place, after the controller check
+> of R29 (the status note after ch.63 §63.3.3). TRON activation is on since
+> 2026-11-20 (`TRON_ACTIVATION_AVAILABLE`), so all of it is reachable in a
+> build. Not built: the `fee_method` and `gasless`
+> members of the withdraw request, the withdraw dispatcher, and submission.
+
+> **Sign-only gasless withdraw built (2026-11-20).** The shared withdraw
+> request has `fee_method` and `gasless`; the direct method and
+> `task::withdraw::init` refuse them for a coin that is not a TRON coin (ch.63
+> R21). For a TRC20 token with the rail enabled, `gasless` and `auto` run the
+> controller check (R29), the preflight (§63.7) and the fee cap, and sign the
+> `PermitTransfer`; the result is the sign-only result of §63.8A in its D63.8
+> (a) form, with the `TronGasless` fee details. The rail makes no TRX fee
+> estimate. The `MM2.json` switch `tron_gasfree_guard_allows_fallback` is
+> built. TRON activation is on since 2026-11-20
+> (`TRON_ACTIVATION_AVAILABLE`), so all of it is reachable in a build. Not
+> built: submission to the provider and settlement tracking (ch.63 D63.6); the
+> sentence above about the withdraw request and the dispatcher describes the
+> state before this date. Until submission is built, the rail only signs: the
+> node does not hand the signed authorization to the provider and no RPC does,
+> so a token on the GasFree address moves only if the user submits the
+> authorization to the provider themselves. The same holds for the recovery
+> procedure of ch.63 D63.4 (a gasless withdraw to the user's own address): it
+> gives a signed authorization and no transfer.
 
 ## Blocker: the derived custody address is knowingly wrong
 
@@ -78,6 +115,16 @@ new PRs, and the branch stays until the second PR below has landed.
 > derivation must reproduce every custody-address vector the SDK publishes:
 > five per network, Shasta included (T1). The text below records the state of
 > the parked branch.
+
+> **Bytecode pinned and verified (2026-11-19).** The creation bytecode of each
+> network is embedded in the module group `mm2src/coins/eth/tron/gasfree/`,
+> taken from the deploying transactions (ch.63 §63.5, status note of
+> 2026-11-19). The derivation reproduces all ten custody-address vectors the
+> SDK publishes for mainnet and Nile, with the Nile salts and init-code
+> hashes. For Shasta it reproduces the five answers of the live controller's
+> `getGasFreeAddress(address)`: the SDK's Shasta vectors predate the Shasta
+> controller's upgrade of 2026-07-04 and no longer apply. The module group is
+> unreachable from every RPC.
 
 **Nothing reachable may be built on this derivation until the proxy creation
 bytecode is pinned and the derivation is verified against at least two

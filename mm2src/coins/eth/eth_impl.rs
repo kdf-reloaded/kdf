@@ -85,6 +85,9 @@ impl EthCoinImpl {
     /// Whether this coin is the native gas coin of an EVM chain (not a token, not TRON).
     pub fn is_evm_platform_coin(&self) -> bool { matches!(self.coin_type, EthCoinType::Eth) }
 
+    /// Whether this coin is TRX or a TRC20 token.
+    pub fn is_tron_family(&self) -> bool { matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) }
+
     /// Whether this coin signs with a hardware wallet.
     pub fn uses_hardware_signer(&self) -> bool {
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
@@ -566,6 +569,22 @@ pub(crate) struct EvmWithdrawSender {
 impl EvmWithdrawSender {
     pub(crate) fn address(&self) -> Address { self.address }
 
+    /// The activated address of `coin`, signed with the coin's own key: the sender of a withdraw without `from`.
+    pub(crate) fn activated(coin: &EthCoin) -> Self {
+        EvmWithdrawSender {
+            address: coin.my_address,
+            key_pair: None,
+        }
+    }
+
+    /// The secret that signs for this sender: the derived key of an HD `from`, else the coin's own local key.
+    pub(crate) fn local_secret<'a>(&'a self, coin: &'a EthCoin) -> Option<&'a mm2_eth::keys::Secret> {
+        match &self.key_pair {
+            Some(key_pair) => Some(key_pair.secret()),
+            None => coin.signer.local_secret(),
+        }
+    }
+
     fn checksum_address(&self) -> String { checksum_address(&format!("{:#02x}", self.address)) }
 
     fn sign_tx(&self, coin: &EthCoin, tx: UnSignedEthTx) -> Result<SignedEthTx, EthSignerError> {
@@ -632,7 +651,13 @@ pub(crate) async fn resolve_evm_withdraw_sender(
         .derive_address(&hd_account, chain, address_id)
         .mm_err(|e| WithdrawError::UnexpectedFromAddress(e.to_string()))?;
     if !is_address_activated {
-        let error = format!("'{}' address is not activated", hd_address.address);
+        // A TRON address is shown in base58check (CRD ch.21 §21.5); the EVM text keeps its form.
+        let shown = if coin.is_tron_family() {
+            coin.hd_address_string(&hd_address.address)
+        } else {
+            hd_address.address.to_string()
+        };
+        let error = format!("'{}' address is not activated", shown);
         return MmError::err(WithdrawError::UnexpectedFromAddress(error));
     }
 
@@ -662,6 +687,23 @@ pub(crate) async fn resolve_evm_withdraw_sender(
         address: hd_address.address,
         key_pair: Some(key_pair),
     })
+}
+
+/// Resolves the sender of a withdraw whose `from` selects an address of the platform's HD wallet. `coin` may be a
+/// token or its platform: a token is resolved through its platform coin. `req.from` selects the address in the
+/// platform's HD wallet, and the key is derived from the software HD wallet.
+///
+/// # Errors
+///
+/// [`WithdrawError::InternalError`] when the platform of a token cannot be found; otherwise the errors of
+/// [`resolve_evm_withdraw_sender`].
+pub(crate) async fn resolve_withdraw_sender_in_platform_wallet(
+    ctx: &MmArc,
+    coin: &EthCoin,
+    req: &WithdrawRequest,
+) -> MmResult<EvmWithdrawSender, WithdrawError> {
+    let wallet_coin = coin.hd_serving_coin().await.map_to_mm(WithdrawError::InternalError)?;
+    resolve_evm_withdraw_sender(ctx, &wallet_coin, req).await
 }
 
 #[cfg_attr(test, mockable)]
@@ -920,6 +962,17 @@ pub(crate) fn build_evm_withdraw_details(
 }
 
 pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> WithdrawResult {
+    withdraw_impl_with_progress(ctx, coin, req, None).await
+}
+
+/// [`withdraw_impl`] for the task that `progress` is the handle of. Only the TRON gasless rail reports phases of
+/// its own to it (CRD ch.63 §63.3.6).
+pub(crate) async fn withdraw_impl_with_progress(
+    ctx: MmArc,
+    coin: EthCoin,
+    req: WithdrawRequest,
+    progress: Option<&crate::rpc_command::init_withdraw::WithdrawTaskHandle>,
+) -> WithdrawResult {
     // TRON uses a dedicated pipeline: its transaction format, address
     // encoding, signing digest and fee model all differ from the EVM flow.
     if matches!(coin.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
@@ -938,8 +991,14 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
                     .to_owned(),
             ));
         }
-        let _ = ctx;
-        return crate::eth::tron::withdraw::withdraw_tron(coin, req).await;
+        // The sender is the activated address, or the HD address a `from` selects (CRD ch.47 `from`, ch.21
+        // R21.10B.4); both resolve before any node request.
+        let sender = if req.from.is_some() {
+            resolve_withdraw_sender_in_platform_wallet(&ctx, &coin, &req).await?
+        } else {
+            EvmWithdrawSender::activated(&coin)
+        };
+        return crate::eth::tron::withdraw::withdraw_tron_with_progress(coin, req, sender, progress).await;
     }
 
     validate_evm_withdraw_request(&coin, &req)?;
@@ -1725,6 +1784,7 @@ impl EthCoin {
             estimate_gas_mult,
             taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: None,
+            tron_gasfree: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
             erc20_tokens_infos: Default::default(),
@@ -2599,7 +2659,8 @@ impl EthCoin {
             },
             // TRON has its own transfer pipeline (build TransactionRaw,
             // sign with SHA-256+secp256k1, broadcast via TronApiClient).
-            // Activation gating prevents this from being reached. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
                 ERRL!("TRON send_to_address not yet wired (pending P10.2.5)"),
             ))),
@@ -2683,7 +2744,8 @@ impl EthCoin {
                 }))
             },
             // V1 Ethereum HTLC swaps; TRON uses a separate atomic-swap flow.
-            // Activation gating prevents this code path. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
                 ERRL!("TRON HTLC payment not yet wired (pending P10.2.5)"),
             ))),
@@ -2859,8 +2921,8 @@ impl EthCoin {
                         }),
                 )
             },
-            // V1 Ethereum HTLC refund; TRON refund is a separate flow,
-            // and activation gating prevents reaching this branch. P10.2.5.
+            // V1 Ethereum HTLC refund; TRON refund is a separate flow. TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
                 ERRL!("TRON HTLC refund not yet wired (pending P10.2.5)"),
             ))),
@@ -3328,7 +3390,8 @@ impl EthCoin {
                     }
                 },
                 // V1 ETH/ERC20 payment validation; TRON HTLC payments use a
-                // separate validator. Activation gating prevents this branch. P10.2.5.
+                // separate validator. TRON coins are wallet-only while
+                // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
                 EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                     return ERR!("TRON HTLC payment validation not yet wired (pending P10.2.5)");
                 },
@@ -3374,7 +3437,8 @@ impl EthCoin {
             EthCoinType::Eth => "ethPayment",
             EthCoinType::Erc20 { .. } => "erc20Payment",
             // V1 ETH/ERC20 search; TRON spend search uses TRON HTTP API.
-            // Activation gating prevents this branch. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return ERR!("TRON spend search not yet wired (pending P10.2.5)");
             },

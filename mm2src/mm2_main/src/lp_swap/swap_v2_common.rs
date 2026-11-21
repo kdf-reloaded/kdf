@@ -2050,6 +2050,106 @@ mod tests {
             }
         }
 
+        /// CRD ch.21 R-D1, R21.B3: while TRON swaps are switched off, an unfinished saved swap whose maker or taker
+        /// coin is a TRON coin (by the coins-config protocol) is not resumed at startup, in the legacy swap files
+        /// and in both v2 storages. Its record stays as it was, unfinished, and its coins are not asked for. An
+        /// unrelated unfinished swap is still kick-started.
+        #[test]
+        fn saved_swaps_with_a_tron_coin_are_not_resumed_at_startup() {
+            use crate::mm2::lp_swap::maker_swap::{MakerSavedSwap, MakerSwapEvent as LegacyMakerEvent};
+            use crate::mm2::lp_swap::saved_swap::{SavedSwap, SavedSwapIo};
+            use crate::mm2::lp_swap::{my_swap_file_path, my_swaps_dir, swap_kick_starts, tron_swap_skip_message};
+            use std::collections::HashSet;
+
+            const { assert!(!coins::TRON_SWAPS_AVAILABLE) };
+            let dbdir = std::env::temp_dir().join(format!("kdf-tron-saved-swaps-{}", Uuid::new_v4()));
+            let ctx = MmCtxBuilder::default()
+                .with_conf(serde_json::json!({
+                    "dbdir": dbdir.to_str().unwrap(),
+                    "coins": [
+                        { "coin": "DOC", "asset": "DOC", "mm2": 1, "protocol": { "type": "UTXO" } },
+                        { "coin": "MARTY", "asset": "MARTY", "mm2": 1, "protocol": { "type": "UTXO" } },
+                        { "coin": "TRX", "mm2": 1, "wallet_only": false,
+                          "protocol": { "type": "TRX", "protocol_data": { "network": "Mainnet" } } },
+                        { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "protocol": { "type": "TRC20",
+                          "protocol_data": { "platform": "TRX",
+                                             "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } } },
+                    ],
+                }))
+                .into_mm_arc();
+            let conn = Connection::open_in_memory().unwrap();
+            let _ = ctx.sqlite_connection.pin(Arc::new(Mutex::new(conn)));
+            block_on(crate::mm2::database::init_and_migrate_db(&ctx)).unwrap();
+            std::fs::create_dir_all(my_swaps_dir(&ctx)).unwrap();
+
+            // An unfinished legacy maker swap: the saved log holds the `Started` event only.
+            let legacy = |maker_coin: &str, taker_coin: &str| {
+                let mut swap = MakerSavedSwap::new(&MmNumber::from("1"), &MmNumber::from("1"));
+                swap.uuid = Uuid::new_v4();
+                swap.events.truncate(1);
+                match &mut swap.events[0].event {
+                    LegacyMakerEvent::Started(data) => {
+                        data.maker_coin = maker_coin.to_owned();
+                        data.taker_coin = taker_coin.to_owned();
+                        data.uuid = swap.uuid;
+                    },
+                    _ => panic!("the first event of the sample is Started"),
+                }
+                let saved = SavedSwap::from(swap);
+                assert!(!saved.is_finished());
+                block_on(saved.save_to_db(&ctx)).unwrap();
+                *saved.uuid()
+            };
+            let legacy_tron = legacy("DOC", "TRX");
+            let legacy_plain = legacy("DOC", "MARTY");
+            let legacy_tron_file = std::fs::read(my_swap_file_path(&ctx, &legacy_tron)).unwrap();
+
+            let mut maker_storage = MakerSwapStorage::new(ctx.clone());
+            let (v2_maker_tron, v2_maker_plain) = (Uuid::new_v4(), Uuid::new_v4());
+            let mut repr = sample_maker_repr(v2_maker_tron);
+            repr.maker_coin = "USDT-TRC20".into();
+            block_on(maker_storage.store_repr(v2_maker_tron, repr)).unwrap();
+            block_on(maker_storage.store_repr(v2_maker_plain, sample_maker_repr(v2_maker_plain))).unwrap();
+
+            let mut taker_storage = TakerSwapStorage::new(ctx.clone());
+            let v2_taker_tron = Uuid::new_v4();
+            let mut repr = sample_taker_repr(v2_taker_tron);
+            repr.taker_coin = "TRX".into();
+            block_on(taker_storage.store_repr(v2_taker_tron, repr)).unwrap();
+
+            let needed = block_on(swap_kick_starts(ctx.clone())).unwrap();
+
+            // The coins to enable come from the swaps that are resumed alone: no TRON ticker is among them.
+            assert_eq!(
+                needed,
+                ["DOC", "MARTY"].iter().map(|c| c.to_string()).collect::<HashSet<_>>()
+            );
+
+            // The skipped records are untouched and still unfinished.
+            assert_eq!(
+                std::fs::read(my_swap_file_path(&ctx, &legacy_tron)).unwrap(),
+                legacy_tron_file
+            );
+            let unfinished: HashSet<Uuid> = block_on(maker_storage.get_unfinished()).unwrap().into_iter().collect();
+            assert!(unfinished.contains(&v2_maker_tron) && unfinished.contains(&v2_maker_plain));
+            assert_eq!(
+                block_on(maker_storage.get_repr(v2_maker_tron)).unwrap().maker_coin,
+                "USDT-TRC20"
+            );
+            assert_eq!(block_on(taker_storage.get_unfinished()).unwrap(), vec![v2_taker_tron]);
+
+            // The log line names the swap and the reason; a swap without a TRON coin gets none.
+            assert_eq!(
+                tron_swap_skip_message(&ctx, &legacy_tron, "DOC", "TRX").unwrap(),
+                format!(
+                    "Not resuming saved swap {legacy_tron} (DOC/TRX): TRON swaps are not available in this build; \
+                     the saved swap is kept"
+                )
+            );
+            assert!(tron_swap_skip_message(&ctx, &v2_maker_tron, "USDT-TRC20", "MARTY").is_some());
+            assert!(tron_swap_skip_message(&ctx, &legacy_plain, "DOC", "MARTY").is_none());
+        }
+
         #[test]
         fn should_handle_full_lifecycle_when_using_maker_swap_storage() {
             let ctx = setup_test_ctx();
