@@ -110,12 +110,13 @@ or undo, and every change that needs a step from you.
   confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
   servers now report at another height shows that height and its block's time.
   - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
-
 - **A Kerrigan (KRGN) coin entry needs `"chain_variant": "KRGN"` in its `protocol` object.** Without it, the
   coin's Electrum headers cannot be read, so its median block time is almost always unknown, and claims and refunds
   of a KRGN swap fail, as they did before this release. With the value, the headers are read and claims and refunds
   follow the same lock-time rule as those of any UTXO coin. A KRGN entry with
   `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
+  - *What you see:* a KRGN entry without the value still activates, but its claims and refunds keep failing.
+  - Detail: PR #NNN; CRD ch.37 status note of 2026-11-18.
 
 #### Coins that are no longer visible after an upgrade
 
