@@ -268,7 +268,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   of blocks, at least 1 and at most 20) behind the height two or more servers have reached, or one
   that sends no new block for three block times or ten minutes while another does, is tried after
   the others for reads and broadcasts, and logged once per change of state; a confirmation wait
-  polls one up-to-date server for the whole wait and moves on only when it fails. The read-only
+  polls one up-to-date server and moves on only when a request to it fails, when it falls out of
+  date, or when it answers the transaction request with an error three times in a row. The read-only
   request `electrum_servers` shows the servers' state. GLEEC KDF ranks by the list position and has
   none of this, so a lagging server keeps answering there. No peer observes it. To get GLEEC KDF's
   routing, set `electrum_tip_checks` to `false` (see the settings list below). Servers that disagree
