@@ -247,6 +247,7 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
         let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
+        let (recently_spent_outpoints, spent_record_is_shared) = self.recently_spent_record(my_script_pubkey)?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -260,7 +261,8 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
             history_sync_state: Mutex::new(initial_history_state),
             tx_cache,
             block_headers_storage,
-            recently_spent_outpoints: AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey)),
+            recently_spent_outpoints,
+            spent_record_is_shared,
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
@@ -385,6 +387,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
         let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
+        let (recently_spent_outpoints, spent_record_is_shared) = self.recently_spent_record(my_script_pubkey)?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -398,7 +401,8 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
             history_sync_state: Mutex::new(initial_history_state),
             tx_cache,
             block_headers_storage,
-            recently_spent_outpoints: AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey)),
+            recently_spent_outpoints,
+            spent_record_is_shared,
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
@@ -425,7 +429,6 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         // For now, use a default script pubkey.
         // TODO change the type of `recently_spent_outpoints` to `AsyncMutex<HashMap<Bytes, RecentlySpentOutPoints>>`
         let my_script_pubkey = Bytes::new();
-        let recently_spent_outpoints = AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey));
 
         let address_format = self.address_format()?;
         let derivation_path = self.derivation_path().mm_err(Into::into)?;
@@ -459,6 +462,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
         let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
+        let (recently_spent_outpoints, spent_record_is_shared) = self.recently_spent_record(my_script_pubkey)?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -473,6 +477,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             block_headers_storage,
             tx_cache,
             recently_spent_outpoints,
+            spent_record_is_shared,
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
@@ -802,6 +807,25 @@ pub trait UtxoCoinBuilderCommonOps {
     /// the registry of shared clients (CRD ch.38 D38.6.4Q.1 status note); every other coin has `None` and builds its
     /// own.
     fn shared_electrum_platform(&self) -> Option<&str> { None }
+
+    /// The recently-spent record of the instance being built, and whether it is the shared record of the QTUM family.
+    ///
+    /// An instance of the QTUM family takes the live record of its platform and `my_script_pubkey` from the registry
+    /// of the node's context, or starts it (CRD ch.38 D38.6.4Q.4 status note, items 1 and 2); every other coin gets a
+    /// private record bound to `my_script_pubkey`, as before. This touches the registry's map only, and no lock.
+    fn recently_spent_record(
+        &self,
+        my_script_pubkey: Bytes,
+    ) -> UtxoCoinBuildResult<(Arc<AsyncMutex<RecentlySpentOutPoints>>, bool)> {
+        let Some(platform) = self.shared_electrum_platform() else {
+            return Ok((
+                Arc::new(AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey))),
+                false,
+            ));
+        };
+        let coins_ctx = CoinsContext::from_ctx(self.ctx()).map_to_mm(UtxoCoinBuildError::Internal)?;
+        Ok((coins_ctx.spent_records.get_or_insert(platform, my_script_pubkey), true))
+    }
 
     async fn electrum_client(
         &self,

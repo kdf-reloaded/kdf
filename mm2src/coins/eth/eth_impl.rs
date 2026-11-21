@@ -962,6 +962,17 @@ pub(crate) fn build_evm_withdraw_details(
 }
 
 pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> WithdrawResult {
+    withdraw_impl_with_progress(ctx, coin, req, None).await
+}
+
+/// [`withdraw_impl`] for the task that `progress` is the handle of. Only the TRON gasless rail reports phases of
+/// its own to it (CRD ch.63 §63.3.6).
+pub(crate) async fn withdraw_impl_with_progress(
+    ctx: MmArc,
+    coin: EthCoin,
+    req: WithdrawRequest,
+    progress: Option<&crate::rpc_command::init_withdraw::WithdrawTaskHandle>,
+) -> WithdrawResult {
     // TRON uses a dedicated pipeline: its transaction format, address
     // encoding, signing digest and fee model all differ from the EVM flow.
     if matches!(coin.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
@@ -987,7 +998,7 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         } else {
             EvmWithdrawSender::activated(&coin)
         };
-        return crate::eth::tron::withdraw::withdraw_tron(coin, req, sender).await;
+        return crate::eth::tron::withdraw::withdraw_tron_with_progress(coin, req, sender, progress).await;
     }
 
     validate_evm_withdraw_request(&coin, &req)?;
@@ -1779,6 +1790,7 @@ impl EthCoin {
             estimate_gas_mult,
             taker_fee_quote_at_limit: self.taker_fee_quote_at_limit,
             tron_api: None,
+            tron_gasfree: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
             erc20_tokens_infos: Default::default(),
@@ -2651,7 +2663,8 @@ impl EthCoin {
             },
             // TRON has its own transfer pipeline (build TransactionRaw,
             // sign with SHA-256+secp256k1, broadcast via TronApiClient).
-            // Activation gating prevents this from being reached. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
                 ERRL!("TRON send_to_address not yet wired (pending P10.2.5)"),
             ))),
@@ -2735,7 +2748,8 @@ impl EthCoin {
                 }))
             },
             // V1 Ethereum HTLC swaps; TRON uses a separate atomic-swap flow.
-            // Activation gating prevents this code path. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
                 ERRL!("TRON HTLC payment not yet wired (pending P10.2.5)"),
             ))),
@@ -2911,8 +2925,8 @@ impl EthCoin {
                         }),
                 )
             },
-            // V1 Ethereum HTLC refund; TRON refund is a separate flow,
-            // and activation gating prevents reaching this branch. P10.2.5.
+            // V1 Ethereum HTLC refund; TRON refund is a separate flow. TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
                 ERRL!("TRON HTLC refund not yet wired (pending P10.2.5)"),
             ))),
@@ -3380,7 +3394,8 @@ impl EthCoin {
                     }
                 },
                 // V1 ETH/ERC20 payment validation; TRON HTLC payments use a
-                // separate validator. Activation gating prevents this branch. P10.2.5.
+                // separate validator. TRON coins are wallet-only while
+                // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
                 EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                     return ERR!("TRON HTLC payment validation not yet wired (pending P10.2.5)");
                 },
@@ -3426,7 +3441,8 @@ impl EthCoin {
             EthCoinType::Eth => "ethPayment",
             EthCoinType::Erc20 { .. } => "erc20Payment",
             // V1 ETH/ERC20 search; TRON spend search uses TRON HTTP API.
-            // Activation gating prevents this branch. P10.2.5.
+            // TRON coins are wallet-only while
+            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return ERR!("TRON spend search not yet wired (pending P10.2.5)");
             },

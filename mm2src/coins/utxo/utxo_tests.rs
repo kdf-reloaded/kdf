@@ -226,7 +226,8 @@ pub(crate) fn utxo_coin_fields_for_test(
         history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
         tx_cache: DummyVerboseCache::default().into_shared(),
         block_headers_storage: None,
-        recently_spent_outpoints: AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey)),
+        recently_spent_outpoints: Arc::new(AsyncMutex::new(RecentlySpentOutPoints::new(my_script_pubkey))),
+        spent_record_is_shared: false,
         tx_hash_algo: TxHashAlgo::DSHA256,
         check_utxo_maturity: false,
     }
@@ -1142,6 +1143,8 @@ fn test_withdraw_impl_set_fixed_fee() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1190,6 +1193,8 @@ fn test_withdraw_impl_sat_per_kb_fee() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1274,6 +1279,8 @@ fn explicit_fee_withdraw_on_coin_with_fee(
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1419,6 +1426,8 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1467,6 +1476,8 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max_dust_included_to_fee() 
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.9789".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1515,6 +1526,8 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_over_max() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: "9.97939455".parse().unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1550,6 +1563,8 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 0u64.into(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1613,6 +1628,8 @@ fn test_withdraw_kmd_rewards_impl(
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1725,6 +1742,8 @@ fn test_withdraw_kmd_rewards_post_fork_reduction() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -1973,6 +1992,8 @@ fn test_withdraw_doc_rewards_none() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -4577,6 +4598,8 @@ fn test_withdraw_to_p2pkh() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2pkh_address.to_string(),
@@ -4626,6 +4649,8 @@ fn test_withdraw_to_p2sh() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2sh_address.to_string(),
@@ -4675,6 +4700,8 @@ fn test_withdraw_to_p2wpkh() {
     let withdraw_req = WithdrawRequest {
         memo: None,
         expiration_seconds: None,
+        fee_method: None,
+        gasless: None,
         amount: 1.into(),
         from: None,
         to: p2wpkh_address.to_string(),
@@ -4956,6 +4983,7 @@ fn test_account_balance_rpc() {
             addresses_map.insert($address.to_string(), $balance);
             balances_by_der_path.insert($der_path.to_string(), HDAddressBalance {
                 address: $address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(
@@ -5296,6 +5324,7 @@ fn test_scan_for_new_addresses() {
             checking_addresses.insert($address.to_string(), balance);
             balances_by_der_path.insert($der_path.to_string(), HDAddressBalance {
                 address: $address.to_string(),
+                gasfree_address: None,
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
                 balance: crate::coin_balance::coin_balance_map_for_ticker(
@@ -9584,6 +9613,8 @@ mod withdraw_recent_spent {
         WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -9708,6 +9739,75 @@ mod withdraw_recent_spent {
         assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
         assert!(record_is_empty(&coin));
         assert_eq!(listing(&coin), before);
+    }
+
+    const GET_TX: &str = "blockchain.transaction.get";
+
+    /// [`coin_on_backend`] with the maturity check on. The server answers the verbose transaction of the one listed
+    /// output (and no other: a transaction it has not seen is answered with a result that is not a transaction, as a
+    /// spread read of a server that has not indexed it fails), and the tip.
+    fn coin_with_maturity_on_backend() -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let (client, server) = electrum_client_over_stub(|server| {
+            server.set_scripthash_result(
+                "blockchain.scripthash.listunspent",
+                &p2pkh_hash,
+                json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": LISTED_VALUE}]),
+            );
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+            server.set_result(BROADCAST, json!("ab".repeat(32)));
+            server.set_result("blockchain.headers.subscribe", json!({"height": 777, "hex": "00"}));
+            server.set_params_result(
+                GET_TX,
+                json!(["01".repeat(32), true]),
+                json!({
+                    "hex": hex::encode(serialize(&UtxoTx::default())),
+                    "txid": "01".repeat(32),
+                    "version": 1,
+                    "locktime": 0,
+                    "vin": [],
+                    "vout": [],
+                    "height": 10,
+                    "time": 1_600_000_000u32,
+                    "blocktime": 1_600_000_000u32,
+                    "confirmations": 100,
+                }),
+            );
+        });
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+        fields.check_utxo_maturity = true;
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    /// The transaction ids the server was asked for with `blockchain.transaction.get`.
+    fn fetched_parents(server: &StubServer) -> Vec<String> {
+        server
+            .request_params(GET_TX)
+            .iter()
+            .map(|params| params[0].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// A output the server listed keeps the parent fetch of the maturity check; an output the record supplied (the
+    /// change of a transaction this node built, whose broadcast the backend accepted) is not fetched: it is never a
+    /// coinbase, and a server that has not seen it yet would fail the spend (CRD ch.38 D38.6.4Q.4 follow-up).
+    #[test]
+    fn maturity_check_fetches_the_parent_of_a_listed_output_and_not_of_a_record_supplied_one() {
+        let (coin, server) = coin_with_maturity_on_backend();
+        let first_details = legacy_withdraw(&coin);
+        let first = tx_of(&first_details);
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+        // The listed output was fetched.
+        assert!(fetched_parents(&server).contains(&"01".repeat(32)));
+
+        broadcast_hex(&coin, &first_details).unwrap();
+        let fetches_before = fetched_parents(&server).len();
+        let second = tx_of(&legacy_withdraw(&coin));
+        // The second withdraw spent the first one's change, and no parent was fetched for it.
+        assert!(inputs_of(&second).iter().all(|input| input.hash == first.hash()));
+        let fetched = fetched_parents(&server);
+        assert_eq!(fetched.len(), fetches_before, "{fetched:?}");
+        assert!(fetched.iter().all(|txid| *txid == "01".repeat(32)));
     }
 
     /// T38.5B.3 (R38.5B.9 items 2 and 6): an accepted broadcast of a withdraw's bytes records the spend.
@@ -11058,6 +11158,8 @@ mod hd_coin_swap_key_tests {
             WithdrawRequest {
                 memo: None,
                 expiration_seconds: None,
+                fee_method: None,
+                gasless: None,
                 amount: 1u64.into(),
                 from,
                 to: RECEIVER.to_string(),
@@ -11587,6 +11689,8 @@ mod sighash_suffix_sites {
         WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: "0.001".parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -11894,6 +11998,8 @@ mod zec_v5_wiring {
         WithdrawRequest {
             memo: None,
             expiration_seconds: None,
+            fee_method: None,
+            gasless: None,
             amount: amount.parse().unwrap(),
             from: None,
             to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
@@ -14348,79 +14454,94 @@ pub(crate) mod hd_accounts_at_index_tests {
     }
 }
 
-/// A Qtum coin with a stub Electrum client that was never connected: nothing here reaches a network.
+/// A Qtum coin over a scripted Electrum server that lists one large unspent output of the coin's address. The coin
+/// holds a shared recently-spent record, as an activated QTUM does (CRD ch.38 D38.6.4Q.4 status note).
 #[cfg(not(target_arch = "wasm32"))]
-fn qtum_coin_without_network_for_test() -> QtumCoin {
-    let client = ElectrumClient(Arc::new(ElectrumClientImpl::new("tQTUM".to_owned(), vec![])));
-    let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
-    QtumCoin::from(UtxoArc::new(fields))
+fn qtum_coin_on_scripted_electrum_for_test() -> (QtumCoin, crate::utxo::rpc_clients::electrum_stub_server::StubServer) {
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+
+    let (p2pkh_hash, p2pk_hash) = order_posting_latency::script_hashes_of_test_coin(false);
+    let (client, server) = electrum_client_over_stub(|server| {
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            &p2pkh_hash,
+            json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 100_000_000_000u64}]),
+        );
+        server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+    });
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+    fields.spent_record_is_shared = true;
+    (QtumCoin::from(UtxoArc::new(fields)), server)
 }
 
-/// Runs `build` (a delegation build) while this test holds the process-wide build lock, and checks that the build
-/// does not list the unspents (CRD ch.38 R38.5B.5: the lock is held from the listing through signing) until the
-/// lock is released, and that it does after.
+/// Runs `build` (a delegation build) twice against a QTUM coin that holds a shared recently-spent record:
+/// - while this test holds the process-wide build lock, the build does not wait for it (CRD ch.38 D38.6.4Q.4 status
+///   note, item 4: the record's lock replaces it for the QTUM family);
+/// - while this test holds the guard of the coin's record, the build does not finish, and it does once the guard is
+///   released: the record's lock is the lock of the address, held through signing and the pending entry.
 #[cfg(not(target_arch = "wasm32"))]
-fn assert_delegation_build_waits_for_the_build_lock<F>(build: impl FnOnce(&QtumCoin) -> F)
+fn assert_delegation_build_waits_for_the_record_guard<F>(build: impl Fn(&QtumCoin) -> F)
 where
     F: futures::Future<
         Output = Result<crate::TransactionDetails, mm2_err_handle::prelude::MmError<crate::DelegationError>>,
     >,
 {
-    use crate::utxo::rpc_clients::UtxoRpcError;
-    use futures::task::noop_waker_ref;
-    use std::future::Future;
-    use std::task::{Context, Poll};
+    use futures::future::{select, Either};
 
-    let listings = Arc::new(AtomicUsize::new(0));
-    let listings_in_mock = listings.clone();
-    QtumCoin::get_unspent_ordered_list.mock_safe(move |_, _| {
-        listings_in_mock.fetch_add(1, Ordering::SeqCst);
-        MockResult::Return(Box::pin(futures::future::err(MmError::new(UtxoRpcError::Internal(
-            "no network in this test".to_owned(),
-        )))))
-    });
     // `am_i_currently_staking` (the add path) asks the Electrum server for the add and the remove history.
     crate::qrc20::rpc_clients::Qrc20ElectrumOps::blockchain_contract_event_get_history
         .mock_safe(|_: &ElectrumClient, _, _, _| MockResult::Return(Box::new(futures01::future::ok(Vec::new()))));
 
-    let coin = qtum_coin_without_network_for_test();
+    let (coin, server) = qtum_coin_on_scripted_electrum_for_test();
+    let listings = || server.requests("blockchain.scripthash.listunspent");
 
-    // The test holds the build lock, as a concurrent withdraw would.
+    // The process-wide lock is held, as a concurrent withdraw of another coin would: the build does not wait for it.
     let held = block_on(UTXO_LOCK.lock());
-    let mut build = Box::pin(build(&coin));
-    let first_poll = build.as_mut().poll(&mut Context::from_waker(noop_waker_ref()));
+    let first = block_on(build(&coin));
     assert!(
-        matches!(first_poll, Poll::Pending),
-        "the build must wait for the build lock, got {:?}",
-        first_poll.map(|result| result.map(|_| ()))
+        listings() >= 1,
+        "the build listed the unspents while the process-wide lock was held"
     );
-    assert_eq!(
-        listings.load(Ordering::SeqCst),
-        0,
-        "the unspents must not be listed before the build lock is held"
-    );
-
     drop(held);
-    let result = block_on(build);
-    assert_eq!(
-        listings.load(Ordering::SeqCst),
-        1,
-        "the build lists the unspents once it holds the lock"
-    );
+    let after_first = listings();
+
+    // The record's guard is held: the build lists, and then waits for the guard.
+    let guard = block_on(coin.as_ref().recently_spent_outpoints.lock());
+    let mut waiting = Box::pin(build(&coin));
+    let outcome = block_on(select(waiting.as_mut(), Box::pin(common::executor::Timer::sleep(1.5))));
     assert!(
-        result.is_err(),
-        "the mocked listing fails the build: {:?}",
-        result.map(|_| ())
+        matches!(outcome, Either::Right(_)),
+        "the build must wait for the guard of the record"
+    );
+    assert!(listings() > after_first, "the build listed before it waited");
+    let first_noted = first.is_ok() as usize;
+    assert_eq!(
+        guard.pending_withdraws.len(),
+        first_noted,
+        "the first build noted its pending entry, nothing was noted while the guard was held"
+    );
+    drop(guard);
+    let second = block_on(waiting);
+    // A build that succeeds notes a pending entry in the shared record, so that its broadcast can be promoted.
+    let noted = block_on(coin.as_ref().recently_spent_outpoints.lock())
+        .pending_withdraws
+        .len();
+    assert_eq!(noted, first_noted + second.is_ok() as usize);
+    assert!(
+        first.is_ok() && second.is_ok(),
+        "{:?} {:?}",
+        first.map(|_| ()),
+        second.map(|_| ())
     );
 }
 
-/// The add-delegation build takes the build lock before it lists the unspents.
+/// The add-delegation build waits for the guard of the shared record, not for the process-wide build lock.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn qtum_delegation_build_waits_for_the_build_lock() {
+fn qtum_delegation_build_waits_for_the_record_guard() {
     use futures::compat::Future01CompatExt;
 
-    assert_delegation_build_waits_for_the_build_lock(|coin| {
+    assert_delegation_build_waits_for_the_record_guard(|coin| {
         let request = QtumDelegationRequest {
             address: "qcyBHeSct7Wr4mAw18iuQ1zW5mMFYmtmBE".to_owned(),
             fee: Some(10),
@@ -14429,13 +14550,13 @@ fn qtum_delegation_build_waits_for_the_build_lock() {
     });
 }
 
-/// The remove-delegation build takes the build lock before it lists the unspents.
+/// The remove-delegation build waits for the guard of the shared record, not for the process-wide build lock.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn qtum_remove_delegation_build_waits_for_the_build_lock() {
+fn qtum_remove_delegation_build_waits_for_the_record_guard() {
     use futures::compat::Future01CompatExt;
 
-    assert_delegation_build_waits_for_the_build_lock(|coin| coin.remove_delegation().compat());
+    assert_delegation_build_waits_for_the_record_guard(|coin| coin.remove_delegation().compat());
 }
 
 /// ZIP 317 conventional fee (Reloaded's own rule, `crate::utxo::zip317`): the builder, the previews, the

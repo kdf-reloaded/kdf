@@ -10,7 +10,7 @@ use crate::platform_coin_with_tokens::*;
 use crate::prelude::*;
 use async_trait::async_trait;
 use coins::coin_balance::{EnableCoinBalance, EnableCoinBalanceError, EnableCoinScanPolicy, HDWalletBalanceOps};
-use coins::eth::tron::{Network as TronNetwork, TronAddress};
+use coins::eth::tron::{Network as TronNetwork, TronAddress, TronGaslessProviderRequest};
 use coins::eth::{eth_coin_from_params_with_global_hd, eth_coin_from_params_with_priv_key, EthCoin,
                  EthCoinActivationParams, EthCoinBuildError, GasStationPricePolicy, SwapGasFeePolicy, SwapV2Contracts,
                  ETH_DEFAULT_GAP_LIMIT};
@@ -321,6 +321,10 @@ pub struct EthWithTokensActivationRequest {
     scan_policy: Option<EnableCoinScanPolicy>,
     #[serde(default)]
     min_addresses_number: Option<u32>,
+    /// The GasFree provider binding of a TRON platform (CRD ch.63 §63.3.1); an EVM platform refuses it. Its two
+    /// credentials are secrets: the type's debug form shows neither (CRD ch.63 R9, ch.35 R35.1.17).
+    #[serde(default)]
+    tron_gasless_provider: Option<TronGaslessProviderRequest>,
 }
 
 impl TxHistory for EthWithTokensActivationRequest {
@@ -472,6 +476,7 @@ impl TokenAsMmCoinInitializer for Erc20TokenInitializer {
                 &token_request.ticker,
                 protocol,
                 token_request.request.required_confirmations,
+                token_request.request.gasless.as_ref(),
             )
             .await
             .mm_err(InitTokensAsMmCoinsError::from)?;
@@ -490,6 +495,10 @@ impl TokenAsMmCoinInitializer for Erc20TokenInitializer {
 pub struct EvmAddressInfo<Balance> {
     derivation_method: DerivationMethod,
     pubkey: String,
+    /// The TRON GasFree custody address of the entry's address (CRD ch.63 §63.3.3): present for a TRON platform
+    /// with a GasFree provider, omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gasfree_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     balances: Option<Balance>,
     /// The activated token tickers, reported instead of the balances when `get_balances` is `false`.
@@ -642,6 +651,17 @@ fn activation_params(
     Ok(params)
 }
 
+/// The GasFree provider binding is valid for a TRON platform only: an EVM platform refuses a request that carries
+/// `tron_gasless_provider` (CRD ch.63 §63.3.1, R1), before any key is read and any node is contacted.
+fn refuse_tron_gasless_provider(request: &EthWithTokensActivationRequest) -> Result<(), MmError<ActivationErr>> {
+    if request.tron_gasless_provider.is_some() {
+        return MmError::err(ActivationErr::InvalidPayload(
+            "tron_gasless_provider is valid for a TRON platform only".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// The unusable-on-this-build policies: the request names a signing policy this build cannot serve.
 fn unsupported_policy_error(policy: &EthPrivKeyPolicy) -> Option<ActivationErr> {
     match policy {
@@ -680,6 +700,7 @@ impl PlatformWithTokensActivationOps for EthCoin {
         if let EthProtocolInfo::Tron { network } = &protocol_conf {
             return tron::enable_tron_platform_coin(&ctx, &ticker, &platform_conf, &activation_request, network).await;
         }
+        refuse_tron_gasless_provider(&activation_request)?;
         let protocol = protocol_conf.coin_protocol(&ticker)?;
         let policy = activation_request.priv_key_policy();
         if let Some(error) = unsupported_policy_error(&policy) {
@@ -915,6 +936,8 @@ async fn iguana_activation_result(
 ) -> Result<EthWithTokensActivationResult, MmError<ActivationErr>> {
     let my_address = coin.my_address().map_to_mm(ActivationErr::Internal)?;
     let pubkey = coin.activation_public_key();
+    // The platform's and the tokens' block describe the same address (CRD ch.63 §63.3.3).
+    let gasfree_address = coin.enabled_address_gasfree().await;
 
     let (eth_balances, erc20_balances, tickers) = if activation_request.get_balances() {
         let eth_balance = coin.my_balance().compat().await.mm_err(balance_error)?;
@@ -930,6 +953,7 @@ async fn iguana_activation_result(
     eth_addresses_infos.insert(my_address.clone(), EvmAddressInfo {
         derivation_method: DerivationMethod::Iguana,
         pubkey: pubkey.clone(),
+        gasfree_address: gasfree_address.clone(),
         balances: eth_balances,
         tickers: None,
     });
@@ -937,6 +961,7 @@ async fn iguana_activation_result(
     erc20_addresses_infos.insert(my_address, EvmAddressInfo {
         derivation_method: DerivationMethod::Iguana,
         pubkey,
+        gasfree_address,
         balances: erc20_balances,
         tickers,
     });
@@ -1065,6 +1090,7 @@ async fn enable_eth_platform_coin_trezor(
     protocol_conf: EthProtocolInfo,
     task_handle: &RpcTaskHandle<InitPlatformCoinWithTokensTask<EthCoin>>,
 ) -> Result<EthCoin, MmError<ActivationErr>> {
+    refuse_tron_gasless_provider(&activation_request)?;
     let protocol = protocol_conf.coin_protocol(&ticker)?;
 
     // Signing-policy preparation: a device context and hardware support of the coin. Neither needs the device.

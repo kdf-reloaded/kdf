@@ -467,8 +467,7 @@ pin).
 
 ### TRON node list and API key
 
-TRON is switched off in this build, so nothing below has an effect yet. When TRON returns, the
-node list of its activation request names the TRON full-node HTTP API endpoints. The mmrpc 2.0
+The node list of a TRON activation request names the TRON full-node HTTP API endpoints. The mmrpc 2.0
 methods (`enable_eth_with_tokens`, `task::enable_eth::init`) read it from `nodes`, as the EVM
 family does: each entry is an object with `url`, an optional `komodo_proxy` (read, and, as on the
 EVM route, requests are not signed with it) and an optional `headers` object of request headers

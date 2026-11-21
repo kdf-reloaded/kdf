@@ -575,6 +575,221 @@ fn my_balance_answers_the_legacy_body_and_the_versioned_result() {
     );
 }
 
+/// A loopback TRON node on the Nile network for the `my_balance` test of CRD ch.63: an account of 2.5 TRX, a 6-decimal
+/// token balance of 1.234567 at every address, and a GasFree controller contract that answers `getGasFreeAddress`
+/// with the address `coins` derives for the asked user. `controller_reads` counts those reads. It stops when `stop`
+/// is set.
+#[cfg(not(target_arch = "wasm32"))]
+fn tron_stub_node(stop: std::sync::Arc<AtomicBool>, controller_reads: std::sync::Arc<AtomicU64>) -> String {
+    use coins::eth::tron::{gasfree_custody_address, Network, TronAddress};
+    use std::io::{Read, Write};
+
+    fn word(value: u64) -> String { format!("{value:064x}") }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the stub node");
+    let port = listener.local_addr().expect("local address").port();
+    listener.set_nonblocking(true).expect("non-blocking listener");
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                },
+            };
+            stream.set_nonblocking(false).ok();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            let (path, body) = loop {
+                let n = match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break (String::new(), Json::Null),
+                    Ok(n) => n,
+                };
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                    let len = head
+                        .to_lowercase()
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if rest.len() >= len {
+                        let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                        break (path, json::from_str(rest).unwrap_or(Json::Null));
+                    }
+                }
+            };
+            let answer = match (path.as_str(), body["function_selector"].as_str()) {
+                ("/wallet/getaccount", _) => Some(json!({ "balance": 2_500_000, "create_time": 1 })),
+                ("/wallet/triggerconstantcontract", Some("decimals()")) => {
+                    Some(json!({ "constant_result": [word(6)] }))
+                },
+                ("/wallet/triggerconstantcontract", Some("balanceOf(address)")) => {
+                    Some(json!({ "constant_result": [word(1_234_567)] }))
+                },
+                ("/wallet/triggerconstantcontract", Some("getGasFreeAddress(address)")) => {
+                    controller_reads.fetch_add(1, Ordering::SeqCst);
+                    // The parameter is one ABI word: 12 zero bytes and the 20-byte user.
+                    body["parameter"]
+                        .as_str()
+                        .and_then(|parameter| parameter.get(24..))
+                        .and_then(|payload| TronAddress::parse(&format!("41{payload}")).ok())
+                        .map(|user| {
+                            let custody = gasfree_custody_address(&Network::Nile, &user);
+                            json!({ "constant_result": [format!("{:0>64}", hex::encode(custody.to_evm_address()))] })
+                        })
+                },
+                _ => None,
+            };
+            let (status, reply) = match answer {
+                Some(answer) => (200, answer.to_string()),
+                None => (404, "{}".to_owned()),
+            };
+            let response = format!(
+                "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            stream.write_all(response.as_bytes()).ok();
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// CRD ch.63 T10 (§63.3.3, R18) for `my_balance`: a TRX coin whose activation gave a GasFree provider, and its TRC20
+/// token, answer `gasfree_address` beside `address`, equal to the local derivation for that address, on the legacy
+/// and on the versioned surface; the platform and the token share one controller confirmation (R29). Without a
+/// provider the member is absent from the body text, not `null`. The coins are built with the coin builder the
+/// activation routes use.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn my_balance_of_a_tron_coin_carries_the_gasfree_address_only_with_a_provider() {
+    use coins::eth::tron::nodes::TronNode;
+    use coins::eth::tron::{gasfree_custody_address, parse_trc20_contract, tron_coin_from_params, GasFreeBinding,
+                           Network, TronAddress, TronCoinParams};
+    use coins::CoinProtocol;
+
+    const API_KEY: &str = "key-0f3a9c";
+    const API_SECRET: &str = "secret-7b1d4e";
+    const CONTRACT: &str = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let controller_reads = std::sync::Arc::new(AtomicU64::new(0));
+    let url = tron_stub_node(stop.clone(), controller_reads.clone());
+    let mut key = [0u8; 32];
+    key[31] = 1;
+
+    // Registers a TRX platform coin with the provider binding `gasfree` and its 6-decimal token; returns the address.
+    let node_with_coins = |gasfree: Option<GasFreeBinding>| -> (MmArc, String) {
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "rpc_password": "pw", "coins": [
+                { "coin": "TRX", "mm2": 1, "protocol": { "type": "TRX", "protocol_data": { "network": "Nile" } } },
+                { "coin": "USDT-TRC20", "mm2": 1, "decimals": 6, "protocol": { "type": "TRC20", "protocol_data": {
+                    "platform": "TRX", "contract_address": CONTRACT } } },
+            ] }))
+            .into_mm_arc();
+        let params = TronCoinParams {
+            nodes: vec![TronNode::plain(url.clone())],
+            required_confirmations: 1,
+            tx_history: false,
+            gasfree,
+        };
+        let platform = block_on(tron_coin_from_params(
+            &ctx,
+            "TRX",
+            &coins::coin_conf(&ctx, "TRX"),
+            params,
+            &key,
+            CoinProtocol::TRX { network: Network::Nile },
+        ))
+        .unwrap_or_else(|_| panic!("the platform coin builds"));
+        let contract = parse_trc20_contract(CONTRACT).expect("a contract");
+        let token = block_on(platform.trc20_token_from_conf_or_contract("USDT-TRC20".to_owned(), contract, 1, None))
+            .unwrap_or_else(|_| panic!("the token builds"));
+        let address = platform.my_address().expect("an address");
+        register_in(&ctx, platform.into());
+        register_in(&ctx, token.into());
+        (ctx, address)
+    };
+    let provider = json::from_value(json!({
+        "base_url": "https://open.gasfree.io",
+        "api_key": API_KEY,
+        "api_secret": API_SECRET,
+        "service_provider": CONTRACT,
+    }))
+    .expect("a provider object");
+    let binding = GasFreeBinding::from_request(&Network::Nile, &provider).expect("a valid provider object");
+
+    // With a provider on the platform.
+    let (ctx, address) = node_with_coins(Some(binding));
+    let user = TronAddress::from_base58(&address).expect("a valid address");
+    let custody = gasfree_custody_address(&Network::Nile, &user).to_base58();
+    for (ticker, balance, id) in [("TRX", "2.5", 31), ("USDT-TRC20", "1.234567", 32)] {
+        let expected = json!({
+            "coin": ticker,
+            "balance": balance,
+            "unspendable_balance": "0",
+            "address": address,
+            "gasfree_address": custody,
+        });
+        let legacy = legacy_success(&ctx, "my_balance", json!({ "coin": ticker }));
+        assert!(
+            !legacy.contains(API_KEY) && !legacy.contains(API_SECRET),
+            "{ticker}: a credential in the body"
+        );
+        same(
+            &json::from_str::<Json>(&legacy).unwrap(),
+            &expected,
+            "the legacy body with the custody address",
+        );
+        // The member stands beside `address`, after it.
+        assert!(
+            legacy.find("\"address\"") < legacy.find("\"gasfree_address\""),
+            "{ticker}: the member order"
+        );
+        let result = versioned_result(versioned(&ctx, "my_balance", Some(json!({ "coin": ticker })), id), id);
+        same(&result, &expected, "the versioned result with the custody address");
+    }
+    assert_eq!(
+        controller_reads.load(Ordering::SeqCst),
+        1,
+        "one confirmation serves the platform, its token and the later reports"
+    );
+
+    // Without a provider: the legacy body is the one it always was.
+    let (ctx, address) = node_with_coins(None);
+    for (ticker, balance, id) in [("TRX", "2.5", 33), ("USDT-TRC20", "1.234567", 34)] {
+        let expected = json!({
+            "coin": ticker,
+            "balance": balance,
+            "unspendable_balance": "0",
+            "address": address,
+        });
+        let legacy = legacy_success(&ctx, "my_balance", json!({ "coin": ticker }));
+        assert!(
+            !legacy.contains("gasfree_address") && !legacy.contains("null"),
+            "{ticker}: the member is absent"
+        );
+        same(
+            &json::from_str::<Json>(&legacy).unwrap(),
+            &expected,
+            "the legacy body without a provider",
+        );
+        let result = versioned_result(versioned(&ctx, "my_balance", Some(json!({ "coin": ticker })), id), id);
+        same(&result, &expected, "the versioned result without a provider");
+    }
+    assert_eq!(
+        controller_reads.load(Ordering::SeqCst),
+        1,
+        "no provider, no controller read"
+    );
+    stop.store(true, Ordering::SeqCst);
+}
+
 #[test]
 fn my_balance_classifies_the_failures_of_the_coin() {
     let node = Node::new();

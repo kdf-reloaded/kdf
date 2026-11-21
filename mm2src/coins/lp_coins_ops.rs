@@ -15,12 +15,13 @@ pub fn is_wallet_only_ticker(ctx: &MmArc, ticker: &str) -> bool {
     let coin_conf = coin_conf(ctx, ticker);
     coin_conf["wallet_only"].as_bool().unwrap_or(false)
 }
-/// Beta switch: whether TRON (TRX, TRC20) coins can be activated.
+/// Whether TRON (TRX, TRC20) coins can be activated.
 ///
-/// TRON support is postponed for the current beta. While this is `false`, every activation route for the
-/// family answers [`TRON_NOT_AVAILABLE`] and registers nothing; the coin code stays compiled and its unit
-/// tests keep running. Set it to `true` to turn the family back on.
-pub const TRON_ACTIVATION_AVAILABLE: bool = false;
+/// `true` since 2026-11-20 (CRD ch.21 D6): every activation route of the family (`enable_eth_with_tokens`,
+/// `task::enable_eth::*`, `enable_erc20`, `task::enable_erc20::*`, and the legacy `enable` and `electrum`) builds
+/// and registers the coin. No route reads this constant any more; it records the state of the family next to the
+/// other family switches. Whether a TRON coin can trade is a separate switch, [`TRON_SWAPS_AVAILABLE`].
+pub const TRON_ACTIVATION_AVAILABLE: bool = true;
 
 /// Beta switch: whether Solana (SOL, SPL tokens) coins can be activated.
 ///
@@ -41,8 +42,18 @@ pub const SOLANA_ACTIVATION_AVAILABLE: bool = false;
 /// back the behavior its coins-config entry asks for.
 pub const TENDERMINT_SWAPS_AVAILABLE: bool = false;
 
-/// The refusal text of every TRON activation route while [`TRON_ACTIVATION_AVAILABLE`] is `false`.
-pub const TRON_NOT_AVAILABLE: &str = "TRON support is not available in this build";
+/// Switch: whether TRON (TRX, TRC20) coins can take part in orders and swaps.
+///
+/// Reloaded has no TRON swap (CRD ch.21 R-D1, R21.B3). While this is `false`, every TRON platform coin and every
+/// TRC20 token reports itself as wallet-only, whatever its coins-config entry says: activation, balances,
+/// addresses, `withdraw` and the transaction history work, while `setprice`, `buy`, `sell` and the other ways to
+/// start a new trade refuse the coin with the usual wallet-only error, and an order or request that already exists
+/// is not matched. An order with a TRON coin that was saved earlier is cancelled at startup, and an unfinished
+/// saved swap that names a TRON coin is not resumed at startup (its record is kept). The read-only views
+/// (`orderbook`, `best_orders`, `trade_preimage`) look at the coins-config `wallet_only` flag alone and are not
+/// changed by this switch, and neither are `max_taker_vol`, `max_maker_vol` and the legacy `get_trade_fee`, which
+/// do not ask whether a coin is wallet-only. Set it to `true` only together with a TRON swap implementation.
+pub const TRON_SWAPS_AVAILABLE: bool = false;
 
 /// The refusal text of every Solana activation route while [`SOLANA_ACTIVATION_AVAILABLE`] is `false`.
 pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this build";
@@ -50,7 +61,6 @@ pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this 
 /// The refusal text for a coin protocol whose family is switched off in this build, if it is.
 fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str> {
     match protocol {
-        CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } if !TRON_ACTIVATION_AVAILABLE => Some(TRON_NOT_AVAILABLE),
         #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. }
             if !SOLANA_ACTIVATION_AVAILABLE =>
@@ -406,6 +416,8 @@ pub async fn validate_address_core(
 }
 pub async fn withdraw(ctx: MmArc, req: WithdrawRequest) -> WithdrawResult {
     let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    // CRD ch.63 R21: the fee-rail check comes before any other processing of the request, for every coin family.
+    check_withdraw_fee_rail(&coin, &req)?;
     // A withdrawal is not built while the coin's Electrum servers disagree about the chain (CRD ch.38 R38.6.4o item 12).
     if let Some(error) = coin.chain_disagreement() {
         return MmError::err(WithdrawError::ChainDisagreement(error));
@@ -1206,18 +1218,20 @@ mod postponed_family_switch_tests {
     use super::*;
 
     /// Flipping a family switch is a deliberate change: this test fails when someone does, and must be updated in
-    /// the same commit that turns the family back on (and removes the refusal tests that go with it).
+    /// the same commit that turns a family back on (and removes the refusal tests that go with it). TRON can be
+    /// activated since 2026-11-20 (CRD ch.21 D6); its swaps stay off.
     #[test]
-    fn postponed_families_are_switched_off_for_this_beta() {
-        assert!(!TRON_ACTIVATION_AVAILABLE);
+    fn family_switches_have_their_documented_values() {
+        assert!(TRON_ACTIVATION_AVAILABLE);
+        assert!(!TRON_SWAPS_AVAILABLE);
         assert!(!SOLANA_ACTIVATION_AVAILABLE);
         assert!(!TENDERMINT_SWAPS_AVAILABLE);
-        assert_eq!(TRON_NOT_AVAILABLE, "TRON support is not available in this build");
         assert_eq!(SOLANA_NOT_AVAILABLE, "Solana support is not available in this build");
     }
 
+    /// TRON is switched on: no route refuses its protocols as a family that is not available.
     #[test]
-    fn tron_protocols_are_refused_while_the_switch_is_off() {
+    fn tron_protocols_are_not_refused() {
         let trx = CoinProtocol::TRX {
             network: crate::eth::tron::Network::Mainnet,
         };
@@ -1225,8 +1239,8 @@ mod postponed_family_switch_tests {
             platform: "TRX".to_owned(),
             contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned(),
         };
-        assert_eq!(unavailable_protocol_message(&trx), Some(TRON_NOT_AVAILABLE));
-        assert_eq!(unavailable_protocol_message(&trc20), Some(TRON_NOT_AVAILABLE));
+        assert_eq!(unavailable_protocol_message(&trx), None);
+        assert_eq!(unavailable_protocol_message(&trc20), None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

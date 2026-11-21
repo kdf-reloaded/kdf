@@ -688,7 +688,7 @@ async fn token_of(ctx: &MmArc, platform: &EthCoin, ticker: &str, contract: &str)
         decimals: 6,
     });
     let token = platform
-        .trc20_token_from_conf_or_contract(ticker.to_owned(), contract, 1)
+        .trc20_token_from_conf_or_contract(ticker.to_owned(), contract, 1, None)
         .await
         .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
     register(ctx, &token).await;
