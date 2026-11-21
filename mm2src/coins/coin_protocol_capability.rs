@@ -181,7 +181,7 @@ pub fn missing_capabilities(required: &[&'static str], info: Option<&[u8]>) -> V
 /// otherwise ([`required_capabilities_from_conf`]). Reading it has no side effect and writes no log line.
 pub async fn required_counterparty_capabilities(ctx: &MmArc, ticker: &str) -> Vec<&'static str> {
     let activated = match CoinsContext::from_ctx(ctx) {
-        Ok(coins_ctx) => coins_ctx.coins.lock().await.get(ticker).cloned(),
+        Ok(coins_ctx) => coins_ctx.coins.lock().await.active().get(ticker).cloned(),
         Err(_) => None,
     };
     required_of(ctx, ticker, activated)
@@ -193,7 +193,10 @@ pub async fn required_counterparty_capabilities(ctx: &MmArc, ticker: &str) -> Ve
 /// height discovered at run time).
 pub fn required_counterparty_capabilities_now(ctx: &MmArc, ticker: &str) -> Vec<&'static str> {
     let activated = match CoinsContext::from_ctx(ctx) {
-        Ok(coins_ctx) => coins_ctx.coins.try_lock().and_then(|coins| coins.get(ticker).cloned()),
+        Ok(coins_ctx) => coins_ctx
+            .coins
+            .try_lock()
+            .and_then(|coins| coins.active().get(ticker).cloned()),
         Err(_) => None,
     };
     required_of(ctx, ticker, activated)
