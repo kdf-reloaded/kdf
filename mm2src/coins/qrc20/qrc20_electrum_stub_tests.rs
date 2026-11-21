@@ -1687,6 +1687,189 @@ fn t38_6_4q_1_a_token_reusing_a_client_whose_servers_disagree_is_refused_and_lea
     });
 }
 
+/// What the legacy `electrum` method does around `lp_coininit` (`mm2_main`, `electrum`): it takes the ticker's
+/// activation lock (CRD ch.55 R55.1.12), then `lp_coininit` checks again whether the ticker is registered.
+async fn legacy_electrum_like(
+    env: &TokenEnv,
+    ticker: &str,
+    servers: &[&StubServer],
+    tx_history: bool,
+) -> Result<MmCoinEnum, String> {
+    let _guard = crate::CoinsContext::from_ctx(&env.ctx)?
+        .lock_activation(&[ticker])
+        .await?;
+    let mut request = electrum_request(servers, tx_history);
+    request["coin"] = json!(ticker);
+    request["check_utxo_maturity"] = json!(false);
+    lp_coininit(&env.ctx, ticker, &request).await
+}
+
+/// R55.1.12 and R55.4: the answer of a repeated legacy activation of an active ticker is the legacy error
+/// "already initialized".
+fn assert_already_initialized(result: Result<MmCoinEnum, String>, ticker: &str) {
+    match result {
+        Ok(_) => panic!("a repeated activation of {ticker} succeeded"),
+        Err(e) => assert!(e.ends_with(&format!("Coin {ticker} already initialized")), "{e}"),
+    }
+}
+
+/// R55.1.12, R55.4 and the D38.6.4Q.1 status note: a second legacy `electrum` activation of an active QTUM, one
+/// after the other, answers the legacy "already initialized" error and builds nothing: no session, no second tip
+/// subscription, no further holder of the shared client, and QTUM still answers.
+#[test]
+fn t38_6_4q_1_a_repeated_activation_of_qtum_answers_already_initialized_and_starts_nothing() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = qtum_client_of(&qtum);
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+        let holders = settled_strong_count(&weak).await;
+        let (versions, tips, calls) = (
+            server.requests(SERVER_VERSION),
+            server.requests(TIP_METHOD),
+            server.requests(CALL),
+        );
+
+        assert_already_initialized(
+            legacy_electrum_like(&env, QTUM_TICKER, &[&server], false).await,
+            QTUM_TICKER,
+        );
+        Timer::sleep(1.).await;
+
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.header_subscriptions(), 1);
+        assert_eq!(
+            (
+                server.requests(SERVER_VERSION),
+                server.requests(TIP_METHOD),
+                server.requests(CALL)
+            ),
+            (versions, tips, calls)
+        );
+        assert_eq!(settled_strong_count(&weak).await, holders);
+        assert_eq!(height_over(&qtum_client_of(&qtum)).await, 777);
+        assert!(matches!(
+            lp_coinfind(&env.ctx, QTUM_TICKER).await.unwrap(),
+            Some(MmCoinEnum::QtumCoin(_))
+        ));
+    });
+}
+
+/// The same for a token that is active on QTUM with its history collector running: no second session, no second
+/// holder, no second collector (observed as the requests of the 30-s idle interval: one balance read for one
+/// collector, as in the disable-then-enable test), and no contract-event subscription.
+#[test]
+fn t38_6_4q_1_a_repeated_activation_of_a_token_answers_already_initialized_and_starts_no_second_collector() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        server.set_result(GET_HISTORY, json!([]));
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], true).await;
+        wait_until("the second balance read of the collector", 10., || {
+            server.requests(CALL) == 2
+        })
+        .await;
+        Timer::sleep(0.5).await;
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (2, 1));
+        let client = qtum_client_of(&qtum);
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+        let holders = settled_strong_count(&weak).await;
+        let versions = server.requests(SERVER_VERSION);
+
+        assert_already_initialized(legacy_electrum_like(&env, TICKER, &[&server], true).await, TICKER);
+        Timer::sleep(1.).await;
+
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.header_subscriptions(), 1);
+        assert_eq!(server.requests(SERVER_VERSION), versions);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (2, 1));
+        assert_eq!(settled_strong_count(&weak).await, holders);
+
+        // One collector: over an idle interval the token reads its balance once, and asks no history.
+        let calls_now = server.requests(CALL);
+        Timer::sleep(33.).await;
+        assert_eq!(server.requests(CALL), calls_now + 1);
+        assert_eq!(server.requests(GET_HISTORY), 1);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(token.my_balance().compat().await.unwrap().spendable, balance_of(1_000));
+        drop(qtum);
+    });
+}
+
+/// R55.1.12: two activations of the same ticker started together are serialized: one succeeds, the other waits and
+/// answers "already initialized", and nothing is doubled. Run for QTUM and then for a token with history on.
+#[test]
+fn t38_6_4q_1_two_activations_of_one_ticker_started_together_build_it_once() {
+    block_on(async {
+        // QTUM.
+        let env = family_env();
+        let server = family_stub().await;
+        let servers = [&server];
+        let (first, second) = futures::join!(
+            legacy_electrum_like(&env, QTUM_TICKER, &servers, false),
+            legacy_electrum_like(&env, QTUM_TICKER, &servers, false)
+        );
+        let (qtum, loser) = match (first, second) {
+            (Ok(coin), Err(e)) | (Err(e), Ok(coin)) => (coin, e),
+            _ => panic!("exactly one of two activations of QTUM must succeed"),
+        };
+        assert!(
+            loser.ends_with(&format!("Coin {QTUM_TICKER} already initialized")),
+            "{loser}"
+        );
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        Timer::sleep(1.).await;
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.requests(SERVER_VERSION), 1);
+        assert_eq!(server.header_subscriptions(), 1);
+        let MmCoinEnum::QtumCoin(qtum) = qtum else {
+            panic!("a QTUM coin")
+        };
+        let client = qtum_client_of(&qtum);
+        let weak = std::sync::Arc::downgrade(&client.0);
+        drop(client);
+
+        // The token, over the client QTUM holds.
+        server.set_result(GET_HISTORY, json!([]));
+        let holders = settled_strong_count(&weak).await;
+        let (first, second) = futures::join!(
+            legacy_electrum_like(&env, TICKER, &servers, true),
+            legacy_electrum_like(&env, TICKER, &servers, true)
+        );
+        let (token, loser) = match (first, second) {
+            (Ok(coin), Err(e)) | (Err(e), Ok(coin)) => (coin, e),
+            _ => panic!("exactly one of two activations of the token must succeed"),
+        };
+        assert!(
+            loser.ends_with(&format!("Coin {TICKER} already initialized")),
+            "{loser}"
+        );
+        wait_until("the second balance read of the collector", 10., || {
+            server.requests(CALL) == 2
+        })
+        .await;
+        Timer::sleep(0.5).await;
+        assert_eq!((server.requests(CALL), server.requests(GET_HISTORY)), (2, 1));
+        assert_eq!((server.open_connections(), server.accepted()), (1, 1));
+        assert_eq!(server.requests(SERVER_VERSION), 1);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 0);
+        // The token holds the client once more; the loser held nothing.
+        assert_eq!(settled_strong_count(&weak).await, holders + 1);
+        let calls_now = server.requests(CALL);
+        Timer::sleep(33.).await;
+        assert_eq!(server.requests(CALL), calls_now + 1);
+        assert_eq!(server.requests(GET_HISTORY), 1);
+        drop((token, qtum));
+    });
+}
+
 /// D38.6.4Q.1 status note, item 5 and D38.6.4Q.5 status note, item 3: after a disable and an enable of a token on a
 /// client QTUM holds, exactly one collector serves the token and no session is added.
 #[test]
