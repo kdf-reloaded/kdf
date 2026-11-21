@@ -19,6 +19,8 @@ impl SolanaCommonOps for SolanaCoin {
 pub(crate) struct SplTokenBalance {
     pub(crate) raw: u64,
     pub(crate) amount: BigDecimal,
+    /// The decimals of the mint, as the node's answer states them; `None` when the wallet has no token account.
+    pub(crate) mint_decimals: Option<u8>,
 }
 
 /// The block height and the balances an activation reports.
@@ -44,6 +46,7 @@ pub(crate) fn token_balance_from_answer(
         return Ok(SplTokenBalance {
             raw: 0,
             amount: 0.into(),
+            mint_decimals: None,
         });
     };
     let raw = balance
@@ -51,7 +54,11 @@ pub(crate) fn token_balance_from_answer(
         .parse::<u64>()
         .map_to_mm(|_| BalanceError::InvalidResponse("The token account amount is not a number".to_string()))?;
     let amount = crate::solana::solana_common::units_to_amount(raw, balance.decimals);
-    Ok(SplTokenBalance { raw, amount })
+    Ok(SplTokenBalance {
+        raw,
+        amount,
+        mint_decimals: Some(balance.decimals),
+    })
 }
 
 /// The reads of a token account on the node `node`: `None` when the account does not exist.

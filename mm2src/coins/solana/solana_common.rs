@@ -77,6 +77,19 @@ pub fn units_to_amount(units: u64, decimals: u8) -> BigDecimal {
     BigDecimal::new(units.into(), i64::from(decimals)).normalized()
 }
 
+/// `value` written with at least `decimals` decimals, as the sum members of a withdraw answer are (CRD ch.40
+/// R40.2A.4, second bullet, and D40.2A.1: the coin's full decimals, so a zero reads `"0.000000000"` for SOL). The
+/// value is not changed. A value that already carries more decimals than `decimals` keeps all of them: no digit is
+/// ever dropped.
+pub fn with_at_least_decimals(value: BigDecimal, decimals: u8) -> BigDecimal {
+    let (_, scale) = value.as_bigint_and_exponent();
+    if scale < i64::from(decimals) {
+        value.with_scale(i64::from(decimals))
+    } else {
+        value
+    }
+}
+
 /// `amount` (in whole units of a coin with `decimals` decimals) as a count of its smallest units. Digits beyond
 /// `decimals` are dropped, not rounded and not refused (CRD ch.40 R40.6B.9, R40.6B.10). A negative amount, or one
 /// that is more than a `u64` of units, is an error: callers compare the amount with the balance first, so the

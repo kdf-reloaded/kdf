@@ -1181,3 +1181,153 @@ fn a_token_balance_uses_the_decimals_of_the_mint_not_the_configured_ones() {
     let activated = activation.token_balances.get("USDC").expect("the token balance");
     assert_eq!(balance_wire(&activated.spendable), "12.345678");
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// The text of the amounts of a withdraw answer (CRD ch.40 R40.2A.4, D40.2A.1): the sum members carry the full
+// decimals of the coin (9 for SOL, the mint's for a token), every other member is the shortest form.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The text of a member of the withdraw answer as it travels on the wire; `path` is the member or `fee_details.<m>`.
+fn amount_text(details: &TransactionDetails, path: &str) -> String {
+    let json = serde_json::to_value(details).expect("a serializable answer");
+    let member = match path.split_once('.') {
+        Some((outer, inner)) => &json[outer][inner],
+        None => &json[path],
+    };
+    member
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("not a string: {member}"))
+}
+
+fn sol_members(lamports: u64, to: &Pubkey, amount: &str) -> TransactionDetails {
+    let (_node, coin) = sol_node(lamports);
+    withdraw(&coin, request("SOL", &to.to_string(), amount, false)).expect("a withdraw")
+}
+
+#[test]
+fn sol_withdraw_sums_carry_nine_decimals() {
+    let other = other_wallet();
+    let details = sol_members(10_000_000_000, &other, "1.5");
+    assert_eq!(amount_text(&details, "spent_by_me"), "1.500005000");
+    assert_eq!(amount_text(&details, "my_balance_change"), "-1.500005000");
+    assert_eq!(amount_text(&details, "total_amount"), "1.5");
+
+    let details = sol_members(10_000_000_000, &other, "0.999995");
+    assert_eq!(amount_text(&details, "spent_by_me"), "1.000000000");
+    assert_eq!(amount_text(&details, "my_balance_change"), "-1.000000000");
+
+    let details = sol_members(10_000_000_000, &wallet(), "0.123456789");
+    assert_eq!(amount_text(&details, "received_by_me"), "0.123456789");
+    assert_eq!(amount_text(&details, "spent_by_me"), "0.123461789");
+    assert_eq!(amount_text(&details, "my_balance_change"), "-0.000005000");
+    assert_eq!(amount_text(&details, "total_amount"), "0.123456789");
+}
+
+/// T40.2A.4: a large amount loses no digit.
+#[test]
+fn sol_withdraw_of_a_large_amount_loses_no_digit() {
+    let details = sol_members(20_000_000_000_000, &other_wallet(), "12345.678901234");
+    assert_eq!(amount_text(&details, "total_amount"), "12345.678901234");
+    assert_eq!(amount_text(&details, "spent_by_me"), "12345.678906234");
+    assert_eq!(amount_text(&details, "my_balance_change"), "-12345.678906234");
+}
+
+/// The `fee_details` total of a SOL withdraw is the fee as one figure, in the shortest form.
+#[test]
+fn sol_withdraw_fee_details_are_the_shortest_form() {
+    let details = sol_members(10_000_000_000, &other_wallet(), "1");
+    assert_eq!(amount_text(&details, "fee_details.fee_amount"), "0.000005");
+    assert_eq!(amount_text(&details, "fee_details.rent_amount"), "0");
+    assert_eq!(amount_text(&details, "fee_details.total_amount"), "0.000005");
+}
+
+fn token_members(decimals: u8, raw: u64, to: &Pubkey, amount: &str) -> TransactionDetails {
+    let node = spawn(Script::new().with_sol(wallet(), 10_000_000).with_token_account(
+        &wallet(),
+        &SPL_TOKEN_PROGRAM_ID,
+        raw,
+        decimals,
+    ));
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, decimals);
+    withdraw(&token, request("USDC", &to.to_string(), amount, false)).expect("a withdraw")
+}
+
+#[test]
+fn token_withdraw_balance_change_carries_the_mint_decimals() {
+    let other = other_wallet();
+    let details = token_members(6, 12_500_000, &other, "1.5");
+    assert_eq!(amount_text(&details, "my_balance_change"), "-1.500000");
+    assert_eq!(amount_text(&details, "spent_by_me"), "1.5");
+    assert_eq!(amount_text(&details, "total_amount"), "1.5");
+    for amount in ["1.5", "0.25", "2"] {
+        let details = token_members(6, 12_500_000, &wallet(), amount);
+        assert_eq!(amount_text(&details, "my_balance_change"), "0.000000");
+    }
+    let details = token_members(0, 10, &other, "2");
+    assert_eq!(amount_text(&details, "my_balance_change"), "-2");
+    let details = token_members(0, 10, &wallet(), "2");
+    assert_eq!(amount_text(&details, "my_balance_change"), "0");
+}
+
+#[test]
+fn token_withdraw_fee_total_carries_nine_decimals() {
+    // The recipient has no account: the rent is paid.
+    let details = token_members(6, 12_500_000, &other_wallet(), "1.5");
+    assert_eq!(amount_text(&details, "fee_details.fee_amount"), "0.000005");
+    assert_eq!(amount_text(&details, "fee_details.rent_amount"), "0.00203928");
+    assert_eq!(amount_text(&details, "fee_details.total_amount"), "0.002044280");
+    // The recipient has an account: no rent.
+    let other = other_wallet();
+    let node = spawn(
+        Script::new()
+            .with_sol(wallet(), 10_000_000)
+            .with_token_account(&wallet(), &SPL_TOKEN_PROGRAM_ID, 12_500_000, 6)
+            .with_token_account(&other, &SPL_TOKEN_PROGRAM_ID, 0, 6),
+    );
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, 6);
+    let details = withdraw(&token, request("USDC", &other.to_string(), "1.5", false)).expect("a withdraw");
+    assert_eq!(amount_text(&details, "fee_details.fee_amount"), "0.000005");
+    assert_eq!(amount_text(&details, "fee_details.rent_amount"), "0");
+    assert_eq!(amount_text(&details, "fee_details.total_amount"), "0.000005000");
+}
+
+/// R40.2A.4, error members: the sums `required` of `NotSufficientBalance` (SOL) and of
+/// `NotSufficientPlatformBalanceForFee` carry the full decimals of SOL; `available` is the shortest form.
+#[test]
+fn error_member_sums_carry_nine_decimals() {
+    let (_node, coin) = sol_node(1_000_000_000);
+    let error = error_of(withdraw(&coin, request("SOL", &other_wallet().to_string(), "1", false)));
+    let (body, _) = wire(&error);
+    assert_eq!(body["error_data"]["required"], "1.000005000");
+    assert_eq!(body["error_data"]["available"], "1");
+
+    let node = spawn(Script::new().with_sol(wallet(), 1_000).with_token_account(
+        &wallet(),
+        &SPL_TOKEN_PROGRAM_ID,
+        12_500_000,
+        6,
+    ));
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, 6);
+    let error = error_of(withdraw(
+        &token,
+        request("USDC", &other_wallet().to_string(), "1", false),
+    ));
+    let (body, _) = wire(&error);
+    assert_eq!(body["error_data"]["required"], "0.002044280");
+    assert_eq!(body["error_data"]["available"], "0.000001");
+
+    let node = spawn(
+        Script::new()
+            .with_sol(wallet(), 1_000)
+            .with_token_account(&wallet(), &SPL_TOKEN_PROGRAM_ID, 12_500_000, 6)
+            .with_token_account(&other_wallet(), &SPL_TOKEN_PROGRAM_ID, 0, 6),
+    );
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, 6);
+    let error = error_of(withdraw(
+        &token,
+        request("USDC", &other_wallet().to_string(), "1", false),
+    ));
+    let (body, _) = wire(&error);
+    assert_eq!(body["error_data"]["required"], "0.000005000");
+}
