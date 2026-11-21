@@ -823,6 +823,15 @@ is fed back to the legacy broadcast method, and the Sia-specific
 not by this chapter. `tx_json` is absent for every other coin family, and its
 absence is not an error.
 
+> **Sign-only gasless result (pointer, 2026-11-19).** The sign-only result of
+> the Tron gasless rail is a second result, after the unsigned results of
+> [Chapter 36](36-tendermint-v2-activation-rpcs.md) R36.14.17, that carries
+> neither `tx_hex` nor `tx_hash`: nothing in it can be broadcast, and its
+> additional top-level members hold an off-chain authorization instead. Those
+> members are stated by [Chapter 63](63-tron-gasfree-fee-delegation.md) §63.8A
+> (R25-R28). R49.25's "mandatory for a completed withdrawal transaction" does
+> not reach that result. §63.8A passed the KDF Dirty Gate on 2026-11-19.
+
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
 `withdraw` result with the `details` payload of a successful task withdrawal.
@@ -1211,3 +1220,9 @@ addresses.
   inventory and a targeted phrase search; the repository's clean-room gate
   tool was not applicable because the additions embed no code blocks.
   *Measure:* 0.02, on the discretionary-expression basis.
+- *Pointer added 2026-11-19 (Spec Reader round 0.5.0-16) -- after R49.26.*
+  It names chapter 63 §63.8A (R25 -- R28) and states that the members
+  R49.25 makes mandatory do not reach the sign-only result; it travels with
+  chapter 63 §63.8A for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
+  2026-11-19, measure 0.01, no findings**, as recorded for §63.8A in chapter
+  63's provenance footer.

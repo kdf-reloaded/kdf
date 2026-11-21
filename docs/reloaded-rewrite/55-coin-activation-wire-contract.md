@@ -653,6 +653,10 @@ constant `TRON_ACTIVATION_AVAILABLE`) or "Solana support is not available in
 this build" (Solana, Solana tokens; `SOLANA_ACTIVATION_AVAILABLE`), and nothing
 is registered.
 
+*Status note (2026-11-20).* TRX and TRC20 are activated on this path again
+(D55.5 and its status note of this date); the TRON rejection text above no
+longer exists.
+
 **R55.4.8** *Sia on the legacy path.* A coin whose configured protocol is the
 Sia protocol is activated synchronously by the legacy path, with the request
 members, construction and failure classes bound by
@@ -1428,6 +1432,18 @@ and the legacy `enable` / `electrum` route stays as the documented extension
 `TRON_ACTIVATION_AVAILABLE` (`false`), so the beta-availability suspension above
 still holds on every route until the constant is set.
 
+*Status note (2026-11-20), the suspension ends.* `TRON_ACTIVATION_AVAILABLE` is
+`true` from this date. Legacy `enable` and `electrum` activate TRX and TRC20
+again, as the documented extension this item decides, and the mmrpc 2.0 methods
+of the note above activate them too; no route answers "TRON support is not
+available in this build" any more. A TRON coin is activated as a wallet-only
+coin on every route: Reloaded has no TRON swap, and while the build constant
+`TRON_SWAPS_AVAILABLE` is `false` the coin reports wallet-only whatever its
+coins-config entry says (chapter 21 R-D1, R21.10B.9, R21.B3 and their status
+notes of 2026-11-20). The sentences of R55.4.7 and of the "Reloaded status" box
+after R55.4.9 that say TRX and TRC20 are refused in this beta describe the tree
+until this date; the Solana part of R55.4.7 is unchanged.
+
 **D55.6** *Re-activation of a passive platform coin.* The reference release
 treats a platform coin that was disabled while dependent tokens stayed active
 (a passive coin) as re-activatable by the platform activation methods
@@ -1691,3 +1707,8 @@ R55.4.5 and the error body of R55.1.10.
   written by the Spec Reader and travel with chapter 43 §43.1F for the KDF
   Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter
   43's provenance footer.
+- *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
+  status notes of this date after R55.4.7 and under D55.5 (the TRON suspension
+  ends; TRON activates as a wallet-only coin family) are Reloaded-original.
+  They add no reference content, so chapter 01 R38 is not engaged and no
+  clearance above is widened. No cleared sentence was edited.

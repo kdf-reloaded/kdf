@@ -14,7 +14,7 @@ use crate::eth::{EthCoin, EthCoinType};
 use crate::{BalanceError, WithdrawError};
 
 use derive_more::Display;
-use ethereum_types::U256;
+use ethereum_types::{Address, U256};
 use mm2_err_handle::prelude::*;
 
 /// Why a TRON balance could not be read.
@@ -164,14 +164,24 @@ pub(crate) async fn trc20_decimals(
 ///
 /// # Errors
 ///
+/// As [`coin_balance_units_of`].
+pub(crate) async fn coin_balance_units(coin: &EthCoin) -> MmResult<U256, BalanceError> {
+    coin_balance_units_of(coin, coin.my_address).await
+}
+
+/// The balance of `owner` in the smallest unit of `coin`: SUN for TRX, token units for a TRC20 token. The HD
+/// wallet reads the balance of each of its addresses with it (CRD ch.21 R21.10B.4).
+///
+/// # Errors
+///
 /// [`BalanceError::Transport`] when the node cannot be asked, [`BalanceError::InvalidResponse`] when its answer
 /// is not a usable balance, [`BalanceError::Internal`] when the coin has no node client or is not a TRON coin.
-pub(crate) async fn coin_balance_units(coin: &EthCoin) -> MmResult<U256, BalanceError> {
+pub(crate) async fn coin_balance_units_of(coin: &EthCoin, owner: Address) -> MmResult<U256, BalanceError> {
     let api = coin
         .tron_api
         .as_ref()
         .ok_or_else(|| MmError::new(BalanceError::from(TronBalanceError::ClientMissing)))?;
-    let owner = TronAddress::from_evm_address(coin.my_address);
+    let owner = TronAddress::from_evm_address(owner);
     let balance = match &coin.coin_type {
         EthCoinType::Tron => trx_balance_sun(api, &owner).await,
         EthCoinType::Trc20 { token_addr, .. } => {

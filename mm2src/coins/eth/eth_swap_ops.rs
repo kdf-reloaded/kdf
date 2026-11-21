@@ -159,7 +159,11 @@ impl SwapOps for EthCoin {
         let selfi = self.clone();
         let tx = match args.fee_tx {
             TransactionEnum::SignedEthTx(t) => t.clone(),
-            _ => panic!(),
+            _ => {
+                return Box::new(futures01::future::err(ERRL!(
+                    "The fee transaction is not an EVM transaction"
+                )))
+            },
         };
         let sender_addr = try_fus!(addr_from_raw_pubkey(args.expected_sender));
         let fee_addr = try_fus!(addr_from_raw_pubkey(args.fee_addr));
@@ -258,7 +262,8 @@ impl SwapOps for EthCoin {
                     }
                 },
                 // V1 ETH/ERC20 fee validation; TRON uses a separate fee validator.
-                // Activation gating prevents this branch. P10.2.5.
+                // TRON coins are wallet-only while
+                // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
                 EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                     return ERR!("TRON dex-fee validation not yet wired (pending P10.2.5)");
                 },
@@ -347,7 +352,10 @@ impl SwapOps for EthCoin {
                         use alloy::providers::Provider;
 
                         let provider = selfi.alloy_provider();
-                        let event_hash = alloy::primitives::B256::from_slice(&event.transaction_hash.unwrap().0);
+                        let Some(hash) = event.transaction_hash else {
+                            return ERR!("The node returned a payment event without a transaction hash");
+                        };
+                        let event_hash = alloy::primitives::B256::from_slice(&hash.0);
                         let transaction =
                             try_s!(assert_send_future(provider.get_transaction_by_hash(event_hash)).await);
                         match transaction {

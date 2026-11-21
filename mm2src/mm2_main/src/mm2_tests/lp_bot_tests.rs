@@ -24,7 +24,9 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_start_and_stop_simple_market_maker_bot_from_ctx() {
+        // The started bot asks its price sources once; a closed loopback port keeps that off the public services.
         let ctx = MmCtxBuilder::default()
+            .with_conf(json!({ "price_urls": ["http://127.0.0.1:1/"] }))
             .with_secp256k1_key_pair(
                 key_pair_from_seed("also shoot benefit prefer juice shell elder veteran woman mimic image kidney")
                     .unwrap(),
@@ -58,6 +60,8 @@ mod tests {
                 "rpc_password": "password",
                 "coins": coins,
                 "i_am_seed": true,
+                // The started bot asks its price sources once; a closed loopback port keeps that off the public services.
+                "price_urls": ["http://127.0.0.1:1/"],
             }),
             "password".into(),
             None,

@@ -2133,6 +2133,7 @@ fn t38_6_4q_4_builds_of_the_family_do_not_wait_for_the_process_wide_lock() {
             max: false,
             fee: None,
             memo: None,
+            expiration_seconds: None,
         };
         let qtum_request = |to: String| WithdrawRequest {
             amount: BigDecimal::from_str("0.1").unwrap(),
@@ -2315,6 +2316,7 @@ fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
             };
             token.withdraw(request).compat().await.unwrap()
         };
@@ -2389,6 +2391,7 @@ fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
             };
             token.withdraw(request).compat().await.unwrap()
         };
@@ -2401,6 +2404,7 @@ fn t38_6_4q_4_withdraws_and_delegations_are_promoted_by_either_coins_send_raw_tx
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
             };
             qtum.withdraw(request).compat().await.unwrap()
         };
@@ -2495,6 +2499,7 @@ fn t38_6_4q_11_a_withdraw_of_another_coin_does_not_wait_for_the_pending_broadcas
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
             };
             let outcome = doc.withdraw(request).compat().await;
             (outcome.is_ok(), started, std::time::Instant::now())
@@ -2627,6 +2632,7 @@ fn t38_6_4q_9_delegation_and_withdraw_from_one_address_list_one_after_the_other(
                 max: false,
                 fee: None,
                 memo: None,
+                expiration_seconds: None,
             };
             qtum.withdraw(request).compat().await.map_err(|e| e.to_string())
         };
