@@ -86,6 +86,7 @@ fn answer(script: &Script, method: &str, params: &Json) -> Reply {
     let context = json!({ "slot": 1 });
     match method {
         "getHealth" => Reply::Result(json!("ok")),
+        "getBlockHeight" => Reply::Result(json!(100)),
         "getBalance" => {
             let lamports = pubkey_param(params, 0).and_then(|key| script.sol.get(&key).copied());
             Reply::Result(json!({ "context": context, "value": lamports.unwrap_or(0) }))
@@ -1029,4 +1030,97 @@ fn t40_6b_15_send_raw_transaction_answers_the_withdraw_hash() {
         node.params_of("sendTransaction").len() == 3,
         "all three went to the node"
     );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Balance precision (CRD ch.40 R40.2.3, R40.3A.2, §40.6A, T40.6B.7): a balance is the exact value, normalized, as
+// the serialized decimal string.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The serialized form of a decimal, as it travels in an RPC answer.
+fn balance_wire(value: &BigDecimal) -> String {
+    match serde_json::to_value(value) {
+        Ok(Json::String(text)) => text,
+        other => format!("not a string: {other:?}"),
+    }
+}
+
+fn sol_wire(lamports: u64) -> (String, String, String) {
+    let node = spawn(Script::new().with_sol(wallet(), lamports));
+    let coin = sol_on(&node.url);
+    let my = block_on(coin.my_balance().compat()).expect("a balance");
+    let base = block_on(coin.base_coin_balance().compat()).expect("a balance");
+    let activation = block_on(coin.activation_balances()).expect("activation balances");
+    (
+        balance_wire(&my.spendable),
+        balance_wire(&base),
+        balance_wire(&activation.balance.spendable),
+    )
+}
+
+#[test]
+fn sol_balance_is_the_exact_normalized_value() {
+    let cases: [(u64, &str); 6] = [
+        (0, "0"),
+        (1, "0.000000001"),
+        (1_500_000_000, "1.5"),
+        (12_345_678_901, "12.345678901"),
+        (123_456_789_123_456_789, "123456789.123456789"),
+        (u64::MAX, "18446744073.709551615"),
+    ];
+    for (lamports, expected) in cases {
+        let (my, base, activation) = sol_wire(lamports);
+        assert_eq!(my, expected);
+        assert_eq!(base, expected);
+        assert_eq!(activation, expected);
+    }
+}
+
+fn token_wire(raw: u64, decimals: u8) -> (String, String) {
+    let node = spawn(Script::new().with_sol(wallet(), 1).with_token_account(
+        &wallet(),
+        &SPL_TOKEN_PROGRAM_ID,
+        raw,
+        decimals,
+    ));
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, decimals);
+    token
+        .platform_coin
+        .add_spl_token_info("USDC".to_string(), token.get_info());
+    let my = block_on(token.my_balance().compat()).expect("a balance");
+    let activation = block_on(token.platform_coin.activation_balances()).expect("activation balances");
+    let activated = activation.token_balances.get("USDC").expect("the token balance");
+    (balance_wire(&my.spendable), balance_wire(&activated.spendable))
+}
+
+#[test]
+fn token_balance_is_the_exact_normalized_value() {
+    let cases: [(u64, u8, &str); 6] = [
+        (0, 6, "0"),
+        (12_345_678, 6, "12.345678"),
+        (1_500_000, 6, "1.5"),
+        (42, 0, "42"),
+        (u64::MAX, 9, "18446744073.709551615"),
+        (u64::MAX, 0, "18446744073709551615"),
+    ];
+    for (raw, decimals, expected) in cases {
+        let (my, activation) = token_wire(raw, decimals);
+        assert_eq!(my, expected);
+        assert_eq!(activation, expected);
+    }
+}
+
+#[test]
+fn a_wallet_without_a_token_account_reads_zero_on_the_wire() {
+    let node = spawn(Script::new().with_sol(wallet(), 0));
+    let token = token_on(&node.url, SPL_TOKEN_PROGRAM_ID, 6);
+    token
+        .platform_coin
+        .add_spl_token_info("USDC".to_string(), token.get_info());
+    let my = block_on(token.my_balance().compat()).expect("a balance");
+    assert_eq!(balance_wire(&my.spendable), "0");
+    let activation = block_on(token.platform_coin.activation_balances()).expect("activation balances");
+    assert_eq!(balance_wire(&activation.balance.spendable), "0");
+    let activated = activation.token_balances.get("USDC").expect("the token balance");
+    assert_eq!(balance_wire(&activated.spendable), "0");
 }

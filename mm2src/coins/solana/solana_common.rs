@@ -3,13 +3,13 @@ use crate::{NumConversError, SignatureError, SignatureResult, SolanaCoin, Valida
 use base58::{FromBase58, ToBase58};
 use common::mm_number::BigDecimal;
 use mm2_err_handle::prelude::*;
-use solana_native_token::LAMPORTS_PER_SOL;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
 use std::str::FromStr;
 
-pub fn lamports_to_sol(lamports: u64) -> BigDecimal { BigDecimal::from(lamports) / BigDecimal::from(LAMPORTS_PER_SOL) }
+/// SOL for `lamports`: the exact value, normalized (see [`units_to_amount`]).
+pub fn lamports_to_sol(lamports: u64) -> BigDecimal { units_to_amount(lamports, LAMPORTS_DECIMALS) }
 
 pub fn amount_to_ui_amount(amount: u64, decimals: u8) -> BigDecimal {
     BigDecimal::from(amount) / BigDecimal::from(10_u64.pow(decimals as u32))
@@ -70,8 +70,11 @@ pub fn verify_message(
     Ok(is_valid)
 }
 
+/// Decimals of SOL: one SOL is 10^9 lamports.
+const LAMPORTS_DECIMALS: u8 = 9;
+
 /// `amount` units of a coin with `decimals` decimals as a decimal number, 10^-decimals each, with no trailing zeros.
-/// Built from the exponent, so any `u8` is safe.
+/// Built from the exponent, so any `u8` is safe. The single place where raw units become a shown balance.
 pub fn units_to_amount(units: u64, decimals: u8) -> BigDecimal {
     BigDecimal::new(units.into(), i64::from(decimals)).normalized()
 }
