@@ -743,6 +743,23 @@ the previous version used. The safe way:
   address. It now lists account 0 with its single address, the one the coin uses, and that address's
   balance. Detail: PR #402; CRD ch.46 R46.2.4.
 
+#### Solana coins
+
+- **Solana balances are shown exactly.** `my_balance` and the activation results rounded a SOL balance to
+  nine significant digits, so a balance of 10 SOL or more lost its last decimals (12.345678901 SOL read
+  12.3456789) and a zero balance read `0.00000000`. SOL and token balances are now the exact amount
+  without trailing zeros (`0`, `1.5`, `12.345678901`); token balances are computed from the raw amount
+  the node reports. Withdraw values were never rounded; the text of their sums is in the next item.
+  Solana stays switched off in this beta.
+  Detail: PR #456; CRD ch.40 §40.2A (R40.2A.1, R40.2A.5), R40.2.3, R40.3A.2, T40.6B.7.
+- **Sums in Solana withdraw answers carry the coin's full decimals.** Members that add or subtract two
+  amounts (`spent_by_me` and `my_balance_change` of a SOL withdraw, `my_balance_change` of a token
+  withdraw, a token withdraw's `fee_details.total_amount`, and the `required` member of a SOL
+  `NotSufficientBalance` and of `NotSufficientPlatformBalanceForFee`) are written with 9 decimals for SOL
+  and the mint's decimals for a token, for example `1.000000000` or `-1.500000`. The values are unchanged;
+  single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
+  CRD ch.40 R40.2A.4, D40.2A.1.
+
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation

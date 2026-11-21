@@ -181,6 +181,15 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
     decimals as its threshold, not one lamport.
   No switch: none of these is a compatibility target. CRD ch.40 D40.6B.2 to
   D40.6B.6; PR #425.
+- **Sums in Solana withdraw answers.** Members that add or subtract two
+  amounts carry the coin's full decimals: `spent_by_me` and
+  `my_balance_change` of a SOL withdraw, `my_balance_change` of an SPL
+  withdraw, an SPL withdraw's `fee_details.total_amount`, and `required` of
+  `NotSufficientPlatformBalanceForFee` and of a SOL `NotSufficientBalance`.
+  Reloaded writes `"1.000000000"` where GLEEC KDF writes `"1.000000"` or
+  `"1"`; the values are equal. No switch: a client that reads them as
+  decimal numbers sees no difference. CRD ch.40 R40.2A.4, D40.2A.1;
+  PR #456.
 
 - **Solana under an HD login.** GLEEC KDF refuses Solana activation under a
   global-HD login and derives no Solana key from a seed. Reloaded derives the
