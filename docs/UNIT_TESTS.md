@@ -781,7 +781,7 @@ every balance query. The tokens' `balanceOf` queries are recorded by contract.
 |---|---|---|
 | `evm_hd_p2_get_new_address_for_the_platform_answers_the_platform_and_every_token` | R49.32 item 1, R49.33 | The map holds exactly the platform and both tokens, zero balances included; the address is the EIP-55 form |
 | `evm_hd_p2_account_balance_and_its_task_form_list_every_ticker_at_every_address` | R49.32 item 1 | `account_balance` and `task::account_balance::init` list the three tickers at every address; the task total sums each ticker |
-| `evm_hd_p2_the_scan_lists_unqueried_addresses_with_an_empty_map_and_finds_a_token_only_address` | R49.32 items 2, 3 | From a known count of 1 the scan finds address 2 that holds only a token, lists address 1 with `{}` and address 2 with all tickers |
+| `evm_hd_p2_the_scan_lists_intervening_addresses_with_an_empty_map_and_finds_a_token_only_address` | R49.32 items 2, 3 | From a known count of 1 the scan finds address 2 that holds only a token, lists address 1 with `{}` and address 2 with all tickers |
 | `evm_hd_p2_the_scan_counts_an_address_used_by_its_nonce_or_platform_balance_with_the_full_map` | R49.32 item 3 | A used address found by its nonce carries the full map |
 | `evm_hd_p2_a_token_removed_by_disable_coin_leaves_the_maps` | R49.32 item 1 | After `disable_coin` of one token, each address lists two tickers |
 | `evm_hd_p2_a_token_ticker_answers_that_token_only_and_the_platform_counts_the_new_address` | R49.32 | `get_new_address` for a token answers that token only, asks no other token, and the platform then lists the address |

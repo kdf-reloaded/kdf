@@ -182,6 +182,23 @@ fn tickers(balance: &Json) -> Vec<String> {
     tickers
 }
 
+/// The error kind of a failed token balance query: the node answers a JSON-RPC error.
+const FAILED_KIND: &str = "Transport";
+
+mod erased {
+    use mm2_err_handle::prelude::{MmError, NotMmError};
+    use serde_json::Value as Json;
+
+    /// The wire form of an error.
+    pub trait Wire {
+        fn json(&self) -> Json;
+    }
+
+    impl<E: serde::Serialize + NotMmError> Wire for MmError<E> {
+        fn json(&self) -> Json { serde_json::to_value(self.get_inner()).unwrap() }
+    }
+}
+
 fn all_tickers() -> Vec<String> { vec![DAI.to_owned(), PLATFORM.to_owned(), USDT.to_owned()] }
 
 fn get_new_address_params() -> coins::hd_wallet::GetNewHDAddressParams {
@@ -250,14 +267,13 @@ fn evm_hd_p2_account_balance_and_its_task_form_list_every_ticker_at_every_addres
 }
 
 #[test]
-fn evm_hd_p2_the_scan_lists_unqueried_addresses_with_an_empty_map_and_finds_a_token_only_address() {
+fn evm_hd_p2_the_scan_lists_intervening_addresses_with_an_empty_map_and_finds_a_token_only_address() {
     let chain = Arc::new(Chain::default());
     let node = chain_node(chain.clone());
     let ctx = activate(&node, 1);
     // Address 2 holds only a token: nonce 0 and no native balance.
     let token_only = address_at(&ctx, 2);
     chain.set_token(USDT_CONTRACT, &token_only, 7_000_000);
-    chain.forget_queries();
 
     let response = block_on(coin(&ctx, PLATFORM).init_scan_for_new_addresses_rpc(scan_params(2)))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -271,7 +287,7 @@ fn evm_hd_p2_the_scan_lists_unqueried_addresses_with_an_empty_map_and_finds_a_to
     assert_eq!(
         found[0]["balance"],
         json!({}),
-        "the unused address between is not queried"
+        "the unused address between carries an empty map"
     );
     assert_eq!(found[1]["address"].as_str().unwrap().to_lowercase(), token_only);
     assert_eq!(tickers(&found[1]["balance"]), all_tickers());
@@ -333,14 +349,32 @@ fn evm_hd_p2_a_failing_token_balance_fails_the_platform_ticker_request_as_a_whol
     let (chain, _node, ctx) = t4931_setup();
     chain.fail_token(DAI_CONTRACT);
     let platform = coin(&ctx, PLATFORM);
-    assert!(block_on(platform.account_balance_rpc(account_params())).is_err());
-    assert!(block_on(
-        platform.init_account_balance_rpc(serde_json::from_value(json!({ "account_index": 0 })).unwrap())
-    )
-    .is_err());
-    assert!(block_on(platform.get_new_address_rpc(get_new_address_params())).is_err());
-    chain.set_nonce(&address_at(&ctx, 3), 1);
-    assert!(block_on(platform.init_scan_for_new_addresses_rpc(scan_params(2))).is_err());
+    let kind = |error: &dyn erased::Wire| error.json()["error_type"].clone();
+    let failed = error_of(block_on(platform.account_balance_rpc(account_params())), "failed");
+    assert_eq!(kind(&failed), FAILED_KIND, "account_balance");
+    let failed = error_of(
+        block_on(platform.init_account_balance_rpc(serde_json::from_value(json!({ "account_index": 0 })).unwrap())),
+        "failed",
+    );
+    assert_eq!(kind(&failed), FAILED_KIND, "task::account_balance::init");
+    // The new address is stored before any balance is asked, so it stays known after the failure.
+    assert_eq!(known_addresses(&ctx), 3);
+    let failed = error_of(
+        block_on(platform.get_new_address_rpc(get_new_address_params())),
+        "failed",
+    );
+    assert_eq!(kind(&failed), FAILED_KIND, "get_new_address");
+    assert_eq!(
+        known_addresses(&ctx),
+        4,
+        "the address stays known although the request failed"
+    );
+    chain.set_nonce(&address_at(&ctx, 4), 1);
+    let failed = error_of(
+        block_on(platform.init_scan_for_new_addresses_rpc(scan_params(2))),
+        "failed",
+    );
+    assert_eq!(kind(&failed), FAILED_KIND, "task::scan_for_new_addresses::init");
 }
 
 #[test]

@@ -471,7 +471,9 @@ platform ticker only, its scan rule is unchanged, and the intervening unused
 entries of a scan carry a zero entry.
 
 *Status note (2026-11-21), balance maps of a platform ticker (as built).* The
-open half of item (a) of the Reloaded status above is closed. For an EVM
+open half of item (a) of the Reloaded status above is closed for the methods
+that exist in this repository; `task::get_new_address::init`, which R49.32 also
+names, is not present here, so that task form stays open. For an EVM
 platform ticker, `get_new_address`, `account_balance`,
 `task::account_balance::init` and `task::scan_for_new_addresses::init` now
 answer, at every address whose balance is queried, the platform ticker and
@@ -479,9 +481,13 @@ every ERC-20 token registered on the platform at call time, zero balances
 included (R49.32 item 1); a token removed by `disable_coin` is no longer
 registered and no longer appears. The totals of `task::account_balance::init`
 sum each ticker over the listed addresses. If the balance query of the platform
-or of any one token fails, the request fails with no partial map. In the scan
+or of any one token fails, the request fails with no partial map. `get_new_address`
+stores the new address (the known count rises by one) before any balance is
+asked, so when a balance query fails the request fails and the address stays
+known; that was already so for a failing platform balance, and it is now more
+likely because each token's balance is asked as well. In the scan
 answer, the unused addresses between the end of the known range and a newly
-found used address carry an empty map and are not queried (item 2), and an
+found used address carry an empty map (item 2), and an
 address is used when its nonce is non-zero, its platform balance is non-zero,
 or the balance of a token registered when the scan starts is non-zero (item 3).
 The activation of the platform is unchanged: its report is built as before

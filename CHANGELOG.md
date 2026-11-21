@@ -619,13 +619,13 @@ the previous version used. The safe way:
   `task::account_balance::init` and `task::scan_for_new_addresses::init` asked for the platform coin now answer, per
   address, the platform and every ERC-20 token activated on it at that moment, including tokens with a zero balance;
   the total of `task::account_balance::init` sums each. They showed the platform coin only. If one balance cannot be
-  read, the request fails instead of returning a partial list. Asked for a token, they still answer that token only.
+  read, the request fails instead of returning a partial list; `get_new_address` still keeps the new address, as it
+  already did when the platform balance could not be read. Asked for a token, they still answer that token only.
   Detail: PR #463; CRD ch.49 R49.32.
-- **A scan for new addresses of an EVM platform leaves the addresses it did not check empty and finds token-only
-  addresses.** The unused addresses between the known range and a newly found address are listed with an empty
-  balance map, as they were not queried. An address counts as used when its transaction count, its platform balance
-  or the balance of any activated token is not zero, so an address that only received a token is found. The scan
-  made during activation is unchanged. Detail: PR #463; CRD ch.49 R49.32.
+- **A scan for new addresses of an EVM platform finds token-only addresses.** An address counts as used when its
+  transaction count, its platform balance or the balance of any activated token is not zero, so an address that only
+  received a token is found. The unused addresses between the known range and a newly found address are listed with
+  an empty balance map. The scan made during activation is unchanged. Detail: PR #463; CRD ch.49 R49.32.
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
