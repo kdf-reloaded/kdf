@@ -2169,7 +2169,16 @@ mod reactivation {
         assert!(block_on(coins::lp_coinfind_registered(&ctx, PLATFORM))
             .unwrap()
             .is_some());
-        assert_eq!(ctx.abort_handlers.lock().unwrap().len(), collectors + 1);
+        // The collector is work of the registered instance (CRD ch.43 R43.1E.5 item 4): it is on the instance's
+        // record, not on the node's list.
+        assert_eq!(ctx.abort_handlers.lock().unwrap().len(), collectors);
+        let work = block_on(coins_ctx(&ctx).coin_work(PLATFORM)).expect("the platform is registered");
+        assert_eq!(work.len(), 1);
+
+        // Removing the platform ends the collector.
+        block_on(coins::disable_platform_with_dependents(&ctx, PLATFORM)).unwrap();
+        assert!(work.is_ended());
+        assert_eq!(work.len(), 0);
     }
 
     /// T43.1F.5 with the decision of 2026-11-19: after the versioned `disable_coin` of a platform its tokens stay
@@ -2351,6 +2360,8 @@ mod reactivation {
         let (node, _) = counting_node();
         passive_platform(&ctx, &node, tokens(&["USDT-ERC20"]));
         let collectors = ctx.abort_handlers.lock().unwrap().len();
+        let work = block_on(coins_ctx(&ctx).coin_work(PLATFORM)).expect("the passive platform is registered");
+        let (instance, started) = (work.id(), work.len());
 
         activate(
             &ctx,
@@ -2359,6 +2370,9 @@ mod reactivation {
         .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
 
         assert_eq!(ctx.abort_handlers.lock().unwrap().len(), collectors);
+        // The re-activation keeps the instance and its work (CRD ch.43 R43.1F.10 item 2).
+        let after = block_on(coins_ctx(&ctx).coin_work(PLATFORM)).unwrap();
+        assert_eq!((after.id(), after.len()), (instance, started));
     }
 
     /// R43.1F.3 item 6: a token disabled while the platform was passive is not listed after the re-activation.

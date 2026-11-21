@@ -2150,6 +2150,33 @@ mod tests {
             assert!(tron_swap_skip_message(&ctx, &legacy_plain, "DOC", "MARTY").is_none());
         }
 
+        /// CRD ch.18 and ch.36 beta notes: a swap that has already started still completes or is recovered. Only
+        /// TRON's saved swaps are skipped at startup while their swaps are off; a saved swap that names a Tendermint
+        /// coin is resumed although `coins::TENDERMINT_SWAPS_AVAILABLE` is `false`, so `tron_swap_skip_message`
+        /// gives no skip line for a Tendermint pair or a Tendermint/UTXO pair.
+        #[test]
+        fn a_saved_swap_with_a_tendermint_coin_is_resumed_while_tendermint_swaps_are_off() {
+            use crate::mm2::lp_swap::tron_swap_skip_message;
+
+            const { assert!(!coins::TENDERMINT_SWAPS_AVAILABLE) };
+            let ctx = MmCtxBuilder::default()
+                .with_conf(serde_json::json!({
+                    "coins": [
+                        { "coin": "DOC", "asset": "DOC", "mm2": 1, "protocol": { "type": "UTXO" } },
+                        { "coin": "IRIS", "mm2": 1, "protocol": { "type": "TENDERMINT", "protocol_data": {
+                            "decimals": 6, "denom": "uiris", "account_prefix": "iaa", "chain_id": "irishub-1" } } },
+                        { "coin": "IRIS-NYAN", "mm2": 1, "protocol": { "type": "TENDERMINTTOKEN",
+                            "protocol_data": { "platform": "IRIS", "decimals": 6, "denom": "nyan" } } },
+                    ],
+                }))
+                .into_mm_arc();
+            let uuid = Uuid::new_v4();
+            assert!(tron_swap_skip_message(&ctx, &uuid, "IRIS", "IRIS-NYAN").is_none());
+            assert!(tron_swap_skip_message(&ctx, &uuid, "IRIS-NYAN", "IRIS").is_none());
+            assert!(tron_swap_skip_message(&ctx, &uuid, "IRIS", "DOC").is_none());
+            assert!(tron_swap_skip_message(&ctx, &uuid, "DOC", "IRIS-NYAN").is_none());
+        }
+
         #[test]
         fn should_handle_full_lifecycle_when_using_maker_swap_storage() {
             let ctx = setup_test_ctx();

@@ -3211,7 +3211,7 @@ fn t38_6_4q_1_the_forced_removal_of_qtum_with_a_token_makes_both_forget_their_su
         let coins_ctx = CoinsContext::from_ctx(&env.ctx).unwrap();
         {
             let mut coins = coins_ctx.coins.lock().await;
-            let registered = coins.remove(TICKER).expect("the token is registered");
+            let (registered, _) = coins.remove(TICKER).expect("the token is registered");
             coins.insert_dependent(QTUM_TICKER, TICKER.to_owned(), registered);
         }
         drop((qtum, token));

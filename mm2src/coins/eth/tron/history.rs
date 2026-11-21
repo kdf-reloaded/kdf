@@ -28,6 +28,7 @@
 use super::api::{AccountListing, TransactionInfoResponse, TronApiClient, TronApiError};
 use super::fee::TronTxFeeDetails;
 use super::{TronAddress, TRX_DECIMALS};
+use crate::coin_work::{carry_current_scope, CoinWork};
 use crate::eth::{u256_to_big_decimal, EthCoin, EthCoinType};
 use crate::{lp_coinfind_registered, BytesJson, HistorySyncState, MarketCoinOps, MmCoin, MmCoinEnum,
             TransactionDetails, TransactionType, TxFeeDetails};
@@ -37,11 +38,13 @@ use common::mm_number::BigDecimal;
 use derive_more::Display;
 use ethereum_types::{Address, U256};
 use futures::compat::Future01CompatExt;
+use futures::future::abortable;
 use kdf_crypto::sha256;
 use mm2_core::mm_ctx::MmArc;
 use serde::Deserialize;
 use serde_json::{json, Value as Json};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::{Arc, PoisonError};
 
@@ -140,15 +143,34 @@ impl EthCoin {
 /// 2.0 activation calls it once the platform and its tokens are registered; it runs on every target. The history is
 /// the platform's own background work, so every look-up of this module uses the registered view, which counts a
 /// passive platform, and the work goes on while the platform is passive (CRD ch.43 R43.1E.6 item 3).
+///
+/// The process is work of the registered instance (CRD ch.43 R43.1E.5 item 4): the caller runs this inside
+/// [`crate::coin_work::CoinWork::run_in_scope`] of that instance. The look-up of the coin runs in that scope without
+/// registering anything; only once the coin is a TRX platform does the process register its abort handle with the
+/// instance, so removing the platform aborts it, and it runs in the instance's scope (CRD ch.55 R55.4.9). The
+/// platform of another family leaves no work on the instance.
 pub fn spawn_platform_history(ctx: &MmArc, ticker: &str) {
-    let (ctx, ticker) = (ctx.clone(), ticker.to_owned());
-    common::executor::spawn(async move {
-        if let Ok(Some(MmCoinEnum::EthCoin(coin))) = lp_coinfind_registered(&ctx, &ticker).await {
+    let (task_ctx, ticker) = (ctx.clone(), ticker.to_owned());
+    common::executor::spawn(carry_current_scope(async move {
+        if let Ok(Some(MmCoinEnum::EthCoin(coin))) = lp_coinfind_registered(&task_ctx, &ticker).await {
             if coin.is_tron_platform_coin() {
-                tron_history_loop(coin, ctx).await;
+                instance_task(&task_ctx, tron_history_loop(coin, task_ctx.clone())).await;
             }
         }
-    });
+    }));
+}
+
+/// Makes `fut` abortable work of the instance whose scope is current: its abort handle goes to that instance's
+/// `CoinWork`, and `fut` runs in the same scope. Outside any scope the handle goes to the node's list, as the other
+/// spawn sites do. Returns the future to spawn, which ends when `fut` ends or is aborted.
+pub(crate) fn instance_task(ctx: &MmArc, fut: impl Future<Output = ()>) -> impl Future<Output = ()> {
+    let (fut, handle) = abortable(carry_current_scope(fut));
+    if let Some(handle) = CoinWork::register_with_current(handle) {
+        ctx.abort_handlers.lock().unwrap().push(handle);
+    }
+    async move {
+        let _ = fut.await;
+    }
 }
 
 /// The history process of `coin`: a pass, then a pause, until the node stops or the coin is no longer the

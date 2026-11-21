@@ -495,7 +495,9 @@ pub(crate) fn tron_swap_skip_message(ctx: &MmArc, uuid: &Uuid, maker_coin: &str,
 /// Return the tickers of coins that must be enabled for swaps to continue.
 ///
 /// An unfinished swap that names a TRON coin is not resumed and its coins are not returned
-/// ([`tron_swap_skip_message`]).
+/// ([`tron_swap_skip_message`]). An unfinished swap that names a Tendermint coin is resumed although
+/// `coins::TENDERMINT_SWAPS_AVAILABLE` is `false`: a swap that has already started still completes or is recovered
+/// (CRD ch.18 and ch.36 beta notes).
 pub async fn swap_kick_starts(ctx: MmArc) -> Result<HashSet<String>, String> {
     let mut coins = HashSet::new();
     let swaps = try_s!(SavedSwap::load_all_my_swaps_from_db(&ctx).await);

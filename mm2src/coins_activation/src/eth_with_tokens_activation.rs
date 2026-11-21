@@ -912,7 +912,9 @@ impl PlatformWithTokensActivationOps for EthCoin {
     ) -> AbortHandle {
         let ticker = self.ticker().to_owned();
         let coin = self.clone();
-        let (fut, abort_handle) = abortable(async move { coin.process_eth_history_loop().await });
+        let (fut, abort_handle) = abortable(coins::coin_work::carry_current_scope(async move {
+            coin.process_eth_history_loop().await
+        }));
         spawn(async move {
             if fut.await.is_err() {
                 info!("eth history loop stopped for {}", ticker);

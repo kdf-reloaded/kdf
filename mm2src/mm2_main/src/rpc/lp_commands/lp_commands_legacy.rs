@@ -18,8 +18,9 @@
 //
 
 use coins::utxo::rpc_clients::with_call_budget;
-use coins::{disable_coin as disable_coin_impl, disable_platform_with_dependents, lp_coinfind, lp_coinfind_registered,
-            lp_coininit, CoinBalance, CoinsContext, DisableCoinError, MmCoinEnum, MyBalanceRpcError};
+use coins::{disable_coin as disable_coin_impl, disable_coin_of_instance, disable_platform_with_dependents,
+            lp_coinfind, lp_coinfind_registered, lp_coininit, CoinBalance, CoinsContext, DisableCoinError, MmCoinEnum,
+            MyBalanceRpcError};
 use common::custom_futures::FutureTimerExt;
 use common::executor::{spawn, Timer};
 use common::log::{error, warn};
@@ -141,8 +142,9 @@ async fn check_and_cancel_orders(
 /// stay registered, and its dependent set is dropped. A passive platform is not an active coin here and answers
 /// `NoSuchCoin`.
 ///
-/// The call takes the activation lock of the requested ticker (CRD ch.55 R55.1.12, ch.43 D43.1F.2 (b)). Ending the
-/// background work of the removed coin is not part of it.
+/// The call takes the activation lock of the requested ticker (CRD ch.55 R55.1.12, ch.43 D43.1F.2 (b)). The removal
+/// ends the removed instance's background work and its event streams, through `disable_coin_impl` (CRD ch.43
+/// R43.1E.5 item 4).
 ///
 /// # Errors
 ///
@@ -188,8 +190,8 @@ pub async fn disable_coin_core(
 ///    is refused if any of them is in use (D43.1E.2 (b), R43.1E.5 item 4);
 /// 4. anything else (a token, a coin without dependents) is removed as before (R43.1E.5 items 2 and 5).
 ///
-/// Ending the background work of the removed coins is not part of the call: it follows with the background-work
-/// change of CRD ch.43 R43.1E.5 item 4.
+/// The removal ends the background work of each removed instance and its event streams, through
+/// `disable_platform_with_dependents` and `disable_coin_impl` (CRD ch.43 R43.1E.5 item 4).
 ///
 /// # Errors
 ///
@@ -398,8 +400,10 @@ where
     result
 }
 
-async fn deregister_coin_after_failed_balance_read(ctx: &MmArc, ticker: &str) {
-    if let Err(e) = disable_coin_impl(ctx, ticker).await {
+/// Removes the coin whose balance read failed, if the registered instance of its ticker is `instance` (CRD ch.55
+/// R55.4.9). Another instance of the ticker stays registered. `None` removes whatever is registered.
+async fn deregister_coin_after_failed_balance_read(ctx: &MmArc, ticker: &str, instance: Option<u64>) {
+    if let Err(e) = disable_coin_of_instance(ctx, ticker, instance).await {
         warn!("Cannot deregister '{}' after its balance read failed: {}", ticker, e);
     }
 }
@@ -411,6 +415,9 @@ async fn legacy_activation_response(
     keep_coin_on_failure: bool,
 ) -> Result<Response<Vec<u8>>, String> {
     let ticker = coin.ticker().to_owned();
+    // The instance the activation registered: the cleanup of a failed read removes this one only (CRD ch.55 R55.4.9).
+    // The activation lock of the ticker is held, so the registered instance is the one that was just built.
+    let instance = try_s!(CoinsContext::from_ctx(ctx)).instance_id(&ticker).await;
     // The caller's bound is also the budget of the Electrum calls of the read, so that an Electrum client fails over
     // from a server that does not answer inside that bound (CRD ch.38 R38.6.4j item 1). Other clients ignore it.
     let call_budget = bound_secs.map_or(std::time::Duration::MAX, std::time::Duration::from_secs_f64);
@@ -420,7 +427,7 @@ async fn legacy_activation_response(
         }),
         bound_secs,
         keep_coin_on_failure,
-        || deregister_coin_after_failed_balance_read(ctx, &ticker),
+        || deregister_coin_after_failed_balance_read(ctx, &ticker, instance),
     )
     .await?;
     let res = CoinInitResponse {
@@ -924,7 +931,7 @@ mod tests {
             async { failed_balance() },
             None,
             false,
-            || deregister_coin_after_failed_balance_read(&ctx, "AAA"),
+            || deregister_coin_after_failed_balance_read(&ctx, "AAA", None),
         ));
         assert!(result.is_err());
         assert!(block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_none());
@@ -944,10 +951,50 @@ mod tests {
             async { failed_balance() },
             None,
             true,
-            || deregister_coin_after_failed_balance_read(&ctx, "AAA"),
+            || deregister_coin_after_failed_balance_read(&ctx, "AAA", None),
         ));
         assert!(result.is_err());
         assert!(block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_some());
+    }
+
+    /// CRD ch.55 R55.4.9: the cleanup of a failed activation removes the instance that activation registered, and
+    /// leaves a different instance of the same ticker registered.
+    #[test]
+    fn the_cleanup_of_a_failed_read_leaves_another_instance_of_the_ticker_registered() {
+        let ctx = MmCtxBuilder::new().with_conf(json!({})).into_mm_arc();
+        let register = |ctx: &MmArc| {
+            block_on(lp_register_coin(ctx, TestCoin::new("AAA").into(), RegisterCoinParams {
+                ticker: "AAA".to_owned(),
+                tx_history: false,
+            }))
+            .expect("AAA is registered")
+        };
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+
+        register(&ctx);
+        let failed_activation = block_on(coins_ctx.instance_id("AAA")).expect("the first instance is registered");
+        // The first instance is removed by someone else, and a second instance registers under the same ticker.
+        block_on(disable_coin_impl(&ctx, "AAA")).unwrap();
+        register(&ctx);
+        let second = block_on(coins_ctx.instance_id("AAA")).expect("the second instance is registered");
+        assert_ne!(failed_activation, second);
+
+        block_on(deregister_coin_after_failed_balance_read(
+            &ctx,
+            "AAA",
+            Some(failed_activation),
+        ));
+        assert!(
+            block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_some(),
+            "the other instance stays"
+        );
+        assert_eq!(block_on(coins_ctx.instance_id("AAA")), Some(second));
+
+        block_on(deregister_coin_after_failed_balance_read(&ctx, "AAA", Some(second)));
+        assert!(
+            block_on(lp_coinfind(&ctx, "AAA")).unwrap().is_none(),
+            "its own instance is removed"
+        );
     }
 
     /// A Sia-protocol coin goes through the legacy `enable` leg (CRD ch.46 R46.6.3): its Sia members are read

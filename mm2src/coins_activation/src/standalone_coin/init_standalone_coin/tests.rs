@@ -9,7 +9,7 @@ use crate::activation_serialization_tests::{case_a_second_waits_and_the_coin_is_
                                             outcome_of_status, scripted_build, Family, L2OneShot, PlatformOneShot,
                                             Running, TokenOneShot, TokenTask};
 use crate::prelude::CurrentBlock;
-use coins::{lp_coinfind, CoinProtocol, RegisterCoinError, TestCoin};
+use coins::{lp_coinfind, lp_register_coin, CoinProtocol, RegisterCoinError, TestCoin};
 use common::{block_on, HttpStatusCode, StatusCode};
 use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use futures::future::pending;

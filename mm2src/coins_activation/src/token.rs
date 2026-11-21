@@ -210,14 +210,22 @@ where
         }
     })?;
 
-    let (token, activation_result) =
-        Token::enable_token(ticker, platform_coin.clone(), activation_params, token_protocol)
-            .await
-            .mm_err(Into::into)?;
+    // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD ch.43
+    // R43.1E.5 item 4, §43.1E not-established item (1)).
+    let work = coins::coin_work::PendingCoinWork::new();
+    let (token, activation_result) = work
+        .scope(Token::enable_token(
+            ticker,
+            platform_coin.clone(),
+            activation_params,
+            token_protocol,
+        ))
+        .await
+        .mm_err(Into::into)?;
 
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx
-        .add_token(&platform_ticker, token.clone().into())
+        .add_token_with_work(&platform_ticker, token.clone().into(), work)
         .await
         .mm_err(|e| EnableTokenError::TokenIsAlreadyActivated(e.ticker))?;
     Token::on_token_registered(&platform_coin, &token);

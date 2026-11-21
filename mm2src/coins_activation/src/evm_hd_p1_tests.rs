@@ -428,6 +428,53 @@ fn id_form(address_id: u32) -> Json { json!({ "account_id": 0, "chain": "Externa
 
 fn path_form(path: &str) -> Json { json!({ "derivation_path": path }) }
 
+/// CRD ch.43 D43.1F.3 (b): a token looks its platform up in the registered view, so a token of a passive HD platform
+/// keeps answering `get_new_address`, `account_balance` and `withdraw` with `from` from the platform's wallet.
+#[test]
+fn evm_hd_p1_a_token_of_a_passive_hd_platform_keeps_answering_its_hd_methods_and_withdraw_from() {
+    let (chain, _node, ctx) = hd_setup();
+    let first = address_at(&ctx, 0);
+    let selected = address_at(&ctx, 1);
+    let fourth = address_at(&ctx, 3);
+    chain.set_token(&first, 10_000_000);
+    chain.set_token(&selected, 10_000_000);
+    chain.set_token(&fourth, 5_000_000);
+    chain.set_nonce(&selected, 7);
+
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+    assert!(
+        block_on(coins_ctx.make_passive(PLATFORM)),
+        "the platform has a dependent token"
+    );
+    assert!(
+        block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_none(),
+        "the passive platform is not an active coin"
+    );
+
+    let token = coin(&ctx, TOKEN);
+    let response = block_on(token.get_new_address_rpc(get_new_address_params())).unwrap_or_else(|e| panic!("{e}"));
+    let answer = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        answer["new_address"]["address"].as_str().unwrap().to_lowercase(),
+        fourth
+    );
+    assert_eq!(tickers(&answer["new_address"]["balance"]), vec![TOKEN.to_owned()]);
+    assert_eq!(answer["new_address"]["balance"][TOKEN]["spendable"], "5");
+
+    let answer = block_on(token.account_balance_rpc(account_params())).unwrap_or_else(|e| panic!("{e}"));
+    let answer = serde_json::to_value(&answer).unwrap();
+    let addresses = answer["addresses"].as_array().unwrap();
+    assert_eq!(addresses.len(), 4);
+    for entry in addresses {
+        assert_eq!(tickers(&entry["balance"]), vec![TOKEN.to_owned()]);
+    }
+    assert_eq!(addresses[1]["balance"][TOKEN]["spendable"], "10");
+
+    let details = direct(&ctx, withdraw_request(Some(id_form(1)))).unwrap_or_else(|e| panic!("{:?}", e.0));
+    assert_eq!(signer(&details), selected, "the key of the selected address signs");
+    assert_eq!(from_of(&details), vec![checksum_address(&selected)]);
+}
+
 #[test]
 fn evm_hd_p1_a_token_withdraw_with_from_is_sent_from_the_selected_address_on_both_routes() {
     let (chain, _node, ctx) = hd_setup();

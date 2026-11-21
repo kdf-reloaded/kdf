@@ -3,7 +3,9 @@ use crate::prelude::*;
 use crate::standalone_coin::init_standalone_coin_error::{InitStandaloneCoinError, InitStandaloneCoinStatusError,
                                                          InitStandaloneCoinUserActionError};
 use async_trait::async_trait;
-use coins::{disable_coin, lp_coinfind_registered, lp_register_coin, MmCoinEnum, RegisterCoinError, RegisterCoinParams};
+use coins::coin_work::PendingCoinWork;
+use coins::{disable_coin, lp_coinfind_registered, lp_register_coin_with_work, MmCoinEnum, RegisterCoinError,
+            RegisterCoinParams};
 use common::{log, SuccessResponse};
 use crypto::trezor::trezor_rpc_task::RpcTaskHandle;
 use mm2_core::mm_ctx::MmArc;
@@ -210,15 +212,19 @@ where
         if let Ok(Some(_)) = lp_coinfind_registered(&self.ctx, &ticker).await {
             return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() }.into());
         }
-        let coin = Standalone::init_standalone_coin(
-            self.ctx.clone(),
-            ticker.clone(),
-            self.coin_conf,
-            &self.request.activation_params,
-            self.protocol_info,
-            task_handle,
-        )
-        .await?;
+        // The work the build spawns belongs to the instance, and ends with this task if the instance is not
+        // registered (CRD ch.43 R43.1E.5 item 4).
+        let work = PendingCoinWork::new();
+        let coin = work
+            .scope(Standalone::init_standalone_coin(
+                self.ctx.clone(),
+                ticker.clone(),
+                self.coin_conf,
+                &self.request.activation_params,
+                self.protocol_info,
+                task_handle,
+            ))
+            .await?;
 
         let result = coin
             .get_activation_result(self.ctx.clone(), task_handle, &self.request.activation_params)
@@ -230,10 +236,15 @@ where
         // Registration stays the backstop for a coin that an activation outside the lock registered; the task
         // that loses ends with `CoinIsAlreadyActivated`; it must not report success for a coin instance it did
         // not register (CRD ch. 55 R55.5.5).
-        lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams {
-            ticker: ticker.clone(),
-            tx_history,
-        })
+        lp_register_coin_with_work(
+            &self.ctx,
+            coin.into(),
+            RegisterCoinParams {
+                ticker: ticker.clone(),
+                tx_history,
+            },
+            work,
+        )
         .await
         .mm_err(Into::into)?;
         self.registered_by_task.store(true, Ordering::SeqCst);

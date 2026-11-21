@@ -152,13 +152,23 @@ where
 
     let validated_params = L2::validate_activation_params(req.activation_params).mm_err(Into::into)?;
 
-    let (l2, activation_result) = L2::enable_l2(&ctx, platform_coin, validated_params, l2_protocol, coin_conf)
+    // The work the build spawns belongs to the instance, and ends if the instance is not registered (CRD ch.43
+    // R43.1E.5 item 4, §43.1E not-established item (1)).
+    let work = coins::coin_work::PendingCoinWork::new();
+    let (l2, activation_result) = work
+        .scope(L2::enable_l2(
+            &ctx,
+            platform_coin,
+            validated_params,
+            l2_protocol,
+            coin_conf,
+        ))
         .await
         .mm_err(Into::into)?;
 
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx
-        .add_token(&platform_ticker, l2.into())
+        .add_token_with_work(&platform_ticker, l2.into(), work)
         .await
         .mm_err(|e| EnableL2Error::L2IsAlreadyActivated(e.ticker))?;
 

@@ -583,7 +583,9 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let ticker = self.ticker().to_owned();
-            let (fut, abort_handle) = abortable(coins::tendermint::start_tendermint_history(self.clone(), storage));
+            let (fut, abort_handle) = abortable(coins::coin_work::carry_current_scope(
+                coins::tendermint::start_tendermint_history(self.clone(), storage),
+            ));
             common::executor::spawn(async move {
                 if let Ok(Err(e)) = fut.await {
                     common::log::info!("the Tendermint history fetcher stopped for {}, reason {}", ticker, e);
