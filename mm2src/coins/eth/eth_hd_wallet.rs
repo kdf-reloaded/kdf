@@ -7,8 +7,8 @@ use crate::hd_wallet::{choose_new_account_id, AccountUpdatingError, AddressDeriv
                        InvalidBip44ChainError, NewAccountCreatingError, NewAccountIndex, NewAddressDerivingError};
 use crate::hd_wallet_storage::{HDAccountStorageItem, HDWalletCoinStorage, HDWalletCoinWithStorageOps,
                                HDWalletStorageResult};
-use crate::{coin_balance, hd_wallet, lp_coinfind, BalanceError, BalanceResult, CoinBalance, CoinWithDerivationMethod,
-            DerivationMethod, MarketCoinOps, MmCoinEnum};
+use crate::{coin_balance, hd_wallet, lp_coinfind_registered, BalanceError, BalanceResult, CoinBalance,
+            CoinWithDerivationMethod, DerivationMethod, MarketCoinOps, MmCoinEnum};
 use async_trait::async_trait;
 use bip32::ChildNumber;
 use crypto::{Bip32DerPathOps, Bip44Chain, Bip44PathToAccount, Bip44PathToCoin, CryptoCtx, DerivationPath,
@@ -892,6 +892,8 @@ impl EthCoin {
     /// The coin whose HD wallet serves the HD RPC methods asked of this coin: the platform for a TRC20 token (a
     /// token coin carries the enabled address only, CRD ch.21 R21.10B.4), this coin otherwise.
     ///
+    /// The token's own look-up of its platform finds a passive platform (CRD ch.43 D43.1F.3 (b)).
+    ///
     /// # Errors
     ///
     /// The text of why the platform of a TRC20 token cannot be found.
@@ -900,7 +902,7 @@ impl EthCoin {
             return Ok(self.clone());
         };
         let ctx = MmArc::from_weak(&self.ctx).ok_or_else(|| "MM context has been dropped".to_owned())?;
-        match lp_coinfind(&ctx, platform).await? {
+        match lp_coinfind_registered(&ctx, platform).await? {
             Some(MmCoinEnum::EthCoin(platform_coin)) => Ok(platform_coin),
             _ => Err(format!(
                 "The platform coin {platform} of {} is not active",

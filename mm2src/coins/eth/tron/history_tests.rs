@@ -9,17 +9,18 @@
 //! (`TronApiClient::new_with_history_nodes`); the rule itself is tested in `nodes.rs`.
 
 use super::api::{TransactionInfoResponse, TronApiClient};
-use super::history::{apply_report, bandwidth_used, collect_history, fee_beyond_resources, receipt_figures,
-                     signed_transaction_bytes, trc20_history_row, tron_history_loop, trx_history_row, ReceiptFigures,
-                     Trc20Event, WalkState};
+use super::history::{apply_report, bandwidth_used, collect_history, fee_beyond_resources, is_registered_instance,
+                     receipt_figures, signed_transaction_bytes, trc20_history_row, tron_history_loop, trx_history_row,
+                     PassReport, ReceiptFigures, Trc20Event, WalkState};
 use super::nodes::TronNode;
 use super::proto;
 use super::test_node::{Reply, StubNode};
 use super::{parse_trc20_contract, tron_coin_from_conf_and_request, Network, TronAddress};
 use crate::eth::{Erc20TokenInfo, EthCoin};
 use crate::my_tx_history_v2::{my_tx_history_v2_rpc, MyTxHistoryErrorV2, MyTxHistoryRequestV2};
-use crate::{lp_register_coin, CoinProtocol, HistorySyncState, MarketCoinOps, MmCoin, MmCoinEnum, RegisterCoinParams,
-            TransactionDetails, TransactionType};
+use crate::{disable_platform_with_dependents, lp_coinfind, lp_register_coin, CoinProtocol, CoinsContext,
+            HistorySyncState, MarketCoinOps, MmCoin, MmCoinEnum, RegisterCoinParams, TransactionDetails,
+            TransactionType};
 use bigdecimal::BigDecimal;
 use common::{block_on, HttpStatusCode, StatusCode};
 use crypto::CryptoCtx;
@@ -1194,6 +1195,67 @@ fn the_process_ends_at_once_without_an_enabled_history_or_without_a_keyed_node()
         set_state(&coin, HistorySyncState::NotStarted);
         tron_history_loop(coin.clone(), ctx.clone()).await;
         assert_eq!(node.requests().len(), before);
+    });
+}
+
+/// A passive TRX platform is registered but not active (CRD ch.43 R43.1E.5 item 3, R43.1E.6): its history process
+/// still finds its platform and its tokens and goes on (item 3), and ends once the platform is removed.
+#[test]
+fn a_passive_platform_keeps_its_history_process_until_it_is_removed() {
+    let ctx = history_ctx();
+    let node = history_node(Arc::default());
+    block_on(async {
+        let platform = trx_coin(&ctx, &node.url(), true).await;
+        // The token is a dependent of the platform, as the activation registers it.
+        let contract = parse_trc20_contract(TOKEN).expect("a contract");
+        platform.add_erc20_token_info(TOKEN_TICKER.to_owned(), Erc20TokenInfo {
+            token_addr: contract,
+            decimals: 6,
+        });
+        let token = platform
+            .trc20_token_from_conf_or_contract(TOKEN_TICKER.to_owned(), contract, 1, None)
+            .await
+            .unwrap_or_else(|e| panic!("the token builds: {}", e.get_inner()));
+        let coins_ctx = CoinsContext::from_ctx(&ctx).expect("a coins context");
+        coins_ctx
+            .add_token("TRX", MmCoinEnum::EthCoin(token.clone()))
+            .await
+            .expect("the token registers");
+        assert!(is_registered_instance(&ctx, &platform).await);
+
+        assert!(coins_ctx.make_passive("TRX").await, "the platform has a dependent");
+        assert!(
+            lp_coinfind(&ctx, "TRX").await.unwrap().is_none(),
+            "a passive platform is not active"
+        );
+        assert!(
+            is_registered_instance(&ctx, &platform).await,
+            "the process of a passive platform goes on"
+        );
+        // The pass still finds the platform and its token: both states are written.
+        apply_report(&platform, &ctx, &PassReport {
+            trx: Ok(()),
+            tokens: Ok(0),
+        })
+        .await;
+        assert!(matches!(platform.history_sync_status(), HistorySyncState::Finished));
+        assert!(matches!(token.history_sync_status(), HistorySyncState::Finished));
+
+        // The token's own look-up of its platform finds the passive platform (CRD ch.43 D43.1F.3 (b)).
+        let serving = token.hd_serving_coin().await.expect("the platform is found");
+        assert!(Arc::ptr_eq(&serving.0, &platform.0));
+
+        disable_platform_with_dependents(&ctx, "TRX")
+            .await
+            .expect("the removal");
+        assert!(
+            token.hd_serving_coin().await.is_err(),
+            "a removed platform is not found"
+        );
+        assert!(
+            !is_registered_instance(&ctx, &platform).await,
+            "a removed platform ends its process"
+        );
     });
 }
 

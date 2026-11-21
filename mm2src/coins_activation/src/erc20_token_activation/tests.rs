@@ -1185,6 +1185,163 @@ fn disabling_a_platform_drops_its_dependent_set_and_its_tokens_stay_registered()
 }
 
 // ---------------------------------------------------------------------------
+// A passive platform (CRD ch.43 R43.1F.6 and R43.1F.7, T43.1F.7; ch.55 R55.1.12 with D43.1F.2 (b))
+// ---------------------------------------------------------------------------
+
+/// The platform with the dependent token `USDT-ERC20`, made passive as an unforced `disable_coin` does.
+fn ctx_with_passive_platform(node: &MockEvmNode) -> MmArc {
+    let ctx = ctx_with_platform(iguana_ctx(), node);
+    enable(&ctx, erc20("USDT-ERC20")).unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+    assert!(
+        block_on(coins_ctx.make_passive(PLATFORM)),
+        "the platform has a dependent"
+    );
+    ctx
+}
+
+#[test]
+fn a_token_activation_on_a_passive_platform_answers_platform_not_activated() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_passive_platform(&node);
+
+    assert_error(
+        &failure(&ctx, erc20("DAI-ERC20")),
+        "PlatformCoinIsNotActivated",
+        Some(json!(PLATFORM)),
+        StatusCode::BAD_REQUEST,
+    );
+    assert!(block_on(coins::lp_coinfind_registered(&ctx, "DAI-ERC20"))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        dependents(&ctx),
+        vec!["USDT-ERC20".to_owned()],
+        "no token joined the set"
+    );
+    // A token that is registered is refused as such, whatever the state of its platform (R43.1F.7).
+    assert_error(
+        &failure(&ctx, erc20("USDT-ERC20")),
+        "TokenIsAlreadyActivated",
+        Some(json!("USDT-ERC20")),
+        StatusCode::BAD_REQUEST,
+    );
+}
+
+#[test]
+fn the_token_task_on_a_passive_platform_is_refused_at_init() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_passive_platform(&node);
+
+    assert_error(
+        &init_error(&ctx, json!({ "ticker": "DAI-ERC20", "activation_params": {} })),
+        "PlatformCoinIsNotActivated",
+        Some(json!(PLATFORM)),
+        StatusCode::BAD_REQUEST,
+    );
+    assert!(block_on(coins::lp_coinfind_registered(&ctx, "DAI-ERC20"))
+        .unwrap()
+        .is_none());
+}
+
+/// R43.1F.6: a token of the legacy `enable` is accepted by a passive platform and does not join its set. The test
+/// registers the token the way that path does: without a set.
+#[test]
+fn a_legacy_token_on_a_passive_platform_does_not_join_the_dependent_set() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_passive_platform(&node);
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+
+    block_on(coins_ctx.add_coin(TestCoin::new("LEGACY-ERC20").into())).expect("the legacy token is registered");
+
+    assert!(block_on(coins::lp_coinfind(&ctx, "LEGACY-ERC20")).unwrap().is_some());
+    assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+}
+
+/// D43.1F.2 (b): the token task takes the lock of its platform with its own. A `disable_coin` that holds the platform's
+/// lock makes the task wait, and the task checks the platform again afterwards: a platform that was made passive
+/// meanwhile is not activated.
+#[test]
+fn a_token_task_that_waited_for_the_platform_lock_checks_the_platform_again() {
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_platform(iguana_ctx(), &node);
+    enable(&ctx, erc20("USDT-ERC20")).unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+    let guard = block_on(coins_ctx.lock_activation(&[PLATFORM])).unwrap();
+
+    let response = block_on(init_token::<EthCoin>(
+        ctx.clone(),
+        task_request(json!({ "ticker": "DAI-ERC20", "activation_params": {} })),
+    ))
+    .unwrap_or_else(|e| panic!("init failed: {}", e));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        block_on(coins::lp_coinfind_registered(&ctx, "DAI-ERC20"))
+            .unwrap()
+            .is_none(),
+        "the task waits for the platform's lock"
+    );
+    assert!(block_on(coins_ctx.make_passive(PLATFORM)));
+    drop(guard);
+
+    let status = poll_terminal(&ctx, response.task_id);
+    assert_eq!(status["status"], "Error");
+    assert_eq!(status["details"]["error_type"], "PlatformCoinIsNotActivated");
+    assert_eq!(status["details"]["error_data"], json!(PLATFORM));
+    assert!(block_on(coins::lp_coinfind_registered(&ctx, "DAI-ERC20"))
+        .unwrap()
+        .is_none());
+}
+
+/// D43.1F.2 (b): the one-shot token activation takes the platform's lock as well.
+#[test]
+fn enable_erc20_waits_for_the_lock_of_its_platform() {
+    use futures::FutureExt;
+
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_platform(iguana_ctx(), &node);
+    let coins_ctx = coins::CoinsContext::from_ctx(&ctx).unwrap();
+    let guard = block_on(coins_ctx.lock_activation(&[PLATFORM])).unwrap();
+
+    let mut activation = Box::pin(enable_evm_token(ctx.clone(), erc20("USDT-ERC20")));
+    assert!(
+        activation.as_mut().now_or_never().is_none(),
+        "the activation waits for the platform's lock"
+    );
+    drop(guard);
+
+    block_on(activation).unwrap_or_else(|e| panic!("enable_erc20 failed: {}", e));
+    assert_eq!(dependents(&ctx), vec!["USDT-ERC20".to_owned()]);
+}
+
+/// CRD ch.43 D43.1F.3 (b), R43.1F.10 item 3: an ERC-20 dependent of a passive platform keeps answering. Its balance and
+/// its swap gas-fee policy, which the orders, the fee estimates and the swaps read, come from the token's own instance:
+/// it holds the policy itself and looks its platform up by no ticker, so nothing in the token's path is refused while
+/// the platform is passive. (The scripted node has no gas-price method, so a trade fee cannot be read here.)
+#[test]
+fn an_erc20_dependent_of_a_passive_platform_keeps_its_balance_and_its_gas_fee_policy() {
+    use futures::compat::Future01CompatExt;
+
+    let node = node_with(Arc::default());
+    let ctx = ctx_with_passive_platform(&node);
+    let token = match block_on(coins::lp_coinfind(&ctx, "USDT-ERC20"))
+        .unwrap()
+        .expect("the token stays active")
+    {
+        coins::MmCoinEnum::EthCoin(token) => token,
+        other => panic!("not an EVM coin: {}", other.ticker()),
+    };
+
+    let balance = block_on(coins::MarketCoinOps::my_balance(&token).compat())
+        .unwrap_or_else(|e| panic!("the token's balance failed: {}", e));
+    assert_eq!(balance.spendable.to_string(), "2");
+    token.set_swap_gas_fee_policy(coins::eth::SwapGasFeePolicy::High);
+    assert_eq!(token.swap_gas_fee_policy(), coins::eth::SwapGasFeePolicy::High);
+    // The platform itself is not an active coin.
+    assert!(block_on(coins::lp_coinfind(&ctx, PLATFORM)).unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
 // CRD ch.63 T9, T10: TRON GasFree members on an EVM chain
 // ---------------------------------------------------------------------------
 

@@ -5,7 +5,7 @@
 //! a custom token), builds the token on top of an activated platform, and serves the single-token RPC and its
 //! task variant.
 
-use crate::context::{lock_activation, CoinsActivationContext};
+use crate::context::{lock_activation_under, CoinsActivationContext};
 use crate::init_token::{InitTokenActivationOps, InitTokenError, InitTokenInProgressStatus, InitTokenTaskHandle,
                         InitTokenTaskManagerShared};
 use crate::platform_coin_with_tokens::{CustomTokenError, InitTokensAsMmCoinsError, RegisterTokenInfo};
@@ -566,29 +566,43 @@ async fn evm_platform_coin(
     Ok(platform_coin)
 }
 
+/// Refuses a token ticker that is registered, or an NFT pseudo-ticker whose chain is active. An NFT pseudo-coin is not
+/// in the coin registry; it is active once its chain is.
+async fn ensure_evm_token_not_active(ctx: &MmArc, ticker: &str) -> MmResult<(), EnableTokenError> {
+    if let Ok(Some(_)) = lp_coinfind(ctx, ticker).await {
+        return MmError::err(EnableTokenError::TokenIsAlreadyActivated(ticker.to_owned()));
+    }
+    if let Ok(chain) = Chain::from_nft_ticker(ticker) {
+        let nft_ctx = NftCtx::from_mm_ctx(ctx).map_to_mm(EnableTokenError::Internal)?;
+        if nft_ctx.is_activated(chain) {
+            return MmError::err(EnableTokenError::TokenIsAlreadyActivated(ticker.to_owned()));
+        }
+    }
+    Ok(())
+}
+
 /// `enable_erc20` and its alias `enable_nft` (CRD R35.2.4): one handler that selects the token kind from the
 /// resolved protocol.
 pub async fn enable_evm_token(
     ctx: MmArc,
     req: EnableEvmTokenRequest,
 ) -> MmResult<EvmTokenActivationResult, EnableTokenError> {
-    // R55.1.12: the lock is held through registration; the checks below are the ones that follow the wait.
-    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
-        .await
-        .map_to_mm(EnableTokenError::Internal)?;
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
-        return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
-    }
-    // An NFT pseudo-coin is not in the coin registry; it is active once its chain is.
-    if let Ok(chain) = Chain::from_nft_ticker(&req.ticker) {
-        let nft_ctx = NftCtx::from_mm_ctx(&ctx).map_to_mm(EnableTokenError::Internal)?;
-        if nft_ctx.is_activated(chain) {
-            return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
-        }
-    }
-
+    // The lock needs the platform ticker, which the token's protocol names, so the protocol is resolved first. A
+    // registered ticker keeps the refusal it has always had, before any other check.
+    ensure_evm_token_not_active(&ctx, &req.ticker).await?;
     let protocol =
         resolve_evm_token_protocol(&ctx, &req.ticker, req.protocol.as_ref()).map_to_mm(EnableTokenError::from)?;
+    let platform_ticker = match &protocol {
+        EvmTokenProtocol::Erc20(protocol) => protocol.platform_coin_ticker.clone(),
+        EvmTokenProtocol::Nft { platform } => platform.clone(),
+    };
+
+    // R55.1.12 with D43.1F.2 (b): the lock of the token (exclusive) and the lock of its platform (shared) are held together through
+    // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
+    let _activation_guard = lock_activation_under(&ctx, &platform_ticker, &[&req.ticker])
+        .await
+        .map_to_mm(EnableTokenError::Internal)?;
+    ensure_evm_token_not_active(&ctx, &req.ticker).await?;
     match protocol {
         EvmTokenProtocol::Erc20(protocol) => enable_erc20_token(&ctx, req, protocol)
             .await

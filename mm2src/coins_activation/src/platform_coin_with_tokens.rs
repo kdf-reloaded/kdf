@@ -6,7 +6,7 @@ use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use coins::sql_tx_history_storage::SqliteTxHistoryStorage;
-use coins::{lp_coinfind, CoinProtocol, CoinsContext, MmCoinEnum};
+use coins::{lp_coinfind_registered, CoinProtocol, CoinsContext, MmCoinEnum};
 use common::mm_number::BigDecimal;
 use common::{log, HttpStatusCode, StatusCode};
 use derive_more::Display;
@@ -442,7 +442,9 @@ where
     // R55.1.12: the platform and every token the request registers are locked until the registration is done.
     // The check below is the one that follows the wait.
     let _activation_guard = lock_platform_activation::<Platform>(&ctx, &req.ticker, &req.request).await?;
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
+    // A passive platform is registered, so it answers `PlatformIsAlreadyActivated` until its re-activation is built
+    // (CRD ch.43 R43.1F.2 follows with the next change).
+    if let Ok(Some(_)) = lp_coinfind_registered(&ctx, &req.ticker).await {
         return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
             req.ticker,
         ));
@@ -568,7 +570,9 @@ where
     // R55.1.12: the platform and every token the request registers are locked until the registration is done.
     // The check below is the one that follows the wait.
     let _activation_guard = lock_platform_activation::<Platform>(&ctx, &req.ticker, &req.request).await?;
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
+    // A passive platform is registered, so it answers `PlatformIsAlreadyActivated` until its re-activation is built
+    // (CRD ch.43 R43.1F.2 follows with the next change).
+    if let Ok(Some(_)) = lp_coinfind_registered(&ctx, &req.ticker).await {
         return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
             req.ticker,
         ));

@@ -298,7 +298,8 @@ pub async fn process_history_loop(coin: SiaCoin, ctx: MmArc) {
                     break;
                 },
             };
-            let registered = coins_ctx.coins.lock().await.contains_key(&ticker);
+            // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
+            let registered = coins_ctx.coins.lock().await.registered().contains(&ticker);
             if registered {
                 missing_coin_attempts = 0;
             } else {
