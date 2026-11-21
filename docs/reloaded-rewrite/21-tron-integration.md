@@ -729,6 +729,12 @@ carries a `fee` descriptor of any form is refused with
 gives for a fee descriptor of a type the coin does not take. The
 fee is the R-W3 estimate. A request without `fee` is unchanged.
 
+*2026-11-20 (clean-side note): the shared fee descriptor now has a
+`Tron` form, so a request whose `fee` is `{"type":"Tron"}` (for
+example a TRON result's `fee_details` sent back) parses and is
+refused with `InvalidFeePolicy` like any other form; before, it
+failed request parsing.*
+
 **T-WP (tests).** Unit tests against a loopback stub node
 (`coins/eth/tron/wallet_path_tests.rs`, `tron/balance.rs`,
 `tron/broadcast.rs`, `tron/address.rs`) cover each rule: the

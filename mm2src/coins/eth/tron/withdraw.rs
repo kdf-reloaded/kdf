@@ -53,9 +53,10 @@ const MAX_AMOUNT_ROUNDS: usize = 3;
 ///
 /// # Errors
 ///
-/// Before a node is asked: [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor (the TRON fee is estimated
-/// from the account's bandwidth and energy, CRD ch.21 R-W3, and no `WithdrawFee` variant describes it) and
-/// [`WithdrawError::UnsupportedError`] for a `memo` (CRD ch.21 R21.10B.7, ch.49 R49.27a).
+/// Before a node is asked: [`WithdrawError::InvalidFeePolicy`] for any `fee` descriptor (the TRON fee is always
+/// estimated from the account's bandwidth and energy, CRD ch.21 R-W3; the `WithdrawFee::Tron` form exists only so
+/// that it can be refused here, CRD ch.21 R-WP6) and [`WithdrawError::UnsupportedError`] for a `memo` (CRD ch.21
+/// R21.10B.7, ch.49 R49.27a).
 ///
 /// From the amounts (CRD ch.21 R21.10B.7): [`WithdrawError::ZeroBalanceToWithdrawMax`],
 /// [`WithdrawError::AmountTooLow`], [`WithdrawError::NotSufficientBalance`] and, for a TRC20 transfer whose

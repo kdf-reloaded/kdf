@@ -524,6 +524,14 @@ pub enum WithdrawFee {
         gas_limit: u64,
         gas_price_option: CosmosGasPriceOption,
     },
+    /// The form a TRON result's `fee_details` carries in `type` (CRD ch.21 R-F2). It exists only so that a request
+    /// with such a `fee` parses and a TRON withdraw can refuse it with `InvalidFeePolicy` like any other
+    /// descriptor (CRD ch.21 R-WP6): the TRON fee is always estimated (CRD ch.21 R-W3), so the form has no
+    /// members and any other member of the object is ignored. No family takes it: the other families that take
+    /// a fee descriptor refuse it as a fee type they do not take, ZCoin refuses every custom fee (CRD ch.49
+    /// R49.27a), a Tendermint request ignores it as it ignores any other foreign descriptor (CRD ch.49 R49.30,
+    /// D49.1), and Solana does not read the descriptor.
+    Tron,
 }
 /// The level named by a [`WithdrawFee::CosmosGasPriority`] descriptor (CRD ch.49 R49.29): the spellings are
 /// exactly these four, case-sensitive. `Low`, `Average` and `High` select position 0, 1 and 2 of the platform

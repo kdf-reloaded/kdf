@@ -773,6 +773,13 @@ the previous version used. The safe way:
   reports the shared set. A shared record of spent coins is still planned. Detail: PR #427; CRD ch.38
   D38.6.4Q.1 and its status note.
 
+#### TRON coins
+
+- **A TRON withdrawal whose `fee` is `{"type":"Tron"}` is now refused with `InvalidFeePolicy`.** Before, such a
+  request failed parsing, for example when the `fee_details` of an earlier TRON result was sent back as `fee`.
+  TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
+  form that is not its own. Detail: CRD ch.21 R-WP6.
+
 ### Tests
 
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
