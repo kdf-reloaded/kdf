@@ -1,11 +1,14 @@
-use super::{addr_format_from_protocol_info, is_my_order, mm2_internal_pubkey_hex, BaseRelProtocolInfo,
-            OrderConfirmationsSettings, OrderbookP2PItemWithProof, OrdermatchContext, OrdermatchRequest};
+use super::capability_presentation::{log_left_out, CapabilityFilter};
+use super::{addr_format_from_protocol_info, is_my_order, mm2_internal_pubkey_hex, orderbook_is_filled,
+            subscribe_to_orderbook_topic, BaseRelProtocolInfo, OrderConfirmationsSettings, Orderbook, OrderbookItem,
+            OrderbookP2PItem, OrderbookP2PItemWithProof, OrdermatchContext, OrdermatchRequest};
 use crate::mm2::lp_network::{request_any_relay, P2PRequest};
 use crate::mm2::lp_ordermatch::{orderbook_address, RpcOrderbookEntryV2};
 use coins::{coin_conf, is_wallet_only_conf, is_wallet_only_ticker};
 use common::mm_number::{BigRational, MmNumber};
 use common::{log, HttpStatusCode};
 use derive_more::Display;
+use futures::StreamExt;
 use http::{Response, StatusCode};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -58,6 +61,84 @@ struct BestOrdersP2PRes {
     conf_infos: HashMap<Uuid, OrderConfirmationsSettings>,
 }
 
+/// How a best-orders request selects the orders of a pair.
+enum BestOrdersBy {
+    /// The best-priced orders until their volume covers the requested one.
+    Volume(BigRational),
+    /// The given number of best-priced orders.
+    Number(usize),
+}
+
+/// The best orders the own book holds for `pair`, best price first: the selection this node applies when it
+/// answers a best-orders request as a relay, over the orders `accept` admits. `None` when the book holds no
+/// orders for the pair.
+///
+/// The two P2P handlers pass a predicate that admits every order, so their answers do not depend on it;
+/// the RPC refill of CRD ch.59 R59.4C.5 admits presentable orders only.
+fn select_best_orders<'a>(
+    orderbook: &'a Orderbook,
+    pair: &(String, String),
+    action: BestOrdersAction,
+    by: &BestOrdersBy,
+    accept: impl Fn(&OrderbookItem) -> bool,
+) -> Option<Vec<&'a OrderbookItem>> {
+    let orders = match orderbook.ordered.get(pair) {
+        Some(orders) => orders,
+        None => {
+            log::debug!("No orders for pair {:?}", pair);
+            return None;
+        },
+    };
+    let mut best_orders = vec![];
+    let mut collected_volume = BigRational::zero();
+    // By number: the positions of the price order used so far.
+    let mut positions_used = 0;
+    for ordered in orders {
+        if matches!(by, BestOrdersBy::Number(number) if positions_used >= *number) {
+            break;
+        }
+        let o = match orderbook.order_set.get(&ordered.uuid) {
+            Some(o) => o,
+            None => {
+                log::debug!("No order with uuid {:?}", ordered.uuid);
+                positions_used += 1;
+                continue;
+            },
+        };
+        if !accept(o) {
+            continue;
+        }
+        match by {
+            BestOrdersBy::Number(_) => {
+                positions_used += 1;
+                best_orders.push(o);
+            },
+            BestOrdersBy::Volume(required_volume) => {
+                let min_volume = match action {
+                    BestOrdersAction::Buy => o.min_volume.clone(),
+                    BestOrdersAction::Sell => &o.min_volume * &o.price,
+                };
+                if &min_volume > required_volume {
+                    log::debug!("Order {} min_vol {:?} > {:?}", o.uuid, min_volume, required_volume);
+                    continue;
+                }
+
+                let max_volume = match action {
+                    BestOrdersAction::Buy => o.max_volume.clone(),
+                    BestOrdersAction::Sell => &o.max_volume * &o.price,
+                };
+                best_orders.push(o);
+
+                collected_volume += max_volume;
+                if &collected_volume >= required_volume {
+                    break;
+                }
+            },
+        }
+    }
+    Some(best_orders)
+}
+
 pub fn process_best_orders_p2p_request(
     ctx: MmArc,
     coin: String,
@@ -83,49 +164,20 @@ pub fn process_best_orders_p2p_request(
     let mut protocol_infos = HashMap::new();
     let mut conf_infos = HashMap::new();
 
+    let by = BestOrdersBy::Volume(required_volume);
     for pair in pairs {
-        let orders = match orderbook.ordered.get(&pair) {
-            Some(orders) => orders,
-            None => {
-                log::debug!("No orders for pair {:?}", pair);
-                continue;
-            },
+        // CRD ch.59 R59.4C.4: a relay serves every order, presentable to this node or not.
+        let Some(selected) = select_best_orders(&orderbook, &pair, action, &by, |_| true) else {
+            continue;
         };
         let mut best_orders = vec![];
-        let mut collected_volume = BigRational::zero();
-        for ordered in orders {
-            match orderbook.order_set.get(&ordered.uuid) {
-                Some(o) => {
-                    let min_volume = match action {
-                        BestOrdersAction::Buy => o.min_volume.clone(),
-                        BestOrdersAction::Sell => &o.min_volume * &o.price,
-                    };
-                    if min_volume > required_volume {
-                        log::debug!("Order {} min_vol {:?} > {:?}", o.uuid, min_volume, required_volume);
-                        continue;
-                    }
-
-                    let max_volume = match action {
-                        BestOrdersAction::Buy => o.max_volume.clone(),
-                        BestOrdersAction::Sell => &o.max_volume * &o.price,
-                    };
-                    let order_w_proof = orderbook.orderbook_item_with_proof(o.clone());
-                    protocol_infos.insert(order_w_proof.order.uuid, order_w_proof.order.base_rel_proto_info());
-                    if let Some(info) = order_w_proof.order.conf_settings {
-                        conf_infos.insert(order_w_proof.order.uuid, info);
-                    }
-                    best_orders.push(order_w_proof.into());
-
-                    collected_volume += max_volume;
-                    if collected_volume >= required_volume {
-                        break;
-                    }
-                },
-                None => {
-                    log::debug!("No order with uuid {:?}", ordered.uuid);
-                    continue;
-                },
-            };
+        for o in selected {
+            let order_w_proof = orderbook.orderbook_item_with_proof(o.clone());
+            protocol_infos.insert(order_w_proof.order.uuid, order_w_proof.order.base_rel_proto_info());
+            if let Some(info) = order_w_proof.order.conf_settings {
+                conf_infos.insert(order_w_proof.order.uuid, info);
+            }
+            best_orders.push(order_w_proof.into());
         }
         match action {
             BestOrdersAction::Buy => result.insert(pair.1, best_orders),
@@ -167,30 +219,20 @@ pub fn process_best_orders_p2p_request_by_number(
     let mut protocol_infos = HashMap::new();
     let mut conf_infos = HashMap::new();
 
+    let by = BestOrdersBy::Number(number);
     for pair in pairs {
-        let orders = match orderbook.ordered.get(&pair) {
-            Some(orders) => orders,
-            None => {
-                log::debug!("No orders for pair {:?}", pair);
-                continue;
-            },
+        // CRD ch.59 R59.4C.4: a relay serves every order, presentable to this node or not.
+        let Some(selected) = select_best_orders(&orderbook, &pair, action, &by, |_| true) else {
+            continue;
         };
         let mut best_orders = vec![];
-        for ordered in orders.iter().take(number) {
-            match orderbook.order_set.get(&ordered.uuid) {
-                Some(o) => {
-                    let order_w_proof = orderbook.orderbook_item_with_proof(o.clone());
-                    protocol_infos.insert(order_w_proof.order.uuid, order_w_proof.order.base_rel_proto_info());
-                    if let Some(info) = order_w_proof.order.conf_settings {
-                        conf_infos.insert(order_w_proof.order.uuid, info);
-                    }
-                    best_orders.push(order_w_proof.into());
-                },
-                None => {
-                    log::debug!("No order with uuid {:?}", ordered.uuid);
-                    continue;
-                },
-            };
+        for o in selected {
+            let order_w_proof = orderbook.orderbook_item_with_proof(o.clone());
+            protocol_infos.insert(order_w_proof.order.uuid, order_w_proof.order.base_rel_proto_info());
+            if let Some(info) = order_w_proof.order.conf_settings {
+                conf_infos.insert(order_w_proof.order.uuid, info);
+            }
+            best_orders.push(order_w_proof.into());
         }
         match action {
             BestOrdersAction::Buy => result.insert(pair.1, best_orders),
@@ -206,6 +248,129 @@ pub fn process_best_orders_p2p_request_by_number(
     Ok(Some(encoded))
 }
 
+/// The pairs of one best-orders call whose order books are fetched at the same time (CRD ch.59 R59.4C.5).
+const BEST_ORDERS_REFILL_PARALLELISM: usize = 4;
+
+/// The orders of one coin in a best-orders answer, with the coin's configuration entry.
+struct BestOrdersOfCoin {
+    coin: String,
+    coin_conf: Json,
+    orders: Vec<OrderbookItem>,
+}
+
+/// What a best-orders RPC call lists of a relay's answer (CRD ch.59 R59.4C.3, R59.4C.5).
+///
+/// A coin that is not in the configuration, or is wallet-only there, is dropped as before. Of every other
+/// coin the presentable orders are kept. When the relay's answer for a pair loses at least one order, the
+/// pair's full order book is fetched once, with the request `orderbook` makes, and the pair's part is built
+/// from the node's own book: the relay's selection over presentable orders only. If the fetch fails, the
+/// pair's part is the relay's answer without the orders that are not presentable, and one warning is logged.
+async fn listed_best_orders(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    requested_coin: &str,
+    action: BestOrdersAction,
+    by: &BestOrdersBy,
+    p2p_response: BestOrdersP2PRes,
+    is_mine: &(impl Fn(&str) -> bool + Sync),
+) -> Vec<BestOrdersOfCoin> {
+    let BestOrdersP2PRes {
+        orders,
+        protocol_infos,
+        conf_infos,
+    } = p2p_response;
+    let mut answered = Vec::with_capacity(orders.len());
+    for (coin, orders_w_proofs) in orders {
+        let coin_conf = coin_conf(ctx, &coin);
+        if coin_conf.is_null() {
+            log::warn!("Coin {} is not found in config", coin);
+            continue;
+        }
+        if is_wallet_only_conf(&coin_conf) {
+            log::warn!(
+                "Coin {} was removed from best orders because it's defined as wallet only in config",
+                coin
+            );
+            continue;
+        }
+        let orders = orders_w_proofs
+            .into_iter()
+            .map(|order_w_proof| {
+                let order = order_w_proof.order;
+                let proto_info = protocol_infos.get(&order.uuid).cloned().unwrap_or_default();
+                let conf_info = conf_infos.get(&order.uuid).copied();
+                OrderbookItem::from_p2p_and_info(order, proto_info, conf_info)
+            })
+            .collect();
+        answered.push(BestOrdersOfCoin {
+            coin,
+            coin_conf,
+            orders,
+        });
+    }
+
+    let requested_ticker = ordermatch_ctx.orderbook_ticker_bypass(requested_coin);
+    let requested_ticker = &requested_ticker;
+    futures::stream::iter(answered)
+        .map(|of_coin| async move {
+            let BestOrdersOfCoin {
+                coin,
+                coin_conf,
+                orders,
+            } = of_coin;
+            let capability_filter = CapabilityFilter::for_pair(ctx, requested_coin, &coin).await;
+            let answered_number = orders.len();
+            let is_presentable =
+                |order: &OrderbookItem| capability_filter.is_presentable(order, is_mine(&order.pubkey));
+            let listed: Vec<_> = orders.into_iter().filter(|order| is_presentable(order)).collect();
+            let left_out = answered_number - listed.len();
+            if left_out == 0 {
+                return BestOrdersOfCoin {
+                    coin,
+                    coin_conf,
+                    orders: listed,
+                };
+            }
+
+            let pair = match action {
+                BestOrdersAction::Buy => (requested_ticker.clone(), coin.clone()),
+                BestOrdersAction::Sell => (coin.clone(), requested_ticker.clone()),
+            };
+            log_left_out("best_orders", &pair.0, &pair.1, left_out);
+            let fetched = match subscribe_to_orderbook_topic(ctx, &pair.0, &pair.1, true).await {
+                Ok(()) if orderbook_is_filled(ctx, &pair.0, &pair.1) => Ok(()),
+                Ok(()) => Err("no relay answered the request".to_owned()),
+                Err(e) => Err(e),
+            };
+            let orders = match fetched {
+                Ok(()) => {
+                    let orderbook = ordermatch_ctx.orderbook.lock();
+                    select_best_orders(&orderbook, &pair, action, by, is_presentable)
+                        .map(|selected| selected.into_iter().cloned().collect())
+                        .unwrap_or_default()
+                },
+                Err(e) => {
+                    log::warn!(
+                        "best_orders: the order book of {}/{} could not be fetched, the relay's answer is listed \
+                         without the orders left out: {}",
+                        pair.0,
+                        pair.1,
+                        e
+                    );
+                    listed
+                },
+            };
+            BestOrdersOfCoin {
+                coin,
+                coin_conf,
+                orders,
+            }
+        })
+        .buffer_unordered(BEST_ORDERS_REFILL_PARALLELISM)
+        .collect()
+        .await
+}
+
 pub async fn best_orders_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let req: BestOrdersRequest = try_s!(json::from_value(req));
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
@@ -217,53 +382,55 @@ pub async fn best_orders_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>,
         let orderbook = ordermatch_ctx.orderbook.lock();
         orderbook.my_p2p_pubkeys.clone()
     };
+    let is_mine = |pubkey: &str| is_my_order(pubkey, &my_pubsecp, &my_p2p_pubkeys);
+    let volume: BigRational = req.volume.into();
     let p2p_request = OrdermatchRequest::BestOrders {
         coin: ordermatch_ctx.orderbook_ticker_bypass(&req.coin),
         action: req.action,
-        volume: req.volume.into(),
+        volume: volume.clone(),
     };
+    let by = BestOrdersBy::Volume(volume);
 
     let best_orders_res =
         try_s!(request_any_relay::<BestOrdersP2PRes>(ctx.clone(), P2PRequest::Ordermatch(p2p_request)).await);
     let mut response = HashMap::new();
     if let Some((p2p_response, peer_id)) = best_orders_res {
         log::debug!("Got best orders {:?} from peer {}", p2p_response, peer_id);
-        for (coin, orders_w_proofs) in p2p_response.orders {
-            let coin_conf = coin_conf(&ctx, &coin);
-            if coin_conf.is_null() {
-                log::warn!("Coin {} is not found in config", coin);
-                continue;
-            }
-            if is_wallet_only_conf(&coin_conf) {
-                log::warn!(
-                    "Coin {} was removed from best orders because it's defined as wallet only in config",
-                    coin
-                );
-                continue;
-            }
-            for order_w_proof in orders_w_proofs {
-                let order = order_w_proof.order;
-                let empty_proto_info = BaseRelProtocolInfo::default();
-                let proto_infos = p2p_response
-                    .protocol_infos
-                    .get(&order.uuid)
-                    .unwrap_or(&empty_proto_info);
+        // CRD ch.59 R59.4C.3, R59.4C.5: only presentable orders are listed.
+        let listed = listed_best_orders(
+            &ctx,
+            &ordermatch_ctx,
+            &req.coin,
+            req.action,
+            &by,
+            p2p_response,
+            &is_mine,
+        )
+        .await;
+        for BestOrdersOfCoin {
+            coin,
+            coin_conf,
+            orders,
+        } in listed
+        {
+            for item in orders {
                 let addr_format = match req.action {
-                    BestOrdersAction::Buy => addr_format_from_protocol_info(&proto_infos.rel),
-                    BestOrdersAction::Sell => addr_format_from_protocol_info(&proto_infos.base),
+                    BestOrdersAction::Buy => addr_format_from_protocol_info(&item.rel_protocol_info),
+                    BestOrdersAction::Sell => addr_format_from_protocol_info(&item.base_protocol_info),
                 };
-                let address = match orderbook_address(&ctx, &coin, &coin_conf, &order.pubkey, addr_format) {
+                let address = match orderbook_address(&ctx, &coin, &coin_conf, &item.pubkey, addr_format) {
                     Ok(a) => a.into_legacy_string(),
                     Err(e) => {
-                        log::error!("Error {} getting coin {} address from pubkey {}", e, coin, order.pubkey);
+                        log::error!("Error {} getting coin {} address from pubkey {}", e, coin, item.pubkey);
                         continue;
                     },
                 };
-                let conf_settings = p2p_response.conf_infos.get(&order.uuid);
-                let is_mine = is_my_order(&order.pubkey, &my_pubsecp, &my_p2p_pubkeys);
+                let conf_settings = item.conf_settings;
+                let order = OrderbookP2PItem::from(item);
+                let is_mine = is_mine(&order.pubkey);
                 let entry = match req.action {
-                    BestOrdersAction::Buy => order.as_rpc_best_orders_buy(address, conf_settings, is_mine),
-                    BestOrdersAction::Sell => order.as_rpc_best_orders_sell(address, conf_settings, is_mine),
+                    BestOrdersAction::Buy => order.as_rpc_best_orders_buy(address, conf_settings.as_ref(), is_mine),
+                    BestOrdersAction::Sell => order.as_rpc_best_orders_sell(address, conf_settings.as_ref(), is_mine),
                 };
                 response.entry(coin.clone()).or_insert_with(Vec::new).push(entry);
             }
@@ -312,17 +479,23 @@ pub async fn best_orders_rpc_v2(
         orderbook.my_p2p_pubkeys.clone()
     };
 
+    let is_mine = |pubkey: &str| is_my_order(pubkey, &my_pubsecp, &my_p2p_pubkeys);
+
     // Build the appropriate P2P request based on query type (volume vs count).
-    let p2p_request = match req.request_by {
-        RequestBestOrdersBy::Volume(ref mm_number) => OrdermatchRequest::BestOrders {
+    let by = match req.request_by {
+        RequestBestOrdersBy::Volume(ref mm_number) => BestOrdersBy::Volume(mm_number.to_ratio()),
+        RequestBestOrdersBy::Number(size) => BestOrdersBy::Number(size),
+    };
+    let p2p_request = match &by {
+        BestOrdersBy::Volume(volume) => OrdermatchRequest::BestOrders {
             coin: ordermatch_ctx.orderbook_ticker_bypass(&req.coin),
             action: req.action,
-            volume: mm_number.to_ratio(),
+            volume: volume.clone(),
         },
-        RequestBestOrdersBy::Number(size) => OrdermatchRequest::BestOrdersByNumber {
+        BestOrdersBy::Number(size) => OrdermatchRequest::BestOrdersByNumber {
             coin: ordermatch_ctx.orderbook_ticker_bypass(&req.coin),
             action: req.action,
-            number: size,
+            number: *size,
         },
     };
 
@@ -332,45 +505,46 @@ pub async fn best_orders_rpc_v2(
     let mut orders = HashMap::new();
     if let Some((p2p_response, peer_id)) = best_orders_res {
         log::debug!("Got best orders {:?} from peer {}", p2p_response, peer_id);
-        for (coin, orders_w_proofs) in p2p_response.orders {
-            let coin_conf = coin_conf(&ctx, &coin);
-            if coin_conf.is_null() {
-                log::warn!("Coin {} is not found in config", coin);
-                continue;
-            }
-            if is_wallet_only_conf(&coin_conf) {
-                log::warn!(
-                    "Coin {} was removed from best orders because it's defined as wallet only in config",
-                    coin
-                );
-                continue;
-            }
-            for order_w_proof in orders_w_proofs {
-                let order = order_w_proof.order;
-                let is_mine = is_my_order(&order.pubkey, &my_pubsecp, &my_p2p_pubkeys);
+        // CRD ch.59 R59.4C.3, R59.4C.5: only presentable orders are listed.
+        let listed = listed_best_orders(
+            &ctx,
+            &ordermatch_ctx,
+            &req.coin,
+            req.action,
+            &by,
+            p2p_response,
+            &is_mine,
+        )
+        .await;
+        for BestOrdersOfCoin {
+            coin,
+            coin_conf,
+            orders: items,
+        } in listed
+        {
+            for item in items {
+                let is_mine = is_mine(&item.pubkey);
                 if req.exclude_mine && is_mine {
                     continue;
                 }
-                let empty_proto_info = BaseRelProtocolInfo::default();
-                let proto_infos = p2p_response
-                    .protocol_infos
-                    .get(&order.uuid)
-                    .unwrap_or(&empty_proto_info);
                 let addr_format = match req.action {
-                    BestOrdersAction::Buy => addr_format_from_protocol_info(&proto_infos.rel),
-                    BestOrdersAction::Sell => addr_format_from_protocol_info(&proto_infos.base),
+                    BestOrdersAction::Buy => addr_format_from_protocol_info(&item.rel_protocol_info),
+                    BestOrdersAction::Sell => addr_format_from_protocol_info(&item.base_protocol_info),
                 };
-                let address = match orderbook_address(&ctx, &coin, &coin_conf, &order.pubkey, addr_format) {
+                let address = match orderbook_address(&ctx, &coin, &coin_conf, &item.pubkey, addr_format) {
                     Ok(a) => a,
                     Err(e) => {
-                        log::error!("Error {} getting coin {} address from pubkey {}", e, coin, order.pubkey);
+                        log::error!("Error {} getting coin {} address from pubkey {}", e, coin, item.pubkey);
                         continue;
                     },
                 };
-                let conf_settings = p2p_response.conf_infos.get(&order.uuid);
+                let conf_settings = item.conf_settings;
+                let order = OrderbookP2PItem::from(item);
                 let entry = match req.action {
-                    BestOrdersAction::Buy => order.as_rpc_best_orders_buy_v2(address, conf_settings, is_mine),
-                    BestOrdersAction::Sell => order.as_rpc_best_orders_sell_v2(address, conf_settings, is_mine),
+                    BestOrdersAction::Buy => order.as_rpc_best_orders_buy_v2(address, conf_settings.as_ref(), is_mine),
+                    BestOrdersAction::Sell => {
+                        order.as_rpc_best_orders_sell_v2(address, conf_settings.as_ref(), is_mine)
+                    },
                 };
                 orders.entry(coin.clone()).or_insert_with(Vec::new).push(entry);
             }

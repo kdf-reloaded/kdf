@@ -223,6 +223,41 @@ impl From<Bip32Error> for UtxoConfError {
     fn from(e: Bip32Error) -> Self { UtxoConfError::ErrorDeserializingDerivationPath(e.to_string()) }
 }
 
+/// Reads the sighash suffix of the coin entry `conf` (CRD ch.61 R61.3.1). An absent key (or JSON `null`) is
+/// no suffix, zero. A present value must be a hexadecimal string with a `0x` prefix that fits 32 bits: a
+/// malformed value fails under every [`UnrecognisedEnumPolicy`], because a wrong suffix signs transactions the
+/// network rejects.
+pub(crate) fn sighash_suffix_from_conf(conf: &Json) -> UtxoConfResult<u32> {
+    let value = &conf[SIGHASH_SUFFIX_KEY];
+    if value.is_null() {
+        return Ok(0);
+    }
+    let invalid = || UtxoConfError::InvalidSighashSuffix {
+        found: value.to_string(),
+    };
+    let text = value.as_str().or_mm_err(invalid)?;
+    let digits = text.strip_prefix("0x").or_mm_err(invalid)?;
+    // `from_str_radix` also accepts a leading sign; only plain hexadecimal digits are valid here.
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return MmError::err(invalid());
+    }
+    u32::from_str_radix(digits, 16).map_to_mm(|_| invalid())
+}
+
+/// Reads the counterparty-requirement switch of the coin entry `conf` (CRD ch.61 R61.5A.4): a boolean, `true`
+/// when absent (or JSON `null`). Any other value fails under every [`UnrecognisedEnumPolicy`].
+pub(crate) fn require_suffix_counterparty_from_conf(conf: &Json) -> UtxoConfResult<bool> {
+    let value = &conf[REQUIRE_SUFFIX_COUNTERPARTY_KEY];
+    if value.is_null() {
+        return Ok(true);
+    }
+    value
+        .as_bool()
+        .or_mm_err(|| UtxoConfError::InvalidRequireSuffixCounterparty {
+            found: value.to_string(),
+        })
+}
+
 pub struct UtxoConfBuilder<'a> {
     conf: &'a Json,
     ticker: &'a str,
@@ -540,22 +575,7 @@ impl<'a> UtxoConfBuilder<'a> {
     /// Reads the sighash suffix (CRD ch.61 R61.3.1). An absent key (or JSON `null`) is no suffix, zero. A
     /// present value must be a hexadecimal string with a `0x` prefix that fits 32 bits: a malformed value fails
     /// under every [`UnrecognisedEnumPolicy`], because a wrong suffix signs transactions the network rejects.
-    fn sighash_suffix(&self) -> UtxoConfResult<u32> {
-        let value = &self.conf[SIGHASH_SUFFIX_KEY];
-        if value.is_null() {
-            return Ok(0);
-        }
-        let invalid = || UtxoConfError::InvalidSighashSuffix {
-            found: value.to_string(),
-        };
-        let text = value.as_str().or_mm_err(invalid)?;
-        let digits = text.strip_prefix("0x").or_mm_err(invalid)?;
-        // `from_str_radix` also accepts a leading sign; only plain hexadecimal digits are valid here.
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return MmError::err(invalid());
-        }
-        u32::from_str_radix(digits, 16).map_to_mm(|_| invalid())
-    }
+    fn sighash_suffix(&self) -> UtxoConfResult<u32> { sighash_suffix_from_conf(self.conf) }
 
     /// Reads the optional sighash-suffix activation height (CRD ch.61 R61.3.2): a non-negative integer. The
     /// first implementation validates it and carries it on the configuration, but no signing site gates on it
@@ -575,17 +595,7 @@ impl<'a> UtxoConfBuilder<'a> {
 
     /// Reads the counterparty-requirement switch (CRD ch.61 R61.5A.4): a boolean, `true` when absent (or JSON
     /// `null`). Any other value fails under every [`UnrecognisedEnumPolicy`].
-    fn require_suffix_counterparty(&self) -> UtxoConfResult<bool> {
-        let value = &self.conf[REQUIRE_SUFFIX_COUNTERPARTY_KEY];
-        if value.is_null() {
-            return Ok(true);
-        }
-        value
-            .as_bool()
-            .or_mm_err(|| UtxoConfError::InvalidRequireSuffixCounterparty {
-                found: value.to_string(),
-            })
-    }
+    fn require_suffix_counterparty(&self) -> UtxoConfResult<bool> { require_suffix_counterparty_from_conf(self.conf) }
 
     fn required_confirmations(&self) -> u64 {
         // param from request should override the config
