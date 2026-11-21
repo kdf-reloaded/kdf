@@ -877,6 +877,9 @@ fn an_inline_token_is_enabled_beside_the_platform_and_is_wallet_only() {
         Err(_) => panic!("the tokens must be enabled"),
     };
     assert_eq!(coins.len(), 2);
+    // Building the tokens writes no token record; the activation does at registration (CRD ch.43 D43.1F.2 (b)).
+    assert!(platform.activated_token_tickers().is_empty());
+    let built = coins.clone();
     let tokens: Vec<TendermintToken> = coins
         .into_iter()
         .map(|coin| match coin {
@@ -900,8 +903,13 @@ fn an_inline_token_is_enabled_beside_the_platform_and_is_wallet_only() {
     assert!(!configured.custom_token);
     assert_eq!(configured.denom.to_string(), "unyan");
 
+    for coin in &built {
+        platform.record_token(coin);
+    }
     let recorded = platform.activated_token_tickers();
     assert!(recorded.contains("CUSTOM-TOKEN") && recorded.contains("IRIS-NYAN"));
+    platform.forget_token_record("CUSTOM-TOKEN");
+    assert!(!platform.activated_token_tickers().contains("CUSTOM-TOKEN"));
 }
 
 #[test]
@@ -1428,4 +1436,96 @@ fn disabling_a_tendermint_platform_drops_its_dependent_set_and_its_token_stays_r
         block_on(lp_coinfind(&ctx, "IRIS-NYAN")).unwrap().is_some(),
         "the token stays registered, as before"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Re-activation of a passive platform (CRD ch.43 R43.1F.2, R43.1F.3, R43.1F.4)
+// ---------------------------------------------------------------------------
+
+/// A node that answers the health check, the ABCI info the answer asks for and every balance query.
+fn reactivation_node() -> crate::evm_test_support::MockEvmNode {
+    let value = base64_standard(&balance_response("unyan", 5_000_000));
+    spawn_node(move |method, _params| match method {
+        "health" => Reply::Result(json!({})),
+        "abci_info" => Reply::Result(json!({ "response": {
+            "data": "test", "version": "0", "app_version": "1", "last_block_height": "42",
+            "last_block_app_hash": ""
+        } })),
+        "abci_query" => Reply::Result(json!({ "response": { "code": 0, "value": value } })),
+        _ => Reply::RpcError,
+    })
+}
+
+/// The platform with the dependent token `IRIS-NYAN`, made passive as an unforced `disable_coin` does.
+fn passive_platform_with_token(ctx: &MmArc, node_url: &str) -> TendermintCoin {
+    let platform = register_platform_on(ctx, node_url);
+    if let Err(e) = block_on(enable_tendermint_token(ctx.clone(), token_request("IRIS-NYAN"))) {
+        panic!("the configured token must activate: {:?}", token_wire(&e).0);
+    }
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    assert!(
+        block_on(coins_ctx.make_passive(PLATFORM)),
+        "the platform has a dependent"
+    );
+    platform
+}
+
+#[test]
+fn a_passive_tendermint_platform_is_re_activated_and_keeps_its_token() {
+    let ctx = ctx();
+    let node = reactivation_node();
+    let platform = passive_platform_with_token(&ctx, &node.url);
+    assert!(block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_none());
+
+    // The request's nodes are never contacted (the default node is a port nothing listens on), `get_balances`
+    // shapes the answer, and the dependent named again is kept.
+    let result = block_on(enable_platform_coin_with_tokens::<TendermintCoin>(
+        ctx.clone(),
+        request(json!({ "get_balances": false, "tokens_params": [{ "ticker": "IRIS-NYAN" }] })),
+    ))
+    .unwrap_or_else(|e| panic!("the re-activation failed: {:?}", wire(&e)));
+    let result = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(result["current_block"], 42);
+    assert_eq!(result["tokens_tickers"], json!(["IRIS-NYAN"]));
+    assert!(result.get("balance").is_none());
+    assert!(
+        block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_some(),
+        "the platform is active"
+    );
+    assert_eq!(dependents(&ctx), vec!["IRIS-NYAN".to_owned()]);
+    assert!(platform.activated_token_tickers().contains("IRIS-NYAN"));
+}
+
+#[test]
+fn a_refused_tendermint_re_activation_leaves_the_platform_passive_and_the_record_unchanged() {
+    let ctx = ctx();
+    let node = reactivation_node();
+    let platform = passive_platform_with_token(&ctx, &node.url);
+
+    // A token whose configuration names another platform: refused before any token is built.
+    let (body, status) = failure(
+        &ctx,
+        request(json!({ "tokens_params": [{ "ticker": "IRIS-NYAN" }, { "ticker": "OSMO-TOKEN" }] })),
+    );
+    assert_eq!(body["error_type"], "PlatformCoinMismatch", "{:?}", body);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // A registered token that is no dependent of the platform.
+    block_on(
+        CoinsContext::from_ctx(&ctx)
+            .unwrap()
+            .add_coin(coins::TestCoin::new("OSMO-TOKEN").into()),
+    )
+    .unwrap();
+    let (body, status) = failure(&ctx, request(json!({ "tokens_params": [{ "ticker": "OSMO-TOKEN" }] })));
+    assert_eq!(body["error_type"], "TokenIsAlreadyActivated", "{:?}", body);
+    assert_eq!(body["error_data"], "OSMO-TOKEN");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert!(
+        block_on(lp_coinfind(&ctx, PLATFORM)).unwrap().is_none(),
+        "the platform stays passive"
+    );
+    assert_eq!(dependents(&ctx), vec!["IRIS-NYAN".to_owned()]);
+    assert_eq!(platform.activated_token_tickers().len(), 1);
 }

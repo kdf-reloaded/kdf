@@ -1874,8 +1874,9 @@ fn a_forced_disable_is_refused_while_an_order_of_a_dependent_is_being_matched() 
     assert_eq!(legacy_disable_result(ctx, "PLAT", json!({}))["passivized"], json!(true));
 }
 
-/// The versioned `disable_coin` is unchanged (the maintainer's decision of 2026-11-18): it has no `passivized`, ignores `force_disable`, and
-/// removes a platform with dependents, which stay registered; its dependent set is dropped.
+/// The versioned `disable_coin` is unchanged (the maintainer's decision of 2026-11-18): it has no `passivized`,
+/// ignores `force_disable`, and removes a platform with dependents, which stay registered; its dependent set is
+/// dropped.
 #[test]
 fn the_versioned_disable_coin_removes_a_platform_with_dependents_and_has_no_passivized() {
     let node = node_with_platform();
@@ -2164,9 +2165,9 @@ fn t40_6b_20_disable_coin_on_a_solana_platform_without_tokens_answers_on_both_su
     assert!(enabled_tickers(&ctx).is_empty());
 }
 
-/// T40.6B.20: a token registered by `add_coin` (the legacy route) is not a dependent of its platform (CRD ch.43 R43.1E.5
-/// item 1), so the platform is a coin without dependents: it answers and is removed as for the other families, the token
-/// stays registered, and the platform can be registered again.
+/// T40.6B.20: a token registered by `add_coin` (the legacy route) is not a dependent of its platform (CRD ch.43
+/// R43.1E.5 item 1), so the platform is a coin without dependents: it answers and is removed as for the other
+/// families, the token stays registered, and the platform can be registered again.
 #[test]
 fn t40_6b_20_disable_coin_on_a_solana_platform_with_a_token_follows_the_other_families() {
     let (platform, token) = offline_solana_and_token();

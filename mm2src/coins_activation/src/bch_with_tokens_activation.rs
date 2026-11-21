@@ -131,9 +131,7 @@ impl TokenAsMmCoinInitializer for SlpTokenInitializer {
             })
             .collect();
 
-        for token in tokens.iter() {
-            self.platform_coin.register_token_info(token);
-        }
+        // The platform's token record is written at registration, not here (CRD ch.43 D43.1F.2 (b)).
         Ok(tokens.into_iter().map(Into::into).collect())
     }
 }
@@ -360,6 +358,14 @@ impl PlatformWithTokensActivationOps for BchCoin {
         .map_to_mm(|error| BchWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
         Ok(platform_coin)
     }
+
+    fn record_token(&self, token: &MmCoinEnum) {
+        if let MmCoinEnum::SlpToken(token) = token {
+            self.register_token_info(token);
+        }
+    }
+
+    fn forget_token_record(&self, ticker: &str) { self.remove_slp_token_info(ticker); }
 
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
         activation_request

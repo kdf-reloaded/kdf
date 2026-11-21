@@ -126,8 +126,9 @@ where
     let coin_conf = L2::coin_conf_from_json(coin_conf_json).mm_err(Into::into)?;
     let platform_ticker = l2_protocol.platform_coin_ticker().to_owned();
 
-    // R55.1.12 with D43.1F.2 (b): the lock of the layer-two coin (exclusive) and the lock of its platform (shared) are held together through
-    // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
+    // R55.1.12 with D43.1F.2 (b): the lock of the layer-two coin (exclusive) and the lock of its platform (shared)
+    // are held together through registration, so a `disable_coin` of the platform cannot run in between. The checks
+    // below follow the wait.
     let _activation_guard = lock_activation_under(&ctx, &platform_ticker, &[&req.ticker])
         .await
         .map_to_mm(EnableL2Error::Internal)?;

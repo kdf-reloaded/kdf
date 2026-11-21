@@ -96,6 +96,15 @@ impl NftCtx {
             .contains(&chain)
     }
 
+    /// Record `chain` as no longer activated (CRD ch.43 R43.1F.8 item 3). Returns `true` when the chain was
+    /// activated before this call.
+    pub fn unmark_activated(&self, chain: Chain) -> bool {
+        self.activated
+            .lock()
+            .expect("nft activation set poisoned")
+            .remove(&chain)
+    }
+
     /// Record `chain` as activated. Returns `true` when this call is the
     /// one that flipped the chain from inactive to active.
     pub fn mark_activated(&self, chain: Chain) -> bool {

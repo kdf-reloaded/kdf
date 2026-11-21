@@ -227,10 +227,10 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
-        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the token (exclusive) is
-        // taken together with the platform's shared lock, so a `disable_coin` of the platform cannot run while the
-        // token is registered. The lock is held through registration, and the ticker and the platform are checked
-        // again once it is ours.
+        // R55.1.12 with D43.1F.2 (b): activations of one ticker run one at a time, and the lock of the token
+        // (exclusive) is taken together with the platform's shared lock, so a `disable_coin` of the platform cannot
+        // run while the token is registered. The lock is held through registration, and the ticker and the platform
+        // are checked again once it is ours.
         let platform_ticker = self.protocol_info.platform_coin_ticker().to_owned();
         let _activation_guard = lock_activation_under(&self.ctx, &platform_ticker, &[&self.ticker])
             .await
