@@ -29,8 +29,8 @@ use super::api::{AccountListing, TransactionInfoResponse, TronApiClient, TronApi
 use super::fee::TronTxFeeDetails;
 use super::{TronAddress, TRX_DECIMALS};
 use crate::eth::{u256_to_big_decimal, EthCoin, EthCoinType};
-use crate::{lp_coinfind, BytesJson, HistorySyncState, MarketCoinOps, MmCoin, MmCoinEnum, TransactionDetails,
-            TransactionType, TxFeeDetails};
+use crate::{lp_coinfind_registered, BytesJson, HistorySyncState, MarketCoinOps, MmCoin, MmCoinEnum,
+            TransactionDetails, TransactionType, TxFeeDetails};
 use common::executor::Timer;
 use common::log::{debug, warn};
 use common::mm_number::BigDecimal;
@@ -137,11 +137,13 @@ impl EthCoin {
 // ---------------------------------------------------------------------------------------------------------------
 
 /// Starts the history process of the activated TRX platform coin `ticker`, if its history is enabled. The mmrpc
-/// 2.0 activation calls it once the platform and its tokens are registered; it runs on every target.
+/// 2.0 activation calls it once the platform and its tokens are registered; it runs on every target. The history is
+/// the platform's own background work, so every look-up of this module uses the registered view, which counts a
+/// passive platform, and the work goes on while the platform is passive (CRD ch.43 R43.1E.6 item 3).
 pub fn spawn_platform_history(ctx: &MmArc, ticker: &str) {
     let (ctx, ticker) = (ctx.clone(), ticker.to_owned());
     common::executor::spawn(async move {
-        if let Ok(Some(MmCoinEnum::EthCoin(coin))) = lp_coinfind(&ctx, &ticker).await {
+        if let Ok(Some(MmCoinEnum::EthCoin(coin))) = lp_coinfind_registered(&ctx, &ticker).await {
             if coin.is_tron_platform_coin() {
                 tron_history_loop(coin, ctx).await;
             }
@@ -169,10 +171,11 @@ pub(crate) async fn tron_history_loop(coin: EthCoin, ctx: MmArc) {
 }
 
 /// Whether `coin` is still the coin registered under its ticker. A coin that was disabled, or disabled and enabled
-/// again (another instance), ends its process.
-async fn is_registered_instance(ctx: &MmArc, coin: &EthCoin) -> bool {
+/// again (another instance), ends its process. A passive platform is still registered, so its process goes on
+/// (CRD ch.43 R43.1E.6 item 3).
+pub(crate) async fn is_registered_instance(ctx: &MmArc, coin: &EthCoin) -> bool {
     matches!(
-        lp_coinfind(ctx, coin.ticker()).await,
+        lp_coinfind_registered(ctx, coin.ticker()).await,
         Ok(Some(MmCoinEnum::EthCoin(found))) if Arc::ptr_eq(&found.0, &coin.0)
     )
 }
@@ -230,7 +233,7 @@ async fn served_coins(coin: &EthCoin, ctx: &MmArc) -> (Option<EthCoin>, Vec<EthC
             tickers.sort();
             let mut tokens = Vec::with_capacity(tickers.len());
             for ticker in tickers {
-                if let Ok(Some(MmCoinEnum::EthCoin(token))) = lp_coinfind(ctx, &ticker).await {
+                if let Ok(Some(MmCoinEnum::EthCoin(token))) = lp_coinfind_registered(ctx, &ticker).await {
                     if matches!(token.coin_type, EthCoinType::Trc20 { .. }) && token.tron_history_enabled() {
                         tokens.push(token);
                     }

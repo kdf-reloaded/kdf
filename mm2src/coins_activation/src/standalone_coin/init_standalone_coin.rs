@@ -3,7 +3,7 @@ use crate::prelude::*;
 use crate::standalone_coin::init_standalone_coin_error::{InitStandaloneCoinError, InitStandaloneCoinStatusError,
                                                          InitStandaloneCoinUserActionError};
 use async_trait::async_trait;
-use coins::{disable_coin, lp_coinfind, lp_register_coin, MmCoinEnum, RegisterCoinError, RegisterCoinParams};
+use coins::{disable_coin, lp_coinfind_registered, lp_register_coin, MmCoinEnum, RegisterCoinError, RegisterCoinParams};
 use common::{log, SuccessResponse};
 use crypto::trezor::trezor_rpc_task::RpcTaskHandle;
 use mm2_core::mm_ctx::MmArc;
@@ -78,7 +78,9 @@ where
     Standalone::InProgressStatus: InitStandaloneCoinInitialStatus,
     InitStandaloneCoinError: From<Standalone::ActivationError>,
 {
-    if let Ok(Some(_)) = lp_coinfind(&ctx, &request.ticker).await {
+    // A passive platform is registered: `init` refuses its ticker like an active one, and builds nothing
+    // (CRD ch.43 R43.1F.9 item 3 with D43.1F.4 (b)).
+    if let Ok(Some(_)) = lp_coinfind_registered(&ctx, &request.ticker).await {
         return MmError::err(InitStandaloneCoinError::CoinIsAlreadyActivated { ticker: request.ticker });
     }
 
@@ -205,7 +207,7 @@ where
             .await
             .map_to_mm(RegisterCoinError::Internal)
             .mm_err(Into::into)?;
-        if let Ok(Some(_)) = lp_coinfind(&self.ctx, &ticker).await {
+        if let Ok(Some(_)) = lp_coinfind_registered(&self.ctx, &ticker).await {
             return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() }.into());
         }
         let coin = Standalone::init_standalone_coin(

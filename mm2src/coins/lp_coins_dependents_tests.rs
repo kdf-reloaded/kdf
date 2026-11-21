@@ -163,3 +163,150 @@ fn the_hook_is_idempotent() {
     assert_eq!(bch.get_slp_tokens_infos().len(), 1);
     assert_eq!(block_on(coins_ctx.dependents_of("BCH")), set(&["OTHER"]));
 }
+
+// The passive state (CRD ch.43 R43.1E.5 item 3 and R43.1E.6)
+
+fn passive_platform() -> (MmArc, Arc<CoinsContext>) {
+    let (ctx, coins_ctx) = ctx_and_coins();
+    block_on(coins_ctx.add_platform_with_tokens(test_coin("PLAT"), vec![test_coin("T1"), test_coin("T2")])).unwrap();
+    assert!(block_on(coins_ctx.make_passive("PLAT")));
+    (ctx, coins_ctx)
+}
+
+#[test]
+fn only_a_registered_platform_with_a_dependent_can_become_passive() {
+    let (_ctx, coins_ctx) = ctx_and_coins();
+    block_on(coins_ctx.add_coin(test_coin("LONE"))).unwrap();
+    block_on(coins_ctx.add_platform_with_tokens(test_coin("PLAT"), vec![test_coin("T1")])).unwrap();
+
+    assert!(!block_on(coins_ctx.make_passive("NOT-REGISTERED")));
+    assert!(
+        !block_on(coins_ctx.make_passive("LONE")),
+        "a coin without a dependent is never passive"
+    );
+    assert!(!block_on(coins_ctx.make_passive("T1")), "a token is never passive");
+    assert!(!block_on(coins_ctx.is_passive("LONE")) && !block_on(coins_ctx.is_passive("T1")));
+
+    assert!(block_on(coins_ctx.make_passive("PLAT")));
+    assert!(block_on(coins_ctx.is_passive("PLAT")));
+}
+
+#[test]
+fn a_passive_platform_is_registered_but_not_active() {
+    let (ctx, coins_ctx) = passive_platform();
+
+    assert!(block_on(lp_coinfind(&ctx, "PLAT")).unwrap().is_none(), "not active");
+    assert!(
+        block_on(lp_coinfind_registered(&ctx, "PLAT")).unwrap().is_some(),
+        "registered"
+    );
+    assert!(block_on(find_pair(&ctx, "PLAT", "T1")).unwrap().is_none());
+    assert!(
+        block_on(find_pair(&ctx, "T1", "T2")).unwrap().is_some(),
+        "the tokens stay active"
+    );
+    assert!(block_on(lp_coinfind_or_err(&ctx, "PLAT")).is_err());
+    assert!(block_on(lp_coinfind(&ctx, "T1")).unwrap().is_some());
+    assert_eq!(block_on(coins_ctx.dependents_of("PLAT")), set(&["T1", "T2"]));
+}
+
+#[test]
+fn get_enabled_coins_lists_a_passive_platform() {
+    let (ctx, _coins_ctx) = passive_platform();
+
+    let answer = block_on(crate::rpc_command::get_enabled_coins::get_enabled_coins_rpc(ctx, None)).unwrap();
+
+    let mut listed: Vec<String> = json::to_value(&answer).unwrap()["coins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|coin| coin["ticker"].as_str().unwrap().to_owned())
+        .collect();
+    listed.sort();
+    assert_eq!(listed, vec!["PLAT".to_owned(), "T1".to_owned(), "T2".to_owned()]);
+}
+
+#[test]
+fn the_registration_checks_count_a_passive_platform_as_registered() {
+    let (ctx, coins_ctx) = passive_platform();
+
+    assert!(block_on(coins_ctx.add_coin(test_coin("PLAT"))).is_err());
+    assert_eq!(
+        block_on(coins_ctx.add_token("OTHER", test_coin("PLAT")))
+            .unwrap_err()
+            .get_inner()
+            .ticker,
+        "PLAT"
+    );
+    let refused = block_on(coins_ctx.add_platform_with_tokens(test_coin("PLAT"), vec![test_coin("NEW")])).unwrap_err();
+    assert_eq!(refused.get_inner().ticker, "PLAT");
+    assert!(
+        block_on(lp_coinfind_registered(&ctx, "NEW")).unwrap().is_none(),
+        "nothing was registered"
+    );
+    let refused = block_on(lp_register_coin(&ctx, test_coin("PLAT"), RegisterCoinParams {
+        ticker: "PLAT".to_owned(),
+        tx_history: false,
+    }))
+    .unwrap_err();
+    assert!(matches!(
+        refused.get_inner(),
+        RegisterCoinError::CoinIsInitializedAlready { .. }
+    ));
+    // The legacy `enable` and `electrum` end here before they read the coin's configuration.
+    let refused = block_on(lp_coininit(&ctx, "PLAT", &json!({}))).unwrap_err();
+    assert!(refused.contains("already initialized"));
+    assert!(block_on(coins_ctx.is_passive("PLAT")), "the refusals change nothing");
+}
+
+#[test]
+fn a_passive_platform_stays_passive_when_its_last_dependent_leaves() {
+    let (ctx, coins_ctx) = passive_platform();
+
+    block_on(disable_coin(&ctx, "T1")).unwrap();
+    block_on(disable_coin(&ctx, "T2")).unwrap();
+
+    assert!(block_on(coins_ctx.dependents_of("PLAT")).is_empty());
+    assert!(
+        block_on(coins_ctx.is_passive("PLAT")),
+        "an empty set does not drop the flag"
+    );
+    assert!(block_on(lp_coinfind_registered(&ctx, "PLAT")).unwrap().is_some());
+    assert!(block_on(lp_coinfind(&ctx, "PLAT")).unwrap().is_none());
+}
+
+#[test]
+fn removing_a_passive_platform_clears_its_flag() {
+    let (ctx, coins_ctx) = passive_platform();
+
+    block_on(disable_coin(&ctx, "PLAT")).unwrap();
+
+    assert!(!block_on(coins_ctx.is_passive("PLAT")));
+    assert!(block_on(lp_coinfind_registered(&ctx, "PLAT")).unwrap().is_none());
+    // A platform of the same ticker registers again, and is active.
+    block_on(coins_ctx.add_coin(test_coin("PLAT"))).unwrap();
+    assert!(block_on(lp_coinfind(&ctx, "PLAT")).unwrap().is_some());
+}
+
+#[test]
+fn a_forced_removal_takes_the_platform_and_every_dependent_in_one_step() {
+    let (ctx, coins_ctx) = passive_platform();
+    block_on(coins_ctx.add_coin(test_coin("LEGACY"))).unwrap();
+
+    let removed = block_on(disable_platform_with_dependents(&ctx, "PLAT")).unwrap();
+
+    assert_eq!(removed, vec!["T1".to_owned(), "T2".to_owned(), "PLAT".to_owned()]);
+    for ticker in ["PLAT", "T1", "T2"] {
+        assert!(block_on(lp_coinfind_registered(&ctx, ticker)).unwrap().is_none());
+    }
+    assert!(!block_on(coins_ctx.is_passive("PLAT")));
+    assert!(block_on(coins_ctx.dependents_of("PLAT")).is_empty());
+    assert!(
+        block_on(lp_coinfind(&ctx, "LEGACY")).unwrap().is_some(),
+        "a coin outside the set stays"
+    );
+    assert!(
+        block_on(disable_platform_with_dependents(&ctx, "PLAT")).is_err(),
+        "disabled already"
+    );
+}

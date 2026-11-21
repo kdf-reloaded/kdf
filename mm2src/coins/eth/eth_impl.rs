@@ -1818,7 +1818,8 @@ impl EthCoin {
             {
                 let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
                 let coins = coins_ctx.coins.lock().await;
-                if !coins.contains_key(&self.ticker) {
+                // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
+                if !coins.registered().contains(&self.ticker) {
                     ctx.log.log("", &[&"tx_history", &self.ticker], "Loop stopped");
                     break;
                 };
@@ -2218,7 +2219,8 @@ impl EthCoin {
             {
                 let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
                 let coins = coins_ctx.coins.lock().await;
-                if !coins.contains_key(&self.ticker) {
+                // A passive platform is still registered, and its background work goes on (CRD ch.43 R43.1E.6 item 3).
+                if !coins.registered().contains(&self.ticker) {
                     ctx.log.log("", &[&"tx_history", &self.ticker], "Loop stopped");
                     break;
                 };
