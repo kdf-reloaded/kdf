@@ -839,7 +839,8 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
 /// Removes the registered platform coin `platform` and every one of its dependent tokens and layer-two coins in one
 /// step, under one hold of the registry: the forced removal of CRD ch.43 R43.1E.5 item 4. Each dependent leaves
 /// through the same record clean-up as a single [`disable_coin`], before the platform does. Returns the tickers
-/// removed, the dependents first. Ending the rest of the background work of the removed coins is not part of it.
+/// removed, the dependents first, and the NFT chain among them when it was a dependent. Ending the rest of the
+/// background work of the removed coins is not part of it.
 pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Result<Vec<String>, String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
@@ -860,7 +861,16 @@ pub async fn disable_platform_with_dependents(ctx: &MmArc, platform: &str) -> Re
                 removed_tickers.push(ticker);
             },
             None if ticker == platform => return ERR!("{} is disabled already", ticker),
-            None => (),
+            // The NFT chain of the platform is a dependent with no coin entry: it is deactivated with the others
+            // (CRD ch.43 R43.1F.8 item 3).
+            None => {
+                if let Ok(chain) = <crate::nft::Chain as crate::nft::ChainTicker>::from_nft_ticker(&ticker) {
+                    if let Ok(nft_ctx) = crate::nft::NftCtx::from_mm_ctx(ctx) {
+                        nft_ctx.unmark_activated(chain);
+                    }
+                    removed_tickers.push(ticker);
+                }
+            },
         }
     }
     Ok(removed_tickers)

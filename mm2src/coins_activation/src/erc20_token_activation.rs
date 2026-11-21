@@ -597,8 +597,9 @@ pub async fn enable_evm_token(
         EvmTokenProtocol::Nft { platform } => platform.clone(),
     };
 
-    // R55.1.12 with D43.1F.2 (b): the lock of the token (exclusive) and the lock of its platform (shared) are held together through
-    // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
+    // R55.1.12 with D43.1F.2 (b): the lock of the token (exclusive) and the lock of its platform (shared) are held
+    // together through registration, so a `disable_coin` of the platform cannot run in between. The checks below
+    // follow the wait.
     let _activation_guard = lock_activation_under(&ctx, &platform_ticker, &[&req.ticker])
         .await
         .map_to_mm(EnableTokenError::Internal)?;
@@ -782,6 +783,11 @@ async fn enable_nft_token(
         .await
         .mm_err(EnableTokenError::from)?;
     nft_ctx.mark_activated(chain);
+    // The NFT chain is a dependent of its platform, with no coin entry of its own (CRD ch.43 R43.1F.8 item 1).
+    let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(EnableTokenError::Internal)?;
+    coins_ctx
+        .add_nft_dependent(platform_coin.ticker(), chain.nft_ticker())
+        .await;
 
     let mut nfts = HashMap::with_capacity(owned.len());
     for nft in owned {
