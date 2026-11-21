@@ -311,6 +311,7 @@ mod tests {
             str_d_zeel: None,
             hash_algo: SignerHashAlgo::DSHA256,
             sighash_suffix: 0,
+            read_by_library: false,
         }
     }
 

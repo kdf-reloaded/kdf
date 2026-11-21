@@ -4,6 +4,7 @@ use crate::coin_work::{CoinWork, PendingCoinWork};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::rpc_clients::electrum_client_registry::ElectrumClientRegistry;
+use crate::utxo::spent_record_registry::SpentRecordRegistry;
 use std::collections::{BTreeSet, HashSet};
 
 #[derive(Clone, Debug)]
@@ -274,6 +275,9 @@ pub struct CoinsContext {
     activation_locks: ActivationLocks,
     /// The Electrum clients that QTUM and its QRC20 tokens share, by weak reference (CRD ch.38 D38.6.4Q.1 status note).
     pub(crate) electrum_clients: ElectrumClientRegistry,
+    /// The recently-spent records that QTUM and its QRC20 tokens share, by weak reference (CRD ch.38 D38.6.4Q.4
+    /// status note).
+    pub(crate) spent_records: SpentRecordRegistry,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
     /// The swap layer's reader of the saved swaps that are not finished, registered at start; a shielded
     /// coin's activation checks the key against it (CRD ch.39 R39.8.0bd).
@@ -320,15 +324,15 @@ pub enum RegisteredTokenPolicy {
     Keep,
 }
 impl RegisteredTokenPolicy {
-    /// The policy a node uses when `reactivation_registered_token` is absent.
+    /// The policy a node uses when `reactivation_registered_token` is absent or `null`.
     pub const DEFAULT: RegisteredTokenPolicy = RegisteredTokenPolicy::Refuse;
 
     /// Reads the top-level `reactivation_registered_token` member of the startup configuration (CRD ch.43
-    /// D43.1F.1): `"refuse"` or `"keep"`; an absent member selects [`Self::DEFAULT`]. Any other value is an error
+    /// D43.1F.1): `"refuse"` or `"keep"`; an absent or `null` member selects [`Self::DEFAULT`]. Any other value is an error
     /// that names the member and the two values.
     pub fn from_conf(conf: &Json) -> Result<RegisteredTokenPolicy, String> {
         match conf.get("reactivation_registered_token") {
-            None => Ok(Self::DEFAULT),
+            None | Some(Json::Null) => Ok(Self::DEFAULT),
             Some(Json::String(value)) if value == "refuse" => Ok(RegisteredTokenPolicy::Refuse),
             Some(Json::String(value)) if value == "keep" => Ok(RegisteredTokenPolicy::Keep),
             Some(other) => Err(format!(
@@ -359,6 +363,7 @@ impl CoinsContext {
                 coins: AsyncMutex::new(CoinRegistry::default()),
                 activation_locks: ActivationLocks::default(),
                 electrum_clients: ElectrumClientRegistry::default(),
+                spent_records: SpentRecordRegistry::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
                 unfinished_swaps_view: parking_lot::Mutex::new(None),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),

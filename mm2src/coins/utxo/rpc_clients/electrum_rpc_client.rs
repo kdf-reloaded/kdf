@@ -1564,7 +1564,9 @@ impl UtxoRpcClientOps for ElectrumClient {
             for item in history.iter() {
                 let transaction = try_s!(selfi.get_transaction_bytes(&item.tx_hash).compat().await);
 
-                let maybe_spend_tx: UtxoTx = try_s!(deserialize(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                let maybe_spend_tx: UtxoTx = try_s!(
+                    crate::utxo::utxo_common::read_utxo_tx(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e))
+                );
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {

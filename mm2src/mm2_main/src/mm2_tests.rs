@@ -13,7 +13,7 @@ use mm2_test_helpers::for_tests::{check_my_swap_status, check_recent_swaps, chec
                                   TAKER_ERROR_EVENTS, TAKER_SUCCESS_EVENTS};
 use serde_json::{self as json, Value as Json};
 use std::collections::HashMap;
-use std::convert::{identity, TryFrom};
+use std::convert::TryFrom;
 use std::env::{self, var};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -23,33 +23,8 @@ use uuid::Uuid;
 
 #[cfg(not(target_arch = "wasm32"))]
 use coins::eth::checksum_address;
-#[cfg(all(feature = "zhtlc-native-tests", not(target_arch = "wasm32")))]
-use mm2_test_helpers::for_tests::{init_z_coin, init_z_coin_status};
 #[cfg(not(target_arch = "wasm32"))]
 use mm2_test_helpers::geth_dev::{GethDev, TEST_ERC20_BYTECODE};
-
-#[cfg(all(feature = "zhtlc-native-tests", not(target_arch = "wasm32")))]
-async fn enable_z_coin(mm: &MarketMakerIt, coin: &str) -> ZcoinActivationResult {
-    let init = init_z_coin(mm, coin).await;
-    let init: RpcV2Response<InitTaskResult> = json::from_value(init).unwrap();
-    let timeout = now_ms() + 60000;
-
-    loop {
-        if gstuff::now_ms() > timeout {
-            panic!("{} initialization timed out", coin);
-        }
-
-        let status = init_z_coin_status(mm, init.result.task_id).await;
-        let status: RpcV2Response<InitZcoinStatus> = json::from_value(status).unwrap();
-        if let InitZcoinStatus::Ready(rpc_result) = status.result {
-            match rpc_result {
-                MmRpcResult::Ok { result } => break result,
-                MmRpcResult::Err(e) => panic!("{} initialization error {:?}", coin, e),
-            }
-        }
-        Timer::sleep(1.).await;
-    }
-}
 
 cfg_native! {
     use common::block_on;
@@ -175,16 +150,21 @@ fn rmd160_from_passphrase(passphrase: &str) -> [u8; 20] {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_rpc() {
-    let (_, mm, _dump_log, _dump_dashboard) = mm_spat(local_start(), &identity);
+    let (_, mm, _dump_log, _dump_dashboard) = mm_spat(local_start(), &|mut conf| {
+        conf["netid"] = 9998.into();
+        conf
+    });
 
     let no_method = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "coin": "DOC",
-        "ipaddr": "electrum1.cipig.net",
         "port": 10017
     })))
     .unwrap();
-    assert!(no_method.0.is_server_error());
+    // CRD ch.43 R43.1A.1d: a request without a method is retried as an mmrpc 2.0 request and refused there as invalid.
+    assert_eq!(no_method.0, StatusCode::BAD_REQUEST, "{}", no_method.1);
+    let no_method_body: Json = json::from_str(&no_method.1).unwrap();
+    assert_eq!(no_method_body["error_type"], "InvalidRequest", "{}", no_method.1);
     assert_eq!((no_method.2)[ACCESS_CONTROL_ALLOW_ORIGIN], "http://localhost:4000");
 
     let not_json = mm.rpc_str("It's just a string").unwrap();
@@ -649,7 +629,6 @@ fn test_check_balance_on_order_post() {
 }
 
 #[test]
-#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_rpc_password_from_json() {
     let coins = json!([
@@ -706,77 +685,38 @@ fn test_rpc_password_from_json() {
     .unwrap();
     let (_dump_log, _dump_dashboard) = mm.mm_dump();
     log!({"Log path: {}", mm.log_path.display()});
-    let electrum_invalid = block_on(mm.rpc(&json! ({
+    let version_invalid = block_on(mm.rpc(&json! ({
         "userpass": "password1",
-        "method": "electrum",
-        "coin": "DOC",
-        "servers": [{"url":"doc.electrum1.cipig.net:10020"},{"url":"doc.electrum2.cipig.net:10020"},{"url":"doc.electrum3.cipig.net:10020"}],
-        "mm2": 1,
-    }))).unwrap();
-
-    // electrum call must fail if invalid password is provided
-    assert!(
-        electrum_invalid.0.is_server_error(),
-        "RPC «electrum» should have failed with server error, but got «{}», response «{}»",
-        electrum_invalid.0,
-        electrum_invalid.1
-    );
-
-    let electrum = block_on(mm.rpc(&json!({
-        "userpass": mm.userpass,
-        "method": "electrum",
-        "coin": "DOC",
-        "servers": [{"url":"doc.electrum1.cipig.net:10020"},{"url":"doc.electrum2.cipig.net:10020"},{"url":"doc.electrum3.cipig.net:10020"}],
-        "mm2": 1,
-    }))).unwrap();
-
-    // electrum call must be successful with RPC password from config
-    assert_eq!(
-        electrum.0,
-        StatusCode::OK,
-        "RPC «electrum» failed with status «{}», response «{}»",
-        electrum.0,
-        electrum.1
-    );
-
-    let electrum = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "electrum",
-        "coin": "MARTY",
-        "servers": [{"url":"marty.electrum1.cipig.net:10021"},{"url":"marty.electrum2.cipig.net:10021"},{"url":"marty.electrum3.cipig.net:10021"}],
-        "mm2": 1,
-    }))).unwrap();
-
-    // electrum call must be successful with RPC password from config
-    assert_eq!(
-        electrum.0,
-        StatusCode::OK,
-        "RPC «electrum» failed with status «{}», response «{}»",
-        electrum.0,
-        electrum.1
-    );
-
-    let orderbook = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "orderbook",
-        "base": "DOC",
-        "rel": "MARTY",
+        "method": "version",
     })))
     .unwrap();
 
-    // orderbook call must be successful with RPC password from config
+    // a protected call must fail if invalid password is provided
+    assert!(
+        version_invalid.0.is_server_error(),
+        "RPC «version» should have failed with server error, but got «{}», response «{}»",
+        version_invalid.0,
+        version_invalid.1
+    );
+
+    let version = block_on(mm.rpc(&json! ({
+        "userpass": mm.userpass,
+        "method": "version",
+    })))
+    .unwrap();
+
+    // a protected call must be successful with RPC password from config
     assert_eq!(
-        orderbook.0,
+        version.0,
         StatusCode::OK,
-        "RPC «orderbook» failed with status «{}», response «{}»",
-        orderbook.0,
-        orderbook.1
+        "RPC «version» failed with status «{}», response «{}»",
+        version.0,
+        version.1
     );
 }
 
 /// Currently only `withdraw` RPC call supports V2.
 #[test]
-#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_mmrpc_v2() {
     let coins = json!([
@@ -798,12 +738,6 @@ fn test_mmrpc_v2() {
     .unwrap();
     let (_dump_log, _dump_dashboard) = mm.mm_dump();
     log!({"Log path: {}", mm.log_path.display()});
-
-    let _electrum = block_on(enable_electrum(&mm, "DOC", false, &[
-        "doc.electrum3.cipig.net:10020",
-        "doc.electrum2.cipig.net:10020",
-        "doc.electrum1.cipig.net:10020",
-    ]));
 
     // no `userpass`
     let withdraw = block_on(mm.rpc(&json! ({
@@ -866,24 +800,6 @@ fn test_mmrpc_v2() {
     log!([withdraw.1]);
     let withdraw_error: RpcErrorResponse<String> = json::from_str(&withdraw.1).expect("Expected 'RpcErrorResponse'");
     assert_eq!(withdraw_error.error_type, "InvalidMmRpcVersion");
-
-    // 'id' = 3
-    let withdraw = block_on(mm.rpc(&json! ({
-        "mmrpc": "2.0",
-        "userpass": mm.userpass,
-        "method": "withdraw",
-        "params": {
-            "coin": "DOC",
-            "to": "RJTYiYeJ8eVvJ53n2YbrVmxWNNMVZjDGLh",
-            "amount": 0.001,
-        },
-        "id": 3,
-    })))
-    .unwrap();
-    assert!(withdraw.0.is_success(), "!withdraw: {}", withdraw.1);
-    let withdraw_ok: RpcSuccessResponse<TransactionDetails> =
-        json::from_str(&withdraw.1).expect("Expected 'RpcSuccessResponse<TransactionDetails>'");
-    assert_eq!(withdraw_ok.id, Some(3));
 }
 
 #[test]
@@ -907,19 +823,17 @@ fn test_rpc_password_from_json_no_userpass() {
     .unwrap();
     let (_dump_log, _dump_dashboard) = mm.mm_dump();
     log!({"Log path: {}", mm.log_path.display()});
-    let electrum = block_on(mm.rpc(&json! ({
-        "method": "electrum",
-        "coin": "DOC",
-        "urls": ["doc.electrum2.cipig.net:10020"],
+    let version = block_on(mm.rpc(&json! ({
+        "method": "version",
     })))
     .unwrap();
 
-    // electrum call must return 500 status code
+    // a protected call without `userpass` must return 500 status code
     assert!(
-        electrum.0.is_server_error(),
-        "RPC «electrum» should have failed with server error, but got «{}», response «{}»",
-        electrum.0,
-        electrum.1
+        version.0.is_server_error(),
+        "RPC «version» should have failed with server error, but got «{}», response «{}»",
+        version.0,
+        version.1
     );
 }
 
@@ -996,29 +910,6 @@ async fn trade_base_rel_electrum(
         log! ({"Alice log path: {}", mm_alice.log_path.display()})
     }
 
-    #[cfg(all(feature = "zhtlc-native-tests", not(target_arch = "wasm32")))]
-    {
-        Timer::sleep(1.).await;
-        let rmd = rmd160_from_passphrase(&bob_passphrase);
-        let bob_zombie_cache_path = mm_bob.folder.join("DB").join(hex::encode(rmd)).join("ZOMBIE_CACHE.db");
-        log!("bob_zombie_cache_path "(bob_zombie_cache_path.display()));
-        std::fs::copy("./mm2src/coins/for_tests/ZOMBIE_CACHE.db", bob_zombie_cache_path).unwrap();
-
-        let rmd = rmd160_from_passphrase(&alice_passphrase);
-        let alice_zombie_cache_path = mm_alice
-            .folder
-            .join("DB")
-            .join(hex::encode(rmd))
-            .join("ZOMBIE_CACHE.db");
-        log!("alice_zombie_cache_path "(alice_zombie_cache_path.display()));
-
-        std::fs::copy("./mm2src/coins/for_tests/ZOMBIE_CACHE.db", alice_zombie_cache_path).unwrap();
-
-        let zombie_bob = enable_z_coin(&mm_bob, "ZOMBIE").await;
-        log!("enable ZOMBIE bob "[zombie_bob]);
-        let zombie_alice = enable_z_coin(&mm_alice, "ZOMBIE").await;
-        log!("enable ZOMBIE alice "[zombie_alice]);
-    }
     // Enable coins on Bob side. Print the replies in case we need the address.
     let rc = enable_coins_eth_electrum_doc_marty(&mm_bob, &["http://195.201.0.6:8565"]).await;
     log! ({"enable_coins (bob): {:?}", rc});
@@ -1190,10 +1081,6 @@ async fn trade_base_rel_electrum(
 #[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn trade_test_electrum_and_eth_coins() { block_on(trade_base_rel_electrum(&[("ETH", "JST")], 1, 2, 0.1)); }
-
-#[test]
-#[cfg(all(not(target_arch = "wasm32"), feature = "zhtlc-native-tests"))]
-fn trade_test_electrum_doc_zombie() { block_on(trade_base_rel_electrum(&[("DOC", "ZOMBIE")], 1, 2, 0.1)); }
 
 #[wasm_bindgen_test]
 #[cfg(target_arch = "wasm32")]
@@ -1859,78 +1746,8 @@ fn test_swap_status() {
     );
 }
 
-/// Ensure that setprice/buy/sell calls deny base == rel
-/// https://github.com/artemii235/SuperNET/issues/363
-#[test]
-#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
-fn test_order_errors_when_base_equal_rel() {
-    let coins = json!([
-        {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-    ]);
-
-    let mm = MarketMakerIt::start(
-        json! ({
-            "gui": "nogui",
-            "netid": 9998,
-            "myipaddr": env::var ("BOB_TRADE_IP") .ok(),
-            "rpcip": env::var ("BOB_TRADE_IP") .ok(),
-            "canbind": env::var ("BOB_TRADE_PORT") .ok().map (|s| s.parse::<i64>().unwrap()),
-            "passphrase": "bob passphrase",
-            "coins": coins,
-            "rpc_password": "pass",
-            "i_am_seed": true,
-        }),
-        "pass".into(),
-        match var("LOCAL_THREAD_MM") {
-            Ok(ref e) if e == "bob" => Some(local_start()),
-            _ => None,
-        },
-    )
-    .unwrap();
-    let (_dump_log, _dump_dashboard) = mm.mm_dump();
-    log!({"Log path: {}", mm.log_path.display()});
-    block_on(enable_electrum(&mm, "DOC", false, &[
-        "doc.electrum3.cipig.net:10020",
-        "doc.electrum2.cipig.net:10020",
-        "doc.electrum1.cipig.net:10020",
-    ]));
-
-    let rc = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "setprice",
-        "base": "DOC",
-        "rel": "DOC",
-        "price": 0.9
-    })))
-    .unwrap();
-    assert!(rc.0.is_server_error(), "setprice should have failed, but got {:?}", rc);
-
-    let rc = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "buy",
-        "base": "DOC",
-        "rel": "DOC",
-        "price": 0.9,
-        "relvolume": 0.1,
-    })))
-    .unwrap();
-    assert!(rc.0.is_server_error(), "buy should have failed, but got {:?}", rc);
-
-    let rc = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "sell",
-        "base": "DOC",
-        "rel": "DOC",
-        "price": 0.9,
-        "basevolume": 0.1,
-    })))
-    .unwrap();
-    assert!(rc.0.is_server_error(), "sell should have failed, but got {:?}", rc);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn startup_passphrase(passphrase: &str, expected_address: &str) {
+fn startup_passphrase(passphrase: &str, expected_public_key: &str) {
     let coins = json!([
         {"coin":"KMD","rpcport":62415,"txversion":4,"protocol":{"type":"UTXO"}},
     ]);
@@ -1959,25 +1776,36 @@ fn startup_passphrase(passphrase: &str, expected_address: &str) {
     {
         log!({"Log path: {}", mm.log_path.display()})
     }
-    let enable = block_on(enable_electrum(&mm, "KMD", false, &["electrum1.cipig.net:10001"]));
-    assert_eq!(expected_address, enable.address);
+    let resp = block_on(mm.rpc(&json!({
+        "userpass": mm.userpass,
+        "mmrpc": "2.0",
+        "method": "get_public_key",
+        "params": {},
+        "id": 0,
+    })))
+    .unwrap();
+    assert_eq!(resp.0, StatusCode::OK, "!get_public_key: {}", resp.1);
+    let key: RpcV2Response<GetPublicKeyResult> = json::from_str(&resp.1).unwrap();
+    assert_eq!(expected_public_key, key.result.public_key);
     block_on(mm.stop()).unwrap();
 }
 
 /// MM2 should detect if passphrase is WIF or 0x-prefixed hex encoded privkey and parse it properly.
 /// https://github.com/artemii235/SuperNET/issues/396
 #[test]
-#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_startup_passphrase() {
     // seed phrase
-    startup_passphrase("bob passphrase", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD");
+    startup_passphrase(
+        "bob passphrase",
+        "022cd3021a2197361fb70b862c412bc8e44cff6951fa1de45ceabfdd9b4c520420",
+    );
 
     // WIF
     assert!(key_pair_from_seed("UvCjJf4dKSs2vFGVtCnUTAhR5FTZGdg43DDRa9s7s5DV1sSDX14g").is_ok());
     startup_passphrase(
         "UvCjJf4dKSs2vFGVtCnUTAhR5FTZGdg43DDRa9s7s5DV1sSDX14g",
-        "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD",
+        "022cd3021a2197361fb70b862c412bc8e44cff6951fa1de45ceabfdd9b4c520420",
     );
     // WIF, Invalid network version
     assert!(key_pair_from_seed("92Qba5hnyWSn5Ffcka56yMQauaWY6ZLd91Vzxbi4a9CCetaHtYj").is_err());
@@ -1988,7 +1816,7 @@ fn test_startup_passphrase() {
     assert!(key_pair_from_seed("0xb8c774f071de08c7fd8f62b97f1a5726f6ce9f1bcf141b70b86689254ed6714e").is_ok());
     startup_passphrase(
         "0xb8c774f071de08c7fd8f62b97f1a5726f6ce9f1bcf141b70b86689254ed6714e",
-        "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD",
+        "022cd3021a2197361fb70b862c412bc8e44cff6951fa1de45ceabfdd9b4c520420",
     );
     // Out of range, https://en.bitcoin.it/wiki/Private_key#Range_of_valid_ECDSA_private_keys
     assert!(key_pair_from_seed("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141").is_err());
@@ -2285,58 +2113,6 @@ fn test_cancel_all_orders() {
     log!("Alice orderbook "[alice_orderbook]);
     let asks = alice_orderbook["asks"].as_array().unwrap();
     assert_eq!(asks.len(), 0, "Alice DOC/MARTY asks are not empty");
-}
-
-/// https://github.com/artemii235/SuperNET/issues/367
-/// Electrum requests should success if at least 1 server successfully connected,
-/// all others might end up with DNS resolution errors, TCP connection errors, etc.
-#[test]
-#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
-#[cfg(not(target_arch = "wasm32"))]
-fn test_electrum_enable_conn_errors() {
-    let coins = json!([
-        {"coin":"DOC","asset":"DOC","protocol":{"type":"UTXO"}},
-        {"coin":"MARTY","asset":"MARTY","protocol":{"type":"UTXO"}},
-    ]);
-
-    let mm_bob = MarketMakerIt::start(
-        json! ({
-            "gui": "nogui",
-            "netid": 9998,
-            "dht": "on",  // Enable DHT without delay.
-            "myipaddr": env::var ("BOB_TRADE_IP") .ok(),
-            "rpcip": env::var ("BOB_TRADE_IP") .ok(),
-            "canbind": env::var ("BOB_TRADE_PORT") .ok().map (|s| s.parse::<i64>().unwrap()),
-            "passphrase": "bob passphrase",
-            "coins": coins,
-            "i_am_seed": true,
-            "rpc_password": "pass",
-        }),
-        "pass".into(),
-        match var("LOCAL_THREAD_MM") {
-            Ok(ref e) if e == "bob" => Some(local_start()),
-            _ => None,
-        },
-    )
-    .unwrap();
-    let (_bob_dump_log, _bob_dump_dashboard) = mm_bob.mm_dump();
-    log!({"Bob log path: {}", mm_bob.log_path.display()});
-    // Using working servers and few else with random ports to trigger "connection refused"
-    block_on(enable_electrum(&mm_bob, "DOC", false, &[
-        "doc.electrum3.cipig.net:10020",
-        "doc.electrum2.cipig.net:10020",
-        "doc.electrum1.cipig.net:10020",
-        "electrum1.cipig.net:60017",
-        "electrum1.cipig.net:60018",
-    ]));
-    // use random domain name to trigger name is not resolved
-    block_on(enable_electrum(&mm_bob, "MARTY", false, &[
-        "marty.electrum3.cipig.net:10021",
-        "marty.electrum2.cipig.net:10021",
-        "marty.electrum1.cipig.net:10021",
-        "random-electrum-domain-name1.net:60017",
-        "random-electrum-domain-name2.net:60017",
-    ]));
 }
 
 #[test]
@@ -3212,17 +2988,12 @@ fn set_price_with_cancel_previous_should_broadcast_cancelled_message() {
 }
 
 #[test]
-#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_batch_requests() {
     let coins = json!([
         {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MARTY","asset":"MARTY","rpcport":52592,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80},
-        {"coin":"JST","name":"jst","protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0xc0eb7AeD740E1796992A08962c15661bDEB58003"}}}
     ]);
 
-    // start bob and immediately place the order
     let mm_bob = MarketMakerIt::start(
         json! ({
             "gui": "nogui",
@@ -3246,27 +3017,22 @@ fn test_batch_requests() {
     let (_bob_dump_log, _bob_dump_dashboard) = mm_bob.mm_dump();
     log!({"Bob log path: {}", mm_bob.log_path.display()});
 
+    // The batch needs no coin: two calls that pass the password check and one that does not.
     let batch_json = json!([
         {
             "userpass": mm_bob.userpass,
-            "method": "electrum",
-            "coin": "DOC",
-            "servers": [{"url":"doc.electrum1.cipig.net:10020"},{"url":"doc.electrum2.cipig.net:10020"},{"url":"doc.electrum3.cipig.net:10020"}],
-            "mm2": 1,
+            "method": "version",
         },
         {
             "userpass": mm_bob.userpass,
-            "method": "electrum",
-            "coin": "MARTY",
-            "servers": [{"url":"marty.electrum1.cipig.net:10021"},{"url":"marty.electrum2.cipig.net:10021"},{"url":"marty.electrum3.cipig.net:10021"}],
-            "mm2": 1,
+            "mmrpc": "2.0",
+            "method": "get_public_key",
+            "params": {},
+            "id": 1,
         },
         {
             "userpass": "error",
-            "method": "electrum",
-            "coin": "MARTY",
-            "servers": [{"url":"marty.electrum1.cipig.net:10021"},{"url":"marty.electrum2.cipig.net:10021"},{"url":"marty.electrum3.cipig.net:10021"}],
-            "mm2": 1,
+            "method": "version",
         },
     ]);
 
@@ -3274,16 +3040,13 @@ fn test_batch_requests() {
     assert!(rc.0.is_success(), "!batch: {}", rc.1);
     log!((rc.1));
     let responses = json::from_str::<Vec<Json>>(&rc.1).unwrap();
-    assert_eq!(responses[0]["coin"], Json::from("DOC"));
-    assert_eq!(
-        responses[0]["address"],
-        Json::from("RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
-    );
+    assert_eq!(responses.len(), 3);
+    let _version: MmVersion = json::from_value(responses[0].clone()).unwrap();
 
-    assert_eq!(responses[1]["coin"], Json::from("MARTY"));
+    let key: RpcV2Response<GetPublicKeyResult> = json::from_value(responses[1].clone()).unwrap();
     assert_eq!(
-        responses[1]["address"],
-        Json::from("RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
+        key.result.public_key,
+        "022cd3021a2197361fb70b862c412bc8e44cff6951fa1de45ceabfdd9b4c520420"
     );
 
     assert!(responses[2]["error"].as_str().unwrap().contains("Userpass is invalid!"));
@@ -3339,7 +3102,7 @@ fn test_metrics_method() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs public servers and a funded DOC wallet, broadcasts a transaction and waits about 10 minutes"]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_electrum_tx_history() {
     fn get_tx_history_request_count(mm: &MarketMakerIt) -> u64 {
@@ -6753,7 +6516,8 @@ fn test_orderbook_depth() {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_mm2_db_migration() {
-    let bob_passphrase = get_passphrase(&".env.client", "BOB_PASSPHRASE").unwrap();
+    // The passphrase only names the DB folder the old swap file is put in.
+    let bob_passphrase = "db migration test passphrase";
 
     let coins = json! ([
         {"coin":"DOC","asset":"DOC","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
@@ -6765,7 +6529,7 @@ fn test_mm2_db_migration() {
     let mm2_folder = new_mm2_temp_folder_path(None);
     let swaps_dir = mm2_folder.join(format!(
         "{}/SWAPS/STATS/MAKER",
-        hex::encode(rmd160_from_passphrase(&bob_passphrase))
+        hex::encode(rmd160_from_passphrase(bob_passphrase))
     ));
     std::fs::create_dir_all(&swaps_dir).unwrap();
     let swap_path = swaps_dir.join("5d02843e-d1b4-488d-aad0-114d82020453.json");

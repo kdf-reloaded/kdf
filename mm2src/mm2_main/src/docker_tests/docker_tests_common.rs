@@ -556,7 +556,9 @@ pub fn single_unspent_swap_tx_sizes(coin: &UtxoStandardCoin) -> (u64, u64) {
 /// CRD ch.38 R38.6.6b: the plain fixed fee of a transaction of `size` bytes at `rate` base units per kB,
 /// in whole coins (eight decimals).
 pub fn fee_for_rate(size: u64, rate: u64) -> BigDecimal {
-    let fee = coins::utxo::ActualTxFee::FixedPerKb(rate).fee_for_size(size);
+    let fee = coins::utxo::ActualTxFee::FixedPerKb(rate)
+        .fee_for_size(size)
+        .expect("a plain fixed rate has a fee for a size");
     BigDecimal::from(fee as i64) / BigDecimal::from(100_000_000)
 }
 

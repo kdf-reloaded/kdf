@@ -466,6 +466,148 @@ While only Reloaded sends it, it also marks a node as Reloaded.
 > only as a request that times out, as with any refusal at the reference
 > (R59.4.7 item 4).
 
+> **Status note (2026-11-20).** What a relay at the reference rows returns
+> for these bytes -- in the full-orderbook answer, the synchronization
+> answer and both best-orders answers -- and how it treats a best-orders
+> peer request with one more trailing member, is recorded in §59.4B
+> (passed the KDF Dirty Gate on 2026-11-20). Nothing in this section is
+> changed by it.
+
+## 59.4B What a relay returns for an order's protocol information
+
+*(Passed the KDF Dirty Gate on 2026-11-20, measure 0.01, attestation in
+§59.11. Reference facts, KDF Spec Reader, 2026-11-20, round 0.5.0-18.
+Rows `v2.6.0-beta` and `v3.0.0-beta` of
+chapter 02 §2.15A, identical at both in everything stated here; the rows
+`dev (as of 2026-03-27)` and `main (as of 2026-10-07)` do not differ from
+`v3.0.0-beta` in the material read. The decoder properties used are those
+of the public MessagePack library release both rows pin, confirmed in
+that library's published source.)*
+
+§59.4A relies on a relay carrying a coin's protocol information
+unchanged (R59.4A.5). This section records what a reference relay does
+with the bytes between receiving an order and answering a request about
+it. "Relay" here means a node that holds other makers' orders and
+answers the peer requests of [Chapter 32](32-orderbook-p2p-and-trie.md)
+§32.7.1.
+
+**R59.4B.1** *What a relay keeps.* A relay keeps, for each order it
+holds, the order's two protocol-information byte strings exactly as it
+received them. It does not decode, check, shorten or rewrite them, and
+it applies no length rule of its own to them. It receives them in one of
+two ways:
+
+1. from the maker's `MakerOrderCreated` message, whose two members it
+   stores as they are; a message without the two members gives two empty
+   strings;
+2. from the side-channel entry of an answer another relay gave it (a
+   full-orderbook answer or a synchronization answer); an answer with no
+   entry for the order gives two empty strings.
+
+A maker's later update message carries no protocol information and
+leaves the stored strings as they are. When a later answer carries the
+order again, the relay rebuilds its record from that answer, protocol
+information included.
+
+**R59.4B.2** *What a relay returns.* In each of these four answers, the
+side-channel map of protocol information holds **one entry for every
+order the answer contains**, keyed by the order's identifier, and the
+entry holds both strings whole -- every byte after the first value
+included:
+
+- (a) the answer to `GetOrderbook` (the full orderbook of a pair);
+- (b) the answer to `SyncPubkeyOrderbookState`, which a keep-alive with
+  an unexpected root triggers: an entry for every order the answer adds,
+  changes or lists in a full set, and none for an order it only removes
+  (Chapter 32 R-Q2a);
+- (c) the answer to `BestOrders` (by volume) and the answer to
+  `BestOrdersByNumber`.
+
+A relay at these rows never leaves the entry out for an order the answer
+contains. An order that a by-volume answer passes over because of its
+minimum volume is in neither the order list nor the map. The map of
+confirmation settings differs: it has an entry only for an order whose
+settings the relay holds.
+
+**R59.4B.3** *An entry with empty strings.* Apart from a coin whose
+maker publishes an empty value, the entry is present with empty strings
+exactly when the relay never received the bytes (R59.4B.1): the maker's
+message lacked the two members, or the relay learned the order from an
+answer that lacked the entry. No path at these
+rows drops bytes a relay holds, and no relay at these rows produces an
+answer without the entry. Empty strings for a coin whose makers always
+publish a non-empty value (R59.4.7 item 1) therefore come from a maker
+or a relay older than these rows, or from another implementation, not
+from a relay at these rows shortening a longer value. A reader of the
+answer cannot tell "the maker published nothing" from "a relay on the
+way never had it".
+
+**R59.4B.4** *The reader's side.* A node that reads one of these answers
+treats a missing map, and a missing entry for an order, as two empty
+strings. It keeps and shows the order (Chapter 32 R-W2; R59.4.7 item 5
+for the address it then shows).
+
+**R59.4B.5** *Wire form (dictated).* In `MakerOrderCreated` and in the
+side-channel entry alike, each of the two strings travels as a
+MessagePack **array of unsigned integers, one per byte**, not as a
+MessagePack binary value. A relay re-encodes what it holds in the same
+form, so the byte sequence a reader obtains equals the one the maker
+sent.
+
+**R59.4B.6** *A best-orders peer request with one more trailing member.*
+`BestOrders` and `BestOrdersByNumber` each carry three members, encoded
+by position. When a request carries a fourth member after the three, a
+relay at these rows **ignores it**: it answers exactly as it would
+without the member. It does not refuse the request, report an error or
+treat the sender differently, and the answer has the same shape. This is
+the decoder tolerance of Chapter 32 R-W2a applied to the request; it
+holds because the request's members are the last thing in the request
+message. It covers only a member appended at the end. A member inserted
+earlier, a member of a changed type, or a request kind the relay does
+not know is a different case, and this section does not bind it. The
+same tolerance applies in the other direction: a reader at these rows
+ignores a member appended at the end of a best-orders answer.
+
+The local `best_orders` RPC request (the legacy method and the mmrpc 2.0
+method) is equally lenient at these rows: a member of the request object
+that the method does not know is ignored.
+
+**R59.4B.7** *Version-6 transactions and the published value in newer
+states.* The rows this chapter can read give this picture:
+
+- At `v2.6.0-beta`, `v3.0.0-beta`, `dev (as of 2026-03-27)`,
+  `staging (as of 2026-03-27)` and `main (as of 2026-10-07)` no source
+  file names the Ironwood upgrade, the shielded coin has no setting for
+  it, and the shielded-coin library pinned is the one of the row
+  `librustzcash k-1.4.2` throughout. None of these states therefore
+  builds a version-6 transaction (chapter 39 R39.6.4f, compatibility
+  note). What the shielded coin publishes as protocol information is the
+  bare descriptor of chapter 39 R39.5.14 at every one of them.
+- On 2026-11-20 the public repository of the historical record listed no
+  release tag newer than `v3.0.0-beta`, and its `main`, `dev` and
+  `staging` branches still stood at the rows named above. No branch
+  listed there on that date names the Ironwood upgrade in any source
+  file.
+- Whether a Komodo or GLEEC build exists that was made from source not
+  published in that repository, whether such a build constructs
+  version-6 transactions, and what it would publish as ARRR protocol
+  information, **cannot be established** from the states read. A
+  black-box observation of such a build's orders on the public network
+  (chapter 01 R6) would be the way to learn it.
+
+> **Compatibility (this repository, 2026-11-20; not corpus-sourced).** A
+> Reloaded node that hides, at RPC presentation, an order whose protocol
+> information lacks a capability the node requires can rely on a
+> reference relay returning a capability word unchanged in all four
+> answers (R59.4B.2). It must treat a missing entry and empty strings
+> alike as "no capability declared", which R59.4A.2 already does. Such an
+> order may come from a capable maker whose bytes an older relay never
+> held (R59.4B.3); hiding it is then a false negative at presentation
+> only, and the acceptance check of R59.4A.5 still decides at
+> negotiation. A member appended to a best-orders peer request changes
+> nothing at a reference relay (R59.4B.6), so it cannot be used to make
+> such a relay filter its answer.
+
 ## 59.5 Bound peer-penalty contract
 
 > **Clearance (chapter 01 T1, R40).** The forbidden-class-sourced
@@ -852,6 +994,32 @@ shall produce no `MakerReserved`, and a refused `MakerReserved` no
   - a request without it is not reserved;
   - with the capability, both go ahead;
   - in no case is a swap started or a penalty record created.
+
+**T15.** *Relay carriage of protocol information (§59.4B).* *(Passed
+the KDF Dirty Gate with §59.4B on 2026-11-20. Reloaded-original test
+obligations on the reference facts of that section.)*
+
+- (a) *Unchanged in every answer (R59.4B.1, R59.4B.2).* A relay receives
+  a `MakerOrderCreated` whose two protocol-information strings each hold
+  a first value followed by further bytes. The answers to `GetOrderbook`,
+  `SyncPubkeyOrderbookState` (as a full set and as a delta that adds the
+  order), `BestOrders` and `BestOrdersByNumber` each hold an entry for
+  the order with both strings byte for byte as sent.
+- (b) *Entry for every order.* In each of the four answers, every order
+  the answer contains has an entry, and an order a delta only removes
+  has none.
+- (c) *Missing entry on reading (R59.4B.4).* An answer that lacks the
+  map, or lacks the entry for one order, is read without error; the
+  order is kept with two empty strings, and no capability is declared
+  for it (R59.4A.2).
+- (d) *Update keeps the strings.* After an update message for the order,
+  the relay's answers hold the same strings as before.
+- (e) *Wire form (R59.4B.5).* The encoded entry holds each string as an
+  array of integers, and a string sent in that form decodes to the same
+  bytes.
+- (f) *Trailing request member (R59.4B.6).* A `BestOrders` request and a
+  `BestOrdersByNumber` request, each with one more member appended, are
+  answered exactly as the same requests without it.
 
 ## 59.8 Deferred Work
 
@@ -1243,6 +1411,54 @@ its gating is not.*
   no code blocks. *Measure:* 0.03, read against the standard that any
   discretionary finding fails a file; dictated-interop and public-surface
   tokens were excluded from the measured set.
+- *Scoped addition (2026-11-20, Spec Reader round 0.5.0-18) -- §59.4B
+  (R59.4B.1--R59.4B.7 and its compatibility note), T15, and the status
+  note at the end of §59.4A.* **KDF Dirty Gate: PASS on 2026-11-20, measure
+  0.01, no findings** (chapter 01 R40; the attestation closes this item).
+  Prompted by
+  the plan to hide, at RPC presentation, orders whose protocol
+  information lacks a required capability. *Inputs:* the forbidden corpus
+  at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  identical in every respect taken, with `dev (as of 2026-03-27)`,
+  `staging (as of 2026-03-27)` and `main (as of 2026-10-07)` compared for
+  R59.4B.7, consulted **only** to establish: how a relay stores the two
+  protocol-information strings and from which messages; that the four
+  answers carry an entry for every order they contain, with the strings
+  whole; when the strings are empty; how a reader treats a missing map or
+  entry; the wire form of the strings; the treatment of a member appended
+  to a best-orders peer request and of an unknown member of the local
+  `best_orders` request; and that no tabled state names the Ironwood
+  upgrade, changes the pinned shielded-coin library, or publishes
+  anything but the bare descriptor. The decoder tolerance and the array
+  form of a byte string are properties of the pinned public MessagePack
+  library release, confirmed in that library's published source. The
+  statement about tags and branch positions on 2026-11-20 is reference
+  metadata of the public repository (chapter 02 R13); no row was added,
+  because every state read was already tabled. What crosses is behavior,
+  dictated wire names (the four request kinds, `MakerOrderCreated`) and
+  public RPC names; no private identifier, function body, helper
+  decomposition, error, log or comment text was reproduced. The
+  compatibility note and T15 are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-20, measure
+  0.01, no findings; the pointer in chapter 32 under R-W2a passed with this
+  item. *Extent:* the order-matching peer-to-peer subject matter of
+  §59.4B and chapter 32 §32.7.1: the peer request definitions, the maker
+  order-creation message, the relay's storage of orders, the four answers
+  (full orderbook, synchronization, best orders by volume and by number),
+  the reading side and request decoding. The row `v3.0.0-beta` was read
+  (the relevant parts of four of the six source files located);
+  `v2.6.0-beta` by its full difference; `dev (as of 2026-03-27)`,
+  `staging (as of 2026-03-27)` and `main (as of 2026-10-07)` by
+  mechanical difference; all five rows by a whole-tree search for the
+  upgrade name and the shielded-library pin record (row `librustzcash
+  k-1.4.2`). The decoder statements of the public MessagePack library and
+  the listing of the live public repository are outside the gate's
+  extent; the listing was checked against the reading clone's remote
+  references of 2026-11-18. *Method:* reading plus mechanical comparison
+  (a per-token forced-versus-free inventory and version-control
+  differences); the repository's clean-room gate tool was not applicable
+  because the additions embed no code blocks. *Measure:* 0.01, on the
+  discretionary-expression basis.
 - *Reloaded-original addition (2026-11-04, Decisions BM and BO): §59.4A
   (R59.4A.1–R59.4A.7), T14 and D5.* The capability word in coin protocol
   information, read by the coin's acceptance check, with no switch on the

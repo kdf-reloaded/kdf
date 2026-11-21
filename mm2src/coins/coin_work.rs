@@ -10,6 +10,12 @@
 //! activation that ends without registering the instance (refused, failed, cancelled) drops the `PendingCoinWork`, and
 //! that ends the work already spawned.
 //!
+//! The scope is per poll, not per logical owner, so only work owned by exactly the instance being built may call
+//! [`CoinWork::register_with_current`] (or run in [`carry_current_scope`]). The task of a shared resource (a shared
+//! Electrum client built during the first instance's activation, a coalesced request) must never register with the
+//! current scope: removing that one instance would abort work that other instances use. A scoped poll must not run a
+//! nested `block_on`, because that polls foreign futures inside the scope.
+//!
 //! Node-wide work that is not per coin stays in `MmCtx::abort_handlers`.
 
 use futures::future::AbortHandle;

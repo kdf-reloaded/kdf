@@ -1,6 +1,7 @@
 // utxo_common_swap — HTLC/swap operations, payment scripts, validation
 
 use super::*;
+use crate::utxo::zip317::{self, Zip317Bytes};
 use crate::{SpendSafeAmountError, SwapKeyDisagreement};
 use kdf_crypto::ripemd160;
 use primitives::hash::H160;
@@ -19,18 +20,94 @@ pub const V2_SWAP_SPEND_TX_SIZE: u64 = DEFAULT_SWAP_TX_SPEND_SIZE;
 /// rate per started kilobyte. A dynamic rate carries no volatility increase on a spend the node builds
 /// itself. If the coin forces the node's minimum relay fee, the estimate is at least
 /// `floor(relay_rate * tx_size / 1000)`.
+///
+/// A coin that follows the ZIP 317 rule has no fee for a size alone: this function fails for it, and the
+/// caller uses [`get_htlc_spend_fee_for_shape`] with the shape of the spend.
 pub async fn get_htlc_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> UtxoRpcResult<u64> {
     let coin_fee = coin.get_tx_fee().await?;
-    let mut fee = coin_fee.fee_for_size(tx_size);
+    let fee = match coin_fee.fee_for_size(tx_size) {
+        Some(fee) => fee,
+        None => {
+            return MmError::err(crate::utxo::rpc_clients::UtxoRpcError::Internal(
+                "the ZIP 317 fee of an HTLC spend depends on the shape of the spend, not on a size".to_owned(),
+            ))
+        },
+    };
+    apply_min_relay_fee_to_htlc_spend(coin, tx_size, fee).await
+}
+
+/// The fee of an HTLC spend or refund of `tx_size` bytes whose transparent bytes are `bytes`: the per-kilobyte
+/// rule over `tx_size` as [`get_htlc_spend_fee`] has it, or the ZIP 317 conventional fee of `bytes` for a coin
+/// that follows that rule. A forced minimum relay fee stays a floor over `tx_size` under both.
+pub async fn get_htlc_spend_fee_for_shape<T: UtxoCommonOps>(
+    coin: &T,
+    tx_size: u64,
+    bytes: Zip317Bytes,
+) -> UtxoRpcResult<u64> {
+    let coin_fee = coin.get_tx_fee().await?;
+    let fee = coin_fee.fee_for_shape(tx_size, bytes);
+    apply_min_relay_fee_to_htlc_spend(coin, tx_size, fee).await
+}
+
+async fn apply_min_relay_fee_to_htlc_spend<T: UtxoCommonOps>(
+    coin: &T,
+    tx_size: u64,
+    mut fee: u64,
+) -> UtxoRpcResult<u64> {
     if coin.as_ref().conf.force_min_relay_fee {
         let relay_fee = get_min_relay_fee(coin.as_ref()).await?;
         let relay_rate = sat_from_big_decimal(&relay_fee, coin.as_ref().decimals).mm_err(Into::into)?;
-        let relay_component = ActualTxFee::Dynamic(relay_rate).fee_for_size(tx_size);
+        let relay_component = ActualTxFee::Dynamic(relay_rate).fee_for_shape(tx_size, Zip317Bytes::default());
         if fee < relay_component {
             fee = relay_component;
         }
     }
     Ok(fee)
+}
+
+/// The length of the redeem script of a version-one HTLC payment ([`payment_script`]).
+const V1_HTLC_REDEEM_SCRIPT_LEN: usize = 107;
+/// The `script_data` of a version-one claim: a push of the 32-byte secret (33 bytes) and `OP_0`.
+const V1_CLAIM_SCRIPT_DATA_LEN: usize = 34;
+
+/// The transparent bytes ZIP 317 counts for an HTLC spend or refund of one P2SH input and outputs of
+/// `output_bytes` bytes. The input is the signed spend as `p2sh_spend_with_signature` assembles it: a signature
+/// push of the maximal size ([`zip317::SIGNATURE_PUSH_LEN`]), the `script_data` of `script_data_len` bytes and a
+/// push of the redeem script.
+pub(crate) fn p2sh_spend_bytes(script_data_len: usize, redeem_script: &Script, output_bytes: u64) -> Zip317Bytes {
+    let redeem_push_len = Builder::default().push_data(redeem_script).into_bytes().len();
+    let script_sig_len = zip317::SIGNATURE_PUSH_LEN as usize + script_data_len + redeem_push_len;
+    Zip317Bytes {
+        input: zip317::input_len_with_script_sig(script_sig_len),
+        output: output_bytes,
+    }
+}
+
+/// [`p2sh_spend_bytes`] of a version-one claim or refund or a version-two maker spend or refund: one P2SH
+/// input and one P2PKH output.
+pub(crate) fn p2sh_spend_to_p2pkh_bytes(script_data_len: usize, redeem_script: &Script) -> Zip317Bytes {
+    p2sh_spend_bytes(script_data_len, redeem_script, P2PKH_OUTPUT_LEN)
+}
+
+/// The shape of the standard version-one claim (the spend the node estimates before it has a payment): the
+/// 107-byte payment redeem script, a 33-byte secret push and `OP_0`, and one P2PKH output.
+pub(crate) fn v1_claim_spend_bytes() -> Zip317Bytes {
+    let redeem_push_len = Builder::default()
+        .push_data(&[0u8; V1_HTLC_REDEEM_SCRIPT_LEN])
+        .into_bytes()
+        .len();
+    let script_sig_len = zip317::SIGNATURE_PUSH_LEN as usize + V1_CLAIM_SCRIPT_DATA_LEN + redeem_push_len;
+    Zip317Bytes {
+        input: zip317::input_len_with_script_sig(script_sig_len),
+        output: P2PKH_OUTPUT_LEN,
+    }
+}
+
+/// The fee of the standard version-one HTLC spend for the estimates that run before a payment exists (the
+/// receiver trade fee and the safe amount): the 496-byte reference size per kilobyte, or the ZIP 317 fee of the
+/// version-one claim shape ([`v1_claim_spend_bytes`]).
+pub(crate) async fn get_v1_htlc_spend_fee_estimate<T: UtxoCommonOps>(coin: &T) -> UtxoRpcResult<u64> {
+    get_htlc_spend_fee_for_shape(coin, DEFAULT_SWAP_TX_SPEND_SIZE, v1_claim_spend_bytes()).await
 }
 
 /// CRD ch.60 R60.6.4, ch.38 R38.6.6c: the value of the single output of an HTLC spend or refund, that is
@@ -50,7 +127,7 @@ fn htlc_spend_output_value(htlc_value: u64, fee: u64) -> Result<u64, Transaction
 /// CRD ch.60 R60.6.7 item 2: the safe amount of a UTXO-family coin, that is the R38.6.6c HTLC spend-fee estimate
 /// under the coin's fee policy at the moment of the call plus the coin's dust (R38.6.6d).
 pub async fn spend_safe_amount<T: UtxoCommonOps>(coin: &T) -> MmResult<Option<MmNumber>, SpendSafeAmountError> {
-    let fee = get_htlc_spend_fee(coin, DEFAULT_SWAP_TX_SPEND_SIZE)
+    let fee = get_v1_htlc_spend_fee_estimate(coin)
         .await
         .mm_err(|e| SpendSafeAmountError::EstimateUnavailable(e.to_string()))?;
     let safe_amount = fee
@@ -63,8 +140,12 @@ pub async fn spend_safe_amount<T: UtxoCommonOps>(coin: &T) -> MmResult<Option<Mm
 
 /// CRD ch.16 R14A: the version-two funding-spend / taker-payment-spend spend-fee estimate `S`.
 /// It is the R38.6.6c estimate over [`V2_SWAP_SPEND_TX_SIZE`] bytes, exactly as the legacy spends use it.
+///
+/// This estimate is explicitly size-based for every coin: a coin that follows the ZIP 317 rule pays the plain
+/// proportional fee at the rate of its entry's `txfee` over `tx_size` bytes, as before that rule existed.
 pub async fn get_v2_swap_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> UtxoRpcResult<u64> {
-    get_htlc_spend_fee(coin, tx_size).await
+    let fee = coin.get_tx_fee().await?.legacy_fee_for_size(tx_size);
+    apply_min_relay_fee_to_htlc_spend(coin, tx_size, fee).await
 }
 
 /// Constructs and broadcasts the taker DEX fee transaction.
@@ -260,7 +341,7 @@ pub fn send_maker_spends_taker_payment<T: UtxoCommonOps>(
         coin.addr_format().clone(),
     );
 
-    let mut prev_tx: UtxoTx = try_tx_fus!(deserialize(taker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_fus!(read_utxo_tx(taker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default()
         .push_data(secret)
@@ -273,7 +354,8 @@ pub fn send_maker_spends_taker_payment<T: UtxoCommonOps>(
         key_pair.public(),
     );
     let fut = async move {
-        let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
+        let spend_bytes = p2sh_spend_to_p2pkh_bytes(script_data.len(), &redeem_script);
+        let fee = try_tx_s!(get_htlc_spend_fee_for_shape(&coin, DEFAULT_SWAP_TX_SPEND_SIZE, spend_bytes).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
             value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
@@ -332,7 +414,7 @@ pub fn send_taker_spends_maker_payment<T: UtxoCommonOps>(
         coin.addr_format().clone(),
     );
 
-    let mut prev_tx: UtxoTx = try_tx_fus!(deserialize(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_fus!(read_utxo_tx(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default()
         .push_data(secret)
@@ -345,7 +427,8 @@ pub fn send_taker_spends_maker_payment<T: UtxoCommonOps>(
         key_pair.public(),
     );
     let fut = async move {
-        let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
+        let spend_bytes = p2sh_spend_to_p2pkh_bytes(script_data.len(), &redeem_script);
+        let fee = try_tx_s!(get_htlc_spend_fee_for_shape(&coin, DEFAULT_SWAP_TX_SPEND_SIZE, spend_bytes).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
             value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
@@ -405,7 +488,7 @@ pub fn send_taker_refunds_payment<T: UtxoCommonOps>(
     );
 
     let mut prev_tx: UtxoTx =
-        try_tx_fus!(deserialize(taker_payment_tx).map_err(|e| TransactionErr::Plain(format!("{:?}", e))));
+        try_tx_fus!(read_utxo_tx(taker_payment_tx).map_err(|e| TransactionErr::Plain(format!("{:?}", e))));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default().push_opcode(Opcode::OP_1).into_script();
     let redeem_script = payment_script(
@@ -415,7 +498,8 @@ pub fn send_taker_refunds_payment<T: UtxoCommonOps>(
         &try_tx_fus!(Public::from_slice(maker_pub)),
     );
     let fut = async move {
-        let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
+        let spend_bytes = p2sh_spend_to_p2pkh_bytes(script_data.len(), &redeem_script);
+        let fee = try_tx_s!(get_htlc_spend_fee_for_shape(&coin, DEFAULT_SWAP_TX_SPEND_SIZE, spend_bytes).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
             value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
@@ -474,7 +558,7 @@ pub fn send_maker_refunds_payment<T: UtxoCommonOps>(
         coin.addr_format().clone(),
     );
 
-    let mut prev_tx: UtxoTx = try_tx_fus!(deserialize(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_fus!(read_utxo_tx(maker_payment_tx).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let script_data = Builder::default().push_opcode(Opcode::OP_1).into_script();
     let redeem_script = payment_script(
@@ -484,7 +568,8 @@ pub fn send_maker_refunds_payment<T: UtxoCommonOps>(
         &try_tx_fus!(Public::from_slice(taker_pub)),
     );
     let fut = async move {
-        let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
+        let spend_bytes = p2sh_spend_to_p2pkh_bytes(script_data.len(), &redeem_script);
+        let fee = try_tx_s!(get_htlc_spend_fee_for_shape(&coin, DEFAULT_SWAP_TX_SPEND_SIZE, spend_bytes).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
             value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
@@ -753,7 +838,7 @@ pub fn validate_maker_payment<T: UtxoCommonOps>(
     input: ValidatePaymentInput,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let my_public = try_fus!(Public::from_slice(&input.taker_pub));
-    let mut tx: UtxoTx = try_fus!(deserialize(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_fus!(read_utxo_tx(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
 
     validate_payment(
@@ -775,7 +860,7 @@ pub fn validate_taker_payment<T: UtxoCommonOps>(
     input: ValidatePaymentInput,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let my_public = try_fus!(Public::from_slice(&input.maker_pub));
-    let mut tx: UtxoTx = try_fus!(deserialize(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_fus!(read_utxo_tx(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
 
     validate_payment(
@@ -816,7 +901,7 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
                 match history.first() {
                     Some(item) => {
                         let tx_bytes = try_s!(client.get_transaction_bytes(&item.tx_hash).compat().await);
-                        let mut tx: UtxoTx = try_s!(deserialize(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                        let mut tx: UtxoTx = try_s!(read_utxo_tx(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
                         tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
                         Ok(Some(tx.into()))
                     },
@@ -849,7 +934,7 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
                 for item in received_by_addr {
                     if item.address == target_addr && !item.txids.is_empty() {
                         let tx_bytes = try_s!(client.get_transaction_bytes(&item.txids[0]).compat().await);
-                        let mut tx: UtxoTx = try_s!(deserialize(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                        let mut tx: UtxoTx = try_s!(read_utxo_tx(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
                         tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
                         return Ok(Some(tx.into()));
                     }
@@ -910,7 +995,7 @@ pub async fn search_for_swap_tx_spend_other(
 /// Extract a secret from the `spend_tx`.
 /// Note spender could generate the spend with several inputs where the only one input is the p2sh script.
 pub fn extract_secret(secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
-    let spend_tx: UtxoTx = try_s!(deserialize(spend_tx).map_err(|e| ERRL!("{:?}", e)));
+    let spend_tx: UtxoTx = try_s!(read_utxo_tx(spend_tx).map_err(|e| ERRL!("{:?}", e)));
     extract_secret_from_script_sigs(
         secret_hash,
         spend_tx.inputs.into_iter().map(|input| input.script_sig.into()),
@@ -1078,7 +1163,7 @@ async fn search_for_swap_output_spend(
     output_index: usize,
     search_from_block: u64,
 ) -> Result<Option<FoundSwapTxSpend>, String> {
-    let mut tx: UtxoTx = try_s!(deserialize(tx).map_err(|e| ERRL!("{:?}", e)));
+    let mut tx: UtxoTx = try_s!(read_utxo_tx(tx).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
     let tx_hash = tx.hash();
     let output0_script_pubkey = tx.outputs[0].script_pubkey.clone();
@@ -1684,7 +1769,7 @@ pub(crate) async fn build_and_broadcast_maker_v2_spend<T>(
 where
     T: UtxoCommonOps,
 {
-    let mut prev_tx: UtxoTx = try_tx_s!(deserialize(prev_tx_bytes).map_err(|e| ERRL!("{:?}", e)));
+    let mut prev_tx: UtxoTx = try_tx_s!(read_utxo_tx(prev_tx_bytes).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
     let my_address = match &coin.as_ref().derivation_method {
         DerivationMethod::Iguana(address) => address.clone(),
@@ -1701,7 +1786,7 @@ where
         },
     };
 
-    let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
+    let fee = try_tx_s!(get_v2_swap_spend_fee(coin, V2_SWAP_SPEND_TX_SIZE).await);
     let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
     let output = TransactionOutput {
         value: htlc_spend_output_value(prev_tx.outputs[DEFAULT_SWAP_VOUT].value, fee)?,
@@ -2147,6 +2232,7 @@ pub(crate) fn build_funding_spend_preimage_tx(
         str_d_zeel: None,
         hash_algo: fields.tx_hash_algo.into(),
         sighash_suffix: fields.conf.sighash_suffix,
+        read_by_library: false,
     })
 }
 
@@ -2529,6 +2615,7 @@ pub(crate) fn build_taker_payment_spend_preimage_tx(
         str_d_zeel: None,
         hash_algo: fields.tx_hash_algo.into(),
         sighash_suffix: fields.conf.sighash_suffix,
+        read_by_library: false,
     })
 }
 

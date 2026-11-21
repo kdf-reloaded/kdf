@@ -1995,7 +1995,11 @@ names.
 >    dependent for running swaps and orders being matched, and refuses the whole
 >    call if any is in use. A passive platform is registered, listed by
 >    `get_enabled_coins` in both forms, and not active for any other look-up
->    (R43.1E.6, R43.1F.10 item 1); its history collection goes on.
+>    (R43.1E.6, R43.1F.10 item 1); its history collection goes on, the TRON
+>    platform history included (its process finds its platform and its tokens
+>    on the registered view, R43.1E.6 item 3). The EVM and TRON history
+>    processes check their registration on each pass and end at their next
+>    pass once their coin is removed.
 > 2. *Versioned form.* The `disable_coin` of §43.1R is as it was (the
 >    maintainer's decision on its scope): it does not read `force_disable`, has
 >    no `passivized`, removes the requested coin, and answers `NoSuchCoin` for a
@@ -2016,7 +2020,10 @@ names.
 > 5. *Token look-ups (D43.1F.3 (b)).* A Reloaded EVM token keeps its swap
 >    gas-fee policy in its own instance and looks its platform up by no ticker,
 >    so a token's orders, swaps and fee estimates work while its platform is
->    passive; nothing changed in the token code for it.
+>    passive; nothing changed in the EVM token code for it. A TRC20 token looks
+>    its platform up by ticker for its HD methods, its GasFree address and
+>    `withdraw`, gasless included; that look-up is the token's own and finds a
+>    passive platform.
 > 6. *Standalone tasks (D43.1F.4 (b)).* The `init` of a standalone activation
 >    task refuses the ticker of a passive platform with `CoinIsAlreadyActivated`
 >    and builds nothing.
@@ -2080,8 +2087,8 @@ names.
 >     `disable_coin` of a coin or token, by the forced removal of a platform
 >     and each of its dependents, or by the clean-up of a failed or cancelled
 >     activation, aborts the work of that instance: the history collector of
->     every family that has one (UTXO, BCH and SLP, QTUM, QRC20, EVM, Sia,
->     Tendermint) and the block-header loop of the UTXO family. The event
+>     every family that has one (UTXO, BCH and SLP, QTUM, QRC20, EVM, TRON,
+>     Sia, Tendermint) and the block-header loop of the UTXO family. The event
 >     streams of the removed ticker (balance, fee estimate, transaction
 >     history) end for every client, as after the last unsubscribe. A passive
 >     platform keeps its work; only removal ends it (R43.1F.10 item 2), and a
@@ -2093,14 +2100,14 @@ names.
 >     until the node stops; ending it is a separate change.
 > 12. *The `reactivation_registered_token` setting (D43.1F.1).* The node reads
 >     the top-level startup-configuration member `reactivation_registered_token`
->     when it starts: `"refuse"` (also when the member is absent) or `"keep"`;
->     any other value, including a value that is not a string, stops the node
->     with an error that names the member and the two values. The policy
->     argument of the check in item 8 is the setting's value. Under `"refuse"`
->     item 8 applies. Under `"keep"` any registered requested token is kept
->     silently, whatever platform it was registered for, and joins the
->     platform's dependent set and token list, case c' included; a token whose
->     configuration names another platform is still refused with
+>     when it starts: `"refuse"` (also when the member is absent or `null`) or
+>     `"keep"`; any other value, including a value that is not a string,
+>     stops the node with an error that names the member and the two values.
+>     The policy argument of the check in item 8 is the setting's value.
+>     Under `"refuse"` item 8 applies. Under `"keep"` any registered requested
+>     token is kept silently, whatever platform it was registered for, and
+>     joins the platform's dependent set and token list, case c' included; a
+>     token whose configuration names another platform is still refused with
 >     `PlatformCoinMismatch` (case c), and cases d and e are unchanged.
 
 **D43.1F.1** *(Open, 2026-11-18.)* **A requested token that is already

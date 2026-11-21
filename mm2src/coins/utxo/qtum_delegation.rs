@@ -6,8 +6,8 @@ use crate::qrc20::{contract_addr_into_rpc_format, ContractCallOutput, GenerateQr
 use crate::utxo::qtum::{QtumBasedCoin, QtumCoin, QtumDelegationOps, QtumDelegationRequest, QtumStakingInfosDetails};
 use crate::utxo::rpc_clients::UtxoRpcClientEnum;
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, UtxoTxBuilder};
+use crate::utxo::PrivKeyNotAllowed;
 use crate::utxo::{qtum, utxo_common, Address, GetUtxoListOps, UtxoCommonOps};
-use crate::utxo::{PrivKeyNotAllowed, UTXO_LOCK};
 use crate::{DelegationError, DelegationFut, DelegationResult, MarketCoinOps, StakingInfos, StakingInfosError,
             StakingInfosFut, StakingInfosResult, TransactionDetails, TransactionType};
 use bigdecimal::Zero;
@@ -123,7 +123,6 @@ impl QtumCoin {
                 reason: "Qtum doesn't support delegation for segwit".to_string(),
             });
         }
-        let _utxo_lock = UTXO_LOCK.lock().await;
         let delegation_output = self
             .remove_delegation_output(QRC20_GAS_LIMIT_DEFAULT, QRC20_GAS_PRICE_DEFAULT)
             .mm_err(Into::into)?;
@@ -250,7 +249,6 @@ impl QtumCoin {
         let to_addr =
             Address::from_str(request.address.as_str()).map_to_mm(|e| DelegationError::AddressError(e.to_string()))?;
         let fee = request.fee.unwrap_or(QTUM_DELEGATION_STANDARD_FEE);
-        let _utxo_lock = UTXO_LOCK.lock().await;
         let staker_address_hex = qtum::contract_addr_from_utxo_addr(to_addr.clone()).mm_err(Into::into)?;
         let delegation_output = self.add_delegation_output(
             staker_address_hex,
@@ -283,7 +281,10 @@ impl QtumCoin {
         let key_pair = utxo.priv_key_policy.key_pair_or_err().mm_err(Into::into)?;
         let my_address = utxo.derivation_method.iguana_or_err().mm_err(Into::into)?;
 
-        let (unspents, _) = self.get_unspent_ordered_list(my_address).await.mm_err(Into::into)?;
+        // The guard of the shared recently-spent record: held from the listing through signing and the pending entry
+        // below (CRD ch.38 D38.6.4Q.4 status note, item 4), in place of the process-wide `UTXO_LOCK`.
+        let (unspents, mut recently_spent) = self.get_unspent_ordered_list(my_address).await.mm_err(Into::into)?;
+        let candidate_unspents = unspents.clone();
         let mut gas_fee = 0;
         let mut outputs = Vec::with_capacity(contract_outputs.len());
         for output in contract_outputs {
@@ -312,9 +313,25 @@ impl QtumCoin {
         )
         .mm_err(Into::into)?;
 
+        // Note the signed transaction as a pending withdraw, so that the broadcast of exactly these bytes is promoted
+        // into the record (R38.5B.9). The record itself is not written here.
+        let spent: Vec<_> = candidate_unspents
+            .into_iter()
+            .filter(|unspent| {
+                signed
+                    .inputs
+                    .iter()
+                    .any(|input| input.previous_output == unspent.outpoint)
+            })
+            .collect();
+        let tx_bytes = serialize(&signed);
+        recently_spent.note_pending_withdraw(&tx_bytes, spent.clone(), signed.hash(), signed.outputs.clone());
+        drop(recently_spent);
+
         let miner_fee = data.fee_amount + data.unused_change.unwrap_or_default();
         let generated_tx = GenerateQrc20TxResult {
             signed,
+            spent,
             miner_fee,
             gas_fee,
         };
@@ -337,7 +354,7 @@ impl QtumCoin {
         Ok(TransactionDetails {
             unsigned: None,
             tx_json: None,
-            tx_hex: serialize(&generated_tx.signed).into(),
+            tx_hex: tx_bytes.into(),
             tx_hash: generated_tx.signed.hash().reversed().to_vec().to_tx_hash(),
             from: vec![my_address_string],
             to: vec![to_address],

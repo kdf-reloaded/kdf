@@ -29,6 +29,7 @@ pub(crate) fn complete_tx(unsigned: TransactionInputSigner, signed_inputs: Vec<T
         consensus_branch_id,
         sapling_v5: unsigned.sapling_v5,
         orchard: unsigned.orchard,
+        opaque: None,
     }
 }
 

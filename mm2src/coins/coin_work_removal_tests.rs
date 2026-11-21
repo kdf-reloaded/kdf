@@ -166,6 +166,44 @@ fn work_spawned_in_a_build_scope_registers_with_the_instance_and_not_with_the_no
     }
 }
 
+/// CRD ch.43 R43.1E.5 item 4, ch.55 R55.4.9: the TRON history process is work of the registered instance. Built inside
+/// the instance's scope it registers its abort handle with the instance's `CoinWork`, not with the node's list, it
+/// runs in that scope, and the forced removal of the platform aborts it.
+#[test]
+fn the_tron_history_process_is_work_of_the_registered_platform_and_ends_with_its_removal() {
+    let (ctx, coins_ctx) = ctx_and_coins();
+    let pending = PendingCoinWork::new();
+    let work = pending.work().clone();
+    block_on(coins_ctx.add_platform_with_tokens_and_work(test_coin("PLAT"), pending, vec![])).unwrap();
+    let registered = block_on(coins_ctx.coin_work("PLAT")).unwrap();
+    assert_eq!(registered.id(), work.id());
+
+    // The process body never ends by itself and reports the instance id it runs in.
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let seen_in_task = seen.clone();
+    let task = registered.run_in_scope(|| {
+        crate::eth::tron::history::instance_task(&ctx, async move {
+            *seen_in_task.lock().unwrap() = CoinWork::current_id();
+            futures::future::pending::<()>().await;
+        })
+    });
+    assert_eq!(registered.len(), 1, "the process is not on the instance's record");
+    assert!(
+        ctx.abort_handlers.lock().unwrap().is_empty(),
+        "the process is on the node's list"
+    );
+
+    // Polled once outside any scope, it still runs in its instance's scope.
+    let mut task = Box::pin(task);
+    assert!(futures::FutureExt::now_or_never(task.as_mut()).is_none());
+    assert_eq!(*seen.lock().unwrap(), Some(registered.id()));
+
+    block_on(disable_platform_with_dependents(&ctx, "PLAT")).unwrap();
+    assert!(registered.is_ended());
+    // The aborted process ends at once; a process that was not aborted would wait for ever here.
+    block_on(task);
+}
+
 /// A streamer keyed like the balance streamer of a coin, that waits for its shutdown.
 struct StreamerOfCoin(String);
 
