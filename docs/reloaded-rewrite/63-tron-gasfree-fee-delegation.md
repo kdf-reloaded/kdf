@@ -987,7 +987,7 @@ observable and is not bound.
 > implement, is stated point by point in §63.8B (R30-R35, the finding,
 > D63.9, T18-T20). In short: no RPC of the reference row submits or traces;
 > the flow that D63.6 defers takes no reference input beyond §63.4 and
-> R31-R33. §63.8B awaits the KDF Dirty Gate.
+> R31-R33. §63.8B passed the KDF Dirty Gate on 2026-11-21.
 
 ## 63.8A The Sign-Only Result: Members Around the Signed Authorization
 
@@ -1159,9 +1159,9 @@ T16. **One member per name (conditional on D63.8).** Under D63.8
 ## 63.8B Submission and Trace: What the Reference Row Has and What It Does Not
 
 *(Added 2026-11-21 by the KDF Spec Reader, round 0.5.0-19; reference
-facts at the rows of chapter 02 §2.15A named below; awaiting the KDF
-Dirty Gate. It adds to §63.8, §63.8A and D63.6 and replaces none of
-their sentences.)*
+facts at the rows of chapter 02 §2.15A named below; passed the KDF
+Dirty Gate on 2026-11-21, measure 0.02, attestation in §63.15. It adds to
+§63.8, §63.8A and D63.6 and replaces none of their sentences.)*
 
 **Reference states.** The row `feat/tron-gasfree (as of 2026-05-04)`
 is the only tabled state that has the gasless rail. The rows `dev (as
@@ -2111,8 +2111,9 @@ V2. The baseline withdraw request has no fee-rail selector and no
   status notes of this date (before §63.8A, after §63.9.1, under D63.6),
   with the pointer after the sign-only pointer of chapter 49; no other text
   of this chapter was changed and no cleared sentence was edited.*
-  **Awaiting the KDF Dirty Gate; no clearance is recorded for this item
-  yet.** *Inputs:* the forbidden corpus at the row `feat/tron-gasfree (as of
+  **KDF Dirty Gate: PASS on 2026-11-21, measure 0.02, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* the forbidden corpus
+  at the row `feat/tron-gasfree (as of
   2026-05-04)` of chapter 02 §2.15A, read read-only and consulted **only**
   to establish whether and how a signed authorization is submitted and
   traced: the gasless withdraw flow, the provider client's submit and trace
@@ -2128,3 +2129,25 @@ V2. The baseline withdraw request has no fee-rail selector and no
   metadata, chapter 01 R6). D63.9 and T18 -- T20 are original to this
   section. No row was added to chapter 02 §2.15A: every state read already
   has a row.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-21, measure
+  0.02, no findings, in a single pass. *Extent:* the TRON GasFree
+  fee-delegation subsystem as this chapter scopes it -- the gasless
+  withdraw flow, the provider client with its submit and trace operations
+  and its status classification, the submit and answer payload
+  declarations, the gasless error family, the long-running withdraw task
+  status vocabulary and the raw-transaction broadcast entry -- at the row
+  `feat/tron-gasfree (as of 2026-05-04)`: six source files of that row
+  read, four whole or nearly whole and two in the relevant part, and
+  whole-tree searches of that row for callers of the submit and trace
+  operations, the two unraised errors, the three unreported phases, the
+  lock and the poll-interval setting; the rows `dev (as of 2026-03-16)`,
+  `dev (as of 2026-03-27)`, `staging (as of 2026-03-27)`, `v3.0.0-beta`,
+  `main (as of 2026-10-07)` and `feat/tron-swap-support (as of
+  2026-04-23)` searched whole-tree for the feature only; on the candidate
+  side, all 238 added lines of this chapter and chapter 49. *Method:*
+  reading plus mechanical comparison (every identifier-shaped token of
+  the additions searched in the compared row and judged forced or free,
+  and a probe of the additions for private-name patterns); the
+  repository's clean-room gate tool was not run because the additions
+  embed no code blocks. *Measure:* 0.02, on the discretionary-expression
+  basis (dictated-interop and public-surface tokens excluded).
