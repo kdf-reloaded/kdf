@@ -202,8 +202,9 @@ pub async fn enable_tendermint_token(
         .map_to_mm(EnableTokenError::from)?;
     let platform_ticker = token_protocol.platform_coin_ticker().to_owned();
 
-    // R55.1.12 with D43.1F.2 (b): the lock of the token (exclusive) and the lock of its platform (shared) are held together through
-    // registration, so a `disable_coin` of the platform cannot run in between. The checks below follow the wait.
+    // R55.1.12 with D43.1F.2 (b): the lock of the token (exclusive) and the lock of its platform (shared) are held
+    // together through registration, so a `disable_coin` of the platform cannot run in between. The checks below
+    // follow the wait.
     let _activation_guard = lock_activation_under(&ctx, &platform_ticker, &[&req.ticker])
         .await
         .map_to_mm(EnableTokenError::Internal)?;

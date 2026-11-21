@@ -135,10 +135,11 @@ async fn check_and_cancel_orders(
     Ok(cancelled)
 }
 
-/// The versioned `disable_coin` (CRD ch.43 §43.1R; the maintainer's decision of 2026-11-18): cancels the orders of the coin and removes the
-/// coin, unless a running swap uses the coin or one of its orders is being matched. It neither passivizes a
-/// platform nor reads `force_disable`: a platform with dependents is removed, its dependents stay registered, and
-/// its dependent set is dropped. A passive platform is not an active coin here and answers `NoSuchCoin`.
+/// The versioned `disable_coin` (CRD ch.43 §43.1R; the maintainer's decision of 2026-11-18): cancels the orders of
+/// the coin and removes the coin, unless a running swap uses the coin or one of its orders is being matched. It
+/// neither passivizes a platform nor reads `force_disable`: a platform with dependents is removed, its dependents
+/// stay registered, and its dependent set is dropped. A passive platform is not an active coin here and answers
+/// `NoSuchCoin`.
 ///
 /// The call takes the activation lock of the requested ticker (CRD ch.55 R55.1.12, ch.43 D43.1F.2 (b)). Ending the
 /// background work of the removed coin is not part of it.

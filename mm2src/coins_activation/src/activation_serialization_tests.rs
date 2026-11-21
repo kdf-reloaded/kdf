@@ -235,6 +235,10 @@ impl PlatformWithTokensActivationOps for TestCoin {
         Vec::new()
     }
 
+    fn record_token(&self, _token: &MmCoinEnum) {}
+
+    fn forget_token_record(&self, _ticker: &str) {}
+
     fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
         activation_request.tokens.clone()
     }
@@ -1006,4 +1010,87 @@ fn t55_21_c_paths_of_different_families_wait_for_each_other() {
     case_c_two_paths_wait_for_each_other::<PlatformTask, TokenOneShot>();
     case_c_two_paths_wait_for_each_other::<TokenTask, L2OneShot>();
     case_c_two_paths_wait_for_each_other::<L2Task, PlatformOneShot>();
+}
+
+// Re-activation of a passive platform (CRD ch.43 R43.1F.2, R43.1F.3): the generic routine builds no platform
+// instance, makes the registered entry active, keeps a registered dependent, and refuses what it must.
+fn passive_scripted_platform(ctx: &MmArc, ticker: &str, dependent: &str) -> Arc<CoinsContext> {
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    common::block_on(
+        coins_ctx.add_platform_with_tokens(TestCoin::new(ticker).into(), vec![TestCoin::new(dependent).into()]),
+    )
+    .unwrap();
+    assert!(common::block_on(coins_ctx.make_passive(ticker)));
+    coins_ctx
+}
+
+fn scripted_platform_request(ticker: &str, script: &str, tokens: &[&str]) -> Json {
+    json!({ "ticker": ticker, "script": script, "tokens": tokens })
+}
+
+#[test]
+fn a_passive_platform_is_re_activated_without_building_a_platform() {
+    let (ticker, dependent) = (unique_ticker("RP"), unique_ticker("RT"));
+    let ctx = serialization_ctx(&[&ticker, &dependent]);
+    let coins_ctx = passive_scripted_platform(&ctx, &ticker, &dependent);
+
+    let request = from_json(scripted_platform_request(&ticker, "ok", &[dependent.as_str()]));
+    common::block_on(enable_platform_coin_with_tokens::<TestCoin>(ctx.clone(), request))
+        .unwrap_or_else(|e| panic!("the re-activation failed: {}", e));
+
+    assert_eq!(builds(&ticker), 0, "a platform instance was built");
+    assert!(!common::block_on(coins_ctx.is_passive(&ticker)));
+    assert!(is_registered(&ctx, &ticker));
+    assert_eq!(
+        common::block_on(coins_ctx.dependents_of(&ticker))
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![dependent]
+    );
+}
+
+#[test]
+fn a_refused_re_activation_leaves_the_platform_passive() {
+    let (ticker, dependent) = (unique_ticker("RP"), unique_ticker("RT"));
+    let ctx = serialization_ctx(&[&ticker, &dependent]);
+    let coins_ctx = passive_scripted_platform(&ctx, &ticker, &dependent);
+
+    // The scripted answer fails after the (skipped) build.
+    let request = from_json(scripted_platform_request(&ticker, "gate_fail", &[]));
+    let refused = common::block_on(enable_platform_coin_with_tokens::<TestCoin>(ctx.clone(), request));
+    assert!(refused.is_err());
+    assert!(
+        common::block_on(coins_ctx.is_passive(&ticker)),
+        "the refusal changes nothing"
+    );
+    assert!(
+        !is_registered(&ctx, &ticker),
+        "a passive platform is not an active coin"
+    );
+    assert_eq!(builds(&ticker), 0);
+
+    // A requested token that is registered and is no dependent of the platform is refused before anything else.
+    let legacy = unique_ticker("RL");
+    common::block_on(coins_ctx.add_coin(TestCoin::new(&legacy).into())).unwrap();
+    let request = from_json(scripted_platform_request(&ticker, "ok", &[legacy.as_str()]));
+    let refused = error_of_result(common::block_on(enable_platform_coin_with_tokens::<TestCoin>(
+        ctx.clone(),
+        request,
+    )));
+    match refused.get_inner() {
+        EnablePlatformCoinWithTokensError::TokenIsAlreadyActivated(refused_ticker) => {
+            assert_eq!(refused_ticker, &legacy)
+        },
+        other => panic!("unexpected error {:?}", other),
+    }
+    assert!(common::block_on(coins_ctx.is_passive(&ticker)));
+}
+
+fn error_of_result<T>(
+    result: Result<T, MmError<EnablePlatformCoinWithTokensError>>,
+) -> MmError<EnablePlatformCoinWithTokensError> {
+    match result {
+        Ok(_) => panic!("expected a refusal"),
+        Err(e) => e,
+    }
 }
