@@ -688,7 +688,7 @@ the previous version used. The safe way:
   a taker into its refund chain, the chain looks for the maker's spend of the taker payment, which reveals the secret
   needed to claim the maker payment. If that look finds nothing or fails, it now asks every server of the coin
   before it goes on with the refund, so the maker payment is claimed in time. Both apply to UTXO coins on Electrum;
-  the first only while `electrum_tip_checks` is `true` (the default). Detail: PR #PENDING; CRD ch.38 R38.6.4o item 6
+  the first only while `electrum_tip_checks` is `true` (the default). Detail: PR #461; CRD ch.38 R38.6.4o item 6
   and ch.51 R31a, status notes of 2026-11-21.
 - **An Electrum server is no longer marked as stuck just because the next block was slow.** A
   server counted as stuck when it had sent no new block for a while (at least 10 minutes) while
@@ -909,7 +909,7 @@ the previous version used. The safe way:
 
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
   confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
-  PR #PENDING; step 3, the lab row, is listed there.
+  PR #461; step 3, the lab row, is listed there.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P7, one record of spent coins
   and one lock per address for QTUM and its tokens, in PR #436; Phase E items 1 and 2 are covered.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P5, one Electrum client for
