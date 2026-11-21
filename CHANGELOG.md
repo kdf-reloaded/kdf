@@ -1027,7 +1027,7 @@ the previous version used. The safe way:
   the refund step still looks at the taker payment first and does not refund once it finds the maker's own
   confirmed claim. When nothing spent the taker payment, the refund goes ahead as before. The design chapter
   also states why a recorded but lost claim is answered differently by the automatic refund and by the manual
-  recovery. Only test code and docs changed. Detail: PR #TBD; CRD ch.51, status notes of 2026-11-21 after
+  recovery. Only test code and docs changed. Detail: PR #464; CRD ch.51, status notes of 2026-11-21 after
   R82 and R83, T35.
 
 ### Plans touched
