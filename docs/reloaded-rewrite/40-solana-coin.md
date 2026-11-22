@@ -2104,14 +2104,15 @@ program address changed to the address of Reloaded's deployment (the program
 refuses to run under any other address than the one it declares). It is built
 twice in a pinned build environment, the two builds must be equal, and after
 deployment the program's hash on chain must equal theirs. The devnet program of
-F40.6B.5 is not matched: the source it was built from is not public. Reloaded
-deploys it once per cluster without an upgrade authority, so no one can change
-the program after deployment: on devnet with a lab key and faucet funds (the
-devnet lab runs on that deployment), and on mainnet from the maintainer's wallet
-once the maintainer decides it, which is after 0.5.0. The program address of
-each cluster is recorded in a dated status note of this section once deployed.
-By its own record the program is not audited; Reloaded's review of its source is
-not an audit.
+F40.6B.5 is not matched: a build of the reviewed state did not equal it
+(2026-11-22), and the commit the repository's own record names for that
+deployment is not in its public history. Reloaded deploys it once per cluster
+without an upgrade authority, so no one can change the program after deployment:
+on devnet with a lab key and faucet funds (the devnet lab runs on that
+deployment), and on mainnet from the maintainer's wallet once the maintainer
+decides it, which is after 0.5.0. The program address of each cluster is
+recorded in a dated status note of this section once deployed. By its own record
+the program is not audited; Reloaded's review of its source is not an audit.
 
 **R40.6D.2 (configuration and tradability).** A platform entry of type `SOLANA`
 names its cluster's program in `protocol.protocol_data.swap_program_id`
