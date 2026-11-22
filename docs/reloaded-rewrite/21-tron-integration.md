@@ -2075,6 +2075,112 @@ a single flag.
   constant is set to `true` only together with a TRON swap
   implementation (§21.11B).
 
+- **D7 -- EVM-only RPC methods (Reloaded status note, 2026-11-22;
+  clean-side, not corpus-sourced).** A TRX or TRC20 coin is a member of
+  the EVM coin family, but its node list holds TRON nodes, and a TRON
+  node does not serve EVM JSON-RPC. Seven methods of the family have no
+  TRON implementation in Reloaded and reach, for an EVM coin, the
+  coin's EVM nodes or its gas API. Until this date a TRON coin took the
+  same path: the method failed only after the coin's TRON nodes had
+  been asked in the EVM form (`sign_raw_transaction`, which has no
+  node to ask for a TRON coin: only after its wait for a nonce had run
+  out), with an error that reads like a node outage. From this date
+  each of the seven refuses a TRX and a TRC20 coin with a typed "not
+  supported" answer, before any request to a node or to a gas API:
+
+  - `get_raw_transaction`: `NotImplemented` naming the coin, HTTP 501.
+  - `sign_raw_transaction`: `NotImplemented` naming the coin, HTTP 501.
+  - Legacy `get_trade_fee`: the coin's trade fee fails with the text
+    "TRON trade fee is not supported" (the unit tests call the coin
+    method; the legacy error body around it is not asserted).
+  - `trade_preimage` whose receiving side is a TRON coin: the coin's
+    receiver trade fee fails with `InternalError` and the text "TRON V1
+    receiver trade fee is not supported", the same form in which the
+    sending side was already refused (the unit tests call the coin
+    method; the RPC status is not asserted). The check of the
+    coins-config `wallet_only` flag in `trade_preimage` is not changed.
+  - `get_eth_estimated_fee_per_gas`: `CoinNotSupported`, HTTP 501.
+  - `stream::fee_estimator::enable`: `NotSupportedFor` naming the coin,
+    HTTP 501; no streamer is started.
+  - `get_token_info` with an `ERC20` protocol whose platform is a TRX
+    or TRC20 coin: `UnsupportedTokenProtocol` naming the platform, HTTP
+    400, the answer a `TRC20` protocol already got.
+
+  An EVM coin is unchanged in all seven. The note of 2026-11-20 after
+  R21.10B.9 calls the legacy `get_trade_fee` and `trade_preimage`
+  unchanged; that holds for the wallet-only question it describes, and
+  the two refusals above are added to it from this date.
+
+  *Against the reference (restated 2026-11-22, after the block
+  "EVM-family methods called on a TRX or TRC20 coin" of §21.10B was
+  cleared).* The reference fails five of the seven methods for a TRON
+  coin as well, with no node request, four of them with other answers
+  than Reloaded's; it accepts the fee stream, and with a gas-fee
+  provider it answers the fee estimate:
+
+  - `get_raw_transaction` (R21.10B.15): the reference answers
+    `InvalidHashError` (HTTP 400) for a malformed `tx_hash` and
+    `Transport` (HTTP 502) otherwise; Reloaded answers `NotImplemented`
+    (HTTP 501) for every request, before the hash is read.
+  - `sign_raw_transaction` (R21.10B.16): the reference answers
+    `InvalidParam`, `InternalError` or, after about five seconds,
+    `TransactionError`, depending on the request; Reloaded answers
+    `NotImplemented` (HTTP 501) at once, before the request members are
+    read.
+  - Legacy `get_trade_fee` (R21.10B.17): both answer the legacy error
+    body; the text differs (the reference's text is not recorded).
+  - `trade_preimage` (R21.10B.18): the same tokens, `CoinIsWalletOnly`
+    for a wallet-only config and `InternalError` (HTTP 500) otherwise.
+    Where the reference could obtain Ethereum figures through a
+    non-legacy swap fee policy and a gas-fee provider (the last
+    paragraph of R21.10B.19), Reloaded refuses the TRON coin's fee
+    reads before any figure is asked for.
+  - `get_eth_estimated_fee_per_gas` (R21.10B.19): the reference answers
+    `Internal` (HTTP 500) without a gas-fee provider and **succeeds**
+    with Ethereum's fees under the TRON ticker with one; Reloaded
+    answers `CoinNotSupported` (HTTP 501) and does not ask the provider.
+  - `stream::fee_estimator::enable` (R21.10B.20): the reference
+    **accepts** the request and runs a stream of error events, or of
+    Ethereum's fees with a gas-fee provider; Reloaded answers
+    `NotSupportedFor` (HTTP 501) and starts no stream.
+  - `get_token_info` (R21.10B.21): the reference answers `NoSuchCoin`
+    (HTTP 404) for a platform that is not active, `InvalidRequest`
+    (HTTP 400) for a base58check or `41...` contract address and
+    `RetrieveInfoError` (HTTP 500) for a `0x` one, for an `ERC20` and a
+    `TRC20` protocol alike. For an `ERC20` protocol on a TRON platform
+    Reloaded answers `NoSuchCoin` for a platform that is not active and
+    `UnsupportedTokenProtocol` (HTTP 400) otherwise, whatever the
+    address; a `TRC20` protocol is refused with
+    `UnsupportedTokenProtocol` before the platform is looked up, as
+    before this date.
+
+  The fee estimate with a gas-fee provider and the fee stream are
+  deliberate divergences, by the maintainer's decision of 2026-11-22: a
+  TRON ticker is not answered with another chain's fees, and a stream that
+  can only report errors is not started. The other differences are in the
+  error token of a call that fails on both sides. All of them are local,
+  no peer sees them, and no compatibility switch exists
+  (`docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2).
+
+  The parity rows of that block are restated for Reloaded:
+
+  - T21.10B.19: `get_raw_transaction` answers `NotImplemented`, HTTP
+    501; `get_token_info` with an `ERC20` protocol on the TRX platform
+    answers `UnsupportedTokenProtocol`, HTTP 400, for both address
+    forms (by the order of the checks: the address is read after the
+    refusal); `get_eth_estimated_fee_per_gas` with `Simple` answers
+    `CoinNotSupported`, HTTP 501; the legacy `get_trade_fee` answers the
+    legacy error body. The stub's count does not change.
+  - T21.10B.20: `sign_raw_transaction` answers `NotImplemented`, HTTP
+    501, at once, for each of the three requests (by the order of the
+    checks: the refusal comes before the request members are read). The
+    stub's count does not change and no answer carries a transaction.
+  - T21.10B.21: unchanged; Reloaded gives the same answers (the unit
+    tests call the coin's fee methods; the RPC status is not asserted).
+  - T21.10B.22: `stream::fee_estimator::enable` for TRX answers
+    `NotSupportedFor`, HTTP 501, no stream is started, and the stub
+    receives no request.
+
 **R-D1 (gate invariant).** Because the coin activates with no
 swap-contract binding, no production code path may reach a
 Tron swap/NFT operation; the deferral sites exist to make the
@@ -2853,3 +2959,10 @@ V3. The address encoding, protobuf transaction/contract formats,
   test; the repository's clean-room gate tool was not run because the
   additions embed no code blocks. *Measure:* 0.03, on the
   discretionary-expression basis.
+- *Status note added 2026-11-22 (clean-side, Reloaded-original) -- D7 of
+  §21.11, the EVM-only RPC methods a TRON coin refuses.* *Inputs:* the
+  cleared text of R21.10B.9 and R21.10B.10 above for what this chapter
+  already records, R21.10B.14 -- R21.10B.21 and T21.10B.19 --
+  T21.10B.22 (cleared 2026-11-22) for the comparison, and this
+  repository's own code. *Forbidden corpus:* not consulted for this
+  note. No cleared sentence was edited.

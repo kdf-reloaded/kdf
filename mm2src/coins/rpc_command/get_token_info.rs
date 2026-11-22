@@ -106,7 +106,9 @@ pub async fn get_token_info(ctx: MmArc, req: GetTokenInfoRequest) -> MmResult<Ge
 
     let platform_coin = lp_coinfind_or_err(&ctx, &platform).await.map_mm_err()?;
     let platform_coin: EthCoin = match platform_coin {
-        MmCoinEnum::EthCoin(eth) => eth,
+        // A TRX or TRC20 coin is not an ERC-20 platform: it has no EVM node to read the contract from (CRD ch.21
+        // D7).
+        MmCoinEnum::EthCoin(eth) if !eth.is_tron_family() => eth,
         _ => return MmError::err(GetTokenInfoError::UnsupportedTokenProtocol(platform)),
     };
 
