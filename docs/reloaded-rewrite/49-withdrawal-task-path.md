@@ -513,12 +513,6 @@ used-address rule and the listed entries of the scan that runs at
 activation (R49.36), and what remains recorded when the balance query of a
 newly generated address fails (R49.37). No sentence above was changed.
 
-*Status note (2026-11-22, clean side).* The points the note of 2026-11-21
-above leaves open -- the shape of `page_balance`, the scan at activation, and
-the address that stays known when a balance query fails -- are the three
-points of the note just above. Whether Reloaded follows R49.35 is the
-maintainer's decision and is not yet taken.
-
 > **Code-quality finding (informative; this repository).** The Trezor
 > emulator test that stands for T49.9 builds the ERC-20 coin directly with
 > an HD derivation instead of activating it on a Trezor platform. It
@@ -728,14 +722,6 @@ R49.37. *A new address whose balance query fails (reference contract).*
 > then queries the balance, with no rollback, as R49.37 item 2 describes.
 > This repository has no `task::get_new_address::init` (chapter 21, the
 > Reloaded note after R21.10B.4).
-
-> *Status note (2026-11-22, clean side).* Item (b) above names the status
-> note of 2026-11-20 in §49.2.1; the note of 2026-11-21 there (PR #463) is
-> newer. Since that change, `task::scan_for_new_addresses::init` for a
-> platform ticker counts an address that holds only a token as used and lists
-> the intervening entries with `{}`. The open points of item (b) stand for
-> the scan at activation only, which keeps the nonce and platform-balance
-> rule (R35.1.3(b)).
 
 T49.33. *(Reloaded-original; R49.35.)* Against a mocked EVM node, under a
 software global-HD login, activate a platform with one ERC-20 token and
@@ -1611,9 +1597,3 @@ addresses.
   comparison was run, and the repository's clean-room gate tool was not
   applicable because the additions embed no code blocks. *Measure:* 0.03, on
   the discretionary-expression basis.
-- *Status notes added 2026-11-22 (clean side, Reloaded-original) -- after
-  the Spec Reader round 0.5.0-21 status note in §49.2.1 and after the
-  Reloaded status note of §49.2.2.* They relate the note of 2026-11-21 in
-  §49.2.1 to R49.35 -- R49.37 and to item (b) of that status note, from this
-  repository's code and the cleared text; no forbidden-class input. No
-  cleared sentence was edited.
