@@ -58,3 +58,18 @@ algorithms use four layouts (CRD ch.37 R37.5.11); the algorithm is bits 8 to 11 
 | `krgn_188823_lone_kawpow.hex` | 188823 | KawPoW, 124 bytes |
 | `krgn_188818_lone_equihash_200_9.hex` | 188818 | Equihash(200,9), 1487 bytes |
 | `krgn_188820_lone_equihash_192_7.hex` | 188820 | Equihash(192,7), 543 bytes |
+
+## Dash-layout transaction fixtures (fetched 2026-11-22)
+
+One transaction per file, raw bytes as hex, exactly as returned by `blockchain.transaction.get` from a public DASH
+Electrum server (DASH rows) or a public Kerrigan Electrum server (Kerrigan row). Each hex hashes (double SHA-256,
+reversed) to its txid. They back CRD ch.38 T38.6.10.1 to T38.6.10.4.
+
+| File | Chain, height | txid | Version / type | Inputs / outputs | Payload |
+|---|---|---|---|---|---|
+| `dash_2576221_type5_cbtx.hex` | DASH 2576221 | `82efdfbb4adb79d9c590cd83c316acb8c40d51c975a519733ff2d420d469e7ed` | 3 / 5 | 1 / 3 | 175 bytes |
+| `dash_2576104_type1_proregtx.hex` | DASH 2576104 | `8a334dff3c0c0d7616b809a837798a70294c5fbd0e36604191de75d2670caf4e` | 3 / 1 | 1 / 1 | 274 bytes |
+| `dash_2576170_type9_assetunlock.hex` | DASH 2576170 | `0bfefcc1c944d1a0c885a1de834d7587c4069d944b6b28e9c2e16b80a07a3cc4` | 3 / 9 | 0 / 1 | 145 bytes |
+| `dash_2576220_v3_type0.hex` | DASH 2576220 | `0d9754c759a993b6ca598a2c6dae7935ffaeeceb77498da1e280437946b5ec8b` | 3 / 0 | 19 / 2 | none |
+| `krgn_191125_type10_sapling.hex` | Kerrigan 191125 | `6b99a0b216da1e96b2eacc0ed9db4993301342f45d21c3a3dfeafbfeadd2ad11` | 3 / 10 | 0 / 1 | 2356 bytes |
+| `dash_2576219_type6_qc.hex` | DASH 2576219 | `c28c2cf4b6aa304430b0c5ef53763fcd8398451307843e54f5618f4da87f6d07` | 3 / 6 | 0 / 0 | 341 bytes |
