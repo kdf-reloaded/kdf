@@ -29,6 +29,9 @@ A release is not cut until every box below is ticked. This checklist applies to 
 - [ ] WASM build succeeds (`cargo build --target wasm32-unknown-unknown -p mm2_bin_lib`).
 - [ ] No `unwrap`/`expect`/`panic!` introduced in RPC paths without justification.
 - [ ] No new `unimplemented!()` in code paths reachable without an explicit experimental Cargo feature.
+- [ ] From 0.5.0 on: the R100 release gate passes, that is, every coin family that can swap reads its swap evidence
+      from two nodes or a trusted node (CRD ch.51 §51.6G): `cargo test -p coins --lib -- --ignored
+      r100_release_gate_every_swap_family_adopted`.
 
 ## Documentation
 
