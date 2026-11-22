@@ -14,6 +14,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
+  `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
+  instead of running on a database layout it does not know. No released version of KDF Reloaded or GLEEC KDF records
+  a state above 15, so this matters only when a node goes back from a later version, or from an unreleased
+  development build, that migrated the database further.
+  - *What to do:* start the version that migrated the database, or move `MM2.db` aside (keep it) to start with a new
+    one. The legacy swaps and their statistics are imported again from their saved files; data kept only in the
+    database, namely swaps of the newer swap protocol, the order history and the node statistics, stays in the file
+    you moved aside.
+  - Detail: PR #486; CRD ch.44 R44.2.3 and §44.9A R44.9A.5.
 - **The shielded (ARRR, Pirate) wallet database is migrated irreversibly on the first start of this version, and an
   older build cannot open the migrated database.** The Zcash libraries were upgraded (see "Changed"), and the new
   wallet library changes the layout of the wallet database. On the first activation of a shielded coin the node
@@ -119,6 +129,24 @@ or undo, and every change that needs a step from you.
   `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
   - *What you see:* a KRGN entry without the value still activates, but its claims and refunds keep failing.
   - Detail: PR #468; CRD ch.37 status note of 2026-11-18.
+- **`account_balance` now answers `page_balance` as an object keyed by ticker, for every HD coin, and the activation
+  report of an EVM platform lists `{}` for the addresses its scan passed over.** Until now `page_balance` was one
+  balance, `{"spendable": "...", "unspendable": "..."}`. It is now an object with one balance per ticker, the same
+  type as the `balance` of one address: `{"RIN": {"spendable": "...", "unspendable": "..."}}`. Each ticker is summed
+  over the addresses of the returned page only, not of the whole account.
+  - *What you see:* a UTXO, QTUM or Sia coin answers its own ticker. An EVM platform ticker answers the platform and
+    every ERC-20 token activated on it, a token with a zero balance included; a TRX ticker answers TRX and its
+    enabled TRC20 tokens; an ERC-20 or TRC20 ticker answers that token only. A page that lists no address (a page
+    past the known range) answers a map with the requested ticker and a zero balance. GLEEC KDF answers `{}` there;
+    the maintainer decided on 2026-11-22 to keep the entry for the requested ticker, as the `total_balance` of an
+    account without a known address already does.
+  - *What to do:* read `page_balance` as an object and take a ticker's balance from `page_balance["<TICKER>"]`; the
+    members `spendable` and `unspendable` no longer sit directly under `page_balance`.
+  - *Activation report of an EVM platform:* the unused addresses that the scan at activation passes over on its way
+    to a used address (not on a TRON platform) carry an empty balance map, `{}`, where they used to carry a zero
+    entry for the platform ticker. A client that reads the platform ticker's balance of every listed address must
+    accept an empty map. A later `account_balance` lists those addresses with the full map and zero values.
+  - Detail: PR #478; CRD ch.49 R49.35, R49.36.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -303,7 +331,7 @@ the previous version used. The safe way:
   *Swaps stay off.* Reloaded has no TRON swap, so every TRX and TRC20 coin counts as wallet-only, whatever its
   coins-file entry says: `setprice`, `buy`, `sell` and `start_swap` refuse it with the usual "… is wallet only"
   answer, as GLEEC KDF does for a coin configured `"wallet_only": true` (every published TRON entry is), a TRON coin
-  declines to match, an order with a TRON coin saved earlier is cancelled at startup with a line in the log, and an
+  declines to match, an order with a TRON coin saved earlier is kept at startup but not announced or matched, and an
   unfinished saved swap that names a TRON coin is not resumed at startup (its record is kept). For a TRON entry that
   does not say `"wallet_only": true`, GLEEC KDF refuses the order at a later check; the answer has the same form, so
   no setting exists for this. Gasless TRC20 transfers through GasFree are signed but not submitted yet: a GasFree
@@ -649,6 +677,11 @@ the previous version used. The safe way:
   balance is not zero. Detail: PR #438; CRD ch.49 R49.32.
 - **`task::scan_for_new_addresses::init` serves EVM coins under an HD wallet.** It was answered only for TRON coins
   and UTXO coins; an EVM platform now answers it. Detail: PR #438; CRD ch.05 R54.
+- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
+  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
+  transaction of another coin family. It now refuses the transaction with an error message. In the
+  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
+  Detail: PR #452.
 
 #### Solana coins
 
@@ -717,6 +750,12 @@ the previous version used. The safe way:
   raw-transaction signing request used to sign such a transaction anyway, and Radiant rejected it. It now
   answers with a signing error that names the output index and the case. Withdrawals and swaps never build
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
+- **The log tells when QTUM and its QRC20 tokens open, share and close a set of Electrum connections.** One INFO
+  line is written when a set is created (naming the instance that created it), one each time another instance
+  reuses it, and one when the last instance lets go of it and it closes. Each line names the platform (for example
+  `QTUM`) and the servers as `host:port` only, without the protocol or any user name, password, path or query of a
+  server entry. No line is written per request or on a timer. Detail: PR #476; CRD ch.38 status note of
+  2026-11-22 after D38.6.4Q.1.
 
 #### ZEC
 
@@ -749,6 +788,17 @@ the previous version used. The safe way:
 
 ### Fixed
 
+#### Orders
+
+- **Saved orders of a coin that cannot be traded are kept, but no longer announced or matched.** After a restart,
+  a saved order of a coin this build cannot trade stays in `my_orders` but is not announced to the order book and
+  is not matched, and one line in the log names it. This covers wallet-only coins, Lightning, Solana, and
+  Tendermint and TRON while their swaps are off. Before, a saved Lightning or Solana order returned to the order
+  book and every match failed, and a saved Tendermint or TRON order was cancelled. The operator can still cancel
+  such an order with `cancel_order`, which still sends its cancel message. A kept taker order still times out as
+  before: fill-or-kill is removed, good-till-cancelled becomes a maker order that is kept and not announced.
+  Detail: PR #485; CRD ch.60 R60.6.5.
+
 #### EVM, BCH, Sia and Lightning coins
 
 - **The HD address methods of an EVM platform list its tokens.** `get_new_address`, `account_balance`,
@@ -761,7 +811,25 @@ the previous version used. The safe way:
 - **A scan for new addresses of an EVM platform finds token-only addresses.** An address counts as used when its
   transaction count, its platform balance or the balance of any activated token is not zero, so an address that only
   received a token is found. The unused addresses between the known range and a newly found address are listed with
-  an empty balance map. The scan made during activation is unchanged. Detail: PR #463; CRD ch.49 R49.32.
+  an empty balance map. The scan made during activation now follows the same rule (next item). Detail: PR #463; CRD
+  ch.49 R49.32.
+- **The address scan at activation of an EVM platform takes the tokens of the same request into account.**
+  `enable_eth_with_tokens` and `task::enable_eth::init` under an HD login now count an address as used when its
+  transaction count, its platform balance or the balance of any token named in the request is not zero, so an address
+  that only holds a token is found and listed. The unused addresses the scan passes over are listed with an empty
+  balance map, and each token's balance is asked once per listed address. If a node query of the scan fails, the
+  activation fails with `Transport` and the scan records no address. A TRON platform keeps its answers.
+  Detail: PR #478; CRD ch.49 R49.36.
+- **An HD account that knows no address is scanned again at the next activation under the default scan policy.** A
+  first activation that fails while it scans leaves the account stored with no known address, and later activations
+  under `scan_if_new_wallet` used to treat it as an existing wallet and never scan it, so used addresses beyond the
+  minimum stayed unlisted until a scan was asked for. Such an account is now scanned as a new one would be, for UTXO
+  coins, QTUM, Sia and EVM coins including TRON. An account that knows an address is not scanned again under the
+  default policy, and `do_not_scan` never scans. The rule does not tell such an account apart from one that knows no
+  address because it was never used, for example one made by `task::create_new_account` and activated with
+  `min_addresses_number` 0: that account is scanned again at every activation under the default policy, up to
+  `gap_limit` addresses per chain, and on an EVM platform every token's balance is asked at each of them. GLEEC KDF
+  does not scan such an account. Detail: PR #478; CRD ch.49 R49.36 item 7, ch.05 R35a.
 - **A quick disable and re-enable no longer leaves the old history loop running, and a failed legacy activation no
   longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
   of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at
@@ -774,6 +842,11 @@ the previous version used. The safe way:
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
+- **An operation that a Lightning coin does not support answers an error instead of stopping the process.** The swap
+  operations, the trade-fee estimates, the waits for a confirmation or a spend and the transaction decoding of a
+  Lightning coin aborted the node when they were reached; each now answers an error. Orders and trade previews with
+  a Lightning coin were already refused. The public key of a Lightning coin, which `get_private_keys` reads, is its
+  node id. Detail: PR #479.
 
 #### WalletConnect
 
@@ -877,6 +950,13 @@ the previous version used. The safe way:
 
 #### Transaction history
 
+- **DASH and Kerrigan history rows of special transactions carry the chain's transaction id.** A DASH coinbase
+  payout, a masternode provider transaction, a Platform withdrawal (asset unlock) or a Kerrigan Sapling transaction
+  carries an extra payload after its lock time. The node ignored that payload, so it computed an identifier the chain
+  does not know and showed it as the history row's `tx_hash` and `internal_id`. The payload is now read and kept,
+  and the identifier is the chain's. A special transaction whose payload is cut short is refused as malformed instead
+  of being read without it. Ordinary transactions are unchanged. Detail: PR #474; CRD ch.38 R38.6.10.5.
+
 - **The history of a UTXO coin says which transactions it skipped.** A transaction the node cannot read is left out of
   the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
   as if it were complete. `sync_status` now lists each skipped transaction in
@@ -914,14 +994,6 @@ the previous version used. The safe way:
   balance change, and one WARN line names the height from which the chain changed. At most one small request is made
   per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
 
-#### EVM coins
-
-- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
-  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
-  transaction of another coin family. It now refuses the transaction with an error message. In the
-  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
-  Detail: PR #452.
-
 #### Kerrigan (KRGN)
 
 - **KRGN swaps can claim and refund over Electrum.** Kerrigan headers are 80, 124, 543 or 1487 bytes long,
@@ -954,7 +1026,6 @@ the previous version used. The safe way:
   and the mint's decimals for a token, for example `1.000000000` or `-1.500000`. The values are unchanged;
   single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
   CRD ch.40 R40.2A.4, D40.2A.1.
-
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
@@ -1032,6 +1103,15 @@ the previous version used. The safe way:
   node built that transaction itself, so it cannot be a coinbase output, and the check no longer
   fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
   after R38.5B.4.
+- **A disabled QTUM or QRC20 instance no longer comes back into the subscriptions of the shared Electrum connections,
+  and a subscription lost on a reconnect is placed again when it is asked for.** Two cases left the shared set of
+  connections of QTUM and its tokens with a wrong record of its subscriptions. A subscription request that was still
+  waiting for its answer when its instance was disabled, or one sent later by a balance stream of the disabled
+  instance, recorded that instance again, and its subscription was then placed again after every reconnect. And when
+  a subscription could not be placed again over a new connection, it still counted as placed, so a later request for
+  it sent nothing. Now a disabled instance records nothing, and a subscription is skipped only while it is placed
+  over the current connection. One instance sends at most one request per subscription at a time. Detail: PR #473;
+  CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
 
 #### TRON coins
 
@@ -1040,8 +1120,29 @@ the previous version used. The safe way:
   TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
   form that is not its own. Detail: PR #455; CRD ch.21 R-WP6.
 
+- **Methods that work only for EVM coins now answer "not supported" for a TRON coin at once.** A TRX or TRC20
+  coin has no EVM node, yet seven methods asked its TRON nodes in the EVM format and failed with an error
+  that looked like a node outage. Each now refuses a TRON coin with a typed error before any request to a
+  node: `get_raw_transaction` and `sign_raw_transaction` with `NotImplemented` (HTTP 501, and
+  `sign_raw_transaction` no longer waits for a nonce first), `get_eth_estimated_fee_per_gas` with
+  `CoinNotSupported` (HTTP 501), `stream::fee_estimator::enable` with `NotSupportedFor` (HTTP 501, no streamer
+  is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
+  (HTTP 400), the legacy `get_trade_fee` with the text "TRON trade fee is not supported", and `trade_preimage`
+  with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
+  supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
+
+#### Legacy swaps
+
+- **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
+  refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
+  that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
+  CRD ch.51, status note of 2026-11-22 after R31a.
+
 ### Tests
 
+- **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
+  network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
+  Detail: PR #479.
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
   runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
   because the locked test library was far older than the locked `wasm-bindgen`. The test library is
@@ -1122,6 +1223,11 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
+  lines for a shared QTUM Electrum client, in PR #476.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
+  shared QTUM Electrum client after a disable or a failed placement, in PR #473.
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
   confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
   PR #461; step 3, the lab row, is listed there.
@@ -1172,6 +1278,7 @@ the previous version used. The safe way:
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
   store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #393).
+  The beta-availability note now says a saved Tendermint order is kept at startup, not cancelled.
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
@@ -1180,6 +1287,7 @@ the previous version used. The safe way:
   The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
   The transaction history (work package 4) is built with a TronGrid API key, still switched off (PR #440).
   On 2026-11-20 TRON was switched on as a wallet-only coin family; swaps stay off.
+  The plan now also says a saved TRON order is kept at startup, not cancelled.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
   controller; the support modules are built; the activation binding and the `gasfree_address` fields in the reports
@@ -1220,6 +1328,12 @@ the previous version used. The safe way:
   and repeating the request later succeeded. For regular use, set a TronGrid API key (`tron_api_key`) or use your
   own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: PR #467;
   CRD ch.21 §21.9.
+- **No watcher can refund a Siacoin (SC) payment yet.** The 0.4.0-beta.1 item "Siacoin (SC) swaps: what is not
+  covered" says that a node watching other traders' swaps can refund a Siacoin payment for an offline taker. That
+  overstated it: a taker hands its swap data to watchers only when both coins of the swap offer watching, and
+  Siacoin is the only coin that does, so no swap hands its data to a watcher, as the 0.4.0-beta.1 item "The swap
+  watcher does not work yet" says. Keep your node running until your swaps have finished. Detail: CRD ch.09 R17,
+  ch.20 D7.
 
 ## [0.4.1-beta.1] — 2026-11-21
 

@@ -4418,6 +4418,45 @@ on 2026-11-18.
    removed from the shared client, unless another live instance remembers
    the same one. They are then no longer placed again after a reconnect.
 
+*Status note (2026-11-22, clean side; maintainer decision of 2026-11-21).*
+A client of the QTUM family's registry (item 2), shared or built for one
+instance whose inputs differ, writes one INFO line when it is created,
+naming the platform ticker and the instance that built it; one each time an
+instance reuses it, naming that instance; and one when the last holder lets
+go of it and it closes. Each line lists the servers in the configured order
+as `host:port` only, as the server names of R38.6.9a; an entry without a
+usable host and port is shown as a placeholder. A failed build and a refused
+reuse (item 3) write nothing, and an instance that lets go while others still
+hold the client writes nothing. No line is written per request or on a
+timer. Every other coin writes none of these lines.
+
+*Status note (2026-11-22, clean side; defect fix).* In this tree a shared
+client keeps the subscriptions of item 6 and of the D38.6.4Q.3 status note
+per instance as follows.
+
+1. *Removal.* An instance is remembered for a subscription before its
+   request is sent, so a disable while the request waits for its answer
+   removes it, and the answer adds nothing back. A removed instance stays
+   retired on the client: a later request of it, from a handle that outlived
+   the removal, sends nothing and is remembered nowhere. This costs one entry
+   per removed instance for the life of the client.
+2. *Placed over the current session.* A request of an instance that
+   remembers the subscription sends nothing only while the subscription is
+   placed over the current session. When placing it again over a newer
+   session failed, the next request of that instance sends it. The placing
+   again itself is not retried (D38.6.4Q.3 status note, item 2). It leaves
+   a subscription that has a request in flight over the current session to
+   that request; when that request fails and the subscription is still
+   remembered, the placing again is asked for once more.
+3. *One request at a time.* An instance has at most one request in flight
+   per subscription and session; another request of the same instance
+   meanwhile sends nothing and is answered as placed, even when the request
+   in flight then fails. A request without an answer holds this only until
+   it is answered, its call ends at the request time limits of the client,
+   or its caller drops it; it then counts as failed.
+4. *First placement.* A subscription whose first placement for an instance
+   failed or was dropped is not remembered for that instance.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -4800,6 +4839,20 @@ item 1 in every version was not checked; the reference sends nothing else.
 token's swap paths were read only for the set of methods they send
 (R38.6.4Q.8), not request by request. (6) The `disable_coin` contract
 (R38.6.4Q.10 item 4) and native mode were not examined.
+
+> **Pointer (2026-11-22, KDF Spec Reader, round 0.5.0-23; gate status as
+> chapter 51 §51.6E states).** Point (5) above is taken further, for the
+> legacy swap's spend search and secret extraction, in
+> [chapter 51](51-legacy-v1-swap-state-machine.md) §51.6E.
+> R89 records how a QRC20 spend or refund is found (candidates from the
+> token's `Transfer` history and the presence of the swap event, the match
+> by the call data), that the `excepted` value is read for the payment only,
+> and that the event is not tied to the matched call's output. R90 records
+> the UTXO and SLP search (classification by the input that spends the swap
+> output) and the secret extraction. R88 records refund eligibility: the
+> wall clock alone for QRC20 and SLP, the median time past for a standard
+> UTXO coin, BCH and the QTUM base coin. The rules of this chapter are
+> unchanged.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
@@ -5648,6 +5701,36 @@ produce. The payload is not interpreted.
 > also refuse bytes left over after a complete reading is a wider question,
 > left to the orchestrator.
 
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-21).** R38.6.10.5 is built. The shared transaction reader treats a
+> transaction as special when its leading word has the top bit clear, a version
+> of 3 or higher in the low 16 bits and a type other than 0 in the high 16 bits.
+> For such a transaction, in every reading path, it reads no time field, takes
+> an empty input list as an empty input list rather than as a witness marker,
+> and, when bytes follow the lock time, reads the compact-size-prefixed payload
+> into a field of its own. The writer puts the payload back after the lock time
+> with its prefix, so the computed identifier, and with it the identifier of a
+> history row, is the chain's transaction id. A payload whose prefix claims more
+> bytes than remain is refused in every path. A special-shaped transaction with
+> nothing after its lock time is read without a payload, as R38.6.10.2 describes
+> for the reference, so a transaction of another standard-layout chain whose
+> version word only happens to have this shape keeps its reading. Such a
+> transaction with a witness would not have its witness marker recognized, and
+> on a chain read with the time-field layout such a word would be read without
+> its time field and trailing string; no listed chain is known to produce
+> either. The whole leading word is kept as the version, so the type is the high
+> 16 bits of it; nothing interprets the payload, and no special transaction is
+> built. Leftover bytes after a complete reading are still not refused in
+> general (the finding above stays open on that point). PIVX special
+> transactions are not covered by this rule; their reading is not established.
+> Tests: T38.6.10.1 with a DASH coinbase (type 5), provider registration (type
+> 1), asset unlock (type 9, no inputs, one output), a version-3 type-0
+> transaction and a Kerrigan Sapling transaction (type 10, no transparent
+> inputs, one output), all from the public chains; T38.6.10.2 to T38.6.10.4 as
+> stated; and a special-shaped transaction without a payload. A DASH quorum
+> commitment (type 6, no inputs and no outputs) is also read with its payload
+> and the chain's identifier by the shared reader.
+
 **R38.6.10.6** *Kerrigan headers are not this section's subject.* How the
 reference reads Kerrigan's headers, the median-time-past and the HTLC
 lock-times is recorded in chapter 37 §37.5.11.
@@ -5776,6 +5859,19 @@ empty-account representation is therefore a one-entry ticker-keyed map whose
 value is a zero `CoinBalance`, not an untyped empty object. This preserves the
 wire shape consumed by wallet SDKs and keeps an intentionally empty HD wallet
 distinguishable from a malformed balance response.
+
+*Status note (2026-11-22), the page total is a map (as built; clean side, not
+corpus-sourced).* `account_balance` of every HD family now answers
+`page_balance` as a ticker-keyed map of the same type as an address's
+`balance`, where it answered one `{spendable, unspendable}` balance
+([Chapter 49](49-withdrawal-task-path.md) R49.35). Where the reference answers
+`{}` -- a page that lists no address, and the `total_balance` of an account with
+no known address -- this repository keeps the form of this rule: a one-entry map
+holding the requested coin's ticker and a zero balance. That is a recorded
+divergence, decided by the maintainer on 2026-11-22. A UTXO or QTUM coin's page
+total therefore holds its own ticker, summed over the addresses of the returned
+page; `total_balance` of the task form and of the activation report is formed as
+before.
 
 > **Cross-reference (informative).** The full wire contract of the UTXO-family
 > task activations (`task::enable_utxo`, `task::enable_qtum`,
@@ -6577,3 +6673,34 @@ R38.8.6 **Tests (two-direction, observable).**
   project's own reads of public LCC Electrum servers and this repository's
   code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Maintainer decision (2026-11-21), clean side -- status note after the
+  code-quality finding under R38.6.10.5 (the Dash-layout special-transaction
+  reader as built).* Written by a session that never read the forbidden
+  corpus, from the maintainer's decision, the cleared section, the published
+  Dash special-transaction format, public DASH and Kerrigan chain data and
+  this repository's code. It takes no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.
+- *Maintainer decision (2026-11-21), clean side -- status note of
+  2026-11-22 after the D38.6.4Q.1 status note (INFO lines for the creation,
+  reuse and release of a QTUM-family Electrum client).* Written by a session
+  that never read the forbidden corpus, from the maintainer's decision and
+  this repository's code. It takes no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.
+- *Defect fix (2026-11-22), clean side -- status note after the D38.6.4Q.1
+  status note (subscriptions of a shared client: a removal while a request
+  waits, a removed instance's later request, placement over the current
+  session, one request at a time).* Written by a session that never read the
+  forbidden corpus, from this repository's code and its tests. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
+- *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
+  at the end of §38.6.4Q.* It names chapter 51 §51.6E (R88, R89, R90) and
+  summarizes what those rules record; its reference content is that of its
+  target and is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure
+  0.03, no findings**, as recorded in chapter 51 §51.16.
+- *Maintainer decision (2026-11-22), clean side -- status note after R38.8.5
+  (the page total of `account_balance` is a ticker-keyed map; the empty forms
+  keep this rule's ticker entry).* Written by a session that never read the
+  forbidden corpus, from the maintainer's decision, the cleared text of
+  chapter 49 §49.2.2 and this repository's code. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.

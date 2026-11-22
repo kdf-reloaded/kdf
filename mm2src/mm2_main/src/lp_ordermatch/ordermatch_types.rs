@@ -184,6 +184,163 @@ fn is_untradable_coin(coin: &MmCoinEnum) -> bool {
 #[cfg(target_arch = "wasm32")]
 fn is_untradable_coin(coin: &MmCoinEnum) -> bool { matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)) }
 
+/// Why a coin cannot trade, judged by the coins configuration alone, so the coin does not have to be active:
+/// the family for a Lightning coin, for Solana (the platform coin and both token forms), for Tendermint (platform
+/// coin or token) while [`coins::TENDERMINT_SWAPS_AVAILABLE`] is `false` and for TRON (TRX or TRC20) while
+/// [`coins::TRON_SWAPS_AVAILABLE`] is `false`; "wallet-only" for an entry with `wallet_only` set and for a coin
+/// without an entry. `None` for a coin that can trade (CRD ch.60 R60.6.5).
+pub(crate) fn untradable_reason_by_conf(ctx: &MmArc, ticker: &str) -> Option<&'static str> {
+    let conf = coin_conf(ctx, ticker);
+    if conf.is_null() {
+        return Some("wallet-only, it has no coins-file entry");
+    }
+    match conf["protocol"]["type"].as_str() {
+        Some("LIGHTNING") => Some("Lightning"),
+        Some("SOLANA" | "SPLTOKEN" | "SOLANATOKEN") => Some("Solana"),
+        Some("TENDERMINT" | "TENDERMINTTOKEN") if !coins::TENDERMINT_SWAPS_AVAILABLE => Some("Tendermint"),
+        Some("TRX" | "TRC20") if !coins::TRON_SWAPS_AVAILABLE => Some("TRON"),
+        _ => coins::is_wallet_only_conf(&conf).then_some("wallet-only"),
+    }
+}
+
+/// The first coin of a pair that the coins configuration finds untradable, and why
+/// ([`untradable_reason_by_conf`]). The startup of the node asks it for a saved order, when no coin is active.
+pub(crate) fn untradable_pair_by_conf(ctx: &MmArc, base: &str, rel: &str) -> Option<(String, &'static str)> {
+    [base, rel]
+        .into_iter()
+        .find_map(|ticker| untradable_reason_by_conf(ctx, ticker).map(|reason| (ticker.to_owned(), reason)))
+}
+
+/// The first coin of an active pair that order creation refuses, and why: a coin [`untradable_coin_ticker`] names,
+/// or one that reports itself wallet-only. The reason is the one the coins configuration gives, where it gives one.
+pub(crate) fn untradable_pair(ctx: &MmArc, base: &MmCoinEnum, rel: &MmCoinEnum) -> Option<(String, &'static str)> {
+    let (ticker, fallback) = match untradable_coin_ticker(base, rel) {
+        Some(ticker) => (ticker, "trading is not supported"),
+        None => {
+            let coin = [base, rel].into_iter().find(|coin| coin.wallet_only(ctx))?;
+            (coin.ticker().to_owned(), "wallet-only")
+        },
+    };
+    let reason = untradable_reason_by_conf(ctx, &ticker).unwrap_or(fallback);
+    Some((ticker, reason))
+}
+
+/// The INFO line of an own order that is kept but neither announced nor matched, because `coin` cannot trade
+/// (CRD ch.60 R60.6.5). `kind` is "Maker" or "Taker".
+pub(crate) fn untradable_order_line(
+    kind: &str,
+    uuid: &Uuid,
+    base: &str,
+    rel: &str,
+    coin: &str,
+    reason: &str,
+) -> String {
+    format!(
+        "{kind} order {uuid} ({base}/{rel}) is kept but will not be announced or matched: {coin} cannot be traded \
+         in this build ({reason}). It can still be cancelled"
+    )
+}
+
+/// The own orders of coins this build cannot trade (CRD ch.60 R60.6.5). Such an order stays in memory and in the
+/// storage, so `my_orders` lists it and `cancel_order` removes it, but it is never announced or matched.
+#[derive(Default)]
+pub(crate) struct UntradableOrders {
+    /// The orders the startup found untradable by the coins configuration. Neither that configuration nor the
+    /// build switches change while the node runs, so such an order is held until the node stops.
+    kept_at_startup: HashSet<Uuid>,
+    /// The orders whose line has been logged, so each is logged once while the node runs.
+    logged: HashSet<Uuid>,
+    /// The lines logged, for the tests.
+    #[cfg(test)]
+    lines: Vec<String>,
+}
+
+impl UntradableOrders {
+    /// Logs the line of the order unless it has been logged while the node runs.
+    fn log_once(&mut self, uuid: &Uuid, line: impl FnOnce() -> String) {
+        if !self.logged.insert(*uuid) {
+            return;
+        }
+        let line = line();
+        log::info!("{}", line);
+        #[cfg(test)]
+        self.lines.push(line);
+    }
+}
+
+impl OrdermatchContext {
+    /// Records a saved order the startup restores although the coins configuration finds its pair untradable, and
+    /// logs its line. Returns whether the order is such an order.
+    pub(crate) fn keep_untradable_saved_order(
+        &self,
+        ctx: &MmArc,
+        kind: &str,
+        uuid: &Uuid,
+        base: &str,
+        rel: &str,
+    ) -> bool {
+        let Some((coin, reason)) = untradable_pair_by_conf(ctx, base, rel) else {
+            return false;
+        };
+        let mut untradable = self.untradable_orders.lock();
+        untradable.kept_at_startup.insert(*uuid);
+        untradable.log_once(uuid, || untradable_order_line(kind, uuid, base, rel, &coin, reason));
+        true
+    }
+
+    /// Whether the startup found the own order untradable. It is the check of the paths that hold no coin object.
+    pub(crate) fn is_kept_untradable(&self, uuid: &Uuid) -> bool {
+        self.untradable_orders.lock().kept_at_startup.contains(uuid)
+    }
+
+    /// The check before an own order is announced or matched: whether the startup found it untradable, or its
+    /// active coins fail the check of order creation now ([`untradable_pair`]). The line is logged the first time
+    /// the order is found so, once while the node runs.
+    pub(crate) fn order_is_untradable(
+        &self,
+        ctx: &MmArc,
+        kind: &str,
+        uuid: &Uuid,
+        base: &MmCoinEnum,
+        rel: &MmCoinEnum,
+    ) -> bool {
+        if self.is_kept_untradable(uuid) {
+            return true;
+        }
+        let Some((coin, reason)) = untradable_pair(ctx, base, rel) else {
+            return false;
+        };
+        self.untradable_orders.lock().log_once(uuid, || {
+            untradable_order_line(kind, uuid, base.ticker(), rel.ticker(), &coin, reason)
+        });
+        true
+    }
+
+    /// [`Self::order_is_untradable`] for a path that holds the tickers of the order only: the coins are looked up,
+    /// and the check runs on them when both are active. With a coin inactive, the answer is whether the startup
+    /// found the order untradable.
+    pub(crate) async fn order_is_untradable_by_tickers(
+        &self,
+        ctx: &MmArc,
+        kind: &str,
+        uuid: &Uuid,
+        base: &str,
+        rel: &str,
+    ) -> bool {
+        if self.is_kept_untradable(uuid) {
+            return true;
+        }
+        match find_pair(ctx, base, rel).await {
+            Ok(Some((base, rel))) => self.order_is_untradable(ctx, kind, uuid, &base, &rel),
+            _ => false,
+        }
+    }
+
+    /// The lines logged for untradable orders since the node started, in order.
+    #[cfg(test)]
+    pub(crate) fn untradable_order_lines(&self) -> Vec<String> { self.untradable_orders.lock().lines.clone() }
+}
+
 /// CRD ch.05 R40: the MM2.json boolean `swap_key_check`, default `true`. Only an explicit JSON `false` turns the
 /// refusal of R36-R39 off, which restores the behavior of earlier builds.
 pub(crate) fn swap_key_check_enabled(ctx: &MmArc) -> bool { ctx.conf["swap_key_check"].as_bool() != Some(false) }

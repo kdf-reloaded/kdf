@@ -21,6 +21,17 @@
 > return in a later release, and the swap rules of this chapter
 > (§18.3, §18.5) stay the target for that return.
 
+> **Status note (2026-11-22), a saved Tendermint order is kept, not
+> cancelled (clean-side, not corpus-sourced).** From this date an order
+> with a Tendermint coin saved by an earlier version is no longer
+> cancelled at startup. It is kept, in memory and in the storage, so
+> `my_orders` lists it and `cancel_order` removes it, but it is never
+> announced and never matched, and one log line names it. The rule, which
+> is the same for every coin that cannot trade, is in the status note of
+> 2026-11-22 at
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) R60.6.5.
+> Nothing else in the note above changes.
+
 ---
 
 ## 18.0 Executive Summary
@@ -932,6 +943,18 @@ The chapter relies on one baseline-state claim:
   row-to-row difference; the additions embed no code blocks, so the
   repository's clean-room gate tool was not applicable. The comparison
   concerns expression; it does not attest the accuracy of the statements.
+- *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
+  after R18.11.14.* It names chapter 51 §51.6E (R88, R91) and summarizes
+  what those rules record; its reference content is that of its target and
+  is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
+  findings**, as recorded in chapter 51 §51.16. No cleared sentence was
+  edited.
+- *Status note added 2026-11-22, clean side.* The status note under the
+  availability note at the head of this chapter, on a saved Tendermint
+  order being kept, records this repository's own behavior and the
+  maintainer's decision of 2026-11-22 on stored orders of untradable
+  coins. It was written by a context that never read the forbidden
+  corpus, takes no forbidden-class input and needs no Dirty Gate pass.
 
 ---
 
@@ -1139,6 +1162,16 @@ zero the hash lock is the plain SHA-256 of the secret. The module accepts
 > **As-built note (2026-11-08, clean side, PR #299).** `extract_secret`
 > (coin and token) refuses a secret whose hex decodes to any length other
 > than 32 bytes, with an error naming the length.
+
+> **Pointer (2026-11-22, KDF Spec Reader, round 0.5.0-23; gate status as
+> chapter 51 §51.6E states).** What the reference does not check around
+> R18.11.14, R18.11.16 and R18.11.19 is recorded in
+> [chapter 51](51-legacy-v1-swap-state-machine.md) R91: only the first
+> message of the spending transaction is read, the secret is not compared
+> with the secret hash, and the result code of a claim transaction found by
+> the search is not examined. The refund-eligibility answer of the family is
+> the wall-clock rule of chapter 51 R88, which agrees with R18.11.15. The
+> rules of this section are unchanged.
 
 ### 18.11.4 Refund: what the reference does and what it reports
 

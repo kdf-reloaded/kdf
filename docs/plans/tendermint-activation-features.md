@@ -24,6 +24,12 @@
 > the constant to `true` and retiring its refusal tests) is recorded here; its
 > place in the order below is the maintainer's call.
 
+> **Saved orders are kept (2026-11-22).** An order with a Tendermint coin saved
+> by an earlier version is no longer cancelled at startup. It is kept, so
+> `my_orders` lists it and `cancel_order` removes it, but it is never announced
+> or matched, and one log line names it (CRD ch.60 R60.6.5, status note of this
+> date).
+
 ## Interim behavior on `fix/activation-api-parity`
 
 Reloaded used to accept any `activation_params` and ignore it, so a request for
