@@ -768,7 +768,12 @@ maintainer decided on 2026-11-22.
   05, status note of 2026-11-22 after R35a). The decision is made in the shared
   `enable_hd_wallet` and reaches UTXO coins, QTUM, Sia and the EVM coins
   including TRON. An account that knows an address is left alone, and
-  `do_not_scan` never scans.
+  `do_not_scan` never scans. The rule does not tell such an account apart from
+  one that knows no address because it was never used, for example one made by
+  `task::create_new_account` and activated with `min_addresses_number` 0: that
+  account is scanned again at every activation under the default policy, up to
+  `gap_limit` addresses per chain, and on an EVM platform every token's balance
+  is asked at each of them.
 - *R49.37, kept as parity.* `get_new_address` keeps the order of this
   repository: the count is raised and stored before the balance query, and a
   failing query fails the request with the address still known. The first
@@ -1662,3 +1667,9 @@ addresses.
   comparison was run, and the repository's clean-room gate tool was not
   applicable because the additions embed no code blocks. *Measure:* 0.03, on
   the discretionary-expression basis.
+- *Status note added 2026-11-22 (after the Reloaded status of §49.2.2).*
+  Reloaded-original, clean side: it records the per-ticker totals, the scan
+  at activation and the rescan of an account with no known address as built,
+  with the two divergences the maintainer decided on 2026-11-22, written from
+  the cleared text of §49.2.2 and this repository's code; no forbidden-class
+  input, chapter 01 R38 not engaged. No cleared sentence was edited.

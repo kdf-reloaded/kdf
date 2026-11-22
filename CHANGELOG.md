@@ -783,8 +783,11 @@ the previous version used. The safe way:
   under `scan_if_new_wallet` used to treat it as an existing wallet and never scan it, so used addresses beyond the
   minimum stayed unlisted until a scan was asked for. Such an account is now scanned as a new one would be, for UTXO
   coins, QTUM, Sia and EVM coins including TRON. An account that knows an address is not scanned again under the
-  default policy, and `do_not_scan` never scans. GLEEC KDF does not scan such an account. Detail: PR #478; CRD ch.49
-  R49.36 item 7, ch.05 R35a.
+  default policy, and `do_not_scan` never scans. The rule does not tell such an account apart from one that knows no
+  address because it was never used, for example one made by `task::create_new_account` and activated with
+  `min_addresses_number` 0: that account is scanned again at every activation under the default policy, up to
+  `gap_limit` addresses per chain, and on an EVM platform every token's balance is asked at each of them. GLEEC KDF
+  does not scan such an account. Detail: PR #478; CRD ch.49 R49.36 item 7, ch.05 R35a.
 - **A quick disable and re-enable no longer leaves the old history loop running, and a failed legacy activation no
   longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
   of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at

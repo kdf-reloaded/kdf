@@ -6590,3 +6590,9 @@ R38.8.6 **Tests (two-direction, observable).**
   project's own reads of public LCC Electrum servers and this repository's
   code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Maintainer decision (2026-11-22), clean side -- status note after R38.8.5
+  (the page total of `account_balance` is a ticker-keyed map; the empty forms
+  keep this rule's ticker entry).* Written by a session that never read the
+  forbidden corpus, from the maintainer's decision, the cleared text of
+  chapter 49 §49.2.2 and this repository's code. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.
