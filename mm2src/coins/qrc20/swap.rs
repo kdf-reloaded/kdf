@@ -287,8 +287,8 @@ impl Qrc20Coin {
             // CRD ch.39 R39.11.5A.7, D39.11.5A.1 (a): this point is reached only with a contract state other
             // than `Uninitialized` (checked above), so a history without the payment contradicts the state.
             None => ERR!(
-                "Undetermined whether the payment was sent: the swap contract reports the payment as sent, but \
-                 no payment transaction was found in the token history from block {}",
+                "Undetermined whether the payment was sent: the swap contract reports a payment for this swap, \
+                 but no payment transaction was found in the token history from block {}",
                 search_from_block
             ),
         }

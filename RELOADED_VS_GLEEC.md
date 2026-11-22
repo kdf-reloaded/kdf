@@ -879,6 +879,11 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   without a broadcast; the manual recovery gets the same error. GLEEC KDF answers these cases differently (CRD ch.39
   §39.11.5A). No switch exists. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.39
   D39.11.5A.1; PR #489.
+- **A swap resumed at its payment step repeats an already-sent check that cannot decide.** In KDF Reloaded, a
+  legacy swap that a restart resumes right before its payment repeats the check within a bound, and then waits
+  without sending until the payment is found or the refund deadline passes. A swap that was not resumed at this
+  step asks once. GLEEC KDF asks once (CRD ch.39 §39.11.5A). No switch exists. Row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). PR #489.
 
 - **Saved swap and order records are synced to disk when they are replaced.** Both write a saved swap through a
   temporary file and a rename. KDF Reloaded also forces the temporary file to disk before the rename and, on Unix,

@@ -4376,7 +4376,7 @@ fn t39_11_5a_5_qrc20_state_without_matching_transaction_is_undetermined() {
             assert!(err.contains("Undetermined whether the payment was sent"), "{err}");
             assert!(
                 err.contains(
-                    "the swap contract reports the payment as sent, but no payment transaction was found in the \
+                    "the swap contract reports a payment for this swap, but no payment transaction was found in the \
                      token history from block 600"
                 ),
                 "{err}"

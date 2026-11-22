@@ -1,6 +1,8 @@
 use super::check_balance::{check_base_coin_balance_for_swap, check_my_coin_balance_for_swap, CheckBalanceError,
                            CheckBalanceResult};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
+use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
+                             ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
 use super::stale_tip_watch::{sleep_observing_tip, StaleTipWatch};
 use super::swap_lock::{hand_over_if_lost, run_while_lock_held, LockOutcome, SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
@@ -276,6 +278,10 @@ pub struct MakerSwap {
     /// its saved log. Set only by `run_maker_swap`; a swap restored by any other path stays `false` and
     /// asks every question (CRD ch.39 R39.11.27).
     started_in_this_process: AtomicBool,
+    /// Whether this run restored the swap from its saved log with the payment step as its next step. Set only
+    /// by the kick-start in `run_maker_swap`; such a swap may have sent its payment before the stop (CRD ch.39
+    /// §39.11.5A).
+    resumed_at_payment_step: AtomicBool,
 }
 
 impl MakerSwap {
@@ -444,6 +450,7 @@ impl MakerSwap {
             payment_locktime,
             p2p_privkey,
             started_in_this_process: AtomicBool::new(false),
+            resumed_at_payment_step: AtomicBool::new(false),
             mutable: RwLock::new(MakerSwapMut {
                 data: MakerSwapData::default(),
                 other_maker_coin_htlc_pub: H264::default(),
@@ -897,6 +904,32 @@ impl MakerSwap {
     }
 
     async fn maker_payment(&self) -> Result<(Option<MakerSwapCommand>, Vec<MakerSwapEvent>), String> {
+        self.maker_payment_paced(RESUMED_PAYMENT_PACING).await
+    }
+
+    /// One run of the already-sent question for the maker payment (CRD ch.39 R39.11.18).
+    async fn ask_maker_payment_sent(&self, secret_hash: &[u8]) -> Result<Option<TransactionEnum>, String> {
+        let transaction_f = self
+            .maker_coin
+            .check_if_my_payment_sent_for_amount(
+                self.r().data.maker_payment_lock as u32,
+                &*self.r().my_maker_coin_htlc_pub,
+                &*self.r().other_maker_coin_htlc_pub,
+                secret_hash,
+                self.r().data.maker_coin_start_block,
+                &self.r().data.maker_coin_swap_contract_address,
+                &self.maker_amount,
+            )
+            .compat();
+        transaction_f.await
+    }
+
+    /// [`MakerSwap::maker_payment`] with the waits of a swap resumed at this step given, so a test can shorten
+    /// them (CRD ch.39 §39.11.5A).
+    async fn maker_payment_paced(
+        &self,
+        pacing: ResumedPaymentPacing,
+    ) -> Result<(Option<MakerSwapCommand>, Vec<MakerSwapEvent>), String> {
         // ch.51 R71/R72: read the algorithm already selected for this swap
         // rather than recomputing with the 20-byte default -- this is the
         // hash the maker's own on-chain payment must actually commit to.
@@ -918,20 +951,35 @@ impl MakerSwap {
         );
         let already_sent = if skip_already_sent {
             Ok(None)
+        } else if self.resumed_at_payment_step.load(Ordering::Relaxed) {
+            // CRD ch.39 §39.11.5A: a swap resumed at this step may have sent its payment before the stop, so an
+            // undetermined answer is asked again and never read as "not sent".
+            let ticker = self.maker_coin.ticker();
+            let answer =
+                ask_already_sent_resumed(&self.uuid, "maker", ticker, pacing, self.wait_refund_until(), || {
+                    self.ask_maker_payment_sent(&secret_hash)
+                })
+                .await;
+            match answer {
+                ResumedPaymentAnswer::Found(tx) => Ok(Some(*tx)),
+                ResumedPaymentAnswer::NotSent => Ok(None),
+                ResumedPaymentAnswer::NotSentAfterBound => {
+                    return Ok((Some(MakerSwapCommand::Finish), vec![
+                        MakerSwapEvent::MakerPaymentTransactionFailed(
+                            ERRL!("{}", not_sent_after_bound_text("maker", ticker)).into(),
+                        ),
+                    ]))
+                },
+                ResumedPaymentAnswer::UndeterminedAtCap(e) => {
+                    return Ok((Some(MakerSwapCommand::Finish), vec![
+                        MakerSwapEvent::MakerPaymentTransactionFailed(
+                            ERRL!("{}", undetermined_at_cap_text("maker", ticker, &e)).into(),
+                        ),
+                    ]))
+                },
+            }
         } else {
-            let transaction_f = self
-                .maker_coin
-                .check_if_my_payment_sent_for_amount(
-                    self.r().data.maker_payment_lock as u32,
-                    &*self.r().my_maker_coin_htlc_pub,
-                    &*self.r().other_maker_coin_htlc_pub,
-                    &secret_hash,
-                    self.r().data.maker_coin_start_block,
-                    &self.r().data.maker_coin_swap_contract_address,
-                    &self.maker_amount,
-                )
-                .compat();
-            transaction_f.await
+            self.ask_maker_payment_sent(&secret_hash).await
         };
 
         let transaction = match already_sent {
@@ -1631,6 +1679,14 @@ impl MakerSwap {
             swap.apply_event(saved_event.event);
         }
         Ok((swap, command))
+    }
+
+    /// Records, for a swap the kick-start is about to resume at `command`, whether that is the payment step
+    /// (CRD ch.39 §39.11.5A).
+    fn note_kick_start_command(&self, command: &MakerSwapCommand) {
+        if matches!(command, MakerSwapCommand::SendPayment) {
+            self.resumed_at_payment_step.store(true, Ordering::Relaxed);
+        }
     }
 
     /// The pre-check of CRD ch.39 R39.5.11 for a swap about to be resumed: the HTLC key held for each leg of a
@@ -2680,6 +2736,7 @@ pub async fn run_maker_swap(swap: RunMakerSwapInput, ctx: MmArc) {
                         return;
                     }
                     log!("Swap " (uuid) " kick started.");
+                    swap.note_kick_start_command(&c);
                     (swap, c)
                 },
                 None => {
@@ -3282,6 +3339,157 @@ mod maker_swap_tests {
         });
         let result = block_on(maker_swap.maker_payment()).unwrap();
         (SEARCHES.with(|c| c.get()), SENDS.with(|c| c.get()), result)
+    }
+
+    thread_local! {
+        static ERRORS_FIRST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static THEN_FOUND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// The fast phase of the tests below: three attempts, a few milliseconds apart.
+    const TEST_RESUMED_PACING: ResumedPaymentPacing = ResumedPaymentPacing {
+        fast_interval_secs: 0.01,
+        fast_attempts: 3,
+        fast_window_secs: 600.,
+        slow_interval_secs: 0.01,
+    };
+
+    /// Runs the maker payment step of a swap inside its send deadline whose already-sent search answers an error
+    /// `errors_first` times and then `then`: `Some(true)` a payment, `Some(false)` "not sent", `None` an error for
+    /// ever. `resumed` is whether the kick-start resumed the swap at this step; `cap_in_secs` is how far ahead the
+    /// refund deadline lies. Returns how many times the search ran, how many payments were sent, and the result.
+    fn run_resumed_maker_payment_step(
+        resumed: bool,
+        errors_first: usize,
+        then: Option<bool>,
+        cap_in_secs: u64,
+    ) -> (usize, usize, (Option<MakerSwapCommand>, Vec<MakerSwapEvent>)) {
+        SEARCHES.with(|c| c.set(0));
+        SENDS.with(|c| c.set(0));
+        ERRORS_FIRST.with(|c| c.set(errors_first));
+        THEN_FOUND.with(|c| c.set(then));
+        let swap = maker_swap_for_payment_stage();
+        let now = now_ms() / 1000;
+        swap.w().data.started_at = now;
+        swap.w().data.maker_payment_lock = now + cap_in_secs - 3700;
+        if resumed {
+            swap.note_kick_start_command(&MakerSwapCommand::SendPayment);
+        }
+        TestCoin::htlc_key_is_random_per_swap.mock_safe(|_| MockResult::Return(false));
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            let asked = SEARCHES.with(|c| c.replace(c.get() + 1));
+            let answer = if asked < ERRORS_FIRST.with(|c| c.get()) {
+                Err("search backend down".to_string())
+            } else {
+                match THEN_FOUND.with(|c| c.get()) {
+                    Some(true) => Ok(Some(eth_tx_for_test().into())),
+                    Some(false) => Ok(None),
+                    None => Err("search backend down".to_string()),
+                }
+            };
+            MockResult::Return(Box::new(futures01::future::result(answer)))
+        });
+        TestCoin::send_maker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SENDS.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        let result = block_on(swap.maker_payment_paced(TEST_RESUMED_PACING)).unwrap();
+        (SEARCHES.with(|c| c.get()), SENDS.with(|c| c.get()), result)
+    }
+
+    /// The text of the single payment-failed event of a step that finished the swap.
+    fn maker_payment_failed_text(result: &(Option<MakerSwapCommand>, Vec<MakerSwapEvent>)) -> String {
+        assert!(matches!(result.0, Some(MakerSwapCommand::Finish)));
+        assert_eq!(result.1.len(), 1);
+        match &result.1[0] {
+            MakerSwapEvent::MakerPaymentTransactionFailed(err) => err.error.clone(),
+            other => panic!("expected MakerPaymentTransactionFailed, got {other:?}"),
+        }
+    }
+
+    /// CRD ch.39 §39.11.5A, maker: a swap resumed at the payment step adopts a payment the first query finds.
+    #[test]
+    fn resumed_maker_payment_found_at_once_is_adopted() {
+        let (searches, sends, result) = run_resumed_maker_payment_step(true, 0, Some(true), 100_000);
+        assert_eq!((searches, sends), (1, 0));
+        assert!(matches!(result.0, Some(MakerSwapCommand::WaitForTakerPayment)));
+        assert!(matches!(&result.1[..], [MakerSwapEvent::MakerPaymentSent(_)]));
+    }
+
+    /// CRD ch.39 §39.11.5A, maker: an undetermined answer is asked again; "not sent" inside the send deadline then
+    /// sends the payment once.
+    #[test]
+    fn resumed_maker_payment_undetermined_then_not_sent_sends_once() {
+        let (searches, sends, result) = run_resumed_maker_payment_step(true, 1, Some(false), 100_000);
+        assert_eq!((searches, sends), (2, 1));
+        assert!(matches!(result.0, Some(MakerSwapCommand::WaitForTakerPayment)));
+        assert!(matches!(&result.1[..], [MakerSwapEvent::MakerPaymentSent(_)]));
+    }
+
+    /// CRD ch.39 §39.11.5A, maker: undetermined through the bound, then found: the payment is adopted and nothing
+    /// is sent.
+    #[test]
+    fn resumed_maker_payment_found_after_the_bound_is_adopted() {
+        let (searches, sends, result) = run_resumed_maker_payment_step(true, 3, Some(true), 100_000);
+        assert_eq!((searches, sends), (4, 0));
+        assert!(matches!(result.0, Some(MakerSwapCommand::WaitForTakerPayment)));
+        assert!(matches!(&result.1[..], [MakerSwapEvent::MakerPaymentSent(_)]));
+    }
+
+    /// CRD ch.39 §39.11.5A, maker: undetermined through the bound, then "not sent": the step fails and nothing is
+    /// sent, although the send deadline has not passed.
+    #[test]
+    fn resumed_maker_payment_not_sent_after_the_bound_fails_without_sending() {
+        let (searches, sends, result) = run_resumed_maker_payment_step(true, 3, Some(false), 100_000);
+        assert_eq!((searches, sends), (4, 0));
+        let text = maker_payment_failed_text(&result);
+        assert!(text.contains("now reports no payment; nothing was sent"), "{text}");
+    }
+
+    /// CRD ch.39 §39.11.5A, maker: undetermined until the refund deadline: the step fails, names the manual
+    /// recovery and the coin's last error, and nothing is sent.
+    #[test]
+    fn resumed_maker_payment_undetermined_to_the_cap_names_manual_recovery() {
+        let (searches, sends, result) = run_resumed_maker_payment_step(true, 0, None, 2);
+        assert!(searches > 3, "the slow phase must have asked: {searches}");
+        assert_eq!(sends, 0);
+        let text = maker_payment_failed_text(&result);
+        assert!(text.contains("stayed undetermined until the refund deadline"), "{text}");
+        assert!(text.contains("recover_funds_of_swap"), "{text}");
+        assert!(text.contains("search backend down"), "{text}");
+    }
+
+    /// CRD ch.39 R39.11.19, maker: a swap that was not resumed at the payment step asks once and fails on an
+    /// undetermined answer.
+    #[test]
+    fn not_resumed_maker_payment_undetermined_asks_once() {
+        let (searches, sends, result) = run_resumed_maker_payment_step(false, 0, None, 100_000);
+        assert_eq!((searches, sends), (1, 0));
+        let text = maker_payment_failed_text(&result);
+        assert!(text.contains("search backend down"), "{text}");
+        assert!(!text.contains("recover_funds_of_swap"), "{text}");
+    }
+
+    /// CRD ch.39 §39.11.5A, maker: only a kick-start whose next step is the payment step marks the swap; a
+    /// kick-start at an earlier step and a swap merely loaded from its saved log do not.
+    #[test]
+    fn only_a_kick_start_at_the_maker_payment_step_marks_the_swap_resumed_there() {
+        let event = MakerSavedEvent {
+            timestamp: 0,
+            event: MakerSwapEvent::TakerFeeValidated(TransactionIdentifier {
+                tx_hex: Vec::new().into(),
+                tx_hash: Vec::new().into(),
+            }),
+        };
+        let command = event.get_command().unwrap();
+        assert!(matches!(command, MakerSwapCommand::SendPayment));
+
+        let swap = maker_swap_for_payment_stage();
+        assert!(!swap.resumed_at_payment_step.load(Ordering::Relaxed));
+        swap.note_kick_start_command(&MakerSwapCommand::Negotiate);
+        assert!(!swap.resumed_at_payment_step.load(Ordering::Relaxed));
+        swap.note_kick_start_command(&command);
+        assert!(swap.resumed_at_payment_step.load(Ordering::Relaxed));
     }
 
     /// T39.11.r (CRD ch.39 R39.11.27), maker: a swap started in this process with no payment event sends a

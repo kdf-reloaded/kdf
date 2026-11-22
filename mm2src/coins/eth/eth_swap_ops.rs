@@ -380,8 +380,8 @@ impl SwapOps for EthCoin {
                             // contract state other than `Uninitialized` (checked above), so a search that
                             // ends without the event contradicts the state.
                             break ERR!(
-                                "Undetermined whether the payment was sent: the swap contract reports the \
-                                 payment as sent, but no payment event was found in blocks {} to {}",
+                                "Undetermined whether the payment was sent: the swap contract reports a \
+                                 payment for this swap, but no payment event was found in blocks {} to {}",
                                 search_from_block,
                                 current_block
                             );

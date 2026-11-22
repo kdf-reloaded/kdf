@@ -5134,7 +5134,7 @@ mod scripted_node_ports {
                 assert!(err.contains(UNDETERMINED), "{err}");
                 assert!(
                     err.contains(
-                        "the swap contract reports the payment as sent, but no payment event was found in blocks \
+                        "the swap contract reports a payment for this swap, but no payment event was found in blocks \
                          100 to 150"
                     ),
                     "{err}"

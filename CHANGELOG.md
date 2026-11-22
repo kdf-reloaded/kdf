@@ -1164,6 +1164,10 @@ the previous version used. The safe way:
   sends its payment, it checks whether it already sent one. For EVM coins and tokens, QRC20 tokens and Sia, an
   answer that cannot decide is now an error that names the condition, and the payment step stops as it does for any
   other error; the manual recovery answers the same error. Detail: PR #489; CRD ch.39 §39.11.5A.
+- **A swap resumed at its payment step repeats a check for an earlier payment that cannot decide.** A swap that a
+  restart resumes right before its payment repeats the check within a bound, and then waits without sending until
+  the payment is found or the refund deadline passes. A payment it finds is taken over and the swap continues. A
+  swap that was not resumed at this step checks once, as before. Detail: PR #489; CRD ch.39 §39.11.5A.
 
 ### Tests
 

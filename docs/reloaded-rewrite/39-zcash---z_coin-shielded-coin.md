@@ -8096,6 +8096,42 @@ payment-failed event carrying the coin's error and finishes. The query runs
 once and nothing is broadcast. The test runs with an EVM coin and with a UTXO
 coin as the paying coin.
 
+> **Status note (2026-11-22, this repository; not corpus-sourced).** By the
+> maintainer's decision of 2026-11-22, this project diverges from
+> R39.11.5A.1 and T39.11.5A.1 for one case: a swap that the kick-start
+> resumes with the payment step as its next step (the maker after
+> `TakerFeeValidated`, the taker after `MakerPaymentValidatedAndConfirmed`).
+> Such a swap may have broadcast its payment before the stop, so an error
+> answer of the already-sent query does not end it at once. PR #489 builds
+> this:
+>
+> 1. *Fast phase.* The query is asked again every 30 s, at most 10 times
+>    counting the first, and no attempt starts later than 10 min after the
+>    step began. "Sent" adopts the payment as R39.11.18 says. "Not sent" goes
+>    on to the unchanged deadline check of R39.11.18 and, within the
+>    deadline, to the send.
+> 2. *Slow phase.* When the fast phase ends without an answer, the payment is
+>    treated as possibly sent and nothing is sent any more. The query is
+>    asked every 120 s until the role's refund deadline (the payment lock
+>    time plus 3700 s, chapter 51 R18). "Sent" adopts the payment, and the
+>    swap continues through its ordinary steps, the refund chain included.
+>    "Not sent" ends the step with the role's payment-failed event and the
+>    swap finishes. An answer that is still an error at the refund deadline
+>    ends the step with the payment-failed event, whose text names
+>    `recover_funds_of_swap`; the manual recovery of R39.11.22 then applies.
+> 3. No event is written while the step waits, so a restart during either
+>    phase resumes at the payment step again (chapter 51 R7) and starts with
+>    the fast phase. One warning is logged when the fast phase ends without
+>    an answer.
+>
+> Every other swap keeps R39.11.19: a swap this process started, and a swap
+> resumed at an earlier step that reaches the payment step later, ask once.
+> Saved-swap events, RPC shapes and the wire are unchanged. No switch exists.
+> Unit tests: `resumed_maker_payment_*` and `resumed_taker_payment_*`,
+> `not_resumed_*_payment_undetermined_asks_once` and
+> `only_a_kick_start_at_the_*_payment_step_marks_the_swap_resumed_there` in
+> the legacy swap modules.
+
 **T39.11.5A.2** *EVM state decides first (R39.11.5A.3).* With the contract
 state `Uninitialized`, the answer is "not sent" and no block-number or log
 request is made. With a failing state read the answer is an error.
@@ -9569,3 +9605,10 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   D39.11.5A.1 and D39.11.5A.2 and this repository's code (PRs #489 and #485),
   takes no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required.
+- *Status note added 2026-11-22 -- after T39.11.5A.1.* Reloaded-original,
+  clean side: it records the maintainer's decision on a swap resumed at its
+  payment step and this repository's code (PR #489), rests only on this
+  repository's own swap code and the cleared text of R39.11.18, R39.11.19,
+  R39.11.5A.1 and chapter 51 R7 and R18, takes no forbidden-class input, so
+  chapter 01 R38 is not engaged and no gate pass is required. No cleared
+  sentence is edited.
