@@ -9,6 +9,7 @@
 use super::tx::TronSwapTx;
 use super::TronSwapError;
 use crate::eth::tron::api::{TronApiClient, TronApiError};
+use crate::eth::tron::fee::TronFeeError;
 use crate::eth::tron::proto::DEFAULT_EXPIRATION_SEC;
 use crate::eth::tron::sign::sign_transaction_raw;
 use crate::eth::tron::tx_builder::build_trigger_smart_contract;
@@ -19,8 +20,14 @@ use common::now_ms;
 /// The lifetime of a sent call: the default expiry of a TRON transaction, counted from the head block's time.
 const LIFETIME_MS: i64 = DEFAULT_EXPIRATION_SEC as i64 * 1000;
 
+/// How far the time of the head block a node reports may be from the local time, in seconds, either way. The
+/// expiry of a sent call counts from the head block's time, which one node states; the local clock bounds it.
+/// With the expiry 60 seconds after the head block's time, a call has at least 30 seconds of validity left by the
+/// local clock when it is built.
+pub const SWAP_HEAD_TIME_TOLERANCE_SECS: u64 = 30;
+
 /// The node client of a TRX or TRC20 coin.
-fn tron_api(coin: &EthCoin) -> Result<TronApiClient, TronSwapError> {
+pub(super) fn tron_api(coin: &EthCoin) -> Result<TronApiClient, TronSwapError> {
     match (&coin.tron_api, coin.is_tron_family()) {
         (Some(api), true) => Ok(api.clone()),
         _ => Err(TronSwapError::NotTronCoin),
@@ -37,7 +44,9 @@ fn tron_api(coin: &EthCoin) -> Result<TronApiClient, TronSwapError> {
 /// Before any node is asked: [`TronSwapError::NoLocalKey`] for a coin a hardware or an external wallet signs
 /// for, [`TronSwapError::NotTronCoin`], [`TronSwapError::NegativeCallValue`], and [`TronSwapError::FeeLimit`] for a
 /// `fee_limit_sun` beyond the protocol's signed 64-bit field. Then [`TronSwapError::Node`] when the head block
-/// cannot be read and [`TronSwapError::Signing`]. After signing, [`TronSwapError::Broadcast`] with the signed
+/// cannot be read, [`TronSwapError::HeadTimeOutOfTolerance`] when its time is more than
+/// [`SWAP_HEAD_TIME_TOLERANCE_SECS`] from the local time (nothing is signed or broadcast), and
+/// [`TronSwapError::Signing`]. After signing, [`TronSwapError::Broadcast`] with the signed
 /// transaction: no node took the request, a node refused the transaction (`result: false`), or the accepting
 /// node named another transaction id.
 pub async fn send_trigger(
@@ -54,20 +63,25 @@ pub async fn send_trigger(
     if call_value < 0 {
         return Err(TronSwapError::NegativeCallValue);
     }
-    let fee_limit = i64::try_from(fee_limit_sun)
-        .map_err(|_| TronSwapError::FeeLimit(format!("{fee_limit_sun} SUN is beyond the range of the field")))?;
+    let fee_limit = i64::try_from(fee_limit_sun).map_err(|_| TronSwapError::FeeLimit(TronFeeError::Overflow))?;
     let owner = TronAddress::from_evm_address(coin.my_address);
 
     let block = api.get_now_block().await.map_err(TronSwapError::Node)?;
     let tapos = block.to_tapos().map_err(TronSwapError::Node)?;
     let block_ms = block.block_header.raw_data.timestamp;
+    // The transaction's own timestamp is the local time of building, as on the withdraw path.
+    let timestamp_ms = now_ms() as i64;
+    if block_ms.abs_diff(timestamp_ms) > SWAP_HEAD_TIME_TOLERANCE_SECS * 1000 {
+        return Err(TronSwapError::HeadTimeOutOfTolerance {
+            head_time_ms: block_ms,
+            local_time_ms: timestamp_ms,
+        });
+    }
     let expiration_ms = block_ms.checked_add(LIFETIME_MS).ok_or_else(|| {
         TronSwapError::Node(TronApiError::InvalidResponse(
             "the head block's time leaves no room for an expiry".to_owned(),
         ))
     })?;
-    // The transaction's own timestamp is the local time of building, as on the withdraw path.
-    let timestamp_ms = now_ms() as i64;
 
     let raw = build_trigger_smart_contract(
         &owner,

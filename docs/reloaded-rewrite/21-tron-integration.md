@@ -2692,6 +2692,12 @@ state; a state outside 0 to 3 is a typed error and never one of the four
 states. The token calls a TRC20 payment needs, `approve(address,uint256)`
 and `allowance(address,address)`, are those of the token standard.
 
+The decoder is tolerant on two points, so that a call is not missed for
+its encoding alone: bytes after the arguments are accepted and ignored,
+and set high bits in an address word are accepted, the address being the
+word's low 20 bytes. Set high bits in the `uint64` lock-time word are
+refused typed.
+
 **R21.11C.5 (events).** The three events are read from a log entry of a
 transaction's receipt: the signature topic, then the parameters in the
 entry's data, in the order §21.11B.2 lists them. An entry whose first
@@ -2713,6 +2719,13 @@ kept. The contract call of a transaction is read from its single
 transaction of any other kind, a TRX transfer included, is a typed
 "not a contract call".
 
+An operation that uses this type MUST take only the transaction id from
+bytes a peer sent. The transaction, its receipt and the contract's
+`payments(id)` are read from the node, under the two-node evidence rule
+of chapter 51, and a payment is judged by the stored payment hash
+(R21.11C.3), not by decoding the peer's call data. That is what makes
+the decoder's tolerance of R21.11C.4 harmless.
+
 **R21.11C.7 (sending a contract call).** A contract call is sent as a
 `TriggerSmartContract` with the call value and the `fee_limit` its
 caller gives, on the reference block of the current head, with an expiry
@@ -2728,6 +2741,24 @@ is read by the dry run of §21.9 in its call-data form, with the call
 value; a reverting dry run is a typed error with the node's reason, and
 an answer without a positive energy figure is a node error. No figure
 stands in for a missing one.
+
+The expiry counts from the head block's time, which the one node that
+answered states, so the local clock bounds it: a head block whose time
+is more than 30 seconds from the local time, ahead or behind, is refused
+typed before anything is signed, and nothing is broadcast, so that a
+call has at least 30 seconds of validity left by the local clock when it
+is built.
+
+The `fee_limit` of a swap contract call is worked out from that dry run:
+the cost of the dry-run energy at the chain's energy price plus a margin
+of 50 %, rounded up to whole SUN (maintainer decision of 2026-11-08:
+the dry-run energy times 1.5). It is never above the maximum the wallet
+path uses for a TRC20 transfer, 100 000 000 SUN (the status note of
+2026-11-19 after R21.10B.7). When the cost of the energy alone is above
+that maximum the call is refused typed and not built, because a limit
+below the need fails on chain and still charges the limit (D21.B5). When
+no node gives chain parameters with a positive energy price, that is a
+node error.
 
 **R21.11C.8 (activation binding as built).** R21.B2 is built on both
 activation routes. For a coin that can trade, `swap_contract_address` is
