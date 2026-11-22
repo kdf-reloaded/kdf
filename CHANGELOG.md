@@ -1039,7 +1039,7 @@ the previous version used. The safe way:
 ### Tests
 
 - **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
-  network) run in the unit-test job with the maker-swap tests; all pass. Only the CI workflow and docs changed.
+  network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
   Detail: PR #479.
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
   runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
