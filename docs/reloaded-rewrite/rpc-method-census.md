@@ -407,6 +407,13 @@ adds stability, backward compatibility or uniform naming:
   because Solana is switched off (`SOLANA_ACTIVATION_AVAILABLE` is `false`,
   maintainer decision 2026-10-26); it is planned to return in the next beta.
 
+> *Reloaded status (clean side, 2026-11-22):* Solana is switched on
+> ([Chapter 40](40-solana-coin.md) D40.4 and its status note of this date).
+> `enable_solana_with_tokens` and `enable_spl` activate a Solana platform and
+> its SPL tokens again, next to the `experimental::` equivalents. The
+> refusal that the item above and the "routed, refuses in this beta" markers
+> of the table describe held until this date. Solana coins are wallet-only.
+
 None of these names is routed by `v2.6.0-beta`, so keeping them is not required
 for compatibility with clients written for that tag, and does not conflict with
 it either: such clients use the `task::` equivalents, which Reloaded routes. An
