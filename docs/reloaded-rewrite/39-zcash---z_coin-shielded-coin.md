@@ -7860,6 +7860,250 @@ are not affected.
 >   has no test double. The refusal step is tested directly, with the fee step made to
 >   fail if reached.
 
+### 39.11.5A The already-sent query in the EVM, QRC20 and Sia families, and stored orders of a coin that cannot be traded (reference)
+
+> **Derivation record (sanitized).** Authored by the KDF Spec Reader on
+> 2026-11-22 from the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A.
+> Everything stated here is identical at both rows unless a rule says otherwise;
+> `main (as of 2026-10-07)` differs from `v3.0.0-beta` only in its read-me. The
+> subsection carries observable behavior, public contract-ABI names, JSON-RPC and
+> Electrum method names, coins-file field names, RPC names and saved-swap event
+> names; no private implementation expression. It adds to R39.11.18 and
+> R39.11.19 and edits no cleared sentence. It sits in this chapter because
+> R39.11.18 and R39.11.19, the rules it completes, are here; its subject is not
+> the shielded coin. *Dirty Gate clearance:* not recorded yet; this subsection is
+> a candidate until the gate passes it. Every rule is *informative; reference
+> fact* unless marked otherwise.
+
+**R39.11.5A.1** *The payment step is the same for every coin family and for a
+restored swap (completes R39.11.19; binding; parity).* The already-sent query,
+and the handling of its three answers, belong to the swap's payment step and not
+to the coin. The step is one and the same for every paying coin family, EVM
+coins and tokens included. A swap restored after a restart whose saved events
+end before the role's payment event re-enters that same step and asks the
+question again. An error answer then ends the step with the role's
+payment-failed event (`MakerPaymentTransactionFailed`,
+`TakerPaymentTransactionFailed`) and the swap finishes, exactly as in a swap
+that was never interrupted. No refund step follows, because the swap holds no
+record of a payment. The step does not ask a second time and does not consult
+another source.
+
+What reaches the step as an error is decided by each coin family. R39.11.5A.2
+to R39.11.5A.8 record where the reference's EVM, QRC20 and Sia coins answer
+"not sent" in a case that is a failed or contradictory read. In those cases the
+step of R39.11.18 proceeds to its deadline check and, within the deadline, to
+the send. The UTXO family is recorded in §39.11.5. The Tendermint, Lightning
+and Solana families were not surveyed in this pass.
+
+**R39.11.5A.2** *EVM: order of the reads.* For a V1 swap payment of an EVM coin
+or an ERC-20 token, the query makes its reads in this order, and stops at the
+first that decides:
+
+1. the payment's state in the swap contract, through the contract's public
+   `payments` getter for the swap's payment identifier;
+2. the node's current block number;
+3. `PaymentSent` events of the swap contract, by `eth_getLogs`, from the swap's
+   start block upward (R39.11.5A.5);
+4. the transaction named by the matching event, by its hash.
+
+A failure of any of the four reads, after the coin's ordinary node failover, is
+an **error** answer. So is a state answer that cannot be decoded, and a
+transaction that cannot be decoded.
+
+**R39.11.5A.3** *EVM: the state read, and a payment in the mempool (Q4).* The
+state is read at the `latest` block. The contract's state field has four
+values: the initial one, here called `Uninitialized` (numeric value 0), and one
+each for a payment that is sent, spent by the receiver, and refunded to the
+sender. A state of `Uninitialized` answers **not sent** at once: no block
+number is read and no event is searched. Any other state only lets the search
+start; the query does not tell the three apart, and a payment that was later
+spent or refunded is still answered as "sent" when its event is found. A payment
+that is broadcast but not yet mined does **not** count: its state at `latest` is
+`Uninitialized`, and the event search covers numbered blocks only. The reference
+makes no `pending` read anywhere in this query.
+
+**R39.11.5A.4** *EVM: state present, no event (Q2).* When the state says a
+payment exists and the search of R39.11.5A.5 ends without a matching event, the
+answer is **not sent**. It is not an error. The contradiction is neither logged
+nor reported.
+
+**R39.11.5A.5** *EVM: the searched range and its requests (Q5, Q6).* The lower
+bound is the swap's start block for the paying coin. The upper bound is the
+current block number of R39.11.5A.2, read once; when that number is below the
+start block, the start block is used as the upper bound, so exactly one request
+is made, for the single block at the start height. What a node answers for a
+block above its own tip is the node's matter; an empty answer gives "not sent"
+under R39.11.5A.4.
+
+The range is searched in consecutive requests. Each request runs from its lower
+block to that block plus the coin's `logs_block_range` (coins file; default
+1,000), or to the upper bound if that is lower. Both ends are inclusive, so a
+full request spans `logs_block_range` + 1 blocks. The next request starts at the
+block the previous one ended on, so that block is queried twice. The search ends
+at the first matching event, or when a request has reached the upper bound. The
+filter names the swap contract's address and the `PaymentSent` event signature
+only; the payment identifier is not an indexed topic of that event, so every
+payment event of the contract in the range is returned and the identifier is
+compared on the client.
+
+A request that the node refuses, for its size or for any other reason, is a
+failed read: the answer is an **error** and the payment step fails under
+R39.11.19. The reference does not narrow the range, does not retry the request
+and does not skip it. The same request sizing is used by the reference's
+one-shot search for a spend or refund of a V1 payment. The reference's wait for
+a payment's spend was not read in this pass.
+
+**R39.11.5A.6** *EVM: event found, no transaction (Q3).* When a matching event
+is found and the node answers the transaction read with "no such transaction"
+(an empty result, not a failure), the answer is **not sent**. A failed
+transaction read is an error (R39.11.5A.2).
+
+**R39.11.5A.7** *QRC20 (Q7).* The query first reads the payment's state from
+the QRC20 swap contract, by a contract call against the node's current state
+(`blockchain.contract.call` over Electrum, `callcontract` on a native node). A
+state of `Uninitialized` answers **not sent** at once. Otherwise the query reads
+the token-transfer history of the wallet's own address for this token from the
+swap's start block (`blockchain.contract.event.get_history` and
+`blockchain.transaction.get_receipt` over Electrum, `searchlogs` on a native
+node), keeps the receipts that carry the swap contract's payment-sent event,
+reads each such transaction, and answers **sent** with the first one that holds
+a token-payment call to the swap contract with this swap's payment identifier.
+When none is found the answer is **not sent**, although the state says the
+payment exists; this is the same outcome as R39.11.5A.4. A failure of the state
+read, of the history read, of a receipt read or of a transaction read is an
+**error**. A payment not yet mined does not count, because the state call sees
+mined state only.
+
+**R39.11.5A.8** *Sia (Q8).* The query asks walletd for the events of the HTLC
+address (chapter 20 R-S7). When that request **fails**, for any reason, the
+answer is **not sent**; the failure is not passed on and not logged by the
+query. An empty event list also answers "not sent". Otherwise the first event
+decides: a version-2 transaction is returned as **sent**, without a check of its
+outputs or amount; any other kind of event is an **error**. Arguments that
+cannot be converted to Sia types, and a wallet without a plain seed key, are
+errors too.
+
+**R39.11.5A.9** *Stored orders and tradability (Q9).* The reference's only
+tradability refusal in order building is the wallet-only one. It refuses
+`setprice`, `buy` and `sell` when either coin of the pair is wallet-only: its
+coins-file entry has `wallet_only` true, or the coin has no coins-file entry at
+all. A Tendermint coin also counts as wallet-only while it is used through a
+hardware wallet. The reference refuses no coin family as such at this point; for
+the Solana family the query that answers "wallet-only" is itself not
+implemented at either row, and what an operator observes there was not
+established.
+
+At start-up none of this is checked:
+
+1. Every stored active maker order and every stored taker order is loaded into
+   memory as it is. No coin is looked up, and the wallet-only check is not run.
+   The orders' tickers are what `coins_needed_for_kick_start` returns.
+2. A restored maker order is announced by the periodic maintenance only once
+   both of its coins are active; until then the pass leaves it alone and it
+   stays stored. The pass then runs the balance reconciliation of chapter 60
+   R60.4.6 item 5, which can cancel the order for insufficient balance. It does
+   not run the wallet-only check.
+3. At match time the maker requires both coins of the order to be active (a
+   request for an order with an inactive coin is dropped without an answer)
+   and judges the taker's protocol information (chapter 59 R59.4.3 and §59.4A).
+   It does not re-run the wallet-only check, and no tradability check runs when
+   the swap starts.
+4. The recomputation that the balance watch of chapter 60 R60.4.5 triggers is
+   skipped for a coin that is wallet-only, so such an order is not resized when
+   the balance changes.
+
+A stored order whose coin became wallet-only after the order was placed is
+therefore restored, announced, matched and swapped like any other. The reference
+has no rule that removes or disables it.
+
+> **Code-quality finding (informative) — three reference answers fold a failed
+> or contradictory read into "not sent".** R39.11.5A.4 (state present, no
+> event), R39.11.5A.6 (event present, no transaction) and R39.11.5A.8 (failed
+> events request) each answer "not sent" where nothing has shown that no payment
+> exists. R39.11.5A.7 does the same for QRC20. After such an answer the step
+> goes on to send. For the two contract families the V1 swap contract accepts a
+> payment only for an identifier whose state is `Uninitialized`, so a second
+> payment under the same identifier cannot be mined; what the reference's send
+> reports in that case was not established. For Sia nothing on chain prevents a
+> second payment to the same HTLC address. *Proposed handling:* in this project
+> classify the four cases as **undetermined**, so that R39.11.19 fails the step
+> and the operator can use the recovery of R39.11.22; and name the condition in
+> the error (state present without event, event without transaction, events
+> request failed). This tightens parity only in cases where the reference's own
+> answer is unsupported, and changes nothing on the wire. Left as D39.11.5A.1.
+> *(Trigger: apparent with little extra effort — the state read and the search
+> are read side by side, and the Sia branch discards the failure in one
+> place.)*
+
+> **Upstream divergence (informative) — request sizing.** Chapter 17 R17.8.1 and
+> T17.8.4 bind this project's forward searches to windows of exactly `W` blocks
+> that neither overlap nor skip a block, and R17.8.2 shrinks `W` when a node
+> refuses a range. The reference's payment-sent search uses `logs_block_range`
+> + 1 blocks per request with the boundary block repeated, and turns a refused
+> range into an error answer (R39.11.5A.5). The set of blocks searched is the
+> same. This also answers, for the payment-sent search and the one-shot spend
+> and refund search, the question chapter 17 R17.8.4 left open.
+
+> **Status note (2026-11-22, this repository; not corpus-sourced).** The round
+> that asked for this subsection reported two things found in this project's
+> code: coin code that turns some errors or contradictions of the already-sent
+> query into "not sent", and a swap resumed at the payment step that finishes as
+> unsent although a payment may exist. R39.11.5A.1 records that the reference
+> treats a resumed swap like any other, and R39.11.5A.4, R39.11.5A.6 to
+> R39.11.5A.8 record which "not sent" answers the reference itself gives. Which
+> of them this project keeps is D39.11.5A.1; what it does with a stored order of
+> an untradable coin is D39.11.5A.2. Nothing is implemented from this subsection
+> yet.
+
+**D39.11.5A.1** *Contradictory or failed reads of the already-sent query.*
+(a) classify the cases of R39.11.5A.4, R39.11.5A.6, R39.11.5A.7 (state present,
+nothing found) and R39.11.5A.8 (failed request) as undetermined, as the finding
+proposes; (b) keep the reference's "not sent" for parity. Recommendation: (a).
+
+**D39.11.5A.2** *Stored orders of a coin this project does not trade.* The
+reference gives no behavior to keep (R39.11.5A.9). (a) Leave a stored order
+loaded but never announce or match it while its coin fails the order-building
+check, and log that once per order; (b) cancel it at start-up with a named
+reason; (c) do as the reference does. Recommendation: (a), with the same check
+at match time.
+
+**D39.11.5A.3** *A payment in the mempool at restart.* The reference answers
+"not sent" for an EVM or QRC20 payment that is broadcast but not mined
+(R39.11.5A.3, R39.11.5A.7). Whether this project should also look at its own
+pending transactions before answering is open; the reference has nothing to
+keep here.
+
+**T39.11.5A.1** *Resumed swap, error answer (R39.11.5A.1).* For each role, a
+swap restored with saved events that end just before the payment event, and a
+paying coin whose already-sent query returns an error, ends with the role's
+payment-failed event carrying the coin's error and finishes. The query runs
+once and nothing is broadcast. The test runs with an EVM coin and with a UTXO
+coin as the paying coin.
+
+**T39.11.5A.2** *EVM state decides first (R39.11.5A.3).* With the contract
+state `Uninitialized`, the answer is "not sent" and no block-number or log
+request is made. With a failing state read the answer is an error.
+
+**T39.11.5A.3** *EVM failed reads (R39.11.5A.2, R39.11.5A.5).* With the state
+present, a failing block-number read, a log request failing on every node, and
+a failing transaction read each give an error answer, never "not sent".
+
+**T39.11.5A.4** *EVM tip below the start block (R39.11.5A.5).* With the state
+present and the node's block number below the swap's start block, the search
+asks for the start block and for no block below it.
+
+**T39.11.5A.5** *The cases of D39.11.5A.1.* Under option (a): state present
+with no event in the searched range, an event whose transaction the node does
+not return, a QRC20 state present with no matching transaction, and a failed
+Sia events request each give an undetermined answer that names the condition,
+and the payment step fails without a broadcast. Under option (b) each gives
+"not sent".
+
+**T39.11.5A.6** *Stored order of an untradable coin (D39.11.5A.2).* Under the
+option chosen: a node started with one stored maker order whose coin fails the
+order-building check does what that option says, and a taker request for that
+order starts no swap under options (a) and (b).
+
 ### 39.11.6 Endpoint naming, the endpoint that rejected, and suspension
 
 > **Provenance (2026-10-28).** R39.11.29 -- R39.11.31 are clean-room original
@@ -9255,3 +9499,30 @@ entries in its list cannot be told apart. Passing the position to the fallback c
 - *Reloaded-original addition (2026-11-20) -- the status note of that date under
   R39.6.4f.* A pointer to chapter 59 §59.4C. No forbidden-class input; it needs no Dirty
   Gate pass.
+- *Scoped addition (2026-11-22, Spec Reader round 0.5.0-25) -- §39.11.5A
+  (R39.11.5A.1 -- R39.11.5A.9, the code-quality finding, the divergence note,
+  the status note of 2026-11-22, D39.11.5A.1 -- D39.11.5A.3 and T39.11.5A.1 --
+  T39.11.5A.6), and the pointers of the same date after chapter 17 R17.8.4,
+  chapter 20 R-S7, chapter 38 §38.6.4Q and chapter 60 R60.4.6; no other text of
+  this chapter or of those chapters was changed.* **KDF Dirty Gate: not
+  recorded yet; the addition is a candidate until the gate passes it.**
+  *Inputs:* (1) the forbidden corpus at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, read read-only from the tags themselves,
+  with the row `main (as of 2026-10-07)` compared against `v3.0.0-beta` by tree
+  difference (only the read-me differs), consulted **only** to establish: how
+  the payment step of each role of the version-one swap handles the three
+  answers of the already-sent query, also in a restored swap; what the EVM,
+  QRC20 and Sia coins answer to that query and from which reads; and what
+  happens to stored orders at start-up, in the periodic maintenance and at
+  match time with respect to the order-building tradability check. Behavior,
+  public contract-ABI names, JSON-RPC and Electrum method names, coins-file
+  field names, RPC names and saved-swap event names only; no private
+  identifier, function body, helper decomposition, error, log, comment or test
+  text was reproduced. (2) The published V1 swap contract, as a matter of
+  public record, for the rule that a payment needs an unused identifier; the
+  contract source was not re-read in this pass and no state of the sibling
+  swap-contract repository is cited. (3) This chapter and chapters 17,
+  20, 38, 51, 59 and 60, for consistency. The status note, the decisions and
+  the acceptance rows are original to this subsection. No row was added to
+  chapter 02 §2.15A: every state read already had one. *Scope of the edit:*
+  additions only; no sentence that the Dirty Gate cleared is edited.

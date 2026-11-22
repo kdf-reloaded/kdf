@@ -4813,6 +4813,13 @@ token's swap paths were read only for the set of methods they send
 (R38.6.4Q.8), not request by request. (6) The `disable_coin` contract
 (R38.6.4Q.10 item 4) and native mode were not examined.
 
+> **Pointer (2026-11-22).** [Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> §39.11.5A, R39.11.5A.7, records the reference's QRC20 already-sent query:
+> the state call, the transfer-history and receipt reads, and its "not sent"
+> answer when the contract state says the payment exists but no matching
+> transaction is found. The pointer is a Spec Reader addition and a candidate
+> until the KDF Dirty Gate passes it with that subsection.
+
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
 events over the streaming infrastructure, registering the addresses to be watched
