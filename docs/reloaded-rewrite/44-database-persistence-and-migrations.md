@@ -619,6 +619,14 @@ migrated for both reference rows. The reference gives no protection in the
 other direction, so R44.9.5 remains the rule that keeps a shared database
 readable by both.
 
+> **Reloaded status update (2026-11-22, Reloaded-original; informative).**
+> With PR #486 RELOADED refuses at start-up a database whose highest ledger
+> value is above `15`, the highest state it records: the start-up error names
+> both numbers, no migration statement runs, and no ledger row is written,
+> lowered or removed. The repair of the old RELOADED shape still runs first.
+> This answers the last sentence of the Reloaded status note under R44.9A.13
+> for this repository.
+
 ### 44.9A.2 The per-swap lock file
 
 R44.9A.6 *Name and location.* The reference uses one lock file per swap,
@@ -862,3 +870,7 @@ section, the highest ledger value is still `15` (R44.9.5).
   shingles); the repository's clean-room gate tool was not applicable because
   the additions embed no code blocks. *Measure:* 0.00, on the
   discretionary-expression basis.
+- *Clean-side addition of 2026-11-22 (PR #486):* the Reloaded status update
+  under R44.9A.5. It is Reloaded-original, rests only on this repository's own
+  start-up code and the cleared text of §44.9A, and changes no sentence of the
+  chapter.
