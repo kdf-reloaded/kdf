@@ -508,12 +508,44 @@ pub struct ElectrumClientImpl {
     /// connection silently loses it. Nothing may assume a subscription
     /// survived. A client shared by several coin instances (CRD ch.38 D38.6.4Q.1 status note) keeps a subscription
     /// only while an instance remembers it (item 6). Never held across an await.
-    watched_script_hashes: StdMutex<HashMap<String, HashSet<ElectrumOwner>>>,
+    watched_script_hashes: StdMutex<HashMap<String, WatchedSubscription>>,
     /// Contract events this client has asked its servers to watch, as the three parameters of
     /// `blockchain.contract.event.subscribe`: the address, the contract and the topic, each with the instances that
     /// remember it (CRD ch.38 D38.6.4Q.3 status note, D38.6.4Q.1 status note item 6). Held so each can be placed again
     /// once over a newly maintained connection, as the script hashes are. Never held across an await.
-    watched_contract_events: StdMutex<Vec<([Json; 3], HashSet<ElectrumOwner>)>>,
+    watched_contract_events: StdMutex<Vec<([Json; 3], WatchedSubscription)>>,
+    /// The instances that were removed (`forget_owner`). A request of a retired owner sends and remembers nothing.
+    /// An owner is unique to its instance and never given again, so this costs one entry for each removed instance for
+    /// the lifetime of the client. Never held across an await.
+    retired_owners: StdMutex<HashSet<ElectrumOwner>>,
+}
+
+/// A subscription a client remembers: the instances that remember it, and whether it is placed in the current session.
+#[derive(Debug, Default)]
+struct WatchedSubscription {
+    owners: HashSet<ElectrumOwner>,
+    /// The session epoch (`PoolShared::session_epoch`) of the last successful placement, `None` while the last
+    /// placement failed or none has been answered yet. A subscription belongs to one session: after a reconnect the
+    /// server holds none until it is placed again, so a request is answered "already subscribed" only while this is
+    /// the current epoch.
+    placed_in: Option<u64>,
+    /// The session epochs and owners of the requests of `subscribe_*` for this subscription that are awaiting their
+    /// answer; at most one for each owner and session. A re-placement pass over a session leaves the subscription to
+    /// a request sent in that same session; its answer is checked against the session epoch and asks for a pass if
+    /// the session ended meanwhile. A request that waits on from an older session does not keep the pass from placing
+    /// the subscription over a newer one.
+    in_flight: Vec<(u64, ElectrumOwner)>,
+}
+
+/// Settles a subscription request when it ends, whether it was answered or its future was dropped before the answer
+/// (a dropped request counts as a failed one). `ok` is set once an answer has arrived.
+struct SettleOnDrop<F: FnMut(bool)> {
+    settle: F,
+    ok: bool,
+}
+
+impl<F: FnMut(bool)> Drop for SettleOnDrop<F> {
+    fn drop(&mut self) { (self.settle)(self.ok) }
 }
 
 /// The identity of a coin instance towards an Electrum client that several instances share (CRD ch.38 D38.6.4Q.1
@@ -1231,24 +1263,72 @@ impl ElectrumClient {
     /// A failure here is not fatal. The caller keeps its existing polling, so
     /// the effect of a lost subscription is added latency rather than a stale
     /// balance.
+    ///
+    /// The owner is remembered before the request is sent, so that a removal that runs while it is in flight takes
+    /// it out again; an answer that arrives for a forgotten owner adds nothing (CRD ch.38 D38.6.4Q.1 status note,
+    /// item 6). A subscription whose first placement failed is not remembered. One that `owner` placed in the current
+    /// session is not placed twice; one whose placement over a later session failed is sent again by the next
+    /// request of the same owner. At most one request is sent for each owner, key and session: a second request of
+    /// the owner while one is in flight sends nothing. A request that gets no answer blocks its (owner, key) only
+    /// until it is answered, until it fails at the end of its call's time budget (a request over a connection is
+    /// bound by the pool's request timeout, 20 s, and the call by the call budget, 60 s unless the caller gave a
+    /// shorter one; it then settles as a failed placement), or until its future is dropped (a caller that gives up
+    /// drops its request, which settles the same way). A retired owner (`forget_owner`: a stale handle of a removed
+    /// instance) sends and remembers nothing. In these cases the answer is `Ok(())`.
     pub async fn subscribe_scripthash(&self, owner: ElectrumOwner, script_hash: String) -> Result<(), String> {
-        // A subscription this instance placed already is not placed twice (D38.6.4Q.1 status note, item 6).
-        if self
-            .lock_watched_script_hashes()
-            .get(&script_hash)
-            .is_some_and(|owners| owners.contains(&owner))
-        {
-            return Ok(());
-        }
         let epoch = self.pool.session_epoch();
+        // The owner is remembered before the request is sent, so that a removal that runs while the request is in
+        // flight takes it out again (D38.6.4Q.1 status note, item 6). A subscription this instance placed in the
+        // current session is not placed twice.
+        let added = {
+            let mut watched = self.lock_watched_script_hashes();
+            // A retired owner (a stale handle of a removed instance) sends and remembers nothing.
+            if self.is_retired(owner) {
+                return Ok(());
+            }
+            let entry = watched.entry(script_hash.clone()).or_default();
+            // Nothing is sent for a subscription placed in this session, nor while a request of the same owner is in
+            // flight in it (at most one request for each owner, key and session).
+            if (entry.owners.contains(&owner) && entry.placed_in == Some(epoch))
+                || entry.in_flight.contains(&(epoch, owner))
+            {
+                return Ok(());
+            }
+            entry.in_flight.push((epoch, owner));
+            entry.owners.insert(owner)
+        };
+        let mut guard = SettleOnDrop {
+            settle: |ok: bool| {
+                let mut watched = self.lock_watched_script_hashes();
+                if let Some(entry) = watched.get_mut(&script_hash) {
+                    entry.in_flight.retain(|sent| *sent != (epoch, owner));
+                }
+                if ok {
+                    // An answer for an owner that was removed meanwhile adds nothing back.
+                    if !self.is_retired(owner) {
+                        let entry = watched.entry(script_hash.clone()).or_default();
+                        entry.owners.insert(owner);
+                        entry.placed_in = Some(epoch);
+                    }
+                } else if added {
+                    // A failed (or abandoned) first placement is not remembered; an owner that was remembered before
+                    // stays.
+                    if let Some(entry) = watched.get_mut(&script_hash) {
+                        entry.owners.remove(&owner);
+                        if entry.owners.is_empty() {
+                            watched.remove(&script_hash);
+                        }
+                    }
+                }
+            },
+            ok: false,
+        };
         let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
             .compat()
             .await;
+        guard.ok = res.is_ok();
+        drop(guard);
         res.map_err(|e| ERRL!("{}", e))?;
-        self.lock_watched_script_hashes()
-            .entry(script_hash)
-            .or_default()
-            .insert(owner);
         // The connection that carried the subscription may have ended before the hash was remembered
         // (a call that had to open a connection of its own releases it when it is done).
         if self.pool.session_epoch() != epoch {
@@ -1261,12 +1341,23 @@ impl ElectrumClient {
     /// logged and skipped so one unusable server cannot stall the rest; `false` tells that some
     /// subscription could not be placed and the attempt is to be repeated.
     pub async fn resubscribe_watched_scripthashes(&self) -> bool {
-        let hashes: Vec<String> = self.lock_watched_script_hashes().keys().cloned().collect();
+        let epoch = self.pool.session_epoch();
+        let hashes: Vec<String> = self
+            .lock_watched_script_hashes()
+            .iter()
+            .filter(|(_, watched)| !watched.in_flight.iter().any(|(sent, _)| *sent == epoch))
+            .map(|(hash, _)| hash.clone())
+            .collect();
         let mut all_placed = true;
         for script_hash in hashes {
+            let epoch = self.pool.session_epoch();
             let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
                 .compat()
                 .await;
+            // A failed placement clears the mark, so that the next request of an owner is sent again.
+            if let Some(entry) = self.lock_watched_script_hashes().get_mut(&script_hash) {
+                entry.placed_in = res.is_ok().then_some(epoch);
+            }
             if let Err(e) = res {
                 common::log::debug!("Could not re-subscribe script hash {}: {}", script_hash, e);
                 all_placed = false;
@@ -1275,13 +1366,13 @@ impl ElectrumClient {
         all_placed
     }
 
-    fn lock_watched_script_hashes(&self) -> std::sync::MutexGuard<'_, HashMap<String, HashSet<ElectrumOwner>>> {
+    fn lock_watched_script_hashes(&self) -> std::sync::MutexGuard<'_, HashMap<String, WatchedSubscription>> {
         self.watched_script_hashes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn lock_watched_contract_events(&self) -> std::sync::MutexGuard<'_, Vec<([Json; 3], HashSet<ElectrumOwner>)>> {
+    fn lock_watched_contract_events(&self) -> std::sync::MutexGuard<'_, Vec<([Json; 3], WatchedSubscription)>> {
         self.watched_contract_events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1290,21 +1381,38 @@ impl ElectrumClient {
     /// Removes `owner`, the instance that was disabled, from every subscription this client remembers, script-hash and
     /// contract-event alike; a subscription that no other instance remembers is forgotten and is not placed again
     /// after a reconnect (CRD ch.38 D38.6.4Q.1 status note, item 6). No request is sent to any server.
+    ///
+    /// The owner is also retired: a later `subscribe_*` of it, by a stale handle of the removed instance, sends and
+    /// remembers nothing, and an answer that arrives for it adds nothing. An owner is never given again, so the client
+    /// keeps one entry for each removed instance for as long as it lives.
     pub fn forget_owner(&self, owner: ElectrumOwner) {
-        self.lock_watched_script_hashes().retain(|_, owners| {
-            owners.remove(&owner);
-            !owners.is_empty()
+        self.retired_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(owner);
+        self.lock_watched_script_hashes().retain(|_, watched| {
+            watched.owners.remove(&owner);
+            !watched.owners.is_empty()
         });
-        self.lock_watched_contract_events().retain_mut(|(_, owners)| {
-            owners.remove(&owner);
-            !owners.is_empty()
+        self.lock_watched_contract_events().retain_mut(|(_, watched)| {
+            watched.owners.remove(&owner);
+            !watched.owners.is_empty()
         });
+    }
+
+    fn is_retired(&self, owner: ElectrumOwner) -> bool {
+        self.retired_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&owner)
     }
 
     /// The instances that remember the script-hash subscription of `script_hash`.
     #[cfg(test)]
     pub(crate) fn script_hash_owners(&self, script_hash: &str) -> Option<HashSet<ElectrumOwner>> {
-        self.lock_watched_script_hashes().get(script_hash).cloned()
+        self.lock_watched_script_hashes()
+            .get(script_hash)
+            .map(|watched| watched.owners.clone())
     }
 
     /// The number of contract-event subscriptions this client remembers.
@@ -1312,12 +1420,20 @@ impl ElectrumClient {
     pub(crate) fn contract_event_subscriptions(&self) -> usize { self.lock_watched_contract_events().len() }
 
     /// Asks the servers to notify this client when the contract event (`address`, `contract`, `topic`) is logged, and
-    /// remembers the subscription for `owner` (once the answer is in) so that it is placed again over a newly
-    /// maintained connection (CRD ch.38 D38.6.4Q.3 status note, item 1; R38.6.4h for the script-hash ones).
+    /// remembers the subscription for `owner` so that it is placed again over a newly maintained connection (CRD
+    /// ch.38 D38.6.4Q.3 status note, item 1; R38.6.4h for the script-hash ones).
     ///
-    /// A failure is the caller's to ignore: nothing here retries, and a subscription that failed is not remembered. A
-    /// subscription that `owner` placed already is not placed twice: no request is sent, and the answer is
-    /// `Json::Null` (D38.6.4Q.1 status note, item 6).
+    /// The owner is remembered before the request is sent, so that a removal that runs while it is in flight takes
+    /// the owner out again, and an answer that arrives for a forgotten owner adds nothing (D38.6.4Q.1 status note,
+    /// item 6). A failure is the caller's to ignore: nothing here retries, and a subscription whose first placement
+    /// failed is not remembered. A subscription that `owner` placed in the current session is not placed twice: no
+    /// request is sent, and the answer is `Json::Null`. One whose placement over a later session failed is sent again
+    /// by the next request of the same owner. At most one request is sent for each owner, key and session, and a
+    /// retired owner (`forget_owner`) sends and remembers nothing; the answer is `Json::Null` in these cases too. A
+    /// request that gets no answer blocks its (owner, key) only until it is answered, until it fails at the end of its
+    /// call's time budget (a request over a connection is bound by the pool's request timeout, 20 s, and the call by
+    /// the call budget, 60 s unless the caller gave a shorter one; it then settles as a failed placement), or until
+    /// its future is dropped (a caller that gives up drops its request, which settles the same way).
     pub async fn subscribe_contract_event(
         &self,
         owner: ElectrumOwner,
@@ -1326,26 +1442,70 @@ impl ElectrumClient {
         topic: String,
     ) -> Result<Json, JsonRpcError> {
         let entry = [address, contract, Json::String(topic)];
-        if self
-            .lock_watched_contract_events()
-            .iter()
-            .any(|(known, owners)| known == &entry && owners.contains(&owner))
-        {
-            return Ok(Json::Null);
-        }
         let epoch = self.pool.session_epoch();
-        let answer: Json = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &entry[0], &entry[1], &entry[2])
-            .compat()
-            .await?;
-        {
+        let added = {
             let mut watched = self.lock_watched_contract_events();
-            match watched.iter_mut().find(|(known, _)| known == &entry) {
-                Some((_, owners)) => {
-                    owners.insert(owner);
-                },
-                None => watched.push((entry, HashSet::from([owner]))),
+            // A retired owner (a stale handle of a removed instance) sends and remembers nothing.
+            if self.is_retired(owner) {
+                return Ok(Json::Null);
             }
-        }
+            match watched.iter_mut().find(|(known, _)| known == &entry) {
+                Some((_, subscription)) => {
+                    // Nothing is sent for a subscription placed in this session, nor while a request of the same
+                    // owner is in flight in it (at most one request for each owner, key and session).
+                    if (subscription.owners.contains(&owner) && subscription.placed_in == Some(epoch))
+                        || subscription.in_flight.contains(&(epoch, owner))
+                    {
+                        return Ok(Json::Null);
+                    }
+                    subscription.in_flight.push((epoch, owner));
+                    subscription.owners.insert(owner)
+                },
+                None => {
+                    watched.push((entry.clone(), WatchedSubscription {
+                        owners: HashSet::from([owner]),
+                        placed_in: None,
+                        in_flight: vec![(epoch, owner)],
+                    }));
+                    true
+                },
+            }
+        };
+        let mut guard = SettleOnDrop {
+            settle: |ok: bool| {
+                let mut watched = self.lock_watched_contract_events();
+                let position = watched.iter().position(|(known, _)| known == &entry);
+                if let Some(i) = position {
+                    watched[i].1.in_flight.retain(|sent| *sent != (epoch, owner));
+                }
+                if ok {
+                    // An answer for an owner that was removed meanwhile adds nothing back.
+                    if !self.is_retired(owner) {
+                        let i = position.unwrap_or_else(|| {
+                            watched.push((entry.clone(), WatchedSubscription::default()));
+                            watched.len() - 1
+                        });
+                        watched[i].1.owners.insert(owner);
+                        watched[i].1.placed_in = Some(epoch);
+                    }
+                } else if let (true, Some(i)) = (added, position) {
+                    // A failed (or abandoned) first placement is not remembered; an owner that was remembered before
+                    // stays.
+                    watched[i].1.owners.remove(&owner);
+                    if watched[i].1.owners.is_empty() {
+                        watched.remove(i);
+                    }
+                }
+            },
+            ok: false,
+        };
+        let res: Result<Json, JsonRpcError> =
+            rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &entry[0], &entry[1], &entry[2])
+                .compat()
+                .await;
+        guard.ok = res.is_ok();
+        drop(guard);
+        let answer = res?;
         // The connection that carried the subscription may have ended before it was remembered.
         if self.pool.session_epoch() != epoch {
             self.pool.request_contract_resubscribe();
@@ -1355,19 +1515,35 @@ impl ElectrumClient {
 
     /// Places every remembered contract-event subscription again, once, over a maintained connection (D38.6.4Q.3
     /// status note, items 1 and 2). An error answer, a refusal or a failure is logged and not repeated: the pool asks
-    /// for this once for each newly maintained session, and nothing here retries or fails anything else.
+    /// for this once for each newly maintained session, and nothing here retries or fails anything else. A failed
+    /// placement clears the entry's mark, so that the next request of an owner for it is sent again.
     pub async fn resubscribe_watched_contract_events(&self) {
+        let current = self.pool.session_epoch();
         let events: Vec<[Json; 3]> = self
             .lock_watched_contract_events()
             .iter()
+            .filter(|(_, watched)| !watched.in_flight.iter().any(|(sent, _)| *sent == current))
             .map(|(entry, _)| entry.clone())
             .collect();
-        for [address, contract, topic] in events {
-            let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &address, &contract, &topic)
-                .compat()
-                .await;
+        for entry in events {
+            let epoch = self.pool.session_epoch();
+            let res: Result<Json, _> =
+                rpc_func!(self, BLOCKCHAIN_CONTRACT_EVENT_SUB_ID, &entry[0], &entry[1], &entry[2])
+                    .compat()
+                    .await;
+            if let Some((_, watched)) = self
+                .lock_watched_contract_events()
+                .iter_mut()
+                .find(|(known, _)| known == &entry)
+            {
+                watched.placed_in = res.is_ok().then_some(epoch);
+            }
             if let Err(e) = res {
-                common::log::debug!("Could not place the contract-event subscription {} again: {}", topic, e);
+                common::log::debug!(
+                    "Could not place the contract-event subscription {} again: {}",
+                    entry[2],
+                    e
+                );
             }
         }
     }
@@ -1811,6 +1987,7 @@ impl ElectrumClientImpl {
             list_unspent_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
             watched_script_hashes: StdMutex::new(HashMap::new()),
             watched_contract_events: StdMutex::new(Vec::new()),
+            retired_owners: StdMutex::new(HashSet::new()),
         }
     }
 
