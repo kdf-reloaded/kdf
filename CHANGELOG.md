@@ -971,15 +971,15 @@ the previous version used. The safe way:
   node built that transaction itself, so it cannot be a coinbase output, and the check no longer
   fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
   after R38.5B.4.
-- **A disabled QTUM or QRC20 instance no longer comes back into the subscriptions of the shared Electrum
-  connections, and a subscription lost on a reconnect is placed again when it is asked for.** Two cases left the
-  shared set of connections of QTUM and its tokens with a wrong record of its subscriptions. A subscription request
-  that was still waiting for its answer when its instance was disabled, or one sent later by a balance stream of the
-  disabled instance, recorded that instance again, and its subscription was then placed again after every reconnect.
-  And when a subscription could not be placed again over a new connection, it still counted as placed, so a later
-  request for it sent nothing. Now a disabled instance records nothing, and a subscription is skipped only while it is
-  placed over the current connection. One instance sends at most one request per subscription at a time. Detail:
-  PR #473; CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
+- **A disabled QTUM or QRC20 instance no longer comes back into the subscriptions of the shared Electrum connections,
+  and a subscription lost on a reconnect is placed again when it is asked for.** Two cases left the shared set of
+  connections of QTUM and its tokens with a wrong record of its subscriptions. A subscription request that was still
+  waiting for its answer when its instance was disabled, or one sent later by a balance stream of the disabled
+  instance, recorded that instance again, and its subscription was then placed again after every reconnect. And when
+  a subscription could not be placed again over a new connection, it still counted as placed, so a later request for
+  it sent nothing. Now a disabled instance records nothing, and a subscription is skipped only while it is placed
+  over the current connection. One instance sends at most one request per subscription at a time. Detail: PR #473;
+  CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
 
 #### TRON coins
 

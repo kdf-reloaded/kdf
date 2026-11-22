@@ -4432,12 +4432,16 @@ per instance as follows.
    remembers the subscription sends nothing only while the subscription is
    placed over the current session. When placing it again over a newer
    session failed, the next request of that instance sends it. The placing
-   again itself is not retried (D38.6.4Q.3 status note, item 2).
+   again itself is not retried (D38.6.4Q.3 status note, item 2). It leaves
+   a subscription that has a request in flight over the current session to
+   that request; when that request fails and the subscription is still
+   remembered, the placing again is asked for once more.
 3. *One request at a time.* An instance has at most one request in flight
    per subscription and session; another request of the same instance
-   meanwhile sends nothing. A request without an answer holds this only until
-   it is answered, its call ends at the request time limits of the client, or
-   its caller drops it; it then counts as failed.
+   meanwhile sends nothing and is answered as placed, even when the request
+   in flight then fails. A request without an answer holds this only until
+   it is answered, its call ends at the request time limits of the client,
+   or its caller drops it; it then counts as failed.
 4. *First placement.* A subscription whose first placement for an instance
    failed or was dropped is not remembered for that instance.
 
