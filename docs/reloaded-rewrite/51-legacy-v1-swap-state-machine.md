@@ -440,6 +440,12 @@ addresses. Any failure MUST emit `NegotiateFailed` and transition to
 `STAGE-FINISH`. The taker MUST NOT transmit a refusal signal — the
 refusal signal is maker-directional only (R33).
 
+> **Status note (2026-11-22, KDF Spec Reader, round 0.5.0-27; passed the KDF
+> Dirty Gate with §51.6F).** How an EVM coin judges a declared swap-contract
+> address, and the case in which the taker selects its own fallback contract
+> instead of ending the swap, are recorded in §51.6F R98–R99. R24 is not
+> edited.
+
 **R25.** *Taker locktime expectation asymmetry.* The taker's expectation
 in R24 is start time plus twice the lock duration, whereas the maker's
 expectation in R11 check 3 is start time plus one lock duration. This
@@ -1516,6 +1522,250 @@ payment transaction. The two rows are identical.
 > 3700 seconds, and for the shielded coin the chain's median time past), which
 > is unchanged, as is the clock check before a refund. No message and no
 > transaction a peer validates changes, which §51.6E permits.
+
+## 51.6F Reference Behavior of an EVM Token Leg: Fee Descriptors, Volume Limits, Swap-Contract Negotiation
+
+> **Status (2026-11-22; KDF Spec Reader, round 0.5.0-27).** Reference record,
+> read at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A. The
+> two rows behave alike in every rule below. **Gate status: passed the KDF
+> Dirty Gate on 2026-11-22, measure 0.03, no findings (chapter 01 R40;
+> attestation in §51.16).** R93–R99 state what the reference does in a legacy
+> swap when one coin is an ERC20 token of the EVM family. They complete R24 and
+> R53–R55 and edit no sentence of this chapter. The reading was of source only;
+> nothing here was observed on a running reference node. The gas figures
+> themselves are bound in [chapter 57](57-evm-fee-inputs.md) and are not
+> restated.
+
+In this section the *token* is an ERC20 token and the *platform coin* is the
+coin that pays its gas. "Available" means a coin's spendable balance minus
+the amount running swaps reserve in that coin (R53).
+
+**R93.** *Fee descriptor of a token.* Every fee figure of a swap is a
+descriptor with the members `coin`, `amount` and `paid_from_trading_vol`.
+For a token:
+
+| Figure | `coin` | `paid_from_trading_vol` |
+|---|---|---|
+| fee to send the swap payment | platform coin's ticker | `false` |
+| fee to spend the counterparty's payment | platform coin's ticker | `false` |
+| fee to send the taker fee (DEX fee) | platform coin's ticker | `false` |
+| the legacy `get_trade_fee` figure | platform coin's ticker | `false` |
+| the taker fee (DEX fee) itself | the token's ticker | `false` |
+
+`amount` of the first four is a quantity of the platform coin. The EVM
+family never sets `paid_from_trading_vol` to `true`, for a token or for a
+platform coin: no gas is taken out of the traded volume.
+
+**R94.** *`trade_preimage` with a token.* The answer keeps its ordinary
+members: `base_coin_fee`, `rel_coin_fee` and `total_fees`, for `buy` and
+`sell` also `taker_fee` and `fee_to_send_taker_fee`, and for `setprice` with
+`max` the volume members.
+
+- The fee member of the side that pays (`base` of `setprice` and `sell`,
+  `rel` of `buy`) is the fee to send the payment. The fee member of the
+  other side is the fee to spend the counterparty's payment. When that side
+  is a token, the member names the platform coin (R93).
+- `taker_fee` names the paying coin, so a paying token is named there, and
+  `fee_to_send_taker_fee` names its platform coin.
+- `total_fees` has one entry per ticker named by the members above. An
+  entry's `amount` is the sum of the figures naming that ticker, and its
+  `required_balance` is the sum of those not paid from the trading volume,
+  which for the EVM family is the same sum. An entry whose amount is zero is
+  left out. A taker paying with a token therefore gets one entry for the
+  token (the taker fee) and one for the platform coin (all gas figures in
+  that coin, from both sides when both coins share the platform).
+
+**R95.** *`trade_preimage` when the platform coin is short.* The answer is an
+error and carries no fee figure.
+
+1. *The typed refusal.* `NotSufficientBaseCoinBalance`, HTTP 400. Its data
+   are `coin` (the platform coin's ticker), `available` (the platform coin's
+   available balance), `required` and `locked_by_swaps` (the amount reserved
+   in the platform coin). `required` is the platform-coin gas of one side
+   only:
+   - a maker paying with the token: the fee to send the payment;
+   - a taker paying with the token: the fee to send the payment plus the fee
+     to send the taker fee;
+   - a token on the receiving side: the fee to spend the counterparty's
+     payment.
+2. *Order.* The paying side is checked first, and within it the platform
+   coin before the token. The token's own check follows and compares the
+   token's available balance with the volume, plus the taker fee for a
+   taker; it answers `NotSufficientBalance` naming the token. No gas enters
+   the token's `required`. The receiving side is checked last.
+3. *No sum across sides.* Each side's figure is compared with the available
+   balance on its own. Two sides that both need the platform coin are not
+   added together.
+4. *Token against its own platform coin.* When the other coin of the pair is
+   the platform coin itself, that side's shortage is reported as
+   `NotSufficientBalance` naming the platform coin, because the fee coin and
+   the checked coin are the same.
+5. *Earlier failure at an estimate.* Two figures ask the node for a gas
+   estimate before any balance is compared: the fee to send the taker fee
+   (chapter 57 §57.4), and the approve part of the payment fee when the
+   token allowance is below the volume (chapter 57 R57.5.3b). A node that
+   refuses the estimate makes the method answer `Transport`, HTTP 500,
+   instead of item 1.
+6. *`setprice` with `max`.* The volume is that of R97 item 1, with its
+   platform-coin check, before the figures above are computed.
+
+**R96.** *Swap start and the fee members of the swap status.* At
+`STAGE-START` each side computes its descriptors anew and runs the checks of
+R95 items 1–4, leaving out its own reservation (R53).
+
+- *Failure.* A shortage of the platform coin, or a refused estimate, ends
+  the swap with `StartFailed`. Nothing is sent to the peer. The event's
+  error text is not bound.
+- *Success.* The data of the `Started` event carry the descriptors, each
+  with `coin`, `amount` (a decimal) and `paid_from_trading_vol`:
+  - maker: `maker_payment_trade_fee`, `taker_payment_spend_trade_fee`;
+  - taker: `fee_to_send_taker_fee`, `taker_payment_trade_fee`,
+    `maker_payment_spend_trade_fee`.
+
+  `my_swap_status` and `my_recent_swaps` show them as part of the event. For
+  a token leg they name the platform coin with `false`, as in R93.
+- *Quotes, not receipts.* The figures are the estimates made at the start.
+  They are not replaced by the gas the transactions paid, and the payment
+  events carry a transaction and its hash, no fee.
+- *Reservation.* A descriptor naming the platform coin counts toward the
+  platform coin's reserved total (R53–R55), not toward the token's.
+- *Fee-exempt taker.* When the trade carries no DEX fee (chapter 08), the
+  fee to send the taker fee is a zero descriptor that names the taker coin
+  itself, for a token as well.
+
+*Code-quality finding (informative; apparent from the reading, no audit was
+made).* The taker's check requires the fee to send the taker fee and the fee
+to send the payment to name the same coin. For a fee-exempt taker paying
+with a token they do not: the first names the token (R96), the second the
+platform coin (R93). As read, such a swap ends with `StartFailed` on an
+internal error. *Possible remedy:* let the zero descriptor name the fee coin
+of the payment, or skip the comparison when its amount is zero.
+
+**R97.** *`max_maker_vol` and `max_taker_vol` for a token.*
+
+1. *`max_maker_vol`.* The volume is the token's whole available balance.
+   Nothing is taken off it for gas. The fee to send the payment is computed
+   at the maker's upper-bound stage (chapter 57 R57.3.4) and compared with
+   the platform coin's available balance. When that is short the method
+   answers `NotSufficientBaseCoinBalance`, HTTP 400, with the four data
+   members of R95 item 1; it does not answer a zero volume. The fee to
+   spend the counterparty's payment is not reserved; no counterparty coin
+   is known to the method.
+2. *`max_taker_vol`.* The result is the largest volume that, with its DEX
+   fee, fits into the token's whole available balance. **No platform-coin
+   reserve is applied, the platform coin's balance is not read, and there is
+   no error for a short platform coin**: the answer is the same with an
+   empty platform-coin balance. The fee to send the taker fee is not
+   computed for a token. The fee to send the payment is still computed, only
+   to learn its coin, so the allowance read and a possible approve estimate
+   happen and their failure fails the method with the legacy error body,
+   HTTP 500.
+3. *Token balance too small.* The floor is the coin's minimum transaction
+   amount, which is zero for the EVM family (chapter 57 R57.7A.3). Below it,
+   `max_maker_vol` answers `NotSufficientBalance` naming the token. The
+   legacy `max_taker_vol` answers success with a zero `result` when the
+   volume is not above the floor; it turns every insufficient-balance
+   outcome into zero.
+4. *Contrast.* For a platform coin both methods take the gas figures off
+   the volume, because the fee coin is the coin itself.
+
+*Code-quality finding (informative; apparent from the reading).* The two
+methods disagree for a token. `max_maker_vol` refuses when the platform coin
+cannot pay the gas; `max_taker_vol` returns a volume that `buy`, `sell` and
+`trade_preimage` then refuse with `NotSufficientBaseCoinBalance`. *Possible
+remedy:* run the platform-coin check of item 1 in `max_taker_vol` too, with
+the payment fee plus the fee to send the taker fee as the required amount.
+
+**R98.** *Which swap-contract addresses travel.* (Completes R26, R59.)
+
+- *Maker's `Negotiation`.* `maker_coin_swap_contract` and
+  `taker_coin_swap_contract` are, for each coin, the primary swap contract
+  the maker's own coin holds from its activation: 20 bytes for an EVM coin
+  or token, an empty byte string for a coin that has none. The maker never
+  declares its fallback contract.
+- *Taker's `NegotiationReply`.* The two members are the addresses the taker
+  selected by R99. They are not always the taker's own primary contract.
+- *Nowhere else.* No other legacy swap message carries a contract address;
+  the payment messages carry transactions. The order-match messages carry
+  none for an EVM coin ([chapter 59](59-legacy-ordermatch-negotiation.md)
+  R59.4.7), and the watcher message carries none.
+- *Status.* The `Started` data show the node's own primary addresses as
+  `maker_coin_swap_contract_address` and `taker_coin_swap_contract_address`.
+  The `Negotiated` data show the selected ones as
+  `maker_coin_swap_contract_addr` and `taker_coin_swap_contract_addr`. From
+  `Negotiated` on, the selected address is the one every payment, validation,
+  spend and refund of that coin uses.
+
+**R99.** *What an EVM coin does with the peer's address.* (Completes R11
+check 4, R24 and R34 conditions 4 and 5.) The coin holds one primary swap
+contract and optionally one fallback contract (chapter 35). For the value
+the peer declared for that coin:
+
+| Declared value | Outcome |
+|---|---|
+| 20 bytes equal to the primary contract | accepted; the primary is selected |
+| 20 bytes equal to the fallback contract | accepted; the fallback is selected |
+| any other 20 bytes | not accepted |
+| a length other than 20 bytes, the empty string included | not accepted |
+| no member at all (shape 1 of R59) | the fallback is selected when one is configured; otherwise not accepted |
+
+- *Maker.* "Not accepted" is the refusal of R34 condition 4 or 5: one
+  negative acknowledgement, `NegotiateFailed`, end. The maker never
+  substitutes an address.
+- *Taker with a fallback configured.* "Not accepted" does not end the swap.
+  The taker selects its own fallback contract, whatever the maker declared,
+  and sends it in its reply. The maker then applies the table: it goes on
+  only when the taker's fallback equals the maker's primary or fallback
+  contract. Otherwise the maker refuses and the taker ends with
+  `NegotiateFailed` at R26 check 7.
+- *Taker without a fallback.* "Not accepted" ends the swap at once with
+  `NegotiateFailed`. The taker sends no reply and no refusal, and the maker
+  ends by R34 condition 1 when its wait runs out.
+- *When.* A difference is settled inside `STAGE-NEGOTIATE` on both sides,
+  before the taker fee. Nothing compares contract addresses at order match,
+  and no later stage refuses for this reason.
+- *Other families.* A UTXO coin accepts every declared value and selects no
+  address.
+
+*Not established (R93–R99).*
+
+1. No outcome was run against a reference binary.
+2. Whether a given node refuses a gas estimate for an account that cannot
+   pay the gas (R95 item 5, R97 item 2).
+3. The error texts of `StartFailed` and `NegotiateFailed`, which are
+   deliberately not recorded.
+4. The contract-address rules of the QRC20, Tendermint, Sia and shielded
+   families were not read for this section.
+5. The second protocol version and the watcher's own checks are outside
+   this section.
+6. Whether this repository's code already differs from R93–R99 was not
+   surveyed.
+
+**T39.** *Reference characterization: fee descriptors (R93, R94, R96).* With
+a token and its platform coin active and funded, `trade_preimage` for `sell`
+with the token as `base`: `base_coin_fee.coin` and
+`fee_to_send_taker_fee.coin` are the platform ticker, `taker_fee.coin` is
+the token ticker, every `paid_from_trading_vol` is `false`, and `total_fees`
+has one entry for each of the two tickers. A swap started from the same pair
+shows the platform ticker and `false` in `taker_payment_trade_fee` and
+`fee_to_send_taker_fee` of its `Started` event.
+
+**T40.** *Reference characterization: short platform coin (R95, R97).* With
+the token funded and the platform coin's balance below the gas figure, and a
+node that answers the gas estimates: `trade_preimage` for `setprice` with the
+token as `base` answers `NotSufficientBaseCoinBalance`, HTTP 400, whose
+`coin` is the platform ticker and which carries `available`, `required` and
+`locked_by_swaps`; `max_maker_vol` for the token answers the same type;
+`max_taker_vol` for the token answers a non-zero `result`.
+
+**T41.** *Reference characterization: contract addresses (R98, R99).* A
+maker and a taker whose EVM coin has different primary contracts and no
+fallback: the taker ends with `NegotiateFailed` without sending a reply, and
+the maker ends with `NegotiateFailed` after its wait. With the taker's
+fallback equal to the maker's primary contract the swap passes negotiation,
+and both `Negotiated` events show the maker's primary address for that coin.
+With a taker fallback the maker does not know, the taker ends with
+`NegotiateFailed` after the maker's negative acknowledgement.
 
 ## 51.7 Bound Message Contract
 
@@ -3242,3 +3492,38 @@ reference rows alike.
   after R29 on a swap resumed at its payment stage. It is Reloaded-original,
   rests only on this repository's own swap code and the cleared text of R7,
   R17 and R29, and changes no sentence of the chapter.
+- *Scoped addition (2026-11-22), KDF Spec Reader, round 0.5.0-27 -- §51.6F
+  (R93–R99, the two code-quality findings, T39–T41) and the status note
+  after R24.* Forbidden-class input was taken through the two-team procedure
+  of chapter 01 §1.4A, from the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  chapter 02 §2.15A; no untabled state was read. The facts taken are, for a
+  legacy swap with an ERC20 token of the EVM family: which coin each fee
+  figure names and the value of its trading-volume flag; the answer of
+  `trade_preimage`, of the swap start and of the two maximum-volume methods
+  when the platform coin cannot pay the gas; which swap-contract addresses
+  the negotiation messages and the swap status carry; and how a declared
+  address is accepted, replaced by the fallback contract or refused. The
+  names used are those of the public RPC methods, their answer and error
+  members, the swap status members and the negotiation message members. No
+  private identifier, function body, helper decomposition, log or error
+  literal was reproduced. The proposed remedies in the findings are the
+  author's own. No cleared sentence was edited. **KDF Dirty Gate: PASS on
+  2026-11-22, measure 0.03, no findings** (chapter 01 R40; the attestation
+  closes this item).
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings; the chapter 02 §2.15A rows `v2.6.0-beta` and `v3.0.0-beta` are
+  tabled. *Extent:* the legacy swap subsystem as §51.6F scopes it for an ERC20
+  token leg of the EVM family: the `trade_preimage` and swap-start fee
+  descriptors, the swap balance checks including the platform coin, both
+  maximum-volume calculations, the EVM swap-contract address acceptance rule,
+  and the maker and taker start and negotiation stages with their event data,
+  compared at both release rows; four source files read, the address rule and
+  the taker side at one row each and the rest at `v3.0.0-beta`, with the
+  differences between the rows checked by their size only; QRC20, Tendermint,
+  Sia, the shielded coins, the watcher and the second protocol version are out
+  of scope. *Method:* reading all 304 added lines and the reference material,
+  a forced-versus-free test of every backticked token (53, all public or
+  serialized surface), and a check of the shape of the difference against the
+  base; the repository's clean-room gate tool was not applicable because the
+  additions embed no code blocks. *Measure:* 0.03, on the
+  discretionary-expression basis.
