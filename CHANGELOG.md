@@ -1222,6 +1222,13 @@ the previous version used. The safe way:
 
 ### Tests
 
+- **The Trezor emulator tests now run in CI.** The emulator job passed while every test was skipped: the
+  container starts only the emulator's controller, and each test looked for the emulator before anything had
+  started it. The job now starts and seeds the emulator and checks that it answers before the tests run, and in
+  that job an emulator that does not answer fails the tests instead of skipping them; run without that job's
+  setting, the tests still skip. The emulator image is pinned to a fixed version. Of the eleven tests, ten run and
+  pass; the PIN test stays ignored. The TRON test had never run and failed in its own setup; only its setup
+  changed. Detail: PR #498.
 - **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
   network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
   Detail: PR #479.
