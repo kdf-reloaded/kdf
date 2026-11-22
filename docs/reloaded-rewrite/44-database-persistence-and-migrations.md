@@ -767,20 +767,22 @@ with a reference build, the following hold.
 > The same PR fences the swap lock between RELOADED runners (R44.9A.13 items 2
 > to 5). The content of `<uuid>.lock` keeps the R44.9A.7 form. A new lock is
 > created by linking a fully written temporary file to the lock name, which
-> fails if the name exists, so no reader sees an empty lock; a refresh and a
-> take-over write through a temporary file and a rename (gap 1 of the code-
-> quality finding). The runner keeps the value it wrote last in memory; before
-> each refresh it reads the file, and a missing file, a different value,
-> content that is not text, or refreshing that has failed for longer than 40
-> seconds makes the lock lost: the run is stopped where it stands, like an
-> abrupt stop, starts no further step and leaves the file (gap 3), and the
-> swap is handed to the kick-start of a saved swap, which takes the lock by
-> chapter 51 R5. A late refresh that finds its own value continues with a
-> warning. After a take-over the file is read back once, which narrows gap 2
-> between RELOADED runners; two of them that take a stale lock within the same
-> second write the same value and are not told apart. Against a reference
-> build on the same directory the timestamp rule of R44.9A.8 remains the only
-> protection (item 5).
+> fails if the name exists, so no reader sees an empty lock (on a file system
+> without hard links the earlier create-then-write is used, and a new lock is
+> empty for a moment); a refresh and a take-over write through a temporary
+> file and a rename (gap 1 of the code- quality finding). The runner keeps the
+> value it wrote last in memory; before each refresh it reads the file, and a
+> missing file, a different value, content that is not text, or refreshing
+> that has failed for longer than 40 seconds makes the lock lost: the run is
+> stopped where it stands, like an abrupt stop, starts no further step and
+> leaves the file (gap 3), and the swap is handed to the kick-start of a saved
+> swap, which takes the lock by chapter 51 R5; if the lock file keeps being
+> removed, the swap is resumed from its record after each loss. A late refresh
+> that finds its own value continues with a warning. After a take-over the
+> file is read back once, which narrows gap 2 between RELOADED runners; two of
+> them that take a stale lock within the same second write the same value and
+> are not told apart. Against a reference build on the same directory the
+> timestamp rule of R44.9A.8 remains the only protection (item 5).
 
 ### 44.9A.5 Tests
 

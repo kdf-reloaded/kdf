@@ -1098,8 +1098,9 @@ the previous version used. The safe way:
   seconds, the run is stopped where it stands, like an abrupt stop, and leaves the lock file. The swap is then
   handed to the ordinary start of a saved swap, which waits 40 seconds and resumes it if no other runner holds the
   lock. A late refresh that finds its own value goes on with a warning. A new lock file is created in one step and
-  replaced in one step, so a reader never sees it empty, and its content keeps the form GLEEC KDF reads. Detail: PR
-  #480; CRD ch.51 R5 and ch.44 §44.9A (status updates).
+  replaced in one step, so a reader does not see it empty (on a file system without hard links a new lock file is
+  empty for a moment), and its content keeps the form GLEEC KDF reads. Detail: PR #480; CRD ch.51 R5 and ch.44
+  §44.9A (status updates).
 
 #### Legacy swaps
 
