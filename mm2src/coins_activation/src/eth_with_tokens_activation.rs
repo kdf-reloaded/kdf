@@ -325,6 +325,9 @@ pub struct EthWithTokensActivationRequest {
     /// credentials are secrets: the type's debug form shows neither (CRD ch.63 R9, ch.35 R35.1.17).
     #[serde(default)]
     tron_gasless_provider: Option<TronGaslessProviderRequest>,
+    /// The node whose answer a swap-evidence read takes alone (CRD ch.51 R100 item 2); it must be one of `nodes`.
+    #[serde(default)]
+    swap_evidence_node: Option<String>,
 }
 
 impl TxHistory for EthWithTokensActivationRequest {
@@ -403,6 +406,7 @@ impl From<EthCoinBuildError> for ActivationErr {
             // ch.35 as an invalid payload; the message names the key.
             EthCoinBuildError::InvalidConfig(e) => ActivationErr::InvalidPayload(e),
             EthCoinBuildError::Transport(e) => ActivationErr::Transport(e),
+            EthCoinBuildError::SwapEvidenceNodeNotInList(e) => ActivationErr::SwapEvidenceNodeNotInList(e),
             EthCoinBuildError::Internal(e) => ActivationErr::Internal(e),
         }
     }
@@ -642,6 +646,7 @@ fn activation_params(
         gas_station_policy: request.gas_station_policy.unwrap_or_default(),
         swap_gas_fee_policy,
         swap_gas_fee_policy_source,
+        swap_evidence_node: request.swap_evidence_node.clone(),
     };
     params
         .validate_swap_contracts(platform_conf)

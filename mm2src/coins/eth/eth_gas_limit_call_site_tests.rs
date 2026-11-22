@@ -74,6 +74,7 @@ fn coin_over_entries_and_conf(
     .unwrap();
     let my_address = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals: 18,
         gas_station_url: None,
@@ -87,6 +88,7 @@ fn coin_over_entries_and_conf(
         fallback_swap_contract: None,
         ticker: ticker.to_owned(),
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],

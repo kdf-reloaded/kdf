@@ -1,6 +1,7 @@
 use crate::standalone_coin::InitStandaloneCoinError;
 use coins::coin_balance::EnableCoinBalanceError;
 use coins::hd_wallet::NewAccountCreatingError;
+use coins::swap_evidence::SwapEvidenceNodeNotInList;
 use coins::utxo::utxo_builder::UtxoCoinBuildError;
 use coins::{BalanceError, RegisterCoinError};
 use crypto::{CryptoCtxError, CryptoInitError, HwError, HwRpcError};
@@ -29,6 +30,9 @@ pub enum InitUtxoStandardError {
     },
     #[display(fmt = "Hardware wallet error: {}", _0)]
     HwError(HwRpcError),
+    /// A `swap_evidence_node` outside the coin's node list (CRD ch.51 R100 item 2).
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     Transport(String),
     Internal(String),
 }
@@ -62,6 +66,9 @@ impl From<InitUtxoStandardError> for InitStandaloneCoinError {
                 InitStandaloneCoinError::CoinCreationError { ticker, error }
             },
             InitUtxoStandardError::HwError(hw_error) => InitStandaloneCoinError::HwError(hw_error),
+            InitUtxoStandardError::SwapEvidenceNodeNotInList(error) => {
+                InitStandaloneCoinError::SwapEvidenceNodeNotInList(error)
+            },
             InitUtxoStandardError::Transport(transport) => InitStandaloneCoinError::Transport(transport),
             InitUtxoStandardError::Internal(internal) => InitStandaloneCoinError::Internal(internal),
         }
@@ -78,6 +85,9 @@ impl InitUtxoStandardError {
         match build_err {
             UtxoCoinBuildError::Internal(internal) => InitUtxoStandardError::Internal(internal),
             UtxoCoinBuildError::FailedToConnectToElectrums(failure) => InitUtxoStandardError::Transport(failure),
+            UtxoCoinBuildError::SwapEvidenceNodeNotInList(error) => {
+                InitUtxoStandardError::SwapEvidenceNodeNotInList(error)
+            },
             build_err @ (UtxoCoinBuildError::NoUsableElectrumServers { .. }
             | UtxoCoinBuildError::HDWalletStorageError(_)) => InitUtxoStandardError::Internal(build_err.to_string()),
             build_err => InitUtxoStandardError::CoinCreationError {

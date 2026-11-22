@@ -603,6 +603,9 @@ pub enum SiaCoinNewError {
     DeriveExtendedKey(#[from] PrivKeyError),
     #[error("[new] HD wallet root derivation failed: {0}")]
     HDWalletCreation(#[from] SiaHDWalletCreationError),
+    /// A `swap_evidence_node` other than the coin's `server_url` (CRD ch.51 R100 item 2).
+    #[error("{0}")]
+    SwapEvidenceNodeNotInList(crate::swap_evidence::SwapEvidenceNodeNotInList),
 }
 
 /// Errors raised by the `my_keypair` accessor when the wallet is not

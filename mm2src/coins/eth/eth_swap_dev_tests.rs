@@ -47,6 +47,7 @@ fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) 
         _ => "ETH".to_string(),
     };
     let coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         ticker,
         coin_type,
         my_address: my_addr,
@@ -55,6 +56,7 @@ fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) 
         swap_contract_address: swap_contract,
         fallback_swap_contract: None,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: false,
         }],

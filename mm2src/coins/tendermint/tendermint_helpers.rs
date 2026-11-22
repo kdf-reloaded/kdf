@@ -161,6 +161,16 @@ impl TendermintCoin {
         }
     }
 
+    /// The swap-evidence policy fixed at activation (CRD ch.51 R100).
+    pub fn stored_swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        self.swap_evidence.lock().unwrap().clone()
+    }
+
+    /// Stores the swap-evidence policy computed at activation (CRD ch.51 R100).
+    pub fn set_swap_evidence_policy(&self, policy: crate::SwapEvidencePolicy) {
+        *self.swap_evidence.lock().unwrap() = policy;
+    }
+
     /// Reads the per-coin swap fee policy (CRD ch.35 R35.6.8); `Legacy` until set.
     pub fn swap_gas_fee_policy(&self) -> SwapGasFeePolicy { *self.swap_gas_fee_policy.lock().unwrap() }
 

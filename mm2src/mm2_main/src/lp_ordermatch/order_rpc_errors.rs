@@ -174,6 +174,10 @@ pub enum SetPriceError {
     /// The Electrum servers of a coin disagree about the chain (CRD ch.38 R38.6.4o item 12). The payload is the text.
     #[display(fmt = "{}", _0)]
     ChainDisagreement(String),
+    /// A coin of the pair has fewer than two nodes for swap evidence and no `swap_evidence_node` (CRD ch.51 R100
+    /// item 4). The payload is the text, which names `swap_evidence_node`.
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceInsufficient(String),
     /// The computer's clock is off by more than the limit (CRD ch.45 R45.6C.8). The payload is the refusal text as the
     /// clock check renders it.
     #[display(fmt = "{}", _0)]
@@ -367,6 +371,7 @@ impl HttpStatusCode for SetPriceError {
             | SetPriceError::TradingNotSupported { .. }
             | SetPriceError::SwapKeyMismatch { .. }
             | SetPriceError::ChainDisagreement(_)
+            | SetPriceError::SwapEvidenceInsufficient(_)
             | SetPriceError::BaseCoinIsWalletOnly { .. }
             | SetPriceError::RelCoinIsWalletOnly { .. }
             | SetPriceError::BaseEqualRel
@@ -697,6 +702,10 @@ pub enum TakerOrderError {
     /// The Electrum servers of a coin disagree about the chain (CRD ch.38 R38.6.4o item 12). The payload is the text.
     #[display(fmt = "{}", _0)]
     ChainDisagreement(String),
+    /// A coin of the pair has fewer than two nodes for swap evidence and no `swap_evidence_node` (CRD ch.51 R100
+    /// item 4). The payload is the text, which names `swap_evidence_node`.
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceInsufficient(String),
     /// The computer's clock is off by more than the limit (CRD ch.45 R45.6C.8). The payload is the refusal text as the
     /// clock check renders it.
     #[display(fmt = "{}", _0)]
@@ -885,6 +894,7 @@ impl HttpStatusCode for TakerOrderError {
             | TakerOrderError::TradingNotSupported { .. }
             | TakerOrderError::SwapKeyMismatch { .. }
             | TakerOrderError::ChainDisagreement(_)
+            | TakerOrderError::SwapEvidenceInsufficient(_)
             | TakerOrderError::BaseCoinIsWalletOnly { .. }
             | TakerOrderError::RelCoinIsWalletOnly { .. }
             | TakerOrderError::NotSufficientBalance { .. }

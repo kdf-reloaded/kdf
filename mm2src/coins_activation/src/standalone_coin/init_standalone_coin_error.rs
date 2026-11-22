@@ -1,4 +1,5 @@
 use crate::prelude::CoinConfWithProtocolError;
+use coins::swap_evidence::SwapEvidenceNodeNotInList;
 use coins::{CoinProtocol, RegisterCoinError};
 use common::{HttpStatusCode, StatusCode};
 use crypto::HwRpcError;
@@ -49,6 +50,9 @@ pub enum InitStandaloneCoinError {
     /// A hardware-wallet failure classified into the public hardware RPC error names (CRD ch. 55 R55.2.17).
     #[display(fmt = "Hardware wallet error: {}", _0)]
     HwError(HwRpcError),
+    /// A `swap_evidence_node` outside the coin's node list (CRD ch.51 R100 item 2).
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     Transport(String),
     Internal(String),
 }
@@ -99,6 +103,7 @@ impl HttpStatusCode for InitStandaloneCoinError {
             | InitStandaloneCoinError::CoinConfigIsNotFound { .. }
             | InitStandaloneCoinError::CoinProtocolParseError { .. }
             | InitStandaloneCoinError::UnexpectedCoinProtocol { .. }
+            | InitStandaloneCoinError::SwapEvidenceNodeNotInList(_)
             | InitStandaloneCoinError::CoinCreationError { .. } => StatusCode::BAD_REQUEST,
             InitStandaloneCoinError::HwError(_) => StatusCode::GONE,
             InitStandaloneCoinError::TaskTimedOut { .. } => StatusCode::REQUEST_TIMEOUT,

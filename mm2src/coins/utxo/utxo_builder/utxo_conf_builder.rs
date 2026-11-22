@@ -790,6 +790,7 @@ mod tests {
             priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
             check_utxo_maturity: None,
             path_to_address: None,
+            swap_evidence_node: None,
         }
     }
 
