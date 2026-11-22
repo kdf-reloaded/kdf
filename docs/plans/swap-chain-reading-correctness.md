@@ -12,7 +12,7 @@ Hardening area: the correctness of the chain reads the legacy (v1) swap path mak
 1. A found spend of a UTXO swap payment is read from the input that spends the payment — PR #481.
 2. The secret read from the transaction that claimed a payment is accepted only when it matches the swap's secret
    hash, for every coin family. EVM coins also read it from the contract's claim event; Tendermint coins read
-   every message of the transaction — PR (to follow).
+   every message of the transaction — PR #488.
 3. To follow.
 4. To follow.
 

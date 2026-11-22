@@ -1088,7 +1088,7 @@ the previous version used. The safe way:
 - **The secret of a swap is checked against its hash on every coin.** When the taker reads the secret from the
   transaction that claimed its payment, the value is used only when it matches the swap's secret hash. EVM coins
   (ETH and ERC20 tokens) also read the secret from the swap contract's claim event; Tendermint coins look at every
-  message of the transaction. Detail: PR (to follow); CRD ch.51, status note of 2026-11-22 before R31.
+  message of the transaction. Detail: PR #488; CRD ch.51, status note of 2026-11-22 before R31.
 
 ### Tests
 
@@ -1176,7 +1176,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
-- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 2 in PR (to follow).
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 2 in PR #488.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
