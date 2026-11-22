@@ -55,7 +55,7 @@ pub enum SwapFamily {
     Solana,
 }
 
-/// The one adoption table of R100 (decision LFV b): `true` once the family's reads agree on two nodes and its
+/// The one adoption table of R100 (maintainer decision of 2026-11-22): `true` once the family's reads agree on two nodes and its
 /// `swap_evidence_policy()` answers its stored policy; until then it answers [`SwapEvidencePolicy::NotAdopted`].
 /// Every entry must be `true` before 0.5.0 is tagged (`r100_release_gate_every_swap_family_adopted`).
 pub const R100_ADOPTED: &[(SwapFamily, bool)] = &[
@@ -130,31 +130,51 @@ pub fn insufficient_refusal(ticker: &str) -> String {
     format!("{ticker} has fewer than two nodes for swap evidence; add a second node or set swap_evidence_node")
 }
 
-/// Host and optional port of a node address: an Electrum `host:port`, an `https://...` / `wss://...` URL or a bare
-/// host. The host is lowercased; an IPv6 host keeps its brackets. The port is the one written, else the default
-/// of an `http`, `https`, `ws` or `wss` scheme.
+/// The host and the port as written of a node address: an Electrum `host:port`, an `https://...` / `wss://...` URL
+/// or a bare host. The host is lowercased; an IPv6 host keeps its brackets and is never split at a colon inside them.
+fn parse_node(addr: &str) -> Option<(String, Option<u16>)> {
+    let addr = addr.trim();
+    let rest = addr.split_once("://").map_or(addr, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, host_port)| host_port);
+    if let Some(after) = host_port.strip_prefix('[') {
+        let (inner, tail) = after.split_once(']')?;
+        if inner.is_empty() || !inner.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+            return None;
+        }
+        let port = match tail {
+            "" => None,
+            tail => Some(tail.strip_prefix(':')?.parse::<u16>().ok()?),
+        };
+        return Some((format!("[{}]", inner.to_ascii_lowercase()), port));
+    }
+    let name = electrum_host_port(addr)?;
+    Some(match name.rsplit_once(':') {
+        Some((host, port)) => (host.to_ascii_lowercase(), port.parse::<u16>().ok()),
+        None => (name.to_ascii_lowercase(), None),
+    })
+}
+
+/// [`parse_node`] with the default port of an `http`, `https`, `ws` or `wss` scheme when none is written.
 fn host_and_port(addr: &str) -> Option<(String, Option<u16>)> {
-    let name = electrum_host_port(addr.trim())?;
-    let (host, port) = match name.rsplit_once(':') {
-        Some((host, port)) if !host.ends_with(':') => (host, port.parse::<u16>().ok()),
-        _ => (name.as_str(), None),
-    };
+    let (host, port) = parse_node(addr)?;
     let port = port.or_else(|| match addr.trim().split_once("://").map(|(scheme, _)| scheme) {
         Some("https") | Some("wss") => Some(443),
         Some("http") | Some("ws") => Some(80),
         _ => None,
     });
-    Some((host.to_ascii_lowercase(), port))
+    Some((host, port))
 }
 
 /// The form in which an error or a log line names a node: `host[:port]`, lowercased, the port only when the address
 /// writes one. A scheme, userinfo, path and query (which may hold a credential) are dropped; an address with no host
 /// is rendered as [`crate::node_url::UNNAMED_NODE`].
 pub fn node_name(addr: &str) -> String {
-    electrum_host_port(addr.trim()).map_or_else(
-        || crate::node_url::UNNAMED_NODE.to_owned(),
-        |name| name.to_ascii_lowercase(),
-    )
+    match parse_node(addr) {
+        Some((host, Some(port))) => format!("{host}:{port}"),
+        Some((host, None)) => host,
+        None => crate::node_url::UNNAMED_NODE.to_owned(),
+    }
 }
 
 /// The host of one node address, lowercased (CRD ch.51 R100 item 1: a node is a distinct host name). `None` when
@@ -279,7 +299,15 @@ enum Asked<A, K> {
 /// - `label` names a node for the log line and for matching the trusted node.
 ///
 /// `label` must return a `host[:port]` form of the node (see [`node_name`]), never a raw URL: it is matched against
-/// the trusted node and it appears in the log line of an undetermined read.
+/// the trusted node and it appears in the log line of an undetermined read. The per-node texts of an
+/// [`Undetermined`] carry what `ask` returns as its error, so an `ask` error must be free of URLs and credentials,
+/// as `label` must be.
+///
+/// A secret that proves itself needs no agreeing read (R100): whenever the read would otherwise end undetermined
+/// because too few nodes answered (an `Insufficient` policy, a silent trusted node, fewer than two answers), the nodes
+/// not asked yet are asked and an answer that proves itself is taken from any of them. Any other answer of those
+/// nodes is ignored and the result stays undetermined with the original reason; a disagreement of two answers is not
+/// reopened.
 ///
 /// Each call asks one pair and decides only when that pair agrees: when two answers differ, no third node is asked.
 pub async fn agree<N, A, K, F, Fut>(
@@ -296,6 +324,28 @@ where
     Fut: Future<Output = Result<A, String>>,
 {
     let labels: Vec<String> = nodes.iter().map(&label).collect();
+    let classify = &classify;
+    let proves_itself = &proves_itself;
+    // The nodes not in `asked`, all at once: the first answer that proves itself, any other answer ignored.
+    let proof_from_rest = |asked: Vec<usize>| {
+        let pending: FuturesUnordered<_> = (0..nodes.len())
+            .filter(|index| !asked.contains(index))
+            .map(|index| {
+                let future = ask(&nodes[index]);
+                async move { future.await.ok() }
+            })
+            .collect();
+        async move {
+            let mut pending = pending;
+            while let Some(answer) = pending.next().await {
+                if let Some(answer) = answer.filter(|answer| proves_itself(answer)) {
+                    let decision = classify(&answer);
+                    return Some((answer, decision));
+                }
+            }
+            None
+        }
+    };
     let mut per_node: Vec<(usize, String, String)> = Vec::new();
     let finish = |reason: UndeterminedReason, mut per_node: Vec<(usize, String, String)>| {
         per_node.sort_by_key(|(index, _, _)| *index);
@@ -311,7 +361,10 @@ where
     // The candidate indexes in the order they are asked, and how many answers decide.
     let (candidates, needed, silent_reason): (Vec<usize>, usize, UndeterminedReason) = match policy {
         SwapEvidencePolicy::Insufficient { .. } => {
-            return finish(UndeterminedReason::TooFewAnswers, per_node);
+            return match proof_from_rest(Vec::new()).await {
+                Some((answer, decision)) => Agreement::Agreed { answer, decision },
+                None => finish(UndeterminedReason::TooFewAnswers, per_node),
+            };
         },
         // A family that has not adopted R100 reads as today: one routed node, its answer taken.
         SwapEvidencePolicy::OwnDaemon | SwapEvidencePolicy::NotAdopted => {
@@ -338,7 +391,6 @@ where
         },
     };
 
-    let classify = &classify;
     let ask_one = |index: usize| {
         let future = ask(&nodes[index]);
         async move {
@@ -388,7 +440,11 @@ where
     }
 
     if answers.len() < needed {
-        return finish(silent_reason, per_node);
+        let asked: Vec<usize> = per_node.iter().map(|(index, _, _)| *index).collect();
+        return match proof_from_rest(asked).await {
+            Some((answer, decision)) => Agreement::Agreed { answer, decision },
+            None => finish(silent_reason, per_node),
+        };
     }
     answers.sort_by_key(|(index, _, _)| *index);
     let (_, answer, decision) = answers.remove(0);
@@ -617,7 +673,8 @@ mod tests {
             Agreement::Undetermined(u) => assert_eq!(u.reason, UndeterminedReason::TrustedNodeSilent),
             other => panic!("{other:?}"),
         }
-        assert_eq!(asked, vec!["b:1"]);
+        // the trusted node is asked first; the others are asked only for a self-proving answer
+        assert_eq!(asked.first().map(String::as_str), Some("b:1"));
     }
 
     #[test]
@@ -645,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "release gate R100 (LFV b): must pass before tagging 0.5.0"]
+    #[ignore = "release gate R100: must pass before tagging 0.5.0"]
     fn r100_release_gate_every_swap_family_adopted() {
         let open: Vec<_> = R100_ADOPTED
             .iter()
@@ -676,6 +733,58 @@ mod tests {
         assert_eq!(asked, vec!["a:1"]);
     }
 
+    /// R100: a secret that proves itself is taken from any node when the read would otherwise be undetermined.
+    #[test]
+    fn agree_a_self_proving_answer_of_another_node_is_taken_when_the_read_is_undetermined() {
+        let proves: &'static [&'static str] = &["secret:s"];
+        // Insufficient policy, one node answers a self-proving answer
+        let script: Script = vec![("a:1", Ok("none")), ("b:1", Ok("secret:s"))];
+        let (outcome, _) = run(SwapEvidencePolicy::Insufficient { hosts: 1 }, &script, proves);
+        assert_eq!(outcome, Agreement::Agreed {
+            answer: "secret:s",
+            decision: "secret".to_owned()
+        });
+        // Trusted node silent, another node proves
+        let trusted = SwapEvidencePolicy::Trusted { node: "b:1".to_owned() };
+        let script: Script = vec![("a:1", Ok("secret:s")), ("b:1", Err("down"))];
+        let (outcome, _) = run(trusted.clone(), &script, proves);
+        assert_eq!(outcome, Agreement::Agreed {
+            answer: "secret:s",
+            decision: "secret".to_owned()
+        });
+        // Trusted node silent, another node answers a plain answer: it is ignored
+        let script: Script = vec![("a:1", Ok("none")), ("b:1", Err("down"))];
+        let (outcome, _) = run(trusted, &script, proves);
+        match outcome {
+            Agreement::Undetermined(u) => {
+                assert_eq!(u.reason, UndeterminedReason::TrustedNodeSilent);
+                assert_eq!(u.per_node.len(), 1, "the plain answer of the other node is not used");
+            },
+            other => panic!("{other:?}"),
+        }
+        // Two nodes of a pair, one silent, a third proves
+        let script: Script = vec![("a:1", Ok("none")), ("b:1", Err("down")), ("c:1", Ok("secret:s"))];
+        let (outcome, _) = run(two(), &script, proves);
+        assert!(matches!(outcome, Agreement::Agreed { .. }));
+    }
+
+    /// A bracketed IPv6 host is never split at a colon inside the brackets.
+    #[test]
+    fn ipv6_hosts_that_differ_in_the_last_group_stay_two_nodes() {
+        let nodes = list(&["[fe80::1:2]:8080", "[fe80::1:3]:8080"]);
+        assert_eq!(node_host(&nodes[0]).as_deref(), Some("[fe80::1:2]"));
+        assert!(matches!(
+            swap_evidence_policy_from("T", None, &nodes).unwrap(),
+            SwapEvidencePolicy::TwoNodes { hosts } if hosts.len() == 2
+        ));
+        assert!(node_matches("[fe80::1:2]:8080", &nodes[0]));
+        assert!(!node_matches("[fe80::1:2]:9090", &nodes[0]));
+        assert!(node_matches("[fe80::1:2]", &nodes[0]));
+        assert!(!node_matches("[fe80::1:2]", &nodes[1]));
+        assert_eq!(node_host("[fe80::1:2]").as_deref(), Some("[fe80::1:2]"));
+        assert_eq!(node_name("https://[FE80::1:2]:8545/x"), "[fe80::1:2]:8545");
+    }
+
     #[test]
     fn agree_own_daemon_and_insufficient() {
         let script: Script = vec![("d:1", Ok("spent"))];
@@ -690,6 +799,7 @@ mod tests {
         let script: Script = vec![("a:1", Ok("x")), ("b:1", Ok("x"))];
         let (outcome, asked) = run(SwapEvidencePolicy::Insufficient { hosts: 1 }, &script, &[]);
         assert!(matches!(outcome, Agreement::Undetermined(u) if u.reason == UndeterminedReason::TooFewAnswers));
-        assert!(asked.is_empty());
+        // plain answers are ignored: the read stays undetermined whoever answers
+        assert_eq!(asked.len(), 2);
     }
 }

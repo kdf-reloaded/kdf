@@ -847,7 +847,7 @@ pub trait UtxoCoinBuilderCommonOps {
                 MmError::err(UtxoCoinBuildError::SwapEvidenceNodeNotInList(
                     SwapEvidenceNodeNotInList {
                         ticker: self.ticker().to_owned(),
-                        node: field.to_owned(),
+                        node: crate::swap_evidence::node_name(field),
                     },
                 ))
             },
@@ -1130,6 +1130,21 @@ mod swap_evidence_tests {
             policy_of(&native_field).unwrap_err(),
             UtxoCoinBuildError::SwapEvidenceNodeNotInList(_)
         ));
+        // a field with a credential is named host[:port] only, also in the native mode
+        let credential = params(
+            json!({ "rpc": "Native" }),
+            Some("http://user:secret@evil.example:1/v3/KEY?y=1"),
+        );
+        match policy_of(&credential).unwrap_err() {
+            UtxoCoinBuildError::SwapEvidenceNodeNotInList(e) => {
+                assert_eq!(e.node, "evil.example:1", "the node is not host[:port]");
+                let text = e.to_string();
+                assert!(!text.contains("secret"), "the text carries the userinfo");
+                assert!(!text.contains("KEY"), "the text carries the path");
+                assert!(!text.contains("y=1"), "the text carries the query");
+            },
+            _ => panic!("the error is not SwapEvidenceNodeNotInList"),
+        }
     }
 }
 

@@ -617,7 +617,7 @@ pub(crate) async fn eth_coin_from_params_with_trezor(
     .await
 }
 
-/// The swap-evidence policy of an EVM coin (CRD ch.51 R100, decision LGA 3.6): without a field, over the nodes that
+/// The swap-evidence policy of an EVM coin (CRD ch.51 R100, maintainer decision of 2026-11-22): without a field, over the nodes that
 /// passed the activation probe; with a field, it must match a configured node, which is then trusted whether or not
 /// it passed the probe.
 pub(crate) fn evm_swap_evidence_policy(
@@ -823,7 +823,7 @@ pub(crate) async fn build_eth_coin(
     let my_address = signer.address();
 
     let web3_instances = probe_eth_nodes(ctx, ticker, &nodes).await?;
-    // The nodes that passed the probe are the nodes of the policy (CRD ch.51 R100, decision LGA 3.6); a trusted node
+    // The nodes that passed the probe are the nodes of the policy (CRD ch.51 R100, maintainer decision of 2026-11-22); a trusted node
     // is one of the configured nodes, answering or not.
     let swap_evidence = {
         let probed_urls: Vec<String> = web3_instances.iter().map(|instance| instance.url.clone()).collect();
@@ -991,7 +991,7 @@ mod tests {
         assert!(invalid_payload(zero_v2.validate_swap_contracts(&conf)));
     }
 
-    /// CRD ch.51 R100, decision LGA 3.6: the policy counts the nodes that passed the probe, not the configured list;
+    /// CRD ch.51 R100, maintainer decision of 2026-11-22: the policy counts the nodes that passed the probe, not the configured list;
     /// a field naming a configured node that failed the probe is accepted (a trusted node that does not answer).
     #[test]
     fn the_evm_policy_counts_probed_nodes_and_a_field_names_a_configured_one() {
