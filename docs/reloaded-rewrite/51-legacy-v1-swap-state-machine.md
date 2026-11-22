@@ -178,6 +178,16 @@ appears expired.
 > the rules for RELOADED in R44.9A.13. This pointer changes no rule of this
 > chapter.
 
+> **Reloaded status note (2026-11-22, Reloaded-original; informative).** R5 is
+> silent on a runner whose lock is no longer its own while the run proceeds.
+> With PR #480 a RELOADED runner checks before each refresh that the lock
+> still holds the value it wrote last (chapter 44 §44.9A, Reloaded status
+> update). When it does not, the run is stopped where it stands, like an
+> abrupt stop, with no event, and the swap is handed to the kick-start of a
+> saved swap: that start takes the lock by this rule (wait one time-to-live,
+> retry once, abandon without an event if still held) and, when it gets the
+> lock, resumes the swap from its event log by R6 and R7. Detail: PR #480.
+
 **R6.** *Two entry modes.* The runner MUST support starting a fresh swap
 at `STAGE-START` and resuming a persisted swap from its event log. On
 resume, if the log's last event yields no next stage, the swap is
@@ -3165,3 +3175,7 @@ reference rows alike.
   repository's clean-room gate tool was not applicable because the additions
   embed no code blocks. *Measure:* 0.03, on the discretionary-expression
   basis.
+- *Clean-side addition of 2026-11-22 (PR #480):* the Reloaded status note
+  under R5 on a runner that lost its lock. It is Reloaded-original, rests only
+  on this repository's own lock and kick-start code and the cleared text of
+  R5 to R7 and chapter 44 §44.9A, and changes no sentence of the chapter.

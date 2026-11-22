@@ -874,6 +874,21 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Reloaded leaves at state 15 is fully migrated for both. No switch exists; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.44 R44.9A.1 to R44.9A.5.
 
+- **Saved swap and order records are synced to disk when they are replaced.** Both write a saved swap through a
+  temporary file and a rename. KDF Reloaded also forces the temporary file to disk before the rename and, on Unix,
+  the folder after it, uses a temporary name unique per write (`<file name>.<process id>.<counter>.tmp`) instead of
+  the fixed `<uuid>.json.tmp`, and writes saved orders the same way. Both ignore the other's leftover temporary
+  files. No peer sees it, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+  CRD ch.44 R44.9A.10 to R44.9A.13.
+
+- **A swap run that lost its swap lock stops.** Both keep a swap's lock in `<uuid>.lock` as a Unix time in seconds.
+  GLEEC KDF rewrites it in place and keeps running, refreshing and finally removing it even after another runner
+  took it over. KDF Reloaded replaces it in one step and checks before each refresh that it still holds its own
+  value; when it does not, the run is stopped where it stands and leaves the file, and the swap is handed to the
+  ordinary start of a saved swap, which resumes it if no other runner holds the lock after 40 seconds. The file's
+  content is the same in both, so each respects the other's lock by its timestamp. No peer sees it, so no switch
+  exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.51 R5, ch.44 §44.9A.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.

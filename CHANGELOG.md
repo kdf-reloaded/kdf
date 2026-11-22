@@ -1131,6 +1131,29 @@ the previous version used. The safe way:
   with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
   supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
 
+#### Swap and order records
+
+- **A crash or power loss while a swap or order record is being saved no longer damages it.** The saved record of a
+  legacy swap, its statistics copy and the saved record of an order were rewritten in place, so a crash in the middle
+  of a save could leave an empty or cut-off file, and the swap could not be resumed from it. Each save now writes a
+  new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the record
+  holds either its previous or its new complete content. Where a folder cannot be synced (some network mounts), the
+  save still succeeds and logs a warning. On Windows a replace refused because another program, such as a virus
+  scanner, holds the new file is retried briefly. A temporary `*.tmp` file left by a crash is ignored. Browser builds
+  already saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3, ch.44
+  R44.8A.6 and §44.9A (status update).
+- **A swap run whose swap lock was taken over now stops.** Each swap is run by one runner, which holds a lock file
+  and refreshes it every 30 seconds. A runner that stalled for more than 40 seconds while another runner took the
+  lock over kept running and refreshing, so two runners could work on one swap, and the first one deleted the
+  other's lock when it ended. A runner now checks before each refresh that the lock file still holds the value it
+  wrote last. When the file is gone or holds another value, or when refreshing has failed for longer than 40
+  seconds, the run is stopped where it stands, like an abrupt stop, and leaves the lock file. The swap is then
+  handed to the ordinary start of a saved swap, which waits 40 seconds and resumes it if no other runner holds the
+  lock. A late refresh that finds its own value goes on with a warning. A new lock file is created in one step and
+  replaced in one step, so a reader does not see it empty (on a file system without hard links a new lock file is
+  empty for a moment), and its content keeps the form GLEEC KDF reads. Detail: PR #480; CRD ch.51 R5 and ch.44
+  §44.9A (status updates).
+
 #### Legacy swaps
 
 - **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
