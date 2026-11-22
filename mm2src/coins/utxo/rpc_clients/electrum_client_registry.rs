@@ -450,9 +450,9 @@ mod tests {
         let registry = ElectrumClientRegistry::default();
         let builds = AtomicUsize::new(0);
         let servers = [
-            server("ssl://user:hunter2@info-lines-test.invalid:50002/some/path?token=abc#frag"),
+            server("ssl://user:pw-placeholder@info-lines-test.invalid:50002/some/path?token=abc#frag"),
             server("info-lines-test.invalid:50001"),
-            server("hunter2"),
+            server("pw-placeholder"),
         ];
         let key = || key_with(&servers, ElectrumBuilderArgs::default());
         let expected = "info-lines-test.invalid:50002, info-lines-test.invalid:50001, <invalid server address>";
@@ -465,20 +465,24 @@ mod tests {
                 .into_iter()
                 .filter(|line| line.contains("info-lines-test.invalid"))
                 .collect();
-            assert_eq!(lines, [
+            let wanted = [
                 format!("INFO Shared Electrum client of QTUM created by QRC20, servers: {expected}"),
                 format!("INFO Shared Electrum client of QTUM reused by QRC20B, servers: {expected}"),
                 format!("INFO Shared Electrum client of QTUM released, servers: {expected}"),
-            ]);
+            ];
+            assert!(
+                lines == wanted,
+                "the INFO lines of the shared client are not the expected three"
+            );
             for line in captured_log_lines()
                 .iter()
                 .filter(|line| line.contains("Shared Electrum client"))
             {
                 assert!(
-                    !["hunter2", "token", "some/path", "frag", "user", "ssl://"]
+                    !["pw-placeholder", "token", "some/path", "frag", "user", "ssl://"]
                         .iter()
                         .any(|secret| line.contains(secret) && line.contains("info-lines-test")),
-                    "{line}"
+                    "an INFO line of the shared client carries more than host:port"
                 );
             }
         }
