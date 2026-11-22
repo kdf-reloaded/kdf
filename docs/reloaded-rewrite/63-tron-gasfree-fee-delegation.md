@@ -1398,7 +1398,11 @@ D63.9. **The submission flow in Reloaded (for the maintainer; open;
     - *Failure endings.* `state` `FAILED`, or `txnState` `ON_CHAIN_FAILED`,
       in any answer ends the task with `Gasless`/`ProviderRejected` (502).
     - *Wait bound (item 7).* The provider is asked for the transfer every
-      `status_poll_interval_ms` (§63.3.1; 3 000 ms by default). No trace
+      `status_poll_interval_ms` (§63.3.1; 3 000 ms by default). Two trace
+      requests of one transfer are at least 1 000 ms apart, also after a
+      failed one: a configured interval below that, zero included, is
+      accepted at activation and raised where it is used. The floor is this
+      repository's choice. No trace
       request is made at or after the signed `deadline` plus 120 seconds.
       Reaching that bound ends the task with the shared `Transport` arm; its
       text says that the outcome of the transfer is unknown.
@@ -1438,11 +1442,18 @@ D63.9. **The submission flow in Reloaded (for the maintainer; open;
       task ends with `QuoteExpired` (400) and nothing is sent.
     - *Cancel.* `task::withdraw::cancel` before the submit request is sent
       stops everything; nothing reaches the provider. After it is sent, a
-      cancel only stops the waiting: the transfer may still complete.
-    - *Records.* Two log lines at the INFO level: one when the provider's
+      cancel only stops the waiting: the transfer may still complete. A
+      cancel, or a stop of the node, while the status is
+      `SubmittingGaslessAuthorization` leaves the outcome unknown: the
+      request may or may not have reached the provider. One INFO log line,
+      written just before the request is sent, names the coin, the sender,
+      the receiver, the amount and the `requestId` and so identifies the
+      submission.
+    - *Records.* Log lines at the INFO level: one just before the submit
+      request is sent (see *Cancel*), one when the provider's
       answer to the submission is in (coin, trace id, sender, receiver,
       amount), one when the wait ends (trace id, the outcome, and the
-      transaction hash when it is known). Neither carries a signature or a
+      transaction hash when it is known). None carries a signature or a
       credential (R9). Nothing is written to a store, and `my_tx_history`
       gains no row.
     - *No trace method.* No RPC traces a `trace_id` outside the withdraw.

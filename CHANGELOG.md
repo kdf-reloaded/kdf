@@ -462,8 +462,9 @@ the previous version used. The safe way:
   `fee_method` (`native`, `gasless` or `auto`) and a `gasless` object (`max_fee`, `deadline_seconds`,
   `fallback_to_native`). With `gasless`, the fee is paid in the token from the GasFree address.
   *The task form* (`task::withdraw::init`, then `task::withdraw::status`) signs the authorization, hands it to the
-  provider and asks the provider about the transfer every `status_poll_interval_ms` until it is settled. So KDF can
-  now move a token that sits on the GasFree address. While the task runs, its status shows
+  provider and asks the provider about the transfer every `status_poll_interval_ms`, and at most once a second
+  whatever that setting says, until it is settled. So KDF can now move a token that sits on the GasFree address.
+  While the task runs, its status shows
   `SubmittingGaslessAuthorization`, then `WaitingForGaslessProvider` (an object with the provider's `trace_id` and
   `provider_state`) and `WaitingForGaslessSettlement` (an object with `trace_id` and `tx_hash`, which is `null`
   until the provider names its transaction). The final answer holds the signed authorization, the fee in the token
@@ -478,7 +479,9 @@ the previous version used. The safe way:
   does not know its trace id (`TraceNotFound`), and when the transfer has not settled 120 seconds after the
   authorization's deadline (`Transport`; the outcome is then unknown). Every error after the submission names the
   trace id, so the transfer can be looked up at the provider. `task::withdraw::cancel` before the submission stops it;
-  after the submission it only stops the waiting, and the transfer may still complete.
+  after the submission it only stops the waiting, and the transfer may still complete. A cancel, or a stop of the
+  node, while the status is `SubmittingGaslessAuthorization` leaves the outcome unknown; a log line written when the
+  submission is sent carries its request id, which identifies it.
   *The direct `withdraw`* only signs: its answer holds the signed authorization and the fee in the token instead of
   a transaction, with no `tx_hex`, no `tx_hash` and a `trace_id` of `null`, and nothing is sent to the provider.
   With `auto`, the ordinary TRX-paid transfer is tried first and the gasless one only when it cannot be funded. Other

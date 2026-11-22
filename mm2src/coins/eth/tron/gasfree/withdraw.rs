@@ -66,6 +66,11 @@ pub(crate) const SETTLEMENT_GRACE_MS: u64 = 120_000;
 /// cannot tell the kinds apart there.
 const PROVIDER_TRANSPORT_TEXT: &str = "The GasFree provider could not be reached or did not serve the request";
 
+/// The shortest time between two trace requests of one transfer, in milliseconds. A configured
+/// `status_poll_interval_ms` below it, zero included, is raised to it where the interval is used; the activation
+/// accepts the value as it is.
+pub(crate) const MIN_POLL_INTERVAL_MS: u64 = 1_000;
+
 /// The sentence the error of a submission with an unknown outcome ends with (D63.9): the request may have reached
 /// the provider, and a second withdraw would sign a new authorization.
 const MAYBE_ACCEPTED_TEXT: &str = ". The provider may have accepted the transfer; check the GasFree address balance \
@@ -523,7 +528,11 @@ pub(crate) struct Submitted {
 ///
 /// `guard` is the guard of the sender's lock (§63.8 step 3). It is released when the provider's answer is in or
 /// the request failed, and when this function returns early (D63.9 item 1). `coin` and `amount` (in token units)
-/// are for the log line below.
+/// are for the log lines.
+///
+/// One INFO line is written just before the request is sent, with the coin, the sender, the receiver, the amount
+/// and the `requestId`: a task that is cancelled, or a node that stops, while the request is under way leaves the
+/// outcome unknown, and that line identifies the submission.
 ///
 /// The outcome is unknown when the request may have reached the provider and no usable answer came back: a failed
 /// connection (one that failed before anything was sent is not told apart), a timeout, a 5xx answer, an answer
@@ -564,6 +573,15 @@ pub(crate) async fn submit(
     let request_id = new_uuid().to_string();
     let request = SubmitRequest::new(signed.clone(), Some(&request_id)).map_err(WithdrawError::InternalError)?;
 
+    // Whatever ends the task from here on, the log says that this submission was sent.
+    info!(
+        "GasFree submission is being sent: coin {}, from {}, to {}, amount {}, request id {}",
+        coin,
+        permit.user.to_base58(),
+        permit.receiver.to_base58(),
+        amount,
+        request_id
+    );
     let answer = binding.provider().submit(&request).await;
     // The provider's nonce moves with a submission only, and this one has been answered or has failed.
     drop(guard);
@@ -647,7 +665,7 @@ fn submit_answer_difference(record: &TransferRecord, permit: &PermitTransfer) ->
 }
 
 /// Follows a submitted transfer until it settles (D63.9), starting with the provider's answer to the submission
-/// and asking for its record every `status_poll_interval_ms` of `binding`. Each record is read as follows:
+/// and asking for its record every `status_poll_interval_ms` of `binding`, at least [`MIN_POLL_INTERVAL_MS`] apart. Each record is read as follows:
 ///
 /// - `state` `FAILED`, or `txnState` `ON_CHAIN_FAILED`: the transfer failed;
 /// - else `state` `SUCCEED`: the transfer is settled, and its `txnHash` is returned;
@@ -725,6 +743,7 @@ async fn next_record(binding: &GasFreeBinding, trace_id: &str, bound_ms: u64) ->
     loop {
         let wait_ms = binding
             .status_poll_interval_ms()
+            .max(MIN_POLL_INTERVAL_MS)
             .min(bound_ms.saturating_sub(now_ms()))
             .min(u64::from(u32::MAX));
         Timer::sleep_ms(wait_ms as u32).await;

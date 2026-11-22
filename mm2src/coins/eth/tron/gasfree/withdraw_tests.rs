@@ -20,7 +20,7 @@ use super::authorization::{sign_permit, typed_data_hash, GasFreeRelayPayload, Pe
 use super::binding::{gasfree_custody_address, GasFreeBinding};
 use super::networks::gasfree_network;
 use super::test_vectors::USERS;
-use super::withdraw::{submit, track, SETTLEMENT_GRACE_MS};
+use super::withdraw::{submit, track, MIN_POLL_INTERVAL_MS, SETTLEMENT_GRACE_MS};
 use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
 use crate::eth::eth_tests::eth_coin_for_test;
 use crate::eth::{EthCoin, EthCoinType, EvmWithdrawSender};
@@ -2120,6 +2120,16 @@ fn the_task_route_submits_and_follows_the_transfer_to_its_settlement() {
         let lines = captured_log_lines();
         let sig = body["sig"].as_str().expect("a string");
         assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("GasFree submission is being sent")
+                    && line.contains(TOKEN)
+                    && line.contains(&sender)
+                    && line.contains(RECEIVER)
+                    && line.contains(&first_id.to_string())),
+            "the sending of the submission is not logged"
+        );
+        assert!(
             lines.iter().any(|line| line.contains("GasFree transfer submitted")
                 && line.contains(TRACE_ID)
                 && line.contains(TOKEN)
@@ -2265,7 +2275,7 @@ fn the_wait_is_bounded_and_its_end_names_the_trace_id() {
     assert_eq!(submitted.trace_id, TRACE_ID);
 
     let started = Instant::now();
-    let Err(error) = block_on(track(binding, submitted, now_ms() + 400, None)) else {
+    let Err(error) = block_on(track(binding, submitted, now_ms() + 2_500, None)) else {
         panic!("the transfer must not settle")
     };
     let elapsed = started.elapsed();
@@ -2275,12 +2285,12 @@ fn the_wait_is_bounded_and_its_end_names_the_trace_id() {
     );
     assert_eq!(error.status_code().as_u16(), 502);
     assert!(
-        elapsed >= Duration::from_millis(350) && elapsed < Duration::from_secs(3),
+        elapsed >= Duration::from_millis(2_400) && elapsed < Duration::from_secs(5),
         "the wait did not end at its bound"
     );
     let polls = lab.trace_calls();
-    assert!(polls >= 2, "the transfer was not traced");
-    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(polls, 2, "the transfer was not traced once a second");
+    std::thread::sleep(Duration::from_millis(1_300));
     assert_eq!(lab.trace_calls(), polls, "the transfer was traced after the bound");
 }
 
@@ -2483,7 +2493,7 @@ fn a_cancel_during_the_wait_stops_the_trace_requests() {
     // A trace request that was under way may still arrive.
     std::thread::sleep(Duration::from_millis(300));
     let polls = lab.trace_calls();
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(1_500));
     assert_eq!(lab.trace_calls(), polls, "a cancelled task still traces");
     assert_eq!(lab.submit_calls().len(), 1);
 }
@@ -2506,4 +2516,37 @@ fn auto_on_the_task_route_submits_after_a_funding_failure_of_the_native_rail() {
     assert_eq!(status["details"]["tx_hash"], TXN_HASH);
     assert_eq!(status["details"]["fee_details"]["trace_id"], TRACE_ID);
     assert_eq!(lab.submit_calls().len(), 1);
+}
+
+/// D63.9: two trace requests of one transfer are at least a second apart, also when the configured interval is 0.
+#[test]
+fn a_poll_interval_of_zero_is_raised_to_a_second() {
+    assert_eq!(MIN_POLL_INTERVAL_MS, 1_000);
+    let lab = Lab::new(Setup {
+        status_poll_interval_ms: Some(0),
+        ..Setup::usual()
+    });
+    assert_eq!(lab.binding().status_poll_interval_ms(), 0);
+    lab.set_relay(|relay| {
+        relay.set_trace(vec![
+            Trace::Record("INPROGRESS", None, None),
+            Trace::Record("SUCCEED", Some(TXN_HASH), None),
+        ])
+    });
+    let binding = lab.binding();
+    let lock = binding.sender_lock(&lab.sender());
+    let signed = lab.signed(now_ms() / 1000 + 300);
+    let guard = block_on(lock.lock());
+    let Ok(submitted) = block_on(submit(binding, &signed, guard, None, TOKEN, &dec("10"))) else {
+        panic!("the provider takes the submission")
+    };
+    let started = Instant::now();
+    let settled = block_on(track(binding, submitted, now_ms() + 30_000, None));
+    let elapsed = started.elapsed();
+    assert!(settled.is_ok(), "the transfer settles");
+    assert_eq!(lab.trace_calls(), 2);
+    assert!(
+        elapsed >= Duration::from_millis(1_900) && elapsed < Duration::from_secs(10),
+        "the trace requests are less than a second apart"
+    );
 }

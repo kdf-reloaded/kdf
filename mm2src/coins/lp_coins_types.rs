@@ -1674,6 +1674,20 @@ mod transaction_details_wire_tests {
         assert_eq!(wire["original_tx_type_url"], "/x");
         assert!(wire.get("internal_id").is_some());
     }
+
+    /// CRD ch.63 D63.9: an unsigned result that carries a hash writes `tx_hash` and still omits `tx_hex`.
+    #[test]
+    fn an_unsigned_result_with_a_hash_writes_the_hash_and_omits_the_hex() {
+        let mut row: TransactionDetails = json::from_str(EMPTY_HEX_ROW).expect("a row deserializes");
+        row.unsigned = Some(UnsignedTransaction::Amino {
+            legacy_amino_json: json!({}),
+            original_tx_type_url: "/x".to_owned(),
+        });
+        row.tx_hash = "a1b2".to_owned();
+        let wire: Json = json::to_value(&row).expect("a row serializes");
+        assert_eq!(wire["tx_hash"], "a1b2");
+        assert!(wire.get("tx_hex").is_none(), "{wire}");
+    }
 }
 
 #[cfg(test)]
