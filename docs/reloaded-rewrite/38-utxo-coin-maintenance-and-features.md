@@ -4418,6 +4418,29 @@ on 2026-11-18.
    removed from the shared client, unless another live instance remembers
    the same one. They are then no longer placed again after a reconnect.
 
+*Status note (2026-11-22, clean side; defect fix).* In this tree a shared
+client keeps the subscriptions of item 6 and of the D38.6.4Q.3 status note
+per instance as follows.
+
+1. *Removal.* An instance is remembered for a subscription before its
+   request is sent, so a disable while the request waits for its answer
+   removes it, and the answer adds nothing back. A removed instance stays
+   retired on the client: a later request of it, from a handle that outlived
+   the removal, sends nothing and is remembered nowhere. This costs one entry
+   per removed instance for the life of the client.
+2. *Placed over the current session.* A request of an instance that
+   remembers the subscription sends nothing only while the subscription is
+   placed over the current session. When placing it again over a newer
+   session failed, the next request of that instance sends it. The placing
+   again itself is not retried (D38.6.4Q.3 status note, item 2).
+3. *One request at a time.* An instance has at most one request in flight
+   per subscription and session; another request of the same instance
+   meanwhile sends nothing. A request without an answer holds this only until
+   it is answered, its call ends at the request time limits of the client, or
+   its caller drops it; it then counts as failed.
+4. *First placement.* A subscription whose first placement for an instance
+   failed or was dropped is not remembered for that instance.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -6577,3 +6600,10 @@ R38.8.6 **Tests (two-direction, observable).**
   project's own reads of public LCC Electrum servers and this repository's
   code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Defect fix (2026-11-22), clean side -- status note after the D38.6.4Q.1
+  status note (subscriptions of a shared client: a removal while a request
+  waits, a removed instance's later request, placement over the current
+  session, one request at a time).* Written by a session that never read the
+  forbidden corpus, from this repository's code and its tests. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
