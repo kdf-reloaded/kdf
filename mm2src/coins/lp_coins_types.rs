@@ -963,8 +963,9 @@ impl Default for TransactionType {
 ///
 /// `Serialize` is written by hand (see [`TransactionDetailsWire`]): a result serializes exactly as it always did,
 /// `tx_hex` and `tx_hash` included even when empty, except the unsigned result of a watch-only Tendermint coin
-/// and the sign-only result of the TRON gasless rail (`unsigned` is `Some`), which omit the two members (CRD ch.36
-/// R36.14.17, ch.63 R25).
+/// and the result of the TRON gasless rail (`unsigned` is `Some`). Those omit `tx_hex`, and omit `tx_hash` while it
+/// is empty (CRD ch.36 R36.14.17, ch.63 R25); the gasless rail fills `tx_hash` once the provider's transaction is
+/// known (CRD ch.63 D63.9).
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct TransactionDetails {
     /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction.
@@ -979,7 +980,9 @@ pub struct TransactionDetails {
     /// family; its absence means "this coin has no JSON carrier", never an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_json: Option<Json>,
-    /// Transaction hash in hexadecimal format. Empty and omitted in the unsigned result only (see `tx_hex`).
+    /// Transaction hash in hexadecimal format. Empty and omitted in the unsigned result only (see `tx_hex`); the
+    /// result of a TRON gasless withdraw that was submitted and settled carries the hash of the provider's
+    /// transaction here (CRD ch.63 D63.9).
     #[serde(default)]
     pub(crate) tx_hash: String,
     /// Coins are sent from these addresses
@@ -1017,13 +1020,14 @@ pub struct TransactionDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) memo: Option<String>,
     /// The unsigned document a watch-only Tendermint coin answers instead of a signed transaction (CRD ch.36
-    /// R36.14.17), or the off-chain authorization of a sign-only TRON gasless withdraw (CRD ch.63 §63.8A). Its
-    /// members sit flat in the result; `None` for every signed transaction.
+    /// R36.14.17), or the off-chain authorization of a TRON gasless withdraw (CRD ch.63 §63.8A). Its members sit
+    /// flat in the result; `None` for every signed transaction.
     #[serde(default, flatten)]
     pub(crate) unsigned: Option<UnsignedTransaction>,
 }
 /// The serialized form of [`TransactionDetails`]: the members in their declared order and under their usual
-/// skip rules. `tx_hex` and `tx_hash` are left out when, and only when, the result is unsigned.
+/// skip rules. `tx_hex` is left out when, and only when, the result is unsigned; `tx_hash` when the result is
+/// unsigned and the hash is empty.
 #[derive(Serialize)]
 struct TransactionDetailsWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1057,7 +1061,7 @@ impl Serialize for TransactionDetails {
         TransactionDetailsWire {
             tx_hex: signed.then_some(&self.tx_hex),
             tx_json: &self.tx_json,
-            tx_hash: signed.then_some(&self.tx_hash),
+            tx_hash: (signed || !self.tx_hash.is_empty()).then_some(&self.tx_hash),
             from: &self.from,
             to: &self.to,
             total_amount: &self.total_amount,
@@ -1099,8 +1103,8 @@ pub enum UnsignedTransaction {
         legacy_amino_json: Json,
         original_tx_type_url: String,
     },
-    /// The sign-only result of the TRON gasless rail (CRD ch.63 §63.8A, D63.8 (a)): a signed off-chain
-    /// authorization that is neither broadcast nor submitted to the provider.
+    /// The result of the TRON gasless rail (CRD ch.63 §63.8A, D63.8 (a)): a signed off-chain authorization. The
+    /// direct `withdraw` method only signs it; the task route also submits it to the provider (CRD ch.63 D63.9).
     TronGasFree(crate::eth::tron::gasfree::authorization::GasFreeRelayPayload),
 }
 #[derive(Clone, Copy, Debug)]
@@ -1110,8 +1114,8 @@ pub struct BlockHeightAndTime {
 }
 impl TransactionDetails {
     /// Whether this is a result without a transaction: the unsigned result of a watch-only coin, where nothing was
-    /// signed or broadcast and the caller's own wallet signs the document (CRD ch.36 R36.14.17), or the sign-only
-    /// result of the TRON gasless rail, whose authorization is not a transaction (CRD ch.63 R25).
+    /// signed or broadcast and the caller's own wallet signs the document (CRD ch.36 R36.14.17), or the result of
+    /// the TRON gasless rail, whose authorization is not a transaction (CRD ch.63 R25).
     pub fn is_unsigned(&self) -> bool { self.unsigned.is_some() }
 
     /// Whether the transaction details block height should be updated (when tx is confirmed)
@@ -1669,6 +1673,20 @@ mod transaction_details_wire_tests {
         assert_eq!(wire["legacy_amino_json"], json!({}));
         assert_eq!(wire["original_tx_type_url"], "/x");
         assert!(wire.get("internal_id").is_some());
+    }
+
+    /// CRD ch.63 D63.9: an unsigned result that carries a hash writes `tx_hash` and still omits `tx_hex`.
+    #[test]
+    fn an_unsigned_result_with_a_hash_writes_the_hash_and_omits_the_hex() {
+        let mut row: TransactionDetails = json::from_str(EMPTY_HEX_ROW).expect("a row deserializes");
+        row.unsigned = Some(UnsignedTransaction::Amino {
+            legacy_amino_json: json!({}),
+            original_tx_type_url: "/x".to_owned(),
+        });
+        row.tx_hash = "a1b2".to_owned();
+        let wire: Json = json::to_value(&row).expect("a row serializes");
+        assert_eq!(wire["tx_hash"], "a1b2");
+        assert!(wire.get("tx_hex").is_none(), "{wire}");
     }
 }
 

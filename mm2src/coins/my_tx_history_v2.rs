@@ -527,7 +527,10 @@ pub async fn my_tx_history_v2_rpc(
     // from the same store; without it the coin answers `NotSupportedFor` below, as the whole EVM family does
     // (R21.10B.6).
     let tron_with_history = matches!(&coin, MmCoinEnum::EthCoin(eth) if eth.tron_history_enabled());
+    // A Solana coin or SPL token whose platform's history is enabled is served from the same store (CRD ch.40
+    // R40.6C.3); without it the coin answers `NotSupportedFor` below (R40.6C.2).
     if tron_with_history
+        || crate::solana::solana_history_enabled(&coin)
         || matches!(
             coin,
             MmCoinEnum::UtxoCoin(_) | MmCoinEnum::QtumCoin(_) | MmCoinEnum::SiaCoin(_)

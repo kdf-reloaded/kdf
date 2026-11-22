@@ -333,6 +333,7 @@ pub async fn solana_coin_with_node_order(
         decimals,
         spl_tokens_infos,
         settings: SolanaCoinSettings::default(),
+        history: SolanaHistoryStates::default(),
     }));
     Ok(solana_coin)
 }
@@ -346,6 +347,48 @@ pub struct SolanaCoinImpl {
     pub(crate) my_address: String,
     pub(crate) spl_tokens_infos: Arc<Mutex<HashMap<String, SplTokenInfo>>>,
     pub(crate) settings: SolanaCoinSettings,
+    /// The transaction-history states of the platform and of its tokens (CRD ch.40 §40.6C).
+    pub history: SolanaHistoryStates,
+}
+
+/// Whether the transaction history of a Solana platform runs (CRD ch.40 R40.6C.1) and the `history_sync_status` of
+/// each coin it writes, platform and tokens, by ticker. The history is not enabled until [`Self::enable`]; the
+/// states of a coin that is not enabled are `NotEnabled` (R40.6C.2).
+#[derive(Debug, Default)]
+pub struct SolanaHistoryStates {
+    enabled: AtomicBool,
+    states: Mutex<HashMap<String, HistorySyncState>>,
+}
+
+impl SolanaHistoryStates {
+    pub fn is_enabled(&self) -> bool { self.enabled.load(AtomicOrdering::SeqCst) }
+
+    /// Enables the history; the activation of a new platform instance calls it once, before the instance is
+    /// registered, so no `my_tx_history` answer sees it half started.
+    pub fn enable(&self) { self.enabled.store(true, AtomicOrdering::SeqCst) }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, HistorySyncState>> {
+        self.states.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The state of `ticker`: `NotEnabled` without history, `NotStarted` before the first pass reported.
+    pub fn state_of(&self, ticker: &str) -> HistorySyncState {
+        if !self.is_enabled() {
+            return HistorySyncState::NotEnabled;
+        }
+        self.lock().get(ticker).cloned().unwrap_or(HistorySyncState::NotStarted)
+    }
+
+    pub(crate) fn set(&self, ticker: &str, state: HistorySyncState) { self.lock().insert(ticker.to_owned(), state); }
+
+    /// Sets a state that describes work in progress or a failure: only until the coin's history has finished once
+    /// (CRD ch.40 R40.6C.9).
+    pub(crate) fn set_unfinished(&self, ticker: &str, state: HistorySyncState) {
+        let mut states = self.lock();
+        if !matches!(states.get(ticker), Some(HistorySyncState::Finished)) {
+            states.insert(ticker.to_owned(), state);
+        }
+    }
 }
 
 /// The per-coin confirmation settings that `set_required_confirmations` and `set_requires_notarization` store and

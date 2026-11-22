@@ -407,6 +407,11 @@ proceed as with `false`.
 > activated from an inline `protocol` is wallet-only. A wallet without a
 > token account reads `"0"` (D40.6B.2 (a)).
 
+> *Reloaded status (clean side, 2026-11-22):* `tx_history` now takes
+> effect in this repository: `true` starts the history of §40.6C on this
+> method and on `enable_solana_with_tokens` (PR #494). A value of another
+> type is still `InvalidRequest` (status note of 2026-11-19 above).
+
 ## 40.2A The string form of balances and amounts (reference behavior)
 
 > *Status note (Spec Reader round 0.5.0-20, 2026-11-21; passed the KDF
@@ -1319,6 +1324,10 @@ abnormally with nothing registered (R40.2.5's note); the legacy
 `v2.1.0-beta` had no history either. The registry branch records no check
 of history (§40.6B.8).
 
+> *Reloaded status (clean side, 2026-11-22):* Reloaded has a Solana and SPL
+> history of its own design since PR #494 (§40.6C); nothing in it comes
+> from the reference, which has none.
+
 ### 40.6B.7 Swaps
 
 **F40.6B.3** *The three rows carry no Solana swap.* For the platform coin
@@ -1552,6 +1561,11 @@ to match.
 > chapter 55 D55.6. A coin that is not active answers the refusal of chapter
 > 43 R43.1E.3 in its extended shape. T40.6B.20 holds except its passive and
 > forced clauses.
+
+> *Reloaded status (clean side, 2026-11-22):* transaction history is built
+> in PR #494 (§40.6C). With `tx_history: true` at the platform's activation,
+> both forms of `my_tx_history` serve the platform and its tokens; without
+> it they answer as the note of 2026-11-17 states.
 
 **D40.6B.2** *Balance of a token the wallet holds no account for
 (R40.6B.4).* Options: (a) answer zero, reading the associated token
@@ -1864,6 +1878,192 @@ as-built note of §40.6A, restated for the configuration value).
 - *Clearance:* passed the KDF Dirty Gate on 2026-11-15, measure 0.01, no
   findings (chapter 01 R37-R41); the attestation is in §40.12.
 
+## 40.6C Transaction history (Reloaded-original, added 2026-11-22)
+
+Reloaded-original rules for the transaction history of SOL and SPL coins. The
+reference has no Solana history (R40.6B.15); nothing in this section was taken
+from it. The general rules of chapter 38 §38.5A apply where this section does
+not say otherwise; chapter 21 §21.10C (TRON) is the model for a platform coin
+and its tokens. The request and answer shapes are those of the public Solana
+JSON-RPC methods `getSignaturesForAddress`, `getTransaction`, `getBlock` and
+`getTokenAccountsByOwner`, as the public Solana client types define them
+(crates `solana-rpc-client-types` and `solana-transaction-status-client-types`,
+Apache-2.0, read on 2026-11-22). The instruction layouts are those of the
+System program and the SPL Token program, decoded with the instruction types of
+the program interface crates this repository already uses. The figures the
+tests check are public devnet data (chapter 01 R6).
+
+**R40.6C.1 (when the history runs).** The history of a Solana platform coin and
+of the SPL tokens it serves is enabled when the platform's activation request
+asks `tx_history: true`, on either surface: `enable_solana_with_tokens` gains
+the optional boolean member `tx_history` (default `false`), and
+`experimental::enable_solana_with_assets` honors the member it already reads. A
+re-activation does not start a second history, and the re-activation of a
+passive platform starts none even when its request asks `tx_history: true`
+(chapter 43 D43.1F.5 (a)); such a platform gets its history when it is removed
+(chapter 43 §43.1E) and activated again. A token activated later by `enable_spl`
+or `experimental::enable_solana_token` is served by its platform's history when
+that history is enabled. The history runs on native and browser builds. It stops
+when the node stops or when the coin instance is no longer the registered one
+(after `disable_coin`). Honoring `tx_history` diverges from R40.2.5, where the
+member has no effect; it is additive, not visible to a peer, and has no switch.
+
+**R40.6C.2 (without it).** A coin whose history is not enabled answers as
+before S10: the versioned `my_tx_history` answers `NotSupportedFor` (HTTP 400)
+and the legacy `my_tx_history` answers an error naming the coin, and no history
+request is sent.
+
+**R40.6C.3 (store and serving).** Each ticker's rows are kept in the per-ticker
+history list of §38.5A (a file natively, the browser's database in the browser
+build). One history writer per platform writes the platform's list and the list
+of each served token. Both forms of `my_tx_history` read those lists, with the
+paging and order rules of §38.5A; the versioned form in the browser build
+answers as for every family there. Rows are never removed: only finalized
+transactions are stored (R40.6C.4), so §38.5C has nothing to remove.
+
+**R40.6C.4 (source).** The writer lists, for each *watched account*, the
+signatures by `getSignaturesForAddress` with `limit` 1000, commitment
+`finalized`, and the `before` cursor set to the oldest signature of the previous
+page. A walk of the whole listing ends at an empty page, since a node may serve
+fewer entries than asked; a later pass also ends at the first page that brings
+no new signature (R40.6C.5). The watched accounts are the platform address and,
+for each served token, every token account the platform address owns for the
+token's mint (`getTokenAccountsByOwner` with the mint filter, read again on each
+pass). Every new signature is read once by `getTransaction` with encoding
+`base64`, commitment `finalized` and `maxSupportedTransactionVersion` 0; a
+signature listed by two watched accounts is read once. The block height of a new
+slot is read once by `getBlock` with `transactionDetails` `none` and `rewards`
+`false`. The requests go to the coin's node pool like every other request of the
+coin (R40.1.5, §40.5A), at most four per second. A failed request, or an answer
+that has no finalized transaction or block for a listed signature or its slot,
+ends the pass, which is tried again after the pause of R40.6C.9; rows already
+stored stay.
+
+**R40.6C.5 (depth).** The first pass after a start walks each watched
+account's listing to its end. A later pass stops at the first
+page that brings no new signature. A listed signature is not read again when
+its transaction is in a stored row the listing can produce: for the platform
+address's listing, a row of the platform's or of any served token's list; for
+a token account's listing, a row of that token's list. A transaction that made
+no row may be read again after a restart. When a token is served that the
+earlier passes of the process did not serve, the listings are walked to their
+end again, so the transactions read before it was served get its rows.
+
+**R40.6C.6 (accounts of a transaction).** The accounts of a transaction are its
+static account keys followed by the addresses of `meta.loadedAddresses`,
+writable then read-only; `meta.preBalances`, `meta.postBalances` and the
+`accountIndex` of the token balances count over that list. The fee payer is
+the first account. A *transfer* is a System program `Transfer` or
+`TransferWithSeed` instruction, top-level or inner; a *creation* is a System
+program `CreateAccount` or `CreateAccountWithSeed` instruction, top-level or
+inner; a *token transfer* is an SPL Token `Transfer` or `TransferChecked`
+instruction, top-level or inner. Another instruction of these two programs, or
+one that does not decode, has no effect of its own (the amounts still come
+from the balances); an instruction that names an account outside the list
+makes the transaction unreadable (R40.6C.11).
+
+**R40.6C.7 (SOL rows).** A transaction is a row of the platform coin when the
+lamports of the platform address change (`postBalances` minus `preBalances`)
+or when the platform address is its fee payer. Its members:
+- `my_balance_change`: the change of the platform address's lamports, in SOL;
+- `received_by_me`: the lamports the transfers move to the platform address,
+  a transfer from the platform address to itself included, so that a send to
+  self has the figures of its withdraw answer (the amount received, the amount
+  and the fee spent); `spent_by_me`: `received_by_me` minus
+  `my_balance_change`. When that is negative, `received_by_me` is raised by the
+  difference and `spent_by_me` is 0. Then `my_balance_change` equals
+  `received_by_me` minus `spent_by_me` for every row;
+- `total_amount`: the lamports of the transfers that name the platform address
+  as source or destination; for a row with none, `my_balance_change` without
+  sign, less the fee the platform address paid, and not below 0;
+- `from` and `to`: the sources and destinations of those transfers, each
+  address once, in the order of the instructions; for a row with none, `from`
+  is the fee payer and `to` the platform address;
+- `fee_details`: the shape of the withdraw answer (D40.6B.5): `fee_amount` is
+  `meta.fee` when the platform address is the fee payer, else 0; `rent_amount`
+  is the lamports of the creations that the platform address funds;
+  `total_amount` their sum. Amounts carry the coin's full decimals, as a
+  withdraw's sums do (D40.2A.1's status note);
+- `transaction_type`: `FeeForTokenTx` when the platform address is the fee
+  payer, the transaction has a token transfer (of any mint) and no transfer
+  names the platform address; else `StandardTransfer`;
+- `tx_hash`: the signature in base58; `internal_id`: the 64 bytes of the
+  signature (a withdraw answer carries the bytes of the base58 text there;
+  `tx_hash` is the same in both); `tx_hex`: the transaction's wire bytes;
+  `timestamp`: `blockTime`;
+  `block_height`: the block height of the transaction's slot (R40.6C.4).
+
+**R40.6C.8 (SPL rows).** A transaction is a row of a served token when the token
+amount of the watched accounts of that token changes (`meta.postTokenBalances`
+minus `meta.preTokenBalances`, entries of the token's mint whose owner is the
+platform address; an account absent on one side counts 0 there), or when it has
+a token transfer of the mint whose source or destination is held by the platform
+address (a successful transaction only, R40.6C.10). Its members follow R40.6C.7
+in the token's own units and decimals, with token transfers of the mint in place
+of transfers, and the owner of a token account (from the token balance entries)
+in place of the account when the entry names one. A token balance entry without
+an owner is not the wallet's. For a row without a token transfer of the mint,
+`total_amount` is the change without sign, with no fee subtracted (the fee is
+SOL), `from` the fee payer and `to` the platform address. `fee_details` is the
+SOL fee of R40.6C.7, so the fee is never part of the token's `spent_by_me`.
+`transaction_type` is `TokenTransfer` with the token's id. One transaction is at
+most one row in each list. A send of the token to self is such a row: received
+and spent with a change of 0, as its withdraw answer says.
+
+**R40.6C.9 (passes and states).** A pass runs at the start and then 60 seconds
+after the end of the previous one. `sync_status` follows chapter 21 R21.10C.10:
+`NotEnabled` without history (R40.6C.2), `NotStarted` before the first pass,
+`InProgress` with `transactions_left` (the new signatures of the page in hand
+not yet read) while the history has not finished once, `Finished` after a pass
+that read everything, and `Error` with a message for a pass that fails before
+the first `Finished`; after that a failed pass keeps `Finished` and is logged
+only.
+
+**R40.6C.10 (failed transactions).** A transaction with a non-null `meta.err`
+is a row when the platform address paid its fee: a SOL row whose only change
+is the fee, by R40.6C.7. No instruction of a failed transaction is read: `from`
+is the fee payer, `to` the platform address, `total_amount` 0, `rent_amount`
+0, and `transaction_type` `StandardTransfer`. It is no token row, since a failed
+transaction changes no token balance.
+
+**R40.6C.11 (rows not read).** A transaction that cannot be decoded, that has no
+`blockTime`, or whose block has no `blockHeight`, is logged and left out; it
+does not stop the history (R38.5A.9). No member is filled with a stand-in value.
+
+**R40.6C.12 (limits).** Finalized transactions only; a transaction appears
+after finalization, so a withdraw shows in the history some seconds after its
+broadcast. A token account closed before the pass that would list it is not
+watched, and its earlier rows are not listed. Address changes of an HD wallet
+need no recompute: a Solana activation has one address (§40.1A).
+
+### 40.6C.1 Tests
+
+T40.6C.1 `tx_history: true` on both surfaces starts the history; `false` or
+absent does not; re-activation does not start a second one (R40.6C.1).
+T40.6C.2 Without history, both `my_tx_history` forms answer as R40.6C.2.
+T40.6C.3 Paging over a scripted node: three pages of signatures, the cursor of
+each request, the end at an empty page, a node that serves pages shorter than
+the limit walked to its end, a later pass that stops at the first page without a
+new signature (R40.6C.4, R40.6C.5).
+T40.6C.4 SOL rows from captured devnet transactions: a send, a receive, a send
+to self (the figures of its withdraw answer), an SPL withdraw that creates the
+receiver's token account (rent in `fee_details`, `FeeForTokenTx`), a failed
+transaction (fee only), and a version-0 transaction with loaded addresses; the
+identity of R40.6C.7 on every row.
+T40.6C.5 SPL rows: a send, a receive (the receiver's token account created in
+the same transaction), a send to self (a row with a change of 0, the figures of
+its withdraw answer), and the absence of a token row for the failed one.
+T40.6C.6 A transaction listed by the platform address and a token account is
+read once and is one row in each list it changes; a restart adds no duplicate.
+T40.6C.7 An undecodable transaction and a block without height are logged and
+left out; the pass goes on (R40.6C.11).
+T40.6C.8 States: `NotEnabled`, `NotStarted`, `InProgress` with
+`transactions_left`, `Finished`, `Error` before the first finish and only a log
+line after it (R40.6C.9).
+T40.6C.9 After `disable_coin` of the platform no history request is sent and no
+list is written; after a token's disable its list is no longer written while the
+platform's history goes on (R40.6C.1).
+
 ## 40.7 Tests
 
 T40.1 Both `experimental::` methods are routed on native and WASM builds.
@@ -1916,6 +2116,10 @@ A unit test; it needs no activation and runs while Solana is switched off.
 ## 40.8 Deferred Work
 
 D40.1 Solana transaction history.
+
+> *Reloaded status (clean side, 2026-11-22):* done in PR #494 (§40.6C):
+> Reloaded's own design on the public Solana JSON-RPC, for SOL and SPL
+> coins, on native and browser builds.
 
 D40.2 HD-wallet, hardware-wallet and WalletConnect Solana policies.
 
@@ -2156,3 +2360,10 @@ with the shapes listed in §40.6 items 3-5.
   2026-11-15 that Solana returns wallet-only once S1 to S8 have landed
   (`docs/plans/solana-support.md`, S9). They take no forbidden-class input
   beyond the cleared rules they cite. No cleared sentence was edited.
+- *Clean-context addition (2026-11-22, forbidden corpus not consulted):*
+  §40.6C and the status notes after R40.2.5, R40.6B.15, D40.6B.1 and D40.1
+  record Reloaded's own design of Solana and SPL transaction history on the
+  public Solana JSON-RPC and program interfaces, and the maintainer's
+  decisions of 2026-11-22 on its depth, failed transactions, node source and
+  token accounts. They take no forbidden-class input beyond the cleared rules
+  they cite. No cleared sentence was edited.
