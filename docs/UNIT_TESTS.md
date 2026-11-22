@@ -889,7 +889,7 @@ of the states and of the new errors, the mapping of the task framework's errors 
 `mm2src/coins/utxo/utxo_tests.rs` (module `hd_accounts_at_index_tests`, names start with `leb_`, 14 tests),
 `mm2src/coins_activation/src/evm_hd_p4_tests.rs` (8 tests), one test each in
 `mm2src/coins_activation/src/eth_with_tokens_activation/tron/tests.rs` and
-`mm2src/coins_activation/src/sia_activation.rs`, and seven emulator tests in
+`mm2src/coins_activation/src/sia_activation.rs`, and seven emulator tests (one `#[ignore]`d) in
 `mm2src/coins/eth/eth_trezor_emulator_tests.rs`. CRD: chapter 49 R49.38 to R49.43 and T49.36 to T49.38 (as the status
 notes of 2026-11-22 in §49.2.3 record), chapter 05 R54 and R58a. Run with
 `cargo test -p coins --lib -- leb_ init_get_new_address` and
@@ -936,7 +936,7 @@ executor, so the thread-local mocks cannot serve it): an EVM node, a Bitcoin-sty
 | `emulator_trezor_get_new_address_shows_the_address_and_records_it_after_the_button` | T49.37, EVM platform | `ConfirmAddress` carries the EIP-55 address of the later result; the count is unchanged until the press and raised by one after it |
 | `emulator_trezor_get_new_address_utxo_shows_the_address_and_records_it_after_the_button` | T49.37, UTXO (`KMD`) | The same for a Komodo address; the device request (`trezor_coin`, script type) is right because the address the device shows is the one the daemon derived; the balance map is `KMD` with zeros |
 | `emulator_trezor_get_new_address_cancel_while_the_address_is_shown_records_nothing` | T49.37 (cancel), EVM | The cancel answers success, the task is gone, the count is unchanged and the next task offers the same address |
-| `emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled` | T49.38 (rejection), EVM | The controller presses "no" while the address is shown: `HwError` `UserCancelled`, count unchanged |
+| `emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled` (`#[ignore]`) | T49.38 (rejection), EVM | Ignored: the address screen of the pinned T2T1 emulator has no cancel; the controller's "no" opens an "Address mismatch?" screen whose "Quit" ends the emulator; open, to be checked by hand on a Trezor |
 | `emulator_trezor_get_new_address_another_seed_is_found_unexpected_device` | T49.38 (other seed), EVM | The emulator is wiped and loaded with another seed: `HwError` `FoundUnexpectedDevice` (R58a) before the address is shown, count unchanged; needs `TREZOR_EMULATOR_UDP` |
 | `emulator_trezor_get_new_address_another_passphrase_is_a_device_address_mismatch` | T49.38 (mismatch), EVM | Passphrase protection on; the first passphrase request (the identity check) is answered with the activation's passphrase, the second (the address request) with another one: `DeviceAddressMismatch` naming both addresses, count unchanged |
 | `emulator_trezor_get_new_address_a_failing_balance_query_leaves_the_address_known` | T49.38 (failing balance), EVM | The node fails the balance read after the press: `Transport`, count raised by one |
@@ -948,7 +948,7 @@ Coverage map of the runs of T49.37 and T49.38 (emulator test, unit test with moc
 | T49.37 status and press, EVM platform | `..._shows_the_address_and_records_it_after_the_button` | the wire form of `ConfirmAddress` (`the_in_progress_values_have_the_wire_form_of_the_contract`) | the address in full on the device's screen |
 | T49.37 status and press, UTXO | `..._utxo_shows_the_address_and_records_it_after_the_button` | `leb_r4942_the_device_request_of_a_utxo_coin` (device name, script type) | the same screen check |
 | T49.37 cancel while shown | `..._cancel_while_the_address_is_shown_records_nothing` (EVM) | none | none |
-| T49.38 rejection on the device | `..._refused_on_the_device_is_user_cancelled` (EVM) | `the_device_answers_map_to_the_hardware_vocabulary` (the mapping) | the press on the model's own buttons (the emulator is driven through its debug link) |
+| T49.38 rejection on the device | none (`..._refused_on_the_device_is_user_cancelled` is `#[ignore]`d, see above) | `the_device_answers_map_to_the_hardware_vocabulary` (the mapping) | open: the refusal on the model's own buttons, to be checked by hand on a Trezor |
 | T49.38 another seed | `..._another_seed_is_found_unexpected_device` (EVM) | `leb_a_replaced_device_ends_the_trezor_policy_task_with_found_unexpected_device` (UTXO) | none |
 | T49.38 another passphrase (mismatch) | `..._another_passphrase_is_a_device_address_mismatch` (EVM) | `a_device_address_mismatch_is_a_typed_request_error_naming_both_addresses` (the wire form) | none |
 | T49.38 failing balance after the confirmation | `..._a_failing_balance_query_leaves_the_address_known` (EVM) | `leb_a_failing_balance_query_leaves_the_address_known`, `evm_hd_p4_a_failing_balance_query_leaves_the_address_known` | none |

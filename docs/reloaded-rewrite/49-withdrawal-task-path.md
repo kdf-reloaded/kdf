@@ -1241,11 +1241,14 @@ is `Error` with `Transport`, and `total` has risen by one.
 >   answers success, the task is gone, the count is unchanged, the next task
 >   offers the same address.
 >
-> - T49.38, the rejection on the device. E
->   `refused_on_the_device_is_user_cancelled` (EVM): the controller presses "no"
->   through the debug link and the task ends with `HwError` `UserCancelled`, the
->   count unchanged. U: the mapping of the device's answers. O: the refusal on
->   the model's own buttons.
+> - T49.38, the rejection on the device. Open, to be checked by hand on a
+>   Trezor. The emulator test `refused_on_the_device_is_user_cancelled` (EVM) is
+>   `#[ignore]`d: on the pinned T2T1 emulator the address screen has one button
+>   (confirm) and no cancel. The debug link's "no" opens an "Address mismatch?"
+>   screen with a back button and a "Quit" button, and "Quit" ends the emulator
+>   process, so the host sees no `UserCancelled`. U: the mapping of the
+>   device's answers (the mock cover stays). O: the refusal on the model's own
+>   buttons.
 >
 > - T49.38, another seed. E `another_seed_is_found_unexpected_device` (EVM): the
 >   emulator is loaded with another seed after the activation and the task ends

@@ -1965,7 +1965,13 @@ fn emulator_trezor_get_new_address_utxo_shows_the_address_and_records_it_after_t
 /// T49.38, the refusal (CRD ch.49 R49.41 item 4, ch.05 R35c): the user presses "no" on the device while it shows the
 /// address. The task ends with `HwError` `UserCancelled` and the known count is unchanged. The controller's NO button
 /// is `DebugLinkDecision` with `DebugButton.NO`. Needs the emulator.
+///
+/// `#[ignore]`d: on the pinned T2T1 emulator (`2-main`) the "Receive address" screen has a single confirm button and
+/// no cancel. The debug link's NO opens an "Address mismatch?" screen (a back button and a "Quit" button); YES there
+/// ("Quit") ends the emulator process, so the host never gets `UserCancelled`. The refusal is
+/// open, to be checked by hand on a Trezor (CRD ch.49 T49.38 as-built note). Run with `--ignored` to see it.
 #[test]
+#[ignore = "the T2T1 emulator's address screen has no cancel: NO opens an Address mismatch screen whose Quit ends the emulator (T49.38)"]
 fn emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled() {
     if !emulator_available("emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled") {
         return;
