@@ -470,6 +470,10 @@ the previous version used. The safe way:
   tokens back from the GasFree address is a gasless withdraw to your own address; until KDF submits, that too gives
   only a signed authorization. Detail: PR #445; CRD ch.63 §63.3.4 to §63.3.6, §63.8, §63.8A, R29;
   RELOADED_VS_GLEEC.md.
+- **TRON swap groundwork: a swap with a TRX or TRC20 coin on either side will use the 32-byte secret hash.** The
+  legacy swap's choice of the secret-hash width selects SHA-256 over 32 bytes for such a pair, as the TRON swap
+  contract requires; ETH and ERC20 pairs keep the 20-byte hash. TRON swaps stay off, so nothing a user can run
+  changes yet. Detail: PR #499; CRD ch.51 R72 status note, ch.21 R21.B6.
 
 #### Tendermint (Cosmos) coins
 
@@ -1270,6 +1274,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`tron-swap-support`](docs/plans/tron-swap-support.md) — note of 2026-11-22: the TRON arm of the secret-hash
+  selection is built, in PR #499.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
   the closing note names what no row covers, in PR #497.
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.

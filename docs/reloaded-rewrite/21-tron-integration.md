@@ -2467,6 +2467,8 @@ is the maker coin or the taker coin. An ETH or ERC20 coin keeps the
 TRON swap operations. While `TRON_SWAPS_AVAILABLE` is `false` no TRON
 coin reaches a swap (the note at R21.B3), so no swap that can run today
 changes, and a saved swap keeps the secret hash it was started with.
+The TRON swap operations MUST refuse a secret hash that is not 32
+bytes, and the TRON swap switch is not turned on before they do.
 
 ### 21.11B.4 Open maintainer decisions
 
