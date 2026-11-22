@@ -768,7 +768,7 @@ the previous version used. The safe way:
   operations, the trade-fee estimates, the waits for a confirmation or a spend and the transaction decoding of a
   Lightning coin aborted the node when they were reached; each now answers an error. Orders and trade previews with
   a Lightning coin were already refused. The public key of a Lightning coin, which `get_private_keys` reads, is its
-  node id.
+  node id. Detail: PR #479.
 
 #### WalletConnect
 
@@ -1040,6 +1040,7 @@ the previous version used. The safe way:
 
 - **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
   network) run in the unit-test job with the maker-swap tests; all pass. Only the CI workflow and docs changed.
+  Detail: PR #479.
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
   runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
   because the locked test library was far older than the locked `wasm-bindgen`. The test library is
