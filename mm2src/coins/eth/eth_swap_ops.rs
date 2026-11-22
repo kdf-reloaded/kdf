@@ -1,11 +1,49 @@
 //! SwapOps and WatcherOps trait implementations for EthCoin.
 
 use super::*;
+use crate::eth::tron::swap::send as tron_send;
+use crate::eth::tron::TronAddress;
+
+/// The V1 payment of a TRX or TRC20 coin to the swap contract selected for the swap (CRD ch.21 §21.11C, ch.51
+/// R98). The swap id and the contract's hash argument are made from the 32-byte secret hash as it is: this path
+/// never reaches the derivation of the EVM contract's 20-byte value (ch.51 R72A).
+fn tron_payment(
+    coin: &EthCoin,
+    time_lock: u32,
+    secret_hash: &[u8],
+    amount: BigDecimal,
+    receiver: Address,
+    swap_contract: Address,
+) -> TransactionFut {
+    let (coin, secret_hash) = (coin.clone(), secret_hash.to_vec());
+    let receiver = TronAddress::from_evm_address(receiver);
+    let contract = TronAddress::from_evm_address(swap_contract);
+    let fut = async move {
+        tron_send::send_payment(&coin, &contract, &receiver, &secret_hash, time_lock, &amount)
+            .await
+            .map(TransactionEnum::from)
+            .map_err(TransactionErr::from)
+    };
+    Box::new(fut.boxed().compat())
+}
 
 #[async_trait]
 impl SwapOps for EthCoin {
     fn send_taker_fee(&self, dex_fee: &DexFee, fee_addr: &[u8], _uuid: &[u8]) -> TransactionFut {
         let address = try_tx_fus!(addr_from_raw_pubkey(fee_addr));
+        // A TRON coin sends a TRX `TransferContract` or a TRC20 `transfer` of the fee, and nothing for a burn
+        // share (CRD ch.21 D21.B9, §21.11C).
+        if self.is_tron_family() {
+            let (coin, dex_fee) = (self.clone(), dex_fee.clone());
+            let fee_address = TronAddress::from_evm_address(address);
+            let fut = async move {
+                tron_send::send_dex_fee(&coin, &fee_address, &dex_fee)
+                    .await
+                    .map(TransactionEnum::from)
+                    .map_err(TransactionErr::from)
+            };
+            return Box::new(fut.boxed().compat());
+        }
         // For EVM coins, only the fee portion is sent on-chain; the burn
         // portion (if any) is implicit — not sent as a separate transfer.
         let amount = dex_fee.fee_amount();
@@ -30,6 +68,9 @@ impl SwapOps for EthCoin {
     ) -> TransactionFut {
         let taker_addr = try_tx_fus!(addr_from_raw_pubkey(taker_pub));
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
+        if self.is_tron_family() {
+            return tron_payment(self, time_lock, secret_hash, amount, taker_addr, swap_contract_address);
+        }
 
         Box::new(
             self.send_hash_time_locked_payment(
@@ -55,6 +96,9 @@ impl SwapOps for EthCoin {
     ) -> TransactionFut {
         let maker_addr = try_tx_fus!(addr_from_raw_pubkey(maker_pub));
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
+        if self.is_tron_family() {
+            return tron_payment(self, time_lock, secret_hash, amount, maker_addr, swap_contract_address);
+        }
 
         Box::new(
             self.send_hash_time_locked_payment(
@@ -307,6 +351,17 @@ impl SwapOps for EthCoin {
         from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+        // A TRON coin reads `payments(id)` of the selected contract under the 32-byte secret hash (CRD ch.21
+        // §21.11C); a failed read is an error and never "not sent".
+        if self.is_tron_family() {
+            let contract = TronAddress::from_evm_address(try_fus!(swap_contract_address.try_to_address()));
+            let (coin, secret_hash) = (self.clone(), secret_hash.to_vec());
+            let fut = async move {
+                let sent = try_s!(tron_send::my_payment_sent(&coin, &contract, time_lock, &secret_hash).await);
+                Ok(sent.map(TransactionEnum::from))
+            };
+            return Box::new(fut.boxed().compat());
+        }
         let id = self.etomic_swap_id(time_lock, secret_hash);
         let swap_contract_address = try_fus!(swap_contract_address.try_to_address());
         let selfi = self.clone();

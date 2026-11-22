@@ -5,6 +5,8 @@
 //! - [`contract_abi`]: the contract's call, read and event surface, and the token approval calls.
 //! - [`tx`]: [`TronSwapTx`], the transaction type a swap record keeps for a TRON leg.
 //! - [`trigger`]: building, signing and broadcasting a contract call, and its energy dry run.
+//! - [`send`]: the sending side of a swap: the payment with its approval, the DEX fee, the own-payment question
+//!   and the fee figures.
 //!
 //! # Invariants
 //!
@@ -14,7 +16,9 @@
 //! - Nothing here decides a fee: the caller of [`trigger::send_trigger`] gives the `fee_limit`.
 
 pub mod contract_abi;
+pub(crate) mod fee_limit_stand_in;
 pub mod ids;
+pub(crate) mod send;
 pub mod trigger;
 pub mod tx;
 
@@ -23,6 +27,7 @@ mod activation_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod contract_abi_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod ids_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod send_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod trigger_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod tx_tests;
 

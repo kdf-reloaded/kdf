@@ -3267,7 +3267,7 @@ fn tron_v1_sender_trade_fee_returns_error_without_network() {
     let err = block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox))
         .unwrap_err();
     assert!(
-        matches!(err.into_inner(), TradePreimageError::InternalError(msg) if msg.contains("TRON V1 sender trade fee"))
+        matches!(err.into_inner(), TradePreimageError::InternalError(msg) if msg.contains("not a TRON coin with a node client"))
     );
 }
 
