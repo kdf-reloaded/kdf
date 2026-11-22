@@ -955,7 +955,7 @@ The chapter relies on one baseline-state claim:
   maintainer's decision of 2026-11-22 on stored orders of untradable
   coins. It was written by a context that never read the forbidden
   corpus, takes no forbidden-class input and needs no Dirty Gate pass.
-- *Status note added 2026-11-22, clean side (PR #NNN).* The status note
+- *Status note added 2026-11-22, clean side (PR #493).* The status note
   after R18.11.19, on the claim lookup that the spend search and the claim
   polling share, records this repository's own behavior. It was written by
   a context that never read the forbidden corpus, takes no forbidden-class
