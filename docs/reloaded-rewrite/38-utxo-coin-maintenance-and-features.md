@@ -4840,6 +4840,20 @@ token's swap paths were read only for the set of methods they send
 (R38.6.4Q.8), not request by request. (6) The `disable_coin` contract
 (R38.6.4Q.10 item 4) and native mode were not examined.
 
+> **Pointer (2026-11-22, KDF Spec Reader, round 0.5.0-23; gate status as
+> chapter 51 §51.6E states).** Point (5) above is taken further, for the
+> legacy swap's spend search and secret extraction, in
+> [chapter 51](51-legacy-v1-swap-state-machine.md) §51.6E.
+> R89 records how a QRC20 spend or refund is found (candidates from the
+> token's `Transfer` history and the presence of the swap event, the match
+> by the call data), that the `excepted` value is read for the payment only,
+> and that the event is not tied to the matched call's output. R90 records
+> the UTXO and SLP search (classification by the input that spends the swap
+> output) and the secret extraction. R88 records refund eligibility: the
+> wall clock alone for QRC20 and SLP, the median time past for a standard
+> UTXO coin, BCH and the QTUM base coin. The rules of this chapter are
+> unchanged.
+
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
 events over the streaming infrastructure, registering the addresses to be watched
@@ -6666,3 +6680,8 @@ R38.8.6 **Tests (two-direction, observable).**
   forbidden corpus, from this repository's code and its tests. It takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
   required.
+- *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
+  at the end of §38.6.4Q.* It names chapter 51 §51.6E (R88, R89, R90) and
+  summarizes what those rules record; its reference content is that of its
+  target and is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure
+  0.03, no findings**, as recorded in chapter 51 §51.16.
