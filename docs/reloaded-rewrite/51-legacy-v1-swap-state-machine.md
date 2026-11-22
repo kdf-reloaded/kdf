@@ -168,6 +168,16 @@ proceeds, the lock MUST be refreshed on a thirty-second interval, i.e.
 strictly more often than its time-to-live, so that a live runner never
 appears expired.
 
+> **Pointer (2026-11-22; passed the KDF Dirty Gate with its target).**
+> The on-disk form of the persistence that R2 through R5 rely on, where a
+> data directory is shared with a reference build, is bound by
+> [Chapter 44](44-database-persistence-and-migrations.md) §44.9A: the lock
+> file of R5 (its name, place, content form, and what the reference does with
+> content it does not recognize) in R44.9A.6 through R44.9A.9, the saved-swap
+> files behind the event log of R2 and R3 in R44.9A.10 through R44.9A.12, and
+> the rules for RELOADED in R44.9A.13. This pointer changes no rule of this
+> chapter.
+
 **R6.** *Two entry modes.* The runner MUST support starting a fresh swap
 at `STAGE-START` and resuming a persisted swap from its event log. On
 resume, if the log's last event yields no next stage, the swap is
@@ -499,6 +509,13 @@ extraction fails, which is the one post-payment taker failure that does
 *not* enter the refund chain — and otherwise emit `TakerPaymentSpent`
 carrying both the spending transaction and the recovered secret.
 
+> **Status note (2026-11-22, KDF Spec Reader, round 0.5.0-23).** How each coin
+> family waits for and searches a spend, where it reads the secret and
+> whether it compares it with the secret hash, and on which clock a payment
+> counts as refundable, is recorded for the reference rows in §51.6E
+> (R85–R92, T36–T38). R30, R31 and R18 are unchanged. Gate status as §51.6E
+> states.
+
 **R31.** *Spend maker payment and refund chain.*
 `STAGE-SPEND-MAKER-PAYMENT` MUST broadcast the spend of the maker
 payment using the recovered secret, emitting `MakerPaymentSpent` on
@@ -583,6 +600,16 @@ locktime.
 > is a field report: a maker spent the taker payment a few seconds after its
 > fourth confirmation, and the taker's looks did not find that spend until
 > hours after the maker payment's locktime.
+
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-22).** For a coin whose swap payment is a script output (the UTXO
+> family: standard UTXO coins, BCH, Qtum, SLP tokens and the transparent side of
+> the shielded coins), a found spend of the payment is classified as a spend or
+> a refund by the script of the input that spends the payment's output. This
+> holds for every search this chapter names (R31a with the search on every
+> server, R82, R83 and R84) and for the swap's other searches of the same
+> payment. A spend whose spending input carries neither form is an error that
+> names the input.
 
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
@@ -1149,6 +1176,289 @@ rule.
 > the failed claim call.
 > Run on 2026-11-13: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 96 tests of which these
 > seven are new.
+
+## 51.6E Reference Behavior of the Coin Families: Spend Search, Secret Extraction, Refund Eligibility
+
+> **Status (2026-11-22; KDF Spec Reader, round 0.5.0-23).** Reference record,
+> read at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A. The
+> two rows behave alike except where a rule names a difference. **Gate status:
+> passed the KDF Dirty Gate on 2026-11-22, measure 0.03 (chapter 01 R40;
+> attestation in §51.16).** R85–R92 state what the reference does. They do not
+> require Reloaded to copy a missing check: none of the behavior below is
+> carried on the wire, so a stricter check on Reloaded's side changes no
+> message and no transaction a peer validates. The findings are informative
+> (chapter 01). The reading was of source only; nothing here was observed on a
+> running reference node.
+
+The legacy machines of this chapter rely on four operations that every coin
+family supplies in its own way:
+
+- the *wait for a spend* of a payment, which the taker uses in R30;
+- the *search for a spend or a refund* of a payment, which the manual
+  recovery `recover_funds_of_swap` uses on both sides (in Reloaded also
+  R31a and R82–R84);
+- the *extraction of the secret* from the transaction that spent the taker
+  payment (R30 and the taker's manual recovery);
+- the answer to *"can this payment be refunded now"*, which the refund
+  stages (R18, R31) and the manual recovery ask before they build a refund.
+
+**R85.** *The machine does not check the secret itself.* The swap machine
+hands the swap's secret hash and the spending transaction to the taker
+coin's extraction and uses the 32 bytes that come back as the secret: it
+records them in `TakerPaymentSpent` and spends the maker payment with them.
+The machine compares nothing. Whether the value was compared with the secret
+hash therefore depends on the taker coin's family alone: it is compared for
+the UTXO families (R90) and for QRC20 (R89), and it is not compared for
+ETH/ERC20 (R86) and for Tendermint (R91). When the extraction answers an
+error, the run loop takes the exit R30 states (`TakerPaymentWaitForSpendFailed`,
+then `STAGE-FINISH`) and the manual recovery fails with that error. When the
+extraction answers a value that is not the secret, the spend of the maker
+payment is built with it; when that spend fails, the run loop records
+`MakerPaymentSpendFailed`.
+
+> **Observation (informative, 2026-11-22).** At both rows the run that
+> records `MakerPaymentSpendFailed` ends at `STAGE-FINISH`. The refund chain
+> that R31 names for this event is reached through the resume map (R32) when
+> the swap is started again, not within the same run.
+
+**R86.** *ETH and ERC20: the secret comes from the call input only.* The
+extraction decodes the call input of the spending transaction as a call of
+the swap contract's claim method and returns its third argument, the
+`secret` of `receiverSpend(bytes32 id, uint256 amount, bytes32 secret,
+address tokenAddress, address sender)`. Further:
+
+1. The receipt and the logs of the transaction are not read. The
+   `ReceiverSpent(bytes32 id, bytes32 secret)` event carries the secret too,
+   and the reference found the transaction through that event (R87), but the
+   secret in the event is never used.
+2. The value is not compared with the swap's secret hash. The hash is handed
+   to the extraction and is not used by it.
+3. The recipient of the transaction is not compared with the swap contract,
+   and the `id` argument is not compared with the swap's id.
+4. A call input that is not a call of the claim method is an error. Only
+   the transaction's own call input is read; a claim that reaches the swap
+   contract through a call of another contract is not seen there, and R85's
+   error exit applies although the event with the secret is on the chain.
+5. *Row difference.* At `v2.6.0-beta` the expected method is chosen by the
+   swap: `receiverSpendReward` when the swap uses the watcher reward,
+   otherwise `receiverSpend`, and only that one is accepted. At `v3.0.0-beta`
+   either method is accepted, recognized by its selector, whatever the swap
+   uses; the secret is the third argument in both. At `v3.0.0-beta` a call
+   input shorter than a selector is an error.
+
+**R87.** *ETH and ERC20: a spend or a refund is found through the swap
+contract's event logs.* Neither the wait nor the search scans transactions
+or their call input. Both ask the node for logs (`eth_getLogs`) that the
+swap contract's address emitted with the event's signature as the first
+topic, over a block range, and accept a log whose data begins with the
+32-byte swap id. The id is the first argument of the payment transaction's
+own call input. The contract address is the one the swap negotiated; in the
+wait, when none is given, it is the recipient of the payment transaction.
+
+1. *Wait for a spend.* Only `ReceiverSpent` is asked for. The range runs
+   from the swap's start block of that coin to the node's tip, in windows of
+   the coin's `logs_block_range`, and the whole pass is repeated at the
+   caller's interval until the deadline, which is measured on the local
+   clock. A refund is not looked for. When a log matches, the transaction it
+   names is fetched by its hash, repeatedly until the node returns it or the
+   deadline passes, and that transaction is the result.
+2. *Search.* The same range is walked in ascending windows. In each window
+   `ReceiverSpent` is asked for first and `SenderRefunded` second; the first
+   matching log decides between *spent* and *refunded*, and the transaction
+   it names is the result. A matching log whose transaction the node does not
+   return is an error. No match up to the tip is the answer *nothing found*.
+3. *Not checked, in either.* The receipt of the transaction is not read, so
+   its execution status is not checked. No number of confirmations is
+   required. A marker that the node sets on a log of a block that left the
+   chain is not read.
+4. *Row difference.* At `v2.6.0-beta` the payment's call input is decoded as
+   the method the swap's watcher-reward setting selects (`ethPayment` or
+   `erc20Payment`, or their `...Reward` forms). At `v3.0.0-beta` the method is
+   recognized by its selector.
+
+> **Note (informative).** A log is produced only by a call that completed, so
+> a transaction found through the event did execute the claim or the refund.
+> That is a property of the chain, not a check the reference makes; item 3
+> stands for everything the log does not prove, for example how deep the
+> block is.
+
+**R88.** *Refund eligibility: the local clock, except for the UTXO coins
+that read the chain's median time past.* The answer to "can this payment be
+refunded now" has one general rule and a few family rules.
+
+1. *General rule.* The payment is refundable when the local wall clock is
+   strictly later than the lock time. Otherwise the answer is to wait for
+   the difference plus one second. No chain time is read (no tip timestamp,
+   no median time past, no height) and there is no margin beyond that one
+   second.
+2. *Families under the general rule:* ETH and ERC20, QRC20, SLP and
+   Tendermint. None of them has a rule of its own, at either row.
+3. *Families with their own rule:* a standard UTXO coin, BCH and the QTUM
+   base coin. While the local clock is before the lock time the answer is to
+   wait, as in item 1 but at most 3600 seconds at a time. After it, the
+   chain's median time past is read, and the payment is refundable when the
+   lock time is strictly less than the median time past; otherwise the
+   answer is to wait for the difference plus one second, at most 3600
+   seconds. KMD has a further condition that this section does not restate.
+   Sia has its own rule (chapters 20 and 54); the shielded coin follows the
+   general rule (chapter 39 R39.5.12 item (a)).
+4. *What the general rule means per family.* For ETH, ERC20 and QRC20 the
+   swap contract applies its own lock-time condition when the refund call
+   executes; the reference does not read the chain's time before it sends
+   the call. For QRC20 the rule is the general one although the QTUM base
+   coin reads the median time past. For SLP the rule is the general one
+   although the refund is a transaction of the platform coin, whose own rule
+   reads the median time past. For Tendermint the general rule is all the
+   reference has, and the refund call it then makes answers an error
+   (chapter 18 R18.11.15); the chain refunds by height on its own.
+5. *Where the answer is used.* The refund stages of R18 and R31 sleep for
+   the time the answer names and ask again; the manual recovery refuses with
+   an error that names the time.
+
+> **Code-quality finding (informative).** An SLP refund is asked for by the
+> wall clock alone, while the platform chain's lock-time rule (BIP 113)
+> counts a time-locked transaction as final only once the median time past
+> has passed its lock time, and the median time past trails the wall clock.
+> A refund sent in between is not final under that rule, which is the case
+> the platform coin's own answer waits out. *Proposed fix:* answer an SLP token's refund
+> eligibility with the platform coin's rule (item 3). The same reasoning
+> suggests reading the chain's time for a contract-based family before the
+> refund call is sent, for example the tip block's timestamp against the lock
+> time, instead of relying on the local clock.
+
+**R89.** *QRC20: candidates by token history and event presence, the match
+by call data.* The search and the wait work on the token's `Transfer`
+history (chapter 38 R38.6.4Q.8 for the Electrum methods).
+
+1. *Search, the payment first.* The payment transaction must have at least
+   one confirmation; without it the search answers an error. Its receipts
+   are read, the `erc20Payment` call among its outputs is located, and the
+   receipt of *that* output is checked: an `excepted` value other than none
+   is an error. The swap id in the call must equal the id derived from the
+   swap's lock time and secret hash, otherwise the search answers an error.
+2. *Search, the spend.* The candidates are the receipts in the token's
+   `Transfer` history of the payment's receiver address, from the swap's
+   start block. A receipt qualifies when it holds a `Transfer` log and a log
+   whose only topic is the `ReceiverSpent` signature. The transaction of a
+   qualifying receipt is fetched, and all of its outputs are examined for a
+   `receiverSpend` call whose `id` is the swap id and whose `secret` hashes
+   to the swap's secret hash (item 6). The first such transaction is the
+   answer *spent*.
+3. *Search, the refund.* Only when no spend is found: the same procedure
+   with the `SenderRefunded` signature, over the `Transfer` history of the
+   node's own address, and a `senderRefund` call with the swap id in any
+   output. The first such transaction is the answer *refunded*.
+4. *Not checked for the spend and the refund.* The `excepted` value of the
+   receipt is not read; the presence of the event log stands in for the
+   outcome. The address that emitted the event log is not compared with the
+   swap contract, and the log's data (the id) is not read. The event is not
+   tied to the call that was matched: the event is looked for in a receipt,
+   the call in the whole transaction, and the receipt's output index is not
+   compared with the index of the output that holds the matched call. The
+   contract address of the matched call's output is not compared with the
+   swap contract. No confirmation is required of the spend or the refund.
+5. *Wait for a spend.* Item 2 is repeated at the caller's interval until the
+   deadline, with the id and the secret hash taken from the payment's own
+   call; the payment's details are read first as in item 1, retried until
+   they can be read. A refund is not looked for.
+6. *Extraction.* Every output of the spending transaction is examined for a
+   `receiverSpend` call. Its `secret` is accepted when
+   RIPEMD-160(SHA-256(secret)) equals the swap's 20-byte secret hash; a
+   32-byte secret hash is first reduced with RIPEMD-160. An output that does
+   not match is skipped, and a transaction without a matching output is an
+   error. The `id` is not compared here.
+7. The two rows are identical for QRC20.
+
+> **Code-quality finding (informative).** The search has one form for both
+> directions (a payment of the node and a payment of the counterparty), and
+> its refund step always reads the `Transfer` history of the node's own
+> address. A refund of the counterparty's payment moves the tokens to the
+> counterparty and does not appear there, so for a counterparty's payment the
+> search can answer *spent* or *nothing found*, never *refunded*. *Proposed
+> fix:* read the refund candidates from the history of the payment's sender.
+> A second point follows from item 4: tie the event to the matched call by
+> the receipt's output index, compare the emitting address with the swap
+> contract, and read the receipt's `excepted` value.
+
+**R90.** *UTXO families, including SLP: the input that spends the swap
+output decides.* The search rebuilds the swap script from the lock time, the
+secret hash and the two keys, and requires the payment transaction's swap
+output to pay to that script's hash; otherwise it answers an error. The swap
+output is output 0 for a standard UTXO coin and output 1 for an SLP token
+(output 0 of an SLP transaction is its metadata output).
+
+1. *Finding the spending transaction.* Over Electrum the history of the
+   output's script is read (a history with fewer than two entries means
+   *nothing found*), and each transaction in it is examined for an input
+   that refers to the swap output. With a native node the wallet's
+   transactions since the swap's start block are examined in the same way,
+   leaving out conflicting ones. No confirmation is required. For an SLP
+   token the lookup is the platform coin's; nothing token-specific is
+   checked on the spending transaction.
+2. *Classification.* The spending transaction is classified by the signature
+   script of the input that refers to the swap output, wherever that input
+   stands in the transaction; the first input has no special role. When the
+   third element of that script is the empty push, the answer is *spent*;
+   otherwise, when its second element is the push of the number one, the
+   answer is *refunded*; otherwise the search answers an error. These are
+   the two forms a spend of the swap script takes: signature, secret, empty
+   push, script for a claim; signature, one, script for a refund. The secret
+   is not examined at this step.
+3. *Wait for a spend.* The lookup of item 1 is repeated at the caller's
+   interval until the deadline, and the spending transaction is returned
+   without classification. A refund found this way fails at the extraction.
+4. *Extraction.* Every input of the spending transaction is examined, and in
+   each signature script every 32-byte data push. The first push whose
+   RIPEMD-160(SHA-256(push)) equals the swap's 20-byte secret hash is the
+   secret; a 32-byte secret hash is first reduced with RIPEMD-160. The
+   extraction is not limited to the input that spends the swap output or to
+   a position in the script. Witness data is not examined. A transaction
+   without such a push is an error.
+5. The two rows are identical in all of this. The baseline anchor differs
+   in two points: it classifies by the first input of the spending
+   transaction, and it reads the secret from the second element of each
+   input's signature script (with the same hash comparison).
+
+**R91.** *Tendermint: the first message only, no comparison.* The extraction
+decodes the first message of the spending transaction as the dialect's
+claim message and returns its `secret` field, hex-decoded to exactly 32
+bytes (chapter 18 R18.11.14). Other messages are not examined, so a
+transaction that carries the claim in a later message is an error. The value
+is not compared with the swap's secret hash. The search (chapter 18
+R18.11.16) and the wait (chapter 18 R18.11.19) take the first result of the
+transaction search `claim_htlc.id='<id>'`; neither examines the result code
+of the transaction found, and neither establishes which of its messages is
+the claim. The payment's own HTLC is read from the first message of the
+payment transaction. The two rows are identical.
+
+> **Code-quality finding (informative).** For ETH/ERC20 and Tendermint the
+> value that becomes the swap's secret is taken from one fixed place of the
+> spending transaction and is not compared with the secret hash (R86, R91),
+> while the UTXO families and QRC20 compare it. *Proposed fix:* compare the
+> extracted value with the swap's secret hash in the machine, for every
+> family, using the hash algorithm the swap selected (R71), and treat a
+> mismatch as "not found here" rather than as the secret. For ETH/ERC20 the
+> `secret` word of the matching `ReceiverSpent` log is a second source when
+> the call input does not decode; for Tendermint every message of the
+> transaction can be examined for a claim with the swap's HTLC id.
+
+**R92.** *Not established by this reading.*
+
+1. Nothing was run. How a node answers the log request across a
+   reorganization, and how real QTUM and Tendermint servers index failed
+   calls, was not examined.
+2. The KMD condition named in R88 item 3 and the Sia and shielded rules are
+   not restated here.
+3. The watcher's own search and extraction, the swaps of the second protocol
+   version, and the Tron-VM form of the EVM family (chapter 21) are outside
+   this section.
+4. The QRC20 history of R89 was read for both clients; with a native node
+   the candidates come from the node's log search over the token contract
+   in steps of 100 blocks, filtered to receipts with a `Transfer` log. The
+   server-side behavior of either source was not examined.
+5. Whether this repository's code already differs from R85–R91 was not
+   surveyed in this reading, apart from the baseline comparison in R90
+   item 5.
 
 ## 51.7 Bound Message Contract
 
@@ -2387,6 +2697,60 @@ the claim's confirmation decides as before; T35 has no item for it.
 
 *(Added 2026-11-21 with the status note under R82.)*
 
+**T36.** *Reference characterization: where the secret is read and whether
+it is compared (R85, R86, R89 item 6, R90 item 4, R91).* These items
+describe the reference; they are not acceptance tests for a Reloaded check
+that is stricter. Given a spending transaction and the swap's secret hash:
+
+1. ETH/ERC20: a transaction whose call input is a `receiverSpend` call
+   yields the third argument, whether or not it hashes to the secret hash; a
+   transaction with any other call input yields an error, whatever its logs
+   hold;
+2. QRC20: a transaction with two `receiverSpend` outputs, of which only the
+   second hashes to the secret hash, yields the second secret; with none
+   that hashes, an error;
+3. UTXO and SLP: a transaction whose matching 32-byte push stands in an
+   input other than the first, or at a position other than the second
+   element, yields that push; a transaction whose 32-byte pushes do not hash
+   to the secret hash yields an error;
+4. Tendermint: a transaction whose first message is a claim yields its
+   secret, whether or not it hashes to the secret hash; a transaction whose
+   claim is the second message yields an error.
+
+**T37.** *Reference characterization: how a spend or a refund is found and
+classified (R87, R89 items 1–5, R90 items 1–3).*
+
+1. ETH/ERC20: a `ReceiverSpent` log of the swap contract whose data begins
+   with the swap id gives *spent* with the transaction the log names; a
+   `SenderRefunded` log likewise gives *refunded*; with both in one window,
+   *spent*; the receipt of the named transaction is not requested;
+2. ETH/ERC20: the wait returns for a `ReceiverSpent` log only and keeps
+   waiting through a `SenderRefunded` log until its deadline;
+3. QRC20: a payment transaction without a confirmation, or whose
+   `erc20Payment` receipt has an `excepted` value other than none, gives an
+   error; a spend candidate is taken from a receipt that holds the event log
+   and is matched by a `receiverSpend` call in any output of the same
+   transaction; the candidate's `excepted` value is not read;
+4. UTXO and SLP: a spending transaction whose second input spends the swap
+   output is classified by that input's signature script (empty push as
+   third element: *spent*; the number one as second element: *refunded*;
+   neither: an error), whatever the first input holds; the swap output is
+   output 0, and output 1 for an SLP token.
+
+**T38.** *Reference characterization: refund eligibility (R88).* With a lock
+time `L`:
+
+1. ETH/ERC20, QRC20, SLP and Tendermint: at local time `L` the answer is to
+   wait one second; at `L + 1` the answer is *refundable*; no request to the
+   chain is made for the answer;
+2. a standard UTXO coin, BCH and the QTUM base coin (not KMD): at local time
+   `L − 5000` the answer is to wait 3600 seconds without a request to the
+   chain; at local time `L + 10` with a median time past of `L` the answer is
+   to wait one second; with a median time past of `L + 1` the answer is
+   *refundable*.
+
+*(T36–T38 added 2026-11-22 with §51.6E; gate status as §51.6E states.)*
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -2644,6 +3008,11 @@ reference rows alike.
   LCC and RVN Electrum servers and this workspace's own refund chain and
   Electrum client code; no reference input was consulted, the note makes no
   parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-22: the status note after the 2026-11-21 note under
+  R31a is a Reloaded addition written in a clean session from the
+  maintainer's decision of 2026-11-22 and this workspace's own UTXO spend
+  search; no reference input was consulted, the note makes no parity claim,
+  and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
@@ -2755,3 +3124,44 @@ reference rows alike.
   *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
   0.00, no findings; the pointer was judged with its target, whose clearance
   is recorded in chapter 09's provenance footer of the same date.
+- *Pointer added 2026-11-22 -- the note under R5 naming chapter 44 §44.9A.*
+  Written by the KDF Spec Reader in round 0.5.0-24. It carries no reference
+  content of its own beyond naming what its target binds; the reference
+  facts are in chapter 44 §44.9A, whose provenance footer records the rows
+  read. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.00, no findings**, as
+  recorded for §44.9A in chapter 44's provenance footer.
+- *Scoped addition (2026-11-22), KDF Spec Reader, round 0.5.0-23 -- §51.6E
+  (R85–R92, the observation under R85, the note under R87, the three
+  code-quality findings) and T36–T38.* Forbidden-class input was taken
+  through the two-team procedure of chapter 01 §1.4A, from the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A; the comparison in R90
+  item 5 rests on the row *baseline anchor (R1)*. The facts taken are, for
+  the ETH/ERC20, QRC20, UTXO, SLP and Tendermint families of the legacy
+  swap: where the secret is read in a spending transaction and whether it is
+  compared with the secret hash; by which chain data a spend or a refund of
+  a payment is found and classified, and what is not checked while doing so;
+  and on which clock, with which margin, a payment counts as refundable. The
+  method and event names used are those of the public swap contract's ABI,
+  the public JSON-RPC and Electrum method names, and the public transaction
+  search key of the HTLC module. No private identifier, function body,
+  helper decomposition, log or error literal was reproduced. The proposed
+  fixes in the findings are the author's own. **KDF Dirty Gate: PASS on
+  2026-11-22, measure 0.03, no findings** (chapter 01 R40; the attestation
+  closes this item).
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings, in a single pass; the chapter 02 §2.15A rows were verified
+  (`v2.6.0-beta`, `v3.0.0-beta` and the baseline anchor (R1)). *Extent:* the
+  legacy-swap operations of the coin families -- the spend wait, the spend and
+  refund search, the secret extraction and the refund-eligibility answer --
+  for ETH/ERC20, QRC20, the standard UTXO family, BCH, the QTUM base coin, SLP
+  and Tendermint, and the taker's use of the extraction; the row `v3.0.0-beta`
+  read in full (nine source files), the row `v2.6.0-beta` in part (the
+  differences of the EVM family) and the baseline anchor in part (the UTXO
+  extraction and classification), with a mechanical pass over 275, 263 and 105
+  files of these three rows respectively; not read: KMD, Sia, the shielded
+  coins, the watcher, the version-two swap and the TRON virtual machine; on
+  the candidate side, the 413 added lines. *Method:* reading plus a per-token
+  forced-versus-free test and a five-word sequence comparison; the
+  repository's clean-room gate tool was not applicable because the additions
+  embed no code blocks. *Measure:* 0.03, on the discretionary-expression
+  basis.

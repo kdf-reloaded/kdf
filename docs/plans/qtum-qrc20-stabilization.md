@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 and P7 #436 merged; Phase C item 3 #462 merged; Phase C item 5 in PR #476; P8 after PR #439; P9 next) — **Last reviewed:** 2026-11-22
+**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 and P7 #436 merged; Phase C item 3 #462 and item 5 #476 merged; P8 in PR #473; P9 next) — **Last reviewed:** 2026-11-22
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -108,6 +108,13 @@ included, for every coin. P8 keeps what it does not cover for QTUM and its token
 not add its owner to the shared client's subscriptions again, and a contract-event subscription of the same owner
 must not be skipped after a failed placement. Tests come first, on dev with PR #439; code changes only if a test
 fails. P8 starts after PR #439 is merged.
+
+*P8 (2026-11-22).* On dev with PR #439, the tests found two defects in the subscriptions of the shared client, and
+PR #473 fixes them: a subscription request that waited for its answer while its instance was disabled, or one sent
+later by a handle of the disabled instance, remembered that instance again; and a subscription whose placement over
+a new session failed still counted as placed, so the next request of the same instance sent nothing. The rules are
+in the status note of 2026-11-22 after D38.6.4Q.1 in CRD ch.38. A disabled instance's balance streamer and a
+notification after the removal add nothing back (tests). Phase C item 5 is done (PR #476).
 
 ## Non-goals and compatibility guardrails
 

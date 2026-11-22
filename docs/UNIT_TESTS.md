@@ -844,6 +844,42 @@ covered by an emulator test. The unchanged answers of a TRON platform and of a T
 `an_address_is_used_when_the_chain_has_its_account_or_an_enabled_token_balance_is_not_zero` in
 `mm2src/coins/eth/tron/hd_tests.rs`.
 
+## EVM HD per-ticker totals, the scan at activation, and a failing `get_new_address` (14 tests, plus 3 UTXO tests)
+
+Location: `mm2src/coins_activation/src/evm_hd_p3_tests.rs` (names start with `evm_hd_p3_`; the scripted node is the one of
+`evm_hd_p2_tests.rs`) and, for the UTXO family, `mm2src/coins/src/utxo/utxo_tests.rs`. CRD: chapter 49, R49.35 to R49.37,
+T49.33 to T49.35; chapter 38 R38.8.5; chapter 05 R35a. Run with `cargo test -p coins_activation --lib evm_hd_p3_` and
+`cargo test -p coins --lib t14a_`.
+
+| Test | CRD | What is tested |
+|---|---|---|
+| `evm_hd_p3_t4933_the_page_total_sums_each_ticker_over_the_returned_page` | R49.35 item 1, T49.33 | `limit: 2` answers a `page_balance` with exactly the two tickers, each summed over the two listed addresses; the second page sums the third address alone |
+| `evm_hd_p3_t4933_a_page_past_the_known_range_holds_the_requested_ticker_at_zero` | R49.35 item 1, R38.8.5 | A page past the known range answers `addresses: []` and a one-entry `page_balance` of the requested ticker at zero (the recorded divergence from `{}`), for the platform and for a token |
+| `evm_hd_p3_t4933_the_account_total_sums_each_ticker_over_every_address` | R49.35 item 2 | `task::account_balance::init` answers `total_balance` with both tickers summed over all three addresses |
+| `evm_hd_p3_t4933_a_token_ticker_answers_a_total_with_the_token_alone` | R49.35 | Asked for the token ticker, both methods answer a total with the token's key alone |
+| `evm_hd_p3_t4933_an_account_with_no_known_address_totals_the_requested_ticker_at_zero` | R49.35 item 2, R38.8.5 | An account with no known address answers the requested ticker at zero, for the platform and for a token |
+| `evm_hd_p3_t4934_the_activation_scan_finds_a_token_only_address_and_lists_the_passed_over_ones_empty` | R49.36, T49.34 | A token-only address 2 is found at activation; addresses 0 and 1 carry `{}`; the total carries both tickers; `account_balance` then counts three addresses with zero values; the token is asked once at the found address |
+| `evm_hd_p3_t4934_the_task_route_runs_the_same_scan` | R49.36, T49.34 | The same assertions through `task::enable_eth::init` |
+| `evm_hd_p3_t4934_do_not_scan_on_fresh_storage_lists_address_zero_only` | R49.36 item 1 | `do_not_scan` lists address 0 only and probes no other address |
+| `evm_hd_p3_t4934_a_failing_token_query_fails_the_activation_and_records_no_address` | R49.36 item 7 | A failing token query fails the activation with `Transport`; the next activation scans the account from its start and finds all three addresses |
+| `evm_hd_p3_t4934_each_token_is_asked_once_per_listed_queried_address` | R49.36 item 4 | With `min_addresses_number` 4, each token's `balanceOf` is asked once at the address the scan found by its nonce, the one it passed over, and the generated minimum-count addresses |
+| `evm_hd_p3_a_stored_account_with_no_known_address_is_scanned_under_the_default_policy` | R49.36 item 7, ch.05 R35a | A stored account with no known address is scanned under `scan_if_new_wallet` and finds the used address |
+| `evm_hd_p3_an_account_with_known_addresses_is_not_rescanned_under_the_default_policy` | R49.36 item 1 | An account that knows an address is not scanned under the default policy; `do_not_scan` never scans; `scan` does |
+| `evm_hd_p3_t4935_a_failing_token_query_fails_get_new_address_and_the_address_stays_known` | R49.37, T49.35 | HTTP 500 with `Transport`, no `new_address`; `account_balance` then reports `total: 2` and the next `get_new_address` answers index 2 |
+| `evm_hd_p3_t4935_a_failing_platform_query_fails_get_new_address_and_the_address_stays_known` | R49.37, T49.35 | The same when the platform balance query is the one that fails |
+
+The UTXO tests, module `hd_accounts_at_index_tests` of `utxo_tests.rs`:
+
+| Test | CRD | What is tested |
+|---|---|---|
+| `t14a_a_stored_account_with_no_known_address_is_scanned_under_the_default_policy` | R49.36 item 7, ch.05 R35a | The rescan of an account with no known address; the page total of `account_balance` is a one-entry map keyed by the coin's ticker |
+| `t14a_an_account_with_a_known_address_is_not_rescanned_under_the_default_policy` | ch.05 R35a | The default policy leaves an account that knows an address alone; `scan` still scans it |
+| `t14a_do_not_scan_leaves_a_stored_account_with_no_known_address_alone` | ch.05 R35a | `do_not_scan` never scans |
+
+`test_account_balance_rpc` (`utxo_tests.rs`) pins the page total of a UTXO HD coin over several pages as a map keyed by
+the coin's ticker, including the pages that list no address. QTUM and Sia answer `account_balance` through the same
+shared routine and have no test of their own.
+
 ## EVM HD address methods and ERC-20 `from` (10 tests)
 
 Location: `mm2src/coins_activation/src/evm_hd_p1_tests.rs` (names start with `evm_hd_p1_`). CRD: chapter 49, R49.32 (last

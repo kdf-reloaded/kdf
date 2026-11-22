@@ -989,15 +989,23 @@ fn an_hd_daemon_activates_the_address_at_the_coin_derivation_path() {
         "the identity key is not the key at the coin derivation path, so binding it was a defect"
     );
 
-    // The node reports a balance for the first address only, so the HD scan stops at the gap limit.
+    // The node reports a balance, of the platform and of the token, for the first address only, so the HD scan
+    // stops at the gap limit (the scan counts an address that holds a token as used, CRD ch.49 R49.36).
     let funded = format!("{:#x}", path_address);
     let node = spawn_node(move |method, params| {
         let queried = params[0].as_str().map(str::to_lowercase);
+        let token_holder = params[0]["data"]
+            .as_str()
+            .filter(|data| data.starts_with("0x70a08231") && data.len() >= 74)
+            .map(|data| format!("0x{}", &data[data.len() - 40..]).to_lowercase());
         match method {
             "eth_getBalance" if queried.as_deref() == Some(funded.as_str()) => {
                 Reply::Result(json!("0xde0b6b3a7640000"))
             },
             "eth_getBalance" => Reply::Result(json!("0x0")),
+            "eth_call" if token_holder.is_some() && token_holder.as_deref() != Some(funded.as_str()) => {
+                Reply::Result(json!(abi_word(0)))
+            },
             _ => healthy_node_reply(method, params, 0, 5_000_000),
         }
     });

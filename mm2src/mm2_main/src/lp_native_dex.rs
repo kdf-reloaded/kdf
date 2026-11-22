@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::mm2::database::init_and_migrate_db;
+use crate::mm2::database::{init_and_migrate_db, DbInitError};
 use crate::mm2::lp_message_service::{init_message_service, InitMessageServiceError};
 use crate::mm2::lp_network::{lp_network_ports, p2p_event_process_loop, subscribe_to_own_peer_healthcheck_topic,
                              NetIdError, P2PContext, RelayQueueSignal};
@@ -147,6 +147,17 @@ pub enum MmInitError {
     ErrorSqliteInitializing(String),
     #[display(fmt = "DB migrating error: {}", _0)]
     ErrorDbMigrating(String),
+    /// The swap database ledger is above the highest state this build knows (CRD ch.44 R44.9A.5).
+    #[display(
+        fmt = "The swap database (MM2.db) was written by a newer version: its migration state is {}, this build \
+               knows up to state {}. Use that newer version, or move MM2.db aside (keep it) to start with a new one.",
+        found,
+        known
+    )]
+    SwapDbNewerThanBuild {
+        found: i64,
+        known: i64,
+    },
     #[display(fmt = "Swap kick start error: {}", _0)]
     SwapsKickStartError(String),
     #[display(fmt = "Order kick start error: {}", _0)]
@@ -192,6 +203,16 @@ impl From<P2PInitError> for MmInitError {
 #[cfg(not(target_arch = "wasm32"))]
 impl From<SqlError> for MmInitError {
     fn from(e: SqlError) -> Self { MmInitError::ErrorSqliteInitializing(e.to_string()) }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<DbInitError> for MmInitError {
+    fn from(e: DbInitError) -> Self {
+        match e {
+            DbInitError::Sql(e) => MmInitError::from(e),
+            DbInitError::NewerThanBuild { found, known } => MmInitError::SwapDbNewerThanBuild { found, known },
+        }
+    }
 }
 
 impl From<OrdermatchInitError> for MmInitError {
@@ -470,7 +491,7 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
         fix_directories(&ctx)?;
         ctx.init_sqlite_connection()
             .map_to_mm(MmInitError::ErrorSqliteInitializing)?;
-        init_and_migrate_db(&ctx).await?;
+        init_and_migrate_db(&ctx).await.map_to_mm(MmInitError::from)?;
         migrate_db(&ctx)?;
     }
 

@@ -5169,6 +5169,12 @@ fn test_account_balance_rpc() {
     });
     let coin = utxo_coin_from_fields(fields);
 
+    // The page total is a map keyed by the coin's ticker (CRD ch.49 R49.35 items 1 and 4); a page that lists no
+    // address holds the ticker at zero (CRD ch.38 R38.8.5).
+    let page_total = |sum: u64| {
+        crate::coin_balance::coin_balance_map_for_ticker(TEST_COIN_NAME, CoinBalance::new(BigDecimal::from(sum)))
+    };
+
     // Request a balance of Account#0, external addresses, 1st page
 
     let params = AccountBalanceParams {
@@ -5182,7 +5188,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/0", "m/44'/141'/0'/0/1", "m/44'/141'/0'/0/2"),
-        page_balance: CoinBalance::new(BigDecimal::from(0)),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 0,
         total: 7,
@@ -5204,7 +5210,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/3", "m/44'/141'/0'/0/4", "m/44'/141'/0'/0/5"),
-        page_balance: CoinBalance::new(BigDecimal::from(99)),
+        page_balance: page_total(99),
         limit: 3,
         skipped: 3,
         total: 7,
@@ -5226,7 +5232,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/6"),
-        page_balance: CoinBalance::new(BigDecimal::from(32)),
+        page_balance: page_total(32),
         limit: 3,
         skipped: 6,
         total: 7,
@@ -5248,7 +5254,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: Vec::new(),
-        page_balance: CoinBalance::default(),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 7,
         total: 7,
@@ -5270,7 +5276,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/1/1", "m/44'/141'/0'/1/2"),
-        page_balance: CoinBalance::new(BigDecimal::from(54)),
+        page_balance: page_total(54),
         limit: 3,
         skipped: 1,
         total: 3,
@@ -5292,7 +5298,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: Vec::new(),
-        page_balance: CoinBalance::default(),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 0,
         total: 0,
@@ -5314,7 +5320,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/1'/1/0"),
-        page_balance: CoinBalance::new(BigDecimal::from(0)),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 0,
         total: 1,
@@ -5336,7 +5342,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: Vec::new(),
-        page_balance: CoinBalance::default(),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 1,
         total: 1,
@@ -14156,6 +14162,137 @@ pub(crate) mod hd_accounts_at_index_tests {
         assert_eq!(stored(&items, 1).external_addresses_number, 2);
     }
 
+    /// Mocks a node on which `used` alone has a history and a balance of 5.
+    fn mock_chain_with_a_used_address(used: String) {
+        let history_of = used.clone();
+        NativeClient::list_all_transactions.mock_safe(move |_, _| {
+            let history = vec![ListTransactionsItem {
+                address: history_of.clone(),
+                ..ListTransactionsItem::default()
+            }];
+            MockResult::Return(Box::new(futures01::future::ok(history)))
+        });
+        let balance_of =
+            |used: &str, address: &Address| BigDecimal::from(if address.to_string() == used { 5 } else { 0 });
+        let single = used.clone();
+        NativeClient::display_balance.mock_safe(move |_, address: Address, _| {
+            MockResult::Return(Box::new(futures01::future::ok(balance_of(&single, &address))))
+        });
+        NativeClient::display_balances.mock_safe(move |_, addresses: Vec<Address>, _| {
+            let balances = addresses
+                .into_iter()
+                .map(|address| {
+                    let balance = balance_of(&used, &address);
+                    (address, balance)
+                })
+                .collect();
+            MockResult::Return(Box::new(futures01::future::ok(balances)))
+        });
+    }
+
+    /// The external address `address_id` of account `0` as a string.
+    fn external_address_of_account_zero(coin: &UtxoStandardCoin, address_id: u32) -> String {
+        use crate::hd_wallet::HDWalletCoinOps;
+        coin.derive_address(&account_zero(), Bip44Chain::External, address_id)
+            .unwrap_or_else(|e| panic!("derive: {}", e))
+            .address
+            .to_string()
+    }
+
+    /// CRD ch.49 R49.36 item 7, ch.05 R35a: under the default `scan_policy` a stored account that has no known address
+    /// is scanned as a new one would be, which is what a first activation that failed during its scan leaves behind.
+    /// The scan finds the used address `1`, lists address `0` that it passed over, and records two addresses. The page
+    /// total of `account_balance` is then a map keyed by the coin's ticker (CRD ch.49 R49.35).
+    #[test]
+    fn t14a_a_stored_account_with_no_known_address_is_scanned_under_the_default_policy() {
+        let items = mock_storage();
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account_zero().extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 0,
+            internal_addresses_number: 0,
+        });
+        let coin = hd_coin_with_account_zero();
+        mock_chain_with_a_used_address(external_address_of_account_zero(&coin, 1));
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::ScanIfNewWallet,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0", "m/44'/141'/0'/0/1"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 2);
+
+        let page = external_balance_page(&coin, 0);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.page_balance.len(), 1);
+        assert_eq!(page.page_balance[TEST_COIN_NAME].spendable, BigDecimal::from(5));
+    }
+
+    /// The same chain and an account that knows an address: the default policy leaves it alone, `scan` still scans
+    /// it, and `do_not_scan` never scans a stored account that has no address.
+    #[test]
+    fn t14a_an_account_with_a_known_address_is_not_rescanned_under_the_default_policy() {
+        let items = mock_storage();
+        let mut account = account_zero();
+        account.external_addresses_number = 1;
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account.extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 1,
+            internal_addresses_number: 0,
+        });
+        let coin = hd_coin(HDAccountsMap::from([(0, account)]));
+        mock_chain_with_a_used_address(external_address_of_account_zero(&coin, 1));
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::ScanIfNewWallet,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 1);
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::Scan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0", "m/44'/141'/0'/0/1"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 2);
+    }
+
+    /// `do_not_scan` never scans, also a stored account that has no known address.
+    #[test]
+    fn t14a_do_not_scan_leaves_a_stored_account_with_no_known_address_alone() {
+        let items = mock_storage();
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account_zero().extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 0,
+            internal_addresses_number: 0,
+        });
+        let coin = hd_coin_with_account_zero();
+        mock_chain_with_a_used_address(external_address_of_account_zero(&coin, 1));
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 1);
+    }
+
     /// T14a: an iguana login is unchanged -- a single address, and no account or address is made known.
     #[test]
     fn t14a_an_iguana_login_is_unchanged() {
@@ -15383,5 +15520,257 @@ mod zip317_fee_tests {
             .unwrap()
             .unwrap();
         assert_eq!(safe, MmNumber::from("0.00011"));
+    }
+}
+
+/// A found spend of a swap payment output is classified by the input that spends that output, never by the
+/// transaction's first input (swap-chain-reading plan, step 1).
+mod swap_spend_by_consumed_input_tests {
+    use super::*;
+    use crate::utxo::rpc_clients::SpentOutputInfo;
+    use crate::utxo::utxo_common::{found_swap_spend, payment_script, PaymentOutputs};
+    use crate::FoundSwapTxSpend;
+    use chain::TransactionOutput;
+    use rpc::v1::types::Bytes as BytesJson;
+    use script::{Builder, Opcode, Script};
+    use serialization::serialize;
+
+    const TIME_LOCK: u32 = 1_700_000_000;
+    const SECRET_HASH: [u8; 20] = [0x33; 20];
+
+    fn first_pub() -> keys::Public { *key_pair_from_seed("swap spend first").unwrap().public() }
+    fn second_pub() -> keys::Public { *key_pair_from_seed("swap spend second").unwrap().public() }
+
+    fn redeem_script() -> Script { payment_script(TIME_LOCK, &SECRET_HASH, &first_pub(), &second_pub()) }
+
+    fn payment_script_pubkey() -> Vec<u8> {
+        Builder::build_p2sh(&dhash160(&redeem_script()).into())
+            .to_bytes()
+            .take()
+    }
+
+    fn payment_tx() -> UtxoTx {
+        let mut tx = UtxoTx::default();
+        tx.outputs.push(TransactionOutput {
+            value: 100_000,
+            script_pubkey: payment_script_pubkey().into(),
+        });
+        tx
+    }
+
+    fn dummy_sig() -> Vec<u8> { vec![0x30; 71] }
+
+    /// The script_sig of the secret path: signature, secret, OP_0, redeem script.
+    fn claim_script_sig() -> Script {
+        Builder::default()
+            .push_data(&dummy_sig())
+            .push_data(&[0x44; 32])
+            .push_opcode(Opcode::OP_0)
+            .push_data(&redeem_script())
+            .into_script()
+    }
+
+    /// The script_sig of the timelock path: signature, OP_1, redeem script.
+    fn refund_script_sig() -> Script {
+        Builder::default()
+            .push_data(&dummy_sig())
+            .push_opcode(Opcode::OP_1)
+            .push_data(&redeem_script())
+            .into_script()
+    }
+
+    /// An input that has nothing to do with the swap: signature and public key.
+    fn unrelated_script_sig() -> Script {
+        Builder::default()
+            .push_data(&dummy_sig())
+            .push_data(&first_pub())
+            .into_script()
+    }
+
+    fn input(prev_hash: H256, prev_index: u32, script_sig: Script) -> TransactionInput {
+        TransactionInput {
+            previous_output: OutPoint {
+                hash: prev_hash,
+                index: prev_index,
+            },
+            script_sig: script_sig.to_bytes(),
+            sequence: 0xffff_fffe,
+            script_witness: vec![],
+        }
+    }
+
+    /// A spend with two inputs; the one at `swap_at` (0 or 1) spends the payment output 0 and carries
+    /// `swap_sig`, the other is unrelated and carries `other_sig`.
+    fn spend_tx(payment: &UtxoTx, swap_at: usize, swap_sig: Script, other_sig: Script) -> UtxoTx {
+        let swap_input = input(payment.hash(), 0, swap_sig);
+        let other_input = input(H256::from([0x77; 32]), 3, other_sig);
+        let mut tx = UtxoTx::default();
+        tx.inputs = if swap_at == 0 {
+            vec![swap_input, other_input]
+        } else {
+            vec![other_input, swap_input]
+        };
+        tx.outputs.push(TransactionOutput {
+            value: 90_000,
+            script_pubkey: vec![0x51].into(),
+        });
+        tx
+    }
+
+    fn info(tx: UtxoTx, input_index: usize) -> SpentOutputInfo {
+        SpentOutputInfo {
+            spending_tx: tx,
+            input_index,
+            spent_in_block: BlockHashOrHeight::Height(10),
+        }
+    }
+
+    fn kind_of(found: &FoundSwapTxSpend) -> &'static str {
+        match found {
+            FoundSwapTxSpend::Spent(_) => "spent",
+            FoundSwapTxSpend::Refunded(_) => "refunded",
+        }
+    }
+
+    #[test]
+    fn claim_in_second_input_is_spent() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "spent");
+    }
+
+    #[test]
+    fn refund_in_second_input_is_refunded() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, refund_script_sig(), unrelated_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "refunded");
+    }
+
+    /// Input 0 is shaped like the refund path while the swap input, the second one, is a claim: the input
+    /// that spends the payment output decides, so the result is "spent".
+    #[test]
+    fn first_input_shaped_like_the_other_branch_does_not_decide() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), refund_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "spent");
+
+        let tx = spend_tx(&payment, 1, refund_script_sig(), claim_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "refunded");
+    }
+
+    /// Input 0 has no swap instruction at all; the result comes from the input that spends the payment output.
+    #[test]
+    fn first_input_without_swap_instruction_is_not_an_error() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        assert!(found_swap_spend(info(tx.clone(), 0), TxHashAlgo::DSHA256).is_err());
+        assert_eq!(
+            kind_of(&found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap()),
+            "spent"
+        );
+    }
+
+    #[test]
+    fn swap_input_without_swap_instruction_is_an_error_naming_the_input() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, unrelated_script_sig(), claim_script_sig());
+        let err = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap_err();
+        assert!(err.contains("input 1"), "{}", err);
+    }
+
+    #[test]
+    fn input_index_out_of_range_is_an_error() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let err = found_swap_spend(info(tx, 2), TxHashAlgo::DSHA256).unwrap_err();
+        assert!(err.contains("no input 2"), "{}", err);
+    }
+
+    /// The search of `search_for_swap_output_spend_of` through the native client, whose spend producer reports
+    /// the index of the input that consumes the requested output.
+    fn search_through_native_client(spend: &UtxoTx, payment: &UtxoTx) -> Result<Option<FoundSwapTxSpend>, String> {
+        const LIST_SINCE_BLOCK_JSON: &str = r#"{"transactions":[{"account":"","address":"RT9MpMyucqXiX8bZLimXBnrrn2ofmdGNKd","category":"receive","amount":0.5,"vout":2,"rawconfirmations":1617,"confirmations":1617,"blockhash":"000000000c33a387d73180220a5a8f2fe6081bad9bdfc0dba5a9985abcee8294","blockindex":7,"blocktime":1607957613,"expiryheight":0,"txid":"45e4900a2b330800a356a74ce2a97370596ad3a25e689e3ed5c36e421d12bbf7","walletconflicts":[],"time":1607957175,"timereceived":1607957175,"vjoinsplit":[],"size":567}],"lastblock":"06082d363f78174fd13b126994210d3c3ad9d073ee3983ad59fe8b76e6e3e071"}"#;
+        NativeClientImpl::get_block_hash.mock_safe(|_, _| {
+            let blockhash: H256Json = hex::decode("000000000c33a387d73180220a5a8f2fe6081bad9bdfc0dba5a9985abcee8294")
+                .unwrap()
+                .as_slice()
+                .into();
+            MockResult::Return(Box::new(futures01::future::ok(blockhash)))
+        });
+        NativeClientImpl::list_since_block.mock_safe(|_, _| {
+            let res: ListSinceBlockRes = json::from_str(LIST_SINCE_BLOCK_JSON).unwrap();
+            MockResult::Return(Box::new(futures01::future::ok(res)))
+        });
+        let spend_bytes: BytesJson = serialize(spend).take().into();
+        NativeClientImpl::get_raw_transaction_bytes
+            .mock_safe(move |_, _| MockResult::Return(Box::new(futures01::future::ok(spend_bytes.clone()))));
+
+        let coin = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        block_on(utxo_common::search_for_swap_output_spend_of(
+            &coin,
+            TIME_LOCK,
+            &first_pub(),
+            &second_pub(),
+            &SECRET_HASH,
+            PaymentOutputs {
+                tx_hash: payment.hash(),
+                output0_script_pubkey: payment.outputs[0].script_pubkey.clone(),
+                spent_script_pubkey: payment.outputs[0].script_pubkey.clone(),
+            },
+            0,
+            0,
+        ))
+    }
+
+    #[test]
+    fn search_finds_claim_in_second_input() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap().unwrap();
+        assert_eq!(kind_of(&found), "spent");
+    }
+
+    #[test]
+    fn search_finds_refund_in_second_input() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, refund_script_sig(), unrelated_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap().unwrap();
+        assert_eq!(kind_of(&found), "refunded");
+    }
+
+    #[test]
+    fn search_is_not_misled_by_a_first_input_of_the_other_branch() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, claim_script_sig(), refund_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap().unwrap();
+        assert_eq!(kind_of(&found), "spent");
+    }
+
+    /// The native producer reports the index of the input that consumes the requested outpoint.
+    #[test]
+    fn native_find_output_spend_reports_the_consuming_input_index() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap();
+        assert!(found.is_some());
+        let client = native_client_for_test();
+        let info = block_on(
+            client
+                .find_output_spend(
+                    payment.hash(),
+                    &payment.outputs[0].script_pubkey,
+                    0,
+                    BlockHashOrHeight::Height(0),
+                )
+                .compat(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(info.input_index, 1);
+        assert_eq!(info.spending_tx.inputs[1].previous_output.hash, payment.hash());
     }
 }
