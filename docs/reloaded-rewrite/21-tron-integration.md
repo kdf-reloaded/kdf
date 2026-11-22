@@ -2633,10 +2633,10 @@ authored from the tabled states and the public sources named in
 
 ### 21.11B.7 Pointer (2026-11-22): the EVM legacy token-leg points the TRON swap track mirrors
 
-> **Status note (2026-11-22, KDF Spec Reader, round 0.5.0-27).** This
-> pointer carries no reference content of its own. Its target, chapter 51
-> §51.6F, is **pending at the KDF Dirty Gate**; the pointer travels with it
-> and is not to be used before that clearance is recorded. No sentence of
+> **Status note (2026-11-22, KDF Spec Reader, round 0.5.0-27).** This pointer
+> carries no reference content of its own. Its target, chapter 51 §51.6F,
+> **passed the KDF Dirty Gate on 2026-11-22, measure 0.03, no findings**; the
+> pointer passed with it, as recorded in chapter 51 §51.16. No sentence of
 > §21.0 -- §21.11B.6 is edited.
 
 A TRON legacy swap would take the EVM family's legacy shapes (R21.B2,
@@ -3041,4 +3041,5 @@ V3. The address encoding, protobuf transaction/contract formats,
   TRON swap track mirrors; the reference facts are in that section, whose
   provenance record in chapter 51 §51.16 names the rows read. It carries no
   reference content of its own. No cleared sentence was edited. **KDF Dirty
-  Gate: pending with chapter 51 §51.6F; no clearance is recorded yet.**
+  Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for
+  §51.6F in chapter 51 §51.16.

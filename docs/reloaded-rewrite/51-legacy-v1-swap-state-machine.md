@@ -440,8 +440,8 @@ addresses. Any failure MUST emit `NegotiateFailed` and transition to
 `STAGE-FINISH`. The taker MUST NOT transmit a refusal signal — the
 refusal signal is maker-directional only (R33).
 
-> **Status note (2026-11-22, KDF Spec Reader, round 0.5.0-27; gate status
-> as recorded at §51.6F).** How an EVM coin judges a declared swap-contract
+> **Status note (2026-11-22, KDF Spec Reader, round 0.5.0-27; passed the KDF
+> Dirty Gate with §51.6F).** How an EVM coin judges a declared swap-contract
 > address, and the case in which the taker selects its own fallback contract
 > instead of ending the swap, are recorded in §51.6F R98–R99. R24 is not
 > edited.
@@ -1508,14 +1508,14 @@ payment transaction. The two rows are identical.
 
 > **Status (2026-11-22; KDF Spec Reader, round 0.5.0-27).** Reference record,
 > read at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A. The
-> two rows behave alike in every rule below. **Gate status: pending. This
-> section has not yet passed the KDF Dirty Gate (chapter 01 R40) and must not
-> be used by a clean session until its clearance is recorded here and in
-> §51.16.** R93–R99 state what the reference does in a legacy swap when one
-> coin is an ERC20 token of the EVM family. They complete R24 and R53–R55 and
-> edit no sentence of this chapter. The reading was of source only; nothing
-> here was observed on a running reference node. The gas figures themselves
-> are bound in [chapter 57](57-evm-fee-inputs.md) and are not restated.
+> two rows behave alike in every rule below. **Gate status: passed the KDF
+> Dirty Gate on 2026-11-22, measure 0.03, no findings (chapter 01 R40;
+> attestation in §51.16).** R93–R99 state what the reference does in a legacy
+> swap when one coin is an ERC20 token of the EVM family. They complete R24 and
+> R53–R55 and edit no sentence of this chapter. The reading was of source only;
+> nothing here was observed on a running reference node. The gas figures
+> themselves are bound in [chapter 57](57-evm-fee-inputs.md) and are not
+> restated.
 
 In this section the *token* is an ERC20 token and the *platform coin* is the
 coin that pays its gas. "Available" means a coin's spendable balance minus
@@ -3483,5 +3483,23 @@ reference rows alike.
   members, the swap status members and the negotiation message members. No
   private identifier, function body, helper decomposition, log or error
   literal was reproduced. The proposed remedies in the findings are the
-  author's own. No cleared sentence was edited. **KDF Dirty Gate: pending;
-  no clearance is recorded for this item yet.**
+  author's own. No cleared sentence was edited. **KDF Dirty Gate: PASS on
+  2026-11-22, measure 0.03, no findings** (chapter 01 R40; the attestation
+  closes this item).
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings; the chapter 02 §2.15A rows `v2.6.0-beta` and `v3.0.0-beta` are
+  tabled. *Extent:* the legacy swap subsystem as §51.6F scopes it for an ERC20
+  token leg of the EVM family: the `trade_preimage` and swap-start fee
+  descriptors, the swap balance checks including the platform coin, both
+  maximum-volume calculations, the EVM swap-contract address acceptance rule,
+  and the maker and taker start and negotiation stages with their event data,
+  compared at both release rows; four source files read, the address rule and
+  the taker side at one row each and the rest at `v3.0.0-beta`, with the
+  differences between the rows checked by their size only; QRC20, Tendermint,
+  Sia, the shielded coins, the watcher and the second protocol version are out
+  of scope. *Method:* reading all 304 added lines and the reference material,
+  a forced-versus-free test of every backticked token (53, all public or
+  serialized surface), and a check of the shape of the difference against the
+  base; the repository's clean-room gate tool was not applicable because the
+  additions embed no code blocks. *Measure:* 0.03, on the
+  discretionary-expression basis.
