@@ -38,13 +38,20 @@ impl MmCoin for LightningCoin {
     }
 
     // Todo: Implement this when implementing payments history for lightning
-    fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> { unimplemented!() }
+    // Lightning has no history loop yet: it has nothing to do and ends at once.
+    fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> {
+        Box::new(futures01::future::ok(()))
+    }
 
     // Todo: Implement this when implementing payments history for lightning
-    fn history_sync_status(&self) -> HistorySyncState { unimplemented!() }
+    // There is no history to sync, so the state is the neutral `NotEnabled`.
+    fn history_sync_status(&self) -> HistorySyncState { HistorySyncState::NotEnabled }
 
     // Todo: Implement this when implementing swaps for lightning as it's is used only for swaps
-    fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> { unimplemented!() }
+    fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
+        let error = format!("get_trade_fee is not supported for {}", self.conf.ticker);
+        Box::new(futures01::future::err(error))
+    }
 
     // Todo: Implement this when implementing swaps for lightning as it's is used only for swaps
     async fn get_sender_trade_fee(
@@ -52,11 +59,17 @@ impl MmCoin for LightningCoin {
         _value: TradePreimageValue,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        unimplemented!()
+        Err(MmError::new(TradePreimageError::InternalError(format!(
+            "Trade fees are not supported for {}",
+            self.conf.ticker
+        ))))
     }
 
     // Todo: Implement this when implementing swaps for lightning as it's is used only for swaps
-    fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> { unimplemented!() }
+    fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
+        let error = TradePreimageError::InternalError(format!("Trade fees are not supported for {}", self.conf.ticker));
+        Box::new(futures01::future::err(MmError::new(error)))
+    }
 
     // Todo: Implement this when implementing swaps for lightning as it's is used only for swaps
     async fn get_fee_to_send_taker_fee(
@@ -64,7 +77,10 @@ impl MmCoin for LightningCoin {
         _dex_fee_amount: BigDecimal,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        unimplemented!()
+        Err(MmError::new(TradePreimageError::InternalError(format!(
+            "Trade fees are not supported for {}",
+            self.conf.ticker
+        ))))
     }
 
     // Lightning payments are either pending, successful or failed. Once a payment succeeds there is no need to for confirmations
@@ -82,8 +98,8 @@ impl MmCoin for LightningCoin {
     fn mature_confirmations(&self) -> Option<u32> { None }
 
     // Todo: Implement this when implementing order matching for lightning as it's is used only for order matching
-    fn coin_protocol_info(&self) -> Vec<u8> { unimplemented!() }
+    fn coin_protocol_info(&self) -> Vec<u8> { Vec::new() }
 
     // Todo: Implement this when implementing order matching for lightning as it's is used only for order matching
-    fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { unimplemented!() }
+    fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { true }
 }

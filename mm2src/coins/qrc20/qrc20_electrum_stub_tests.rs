@@ -1468,6 +1468,67 @@ fn t38_6_4q_1_qtum_and_two_tokens_with_the_same_servers_share_one_client_one_ses
     });
 }
 
+/// The lines about the shared client over the server at `addr`, in the order they were logged. The capture is
+/// process-wide, so the server's own address (a port no other test has) picks the lines of the test.
+fn shared_client_lines(addr: &str) -> Vec<String> {
+    crate::eth::alloy_compat::transport::test_support::captured_log_lines()
+        .into_iter()
+        .filter(|line| line.contains("Shared Electrum client") && line.contains(addr))
+        .collect()
+}
+
+/// D38.6.4Q.1 status note, item 5, and the maintainer's decision of 2026-11-21: one INFO line when a shared client is
+/// created, one when an instance reuses it, one when the last holder lets it go. QTUM builds it, a token on the same
+/// servers reuses it, and the release comes with the disable of the last of them.
+#[test]
+fn t38_6_4q_1_the_shared_client_logs_one_line_each_for_its_creation_its_reuse_and_its_release() {
+    use crate::eth::alloy_compat::transport::test_support::install_log_capture;
+    block_on(async {
+        let capturing = install_log_capture();
+        let env = family_env();
+        let server = family_stub().await;
+        let addr = server.addr().to_string();
+        let qtum = init_qtum(&env, &[&server]).await;
+        let created = format!("Shared Electrum client of QTUM created by QTUM, servers: {addr}");
+        let reused = format!("Shared Electrum client of QTUM reused by {TICKER}, servers: {addr}");
+        let released = format!("Shared Electrum client of QTUM released, servers: {addr}");
+        let count = |text: &str| {
+            shared_client_lines(&addr)
+                .iter()
+                .filter(|line| line.ends_with(text))
+                .count()
+        };
+        if capturing {
+            assert_eq!(shared_client_lines(&addr).len(), 1, "{:?}", shared_client_lines(&addr));
+            assert_eq!(count(&created), 1);
+        }
+
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        assert!(same_client(&qtum_client_of(&qtum), &electrum_client_of(&token)));
+        if capturing {
+            assert_eq!(count(&created), 1, "the token does not create a second client");
+            assert_eq!(count(&reused), 1);
+            assert_eq!(shared_client_lines(&addr).len(), 2, "{:?}", shared_client_lines(&addr));
+        }
+
+        // The token's release is not the client's: the QTUM instance still holds it.
+        drop(token);
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        Timer::sleep(1.).await;
+        assert_eq!(count(&released), 0);
+
+        drop(qtum);
+        disable_coin(&env.ctx, QTUM_TICKER).await.unwrap();
+        if capturing {
+            wait_until("the release line", 10., || count(&released) == 1).await;
+            Timer::sleep(1.).await;
+            assert_eq!(count(&released), 1);
+            assert_eq!(count(&created), 1);
+            assert_eq!(shared_client_lines(&addr).len(), 3, "{:?}", shared_client_lines(&addr));
+        }
+    });
+}
+
 /// D38.6.4Q.1 status note, item 1: an instance whose inputs differ in any of the platform, the servers, `min_connected`
 /// and `max_connected`, `block_interval` or the builder arguments builds a client of its own, so the servers it names
 /// are always honored. (The key itself is covered by the registry's unit tests.) Here: another `max_connected`, a

@@ -484,6 +484,10 @@ pub struct Transaction {
     /// produced this transaction: the original bytes and the identifier that reader computed. See
     /// [`OpaqueTx`]. `None` for everything the parser of this module reads or a signer builds.
     pub opaque: Option<OpaqueTx>,
+    /// The extra payload of a Dash-layout special transaction (R38.6.10.5): `None` for every other transaction and
+    /// for a special-shaped one with nothing after its lock time, `Some` (possibly empty) when bytes follow the
+    /// lock time. The payload is kept and written back, not interpreted.
+    pub extra_payload: Option<Bytes>,
 }
 
 /// The raw form of a transaction that a reader outside this crate has parsed (CRD ch.39 D39.11.4V.3: a
@@ -641,6 +645,12 @@ impl Serializable for Transaction {
             .append_list(&self.outputs)
             .append(&self.lock_time);
 
+        if let Some(payload) = &self.extra_payload {
+            stream
+                .append(&CompactInteger::from(payload.len()))
+                .append_slice(payload);
+        }
+
         if self.overwintered && self.version >= 3 {
             stream.append(&self.expiry_height);
             if self.version >= 4 {
@@ -681,6 +691,11 @@ pub enum TxType {
     PosWithNTime,
 }
 
+/// A transaction qualifies as a Dash-layout special transaction (R38.6.10.5) when the top bit of its leading word is
+/// clear, its version (low 16 bits) is 3 or higher and its type (high 16 bits) is not 0. Such a transaction with
+/// nothing after its lock time is read without a payload (`extra_payload == None`).
+fn is_special_header(header: i32) -> bool { header >= 0 && (header & 0xFFFF) >= 3 && (header >> 16) != 0 }
+
 /// Decodes a transaction under the given `tx_type` hint. Used directly by
 /// `BlockHeader` AuxPoW deserialization (which knows the parent coinbase is a
 /// standard-with-witness Bitcoin transaction) and indirectly by the top-level
@@ -702,7 +717,10 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
         return deserialize_tx_v5(reader, version_group_id);
     }
 
-    let n_time = if tx_type == TxType::PosWithNTime {
+    let special = is_special_header(header);
+
+    // A special transaction has the Dash layout in every path: no time field, no witness marker, no trailing string.
+    let n_time = if tx_type == TxType::PosWithNTime && !special {
         Some(reader.read()?)
     } else {
         None
@@ -712,7 +730,7 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
     // Detect SegWit: zero inputs followed by a non-zero witness flag indicates
     // the BIP-141 envelope. Only legal in StandardWithWitness mode; older
     // overwintered/PoS layouts would mis-parse here.
-    let read_witness = if inputs.is_empty() && !overwintered && tx_type == TxType::StandardWithWitness {
+    let read_witness = if inputs.is_empty() && !overwintered && !special && tx_type == TxType::StandardWithWitness {
         let witness_flag: u8 = reader.read()?;
         if witness_flag != WITNESS_FLAG {
             return Err(Error::MalformedData);
@@ -734,6 +752,18 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
     }
 
     let lock_time = reader.read()?;
+
+    let extra_payload = if special && !reader.is_finished() {
+        let len: u64 = reader.read::<CompactInteger>()?.into();
+        let mut payload = Vec::new();
+        reader.by_ref().take(len).read_to_end(&mut payload)?;
+        if payload.len() as u64 != len {
+            return Err(Error::UnexpectedEnd);
+        }
+        Some(Bytes::from(payload))
+    } else {
+        None
+    };
 
     let mut expiry_height = 0u32;
     let mut value_balance = 0i64;
@@ -773,7 +803,7 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
         }
     }
 
-    let str_d_zeel = if tx_type == TxType::PosWithNTime && !reader.is_finished() {
+    let str_d_zeel = if tx_type == TxType::PosWithNTime && !special && !reader.is_finished() {
         let len: CompactInteger = reader.read()?;
         let mut buf = vec![0u8; len.into()];
         reader.read_slice(&mut buf)?;
@@ -806,6 +836,7 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
         sapling_v5: SaplingBundleV5::default(),
         orchard: OrchardBundle::default(),
         opaque: None,
+        extra_payload,
     })
 }
 
@@ -843,6 +874,7 @@ fn deserialize_tx_v5<T: io::Read>(reader: &mut Reader<T>, version_group_id: u32)
         sapling_v5,
         orchard,
         opaque: None,
+        extra_payload: None,
     })
 }
 
@@ -872,6 +904,7 @@ impl Deserializable for Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex::ToHex;
 
     /// An overwintered transaction of a version above 5 is refused, not read in the version 4 layout;
     /// version 4 still parses.
@@ -940,6 +973,7 @@ mod tests {
             sapling_v5: SaplingBundleV5::default(),
             orchard: OrchardBundle::default(),
             opaque: None,
+            extra_payload: None,
         };
 
         let bytes = serialize(&tx);
@@ -969,5 +1003,194 @@ mod tests {
         };
         assert_eq!(serialize(&tx).to_vec(), raw);
         assert_eq!(tx.hash(), txid);
+    }
+
+    fn fixture(hex_text: &str) -> Vec<u8> { hex_text.trim().from_hex().expect("fixture is hex") }
+
+    /// T38.6.10.1: public-chain Dash-layout transactions, read, written back byte-exact, with the chain's txid.
+    #[test]
+    fn dash_layout_special_transactions_read_and_write_back_exactly() {
+        // (hex, txid, version/type word, inputs, outputs, payload length)
+        let vectors = [
+            (
+                include_str!("test_data/dash_2576221_type5_cbtx.hex"),
+                "82efdfbb4adb79d9c590cd83c316acb8c40d51c975a519733ff2d420d469e7ed",
+                0x0005_0003,
+                1,
+                3,
+                Some(175),
+            ),
+            (
+                include_str!("test_data/dash_2576104_type1_proregtx.hex"),
+                "8a334dff3c0c0d7616b809a837798a70294c5fbd0e36604191de75d2670caf4e",
+                0x0001_0003,
+                1,
+                1,
+                Some(274),
+            ),
+            (
+                include_str!("test_data/dash_2576170_type9_assetunlock.hex"),
+                "0bfefcc1c944d1a0c885a1de834d7587c4069d944b6b28e9c2e16b80a07a3cc4",
+                0x0009_0003,
+                0,
+                1,
+                Some(145),
+            ),
+            (
+                include_str!("test_data/dash_2576220_v3_type0.hex"),
+                "0d9754c759a993b6ca598a2c6dae7935ffaeeceb77498da1e280437946b5ec8b",
+                3,
+                19,
+                2,
+                None,
+            ),
+            (
+                include_str!("test_data/krgn_191125_type10_sapling.hex"),
+                "6b99a0b216da1e96b2eacc0ed9db4993301342f45d21c3a3dfeafbfeadd2ad11",
+                0x000a_0003,
+                0,
+                1,
+                Some(2356),
+            ),
+        ];
+        for (hex_text, txid, word, inputs, outputs, payload_len) in vectors {
+            let bytes = fixture(hex_text);
+            let tx: Transaction = deserialize(bytes.as_slice()).unwrap_or_else(|e| panic!("{txid}: {e:?}"));
+            assert_eq!(tx.version, word, "{txid}");
+            assert_eq!(tx.inputs.len(), inputs, "{txid}");
+            assert_eq!(tx.outputs.len(), outputs, "{txid}");
+            assert_eq!(tx.extra_payload.as_ref().map(|p| p.len()), payload_len, "{txid}");
+            assert!(!tx.has_witness(), "{txid}");
+            assert_eq!(serialize(&tx).to_vec(), bytes, "{txid}");
+            assert_eq!(tx.hash().reversed().to_vec().to_hex::<String>(), txid);
+        }
+    }
+
+    /// The type-6 quorum commitment has neither inputs nor outputs: report what the readers do.
+    #[test]
+    fn dash_type6_quorum_commitment_without_outputs() {
+        let bytes = fixture(include_str!("test_data/dash_2576219_type6_qc.hex"));
+        let txid = "c28c2cf4b6aa304430b0c5ef53763fcd8398451307843e54f5618f4da87f6d07";
+        let standard = deserialize_tx(&mut Reader::from_read(bytes.as_slice()), TxType::StandardWithWitness);
+        assert_eq!(standard, Err(Error::Custom("Transaction has no output".into())));
+        let tx: Transaction = deserialize(bytes.as_slice()).expect("the multi-path reader reads it on its Zcash path");
+        assert_eq!(tx.extra_payload.as_ref().map(|p| p.len()), Some(341));
+        assert_eq!(serialize(&tx).to_vec(), bytes);
+        assert_eq!(tx.hash().reversed().to_vec().to_hex::<String>(), txid);
+    }
+
+    /// T38.6.10.2: an overwintered version-3 transaction (low 16 bits of the word are also 3) and a segwit
+    /// transaction keep their readings.
+    #[test]
+    fn overwintered_v3_and_segwit_keep_their_readings() {
+        // Overwintered v3: version group id, no inputs, no outputs, lock time, expiry height, no joinsplits.
+        let mut ow = (3u32 | (1 << 31)).to_le_bytes().to_vec();
+        ow.extend_from_slice(&0x03c4_8270u32.to_le_bytes());
+        ow.extend_from_slice(&[0x00, 0x00]);
+        ow.extend_from_slice(&7u32.to_le_bytes());
+        ow.extend_from_slice(&9u32.to_le_bytes());
+        ow.push(0x00);
+        let tx: Transaction = deserialize(ow.as_slice()).unwrap();
+        assert!(tx.overwintered && tx.zcash);
+        assert_eq!((tx.version, tx.lock_time, tx.expiry_height), (3, 7, 9));
+        assert_eq!(tx.extra_payload, None);
+        assert_eq!(serialize(&tx).to_vec(), ow);
+        assert_eq!(tx.hash(), dhash256(&ow));
+
+        // Segwit: version 2, marker and flag, one input, one output, a two-item witness, lock time.
+        let mut sw = 2u32.to_le_bytes().to_vec();
+        sw.extend_from_slice(&[0x00, 0x01, 0x01]);
+        sw.extend_from_slice(&[0x11; 32]);
+        sw.extend_from_slice(&0u32.to_le_bytes());
+        sw.extend_from_slice(&[0x00]);
+        sw.extend_from_slice(&0xffff_fffeu32.to_le_bytes());
+        sw.extend_from_slice(&[0x01]);
+        sw.extend_from_slice(&5000u64.to_le_bytes());
+        sw.extend_from_slice(&[0x02, 0x51, 0x51]);
+        sw.extend_from_slice(&[0x02, 0x01, 0xaa, 0x02, 0xbb, 0xcc]);
+        sw.extend_from_slice(&0u32.to_le_bytes());
+        let tx: Transaction = deserialize(sw.as_slice()).unwrap();
+        assert_eq!(tx.extra_payload, None);
+        assert!(tx.has_witness());
+        assert_eq!(tx.inputs[0].script_witness.len(), 2);
+        assert_eq!(serialize_with_flags(&tx, SERIALIZE_TRANSACTION_WITNESS).to_vec(), sw);
+        let stripped = serialize(&tx);
+        assert_eq!(tx.hash(), dhash256(&stripped));
+        assert_ne!(stripped.to_vec(), sw);
+    }
+
+    /// T38.6.10.4: a payload prefix longer than the bytes that remain, or a missing payload, is refused in every
+    /// path and by the top-level reader.
+    #[test]
+    fn truncated_special_payload_is_refused_everywhere() {
+        let full = fixture(include_str!("test_data/dash_2576170_type9_assetunlock.hex"));
+        let payload_len = 145usize;
+        let payload_start = full.len() - payload_len; // the prefix (0x91 = 145 < 253) is one byte before it
+        assert_eq!(full[payload_start - 1], 145, "prefix byte of the 145-byte payload");
+
+        let mut cases = Vec::new();
+        cases.push(full[..full.len() - 1].to_vec()); // one payload byte missing
+        cases.push(full[..payload_start].to_vec()); // prefix, no payload
+        let mut lying = full[..payload_start - 1].to_vec();
+        lying.extend_from_slice(&[0xfd, 0xff, 0xff]); // claims 65535 bytes
+        lying.extend_from_slice(&full[payload_start..]);
+        cases.push(lying);
+
+        for (i, bytes) in cases.iter().enumerate() {
+            for tx_type in [TxType::StandardWithWitness, TxType::PosWithNTime, TxType::Zcash] {
+                assert!(
+                    deserialize_tx(&mut Reader::from_read(bytes.as_slice()), tx_type).is_err(),
+                    "case {i}"
+                );
+            }
+            assert!(deserialize::<_, Transaction>(bytes.as_slice()).is_err(), "case {i}");
+        }
+        assert!(deserialize::<_, Transaction>(full.as_slice()).is_ok());
+    }
+
+    /// R38.6.10.2: a special-shaped transaction with nothing after its lock time is read without a payload and
+    /// written back byte-exact.
+    #[test]
+    fn special_transaction_cut_after_lock_time_reads_without_payload() {
+        let full = fixture(include_str!("test_data/dash_2576170_type9_assetunlock.hex"));
+        let payload_start = full.len() - 145;
+        let bytes = full[..payload_start - 1].to_vec();
+        for tx_type in [TxType::StandardWithWitness, TxType::PosWithNTime, TxType::Zcash] {
+            let tx = deserialize_tx(&mut Reader::from_read(bytes.as_slice()), tx_type).unwrap();
+            assert_eq!(tx.extra_payload, None);
+            assert_eq!(serialize(&tx).to_vec(), bytes);
+            assert_eq!(tx.hash(), dhash256(&bytes));
+        }
+        let tx: Transaction = deserialize(bytes.as_slice()).unwrap();
+        assert_eq!(tx.extra_payload, None);
+        assert_eq!(serialize(&tx).to_vec(), bytes);
+        assert_eq!(tx.hash(), dhash256(&bytes));
+    }
+
+    /// A non-Dash transaction whose version word has the special shape, with nothing after the lock time, reads
+    /// as an ordinary transaction and round-trips byte-exact.
+    #[test]
+    fn special_shaped_version_without_payload_round_trips() {
+        let mut b = 0x0001_0003u32.to_le_bytes().to_vec();
+        b.push(0x01);
+        b.extend_from_slice(&[0x22; 32]);
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.push(0x00);
+        b.extend_from_slice(&0xffff_fffeu32.to_le_bytes());
+        b.push(0x01);
+        b.extend_from_slice(&5000u64.to_le_bytes());
+        b.extend_from_slice(&[0x02, 0x51, 0x51]);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let check = |tx: Transaction| {
+            assert_eq!(tx.version, 0x0001_0003);
+            assert_eq!(tx.extra_payload, None);
+            assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 1));
+            assert_eq!(tx.outputs[0].value, 5000);
+            assert_eq!(serialize(&tx).to_vec(), b);
+        };
+        for tx_type in [TxType::StandardWithWitness, TxType::PosWithNTime, TxType::Zcash] {
+            check(deserialize_tx(&mut Reader::from_read(b.as_slice()), tx_type).unwrap());
+        }
+        check(deserialize::<_, Transaction>(b.as_slice()).unwrap());
     }
 }

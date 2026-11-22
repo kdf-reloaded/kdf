@@ -212,9 +212,10 @@ jobs:
           # (CRD ch.45 §45.6C, T45.23 to T45.31): stub time sources and a loopback socket, no
           # real time server. The clock-check gate tests in `ordermatch_tests` run in the
           # `ordermatch` cell. The loopback tests of the native RPC server (`rpc::server_tests::`,
-          # no outside network) run here too.
+          # no outside network) run here too. The legacy taker-swap unit tests of
+          # `lp_swap::taker_swap` (mocked coins, no network) also run here.
           - name: maker-outbox
-            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness lp_swap::maker_swap:: lp_clock_check:: rpc::server_tests::"
+            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness lp_swap::maker_swap:: lp_clock_check:: rpc::server_tests:: lp_swap::taker_swap::"
           # The bounds on a value received from a peer (CRD ch.28 R16a, T4a): the check itself,
           # its use by the node's decode sites in `mm2_p2p`, `coins` and `mm2_main`, and the
           # deepest message the node sends. The `ordermatch_tests` ones also run in the
@@ -226,6 +227,12 @@ jobs:
           # from the workspace, so it is run by manifest path (its own Cargo.lock).
           - name: bounded-close
             cmd: "cargo test --manifest-path vendor-patches/libp2p-yamux-0.44.0/Cargo.toml"
+          # The Noise crate on x25519-dalek 2 (RUSTSEC-2024-0344): the vendored crate's own
+          # tests, which include the RFC 7748 Diffie-Hellman vectors and the handshake round
+          # trip. The crate is excluded from the workspace, so it is run by manifest path
+          # (its own Cargo.lock).
+          - name: noise-dalek
+            cmd: "cargo test --manifest-path vendor-patches/libp2p-noise-0.43.0/Cargo.toml"
           # The withdraw, Qtum, Bitcoin Cash and SLP tests of `coins`, selected by a substring of
           # the test path. The tests of these paths that need a public server carry
           # `#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]`

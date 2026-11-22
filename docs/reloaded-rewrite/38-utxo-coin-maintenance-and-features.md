@@ -4418,6 +4418,18 @@ on 2026-11-18.
    removed from the shared client, unless another live instance remembers
    the same one. They are then no longer placed again after a reconnect.
 
+*Status note (2026-11-22, clean side; maintainer decision of 2026-11-21).*
+A client of the QTUM family's registry (item 2), shared or built for one
+instance whose inputs differ, writes one INFO line when it is created,
+naming the platform ticker and the instance that built it; one each time an
+instance reuses it, naming that instance; and one when the last holder lets
+go of it and it closes. Each line lists the servers in the configured order
+as `host:port` only, as the server names of R38.6.9a; an entry without a
+usable host and port is shown as a placeholder. A failed build and a refused
+reuse (item 3) write nothing, and an instance that lets go while others still
+hold the client writes nothing. No line is written per request or on a
+timer. Every other coin writes none of these lines.
+
 *Status note (2026-11-22, clean side; defect fix).* In this tree a shared
 client keeps the subscriptions of item 6 and of the D38.6.4Q.3 status note
 per instance as follows.
@@ -5675,6 +5687,36 @@ produce. The payload is not interpreted.
 > also refuse bytes left over after a complete reading is a wider question,
 > left to the orchestrator.
 
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-21).** R38.6.10.5 is built. The shared transaction reader treats a
+> transaction as special when its leading word has the top bit clear, a version
+> of 3 or higher in the low 16 bits and a type other than 0 in the high 16 bits.
+> For such a transaction, in every reading path, it reads no time field, takes
+> an empty input list as an empty input list rather than as a witness marker,
+> and, when bytes follow the lock time, reads the compact-size-prefixed payload
+> into a field of its own. The writer puts the payload back after the lock time
+> with its prefix, so the computed identifier, and with it the identifier of a
+> history row, is the chain's transaction id. A payload whose prefix claims more
+> bytes than remain is refused in every path. A special-shaped transaction with
+> nothing after its lock time is read without a payload, as R38.6.10.2 describes
+> for the reference, so a transaction of another standard-layout chain whose
+> version word only happens to have this shape keeps its reading. Such a
+> transaction with a witness would not have its witness marker recognized, and
+> on a chain read with the time-field layout such a word would be read without
+> its time field and trailing string; no listed chain is known to produce
+> either. The whole leading word is kept as the version, so the type is the high
+> 16 bits of it; nothing interprets the payload, and no special transaction is
+> built. Leftover bytes after a complete reading are still not refused in
+> general (the finding above stays open on that point). PIVX special
+> transactions are not covered by this rule; their reading is not established.
+> Tests: T38.6.10.1 with a DASH coinbase (type 5), provider registration (type
+> 1), asset unlock (type 9, no inputs, one output), a version-3 type-0
+> transaction and a Kerrigan Sapling transaction (type 10, no transparent
+> inputs, one output), all from the public chains; T38.6.10.2 to T38.6.10.4 as
+> stated; and a special-shaped transaction without a payload. A DASH quorum
+> commitment (type 6, no inputs and no outputs) is also read with its payload
+> and the chain's identifier by the shared reader.
+
 **R38.6.10.6** *Kerrigan headers are not this section's subject.* How the
 reference reads Kerrigan's headers, the median-time-past and the HTLC
 lock-times is recorded in chapter 37 §37.5.11.
@@ -6604,6 +6646,19 @@ R38.8.6 **Tests (two-direction, observable).**
   project's own reads of public LCC Electrum servers and this repository's
   code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Maintainer decision (2026-11-21), clean side -- status note after the
+  code-quality finding under R38.6.10.5 (the Dash-layout special-transaction
+  reader as built).* Written by a session that never read the forbidden
+  corpus, from the maintainer's decision, the cleared section, the published
+  Dash special-transaction format, public DASH and Kerrigan chain data and
+  this repository's code. It takes no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.
+- *Maintainer decision (2026-11-21), clean side -- status note of
+  2026-11-22 after the D38.6.4Q.1 status note (INFO lines for the creation,
+  reuse and release of a QTUM-family Electrum client).* Written by a session
+  that never read the forbidden corpus, from the maintainer's decision and
+  this repository's code. It takes no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.
 - *Defect fix (2026-11-22), clean side -- status note after the D38.6.4Q.1
   status note (subscriptions of a shared client: a removal while a request
   waits, a removed instance's later request, placement over the current

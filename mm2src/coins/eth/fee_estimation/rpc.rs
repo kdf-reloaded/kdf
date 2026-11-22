@@ -49,7 +49,9 @@ pub async fn get_eth_estimated_fee_per_gas(
     req: GetFeeEstimationRequest,
 ) -> MmResult<FeePerGasEstimated, GetFeeEstimationRequestError> {
     match lp_coinfind(&ctx, &req.coin).await {
-        Ok(Some(MmCoinEnum::EthCoin(coin))) => {
+        // A TRX or TRC20 coin is an `EthCoin` without an EVM node: it takes the `CoinNotSupported` arm below,
+        // before the gas API or a node is asked (CRD ch.21 D7).
+        Ok(Some(MmCoinEnum::EthCoin(coin))) if !coin.is_tron_family() => {
             let use_simple = matches!(req.estimator_type, EstimatorType::Simple);
             let fee = coin
                 .get_eip1559_gas_fee(use_simple)

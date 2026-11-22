@@ -2,9 +2,11 @@
 //!
 //! Builds an [`EthCoin`] backed by [`EthCoinType::Tron`] (or
 //! [`EthCoinType::Trc20`]) with a populated [`TronApiClient`]. The TRON code
-//! paths (withdraw, fees, balance) bypass the EVM `web3` field entirely, so we
-//! still construct an alloy provider over the TRON URLs purely as a
-//! placeholder — it is never invoked.
+//! paths (withdraw, fees, balance) use that client and not the EVM `web3`
+//! field. An alloy provider over the TRON URLs is still constructed as a
+//! placeholder for the shared coin shape; a TRON node does not serve EVM
+//! JSON-RPC, so no TRON path may use it, and the EVM-only RPC methods refuse a
+//! TRON coin before reaching it (CRD ch.21 D7).
 //!
 //! TRON activation deliberately does not parse `swap_contract_address` or
 //! V2 contracts because TRON-side atomic swaps are still pending
@@ -259,8 +261,10 @@ async fn build_tron_coin(
     let _ = network;
 
     // Placeholder alloy provider over the TRON URLs, to satisfy the shared `EthCoinImpl` shape. The TRON wallet
-    // paths (balance, withdraw, broadcast, current block) use the TRON API client instead. Known boundary: the
-    // provider is given the plain URL strings only, so a request sent through it carries no headers and no key.
+    // paths (balance, withdraw, broadcast, current block) use the TRON API client instead, and no TRON path may
+    // use this provider: a TRON node does not serve EVM JSON-RPC. The EVM-only RPC methods refuse a TRX or TRC20
+    // coin before reaching it (CRD ch.21 D7). Known boundary: the provider is given the plain URL strings only,
+    // so a request sent through it carries no headers and no key.
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
     let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes(ticker, urls), event_handlers)
         .map_to_mm(|e| {

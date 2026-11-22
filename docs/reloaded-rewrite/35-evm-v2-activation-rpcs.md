@@ -309,6 +309,13 @@ version ignores the flag in HD mode).
 > bound by [Chapter 49](49-withdrawal-task-path.md) R49.32 -- R49.34. This
 > note binds nothing of its own.
 
+> **Pointer (2026-11-22, Spec Reader round 0.5.0-21; passed the KDF Dirty
+> Gate with chapter 49 §49.2.2).** For the HD shape (b), the scan that
+> `scan_policy` selects, the tokens that take part in it, the entries the
+> report lists and their balance members, and what the scan records are
+> bound by [Chapter 49](49-withdrawal-task-path.md) R49.36; the type of
+> `total_balance` by R49.35. This note binds nothing of its own.
+
 The success HTTP status is 200.
 
 ### 35.1.D Signing policy, RPC mode, inline NFT
@@ -2899,6 +2906,11 @@ is decided together with this item.
   chapter 49 §49.2.1 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on
   2026-11-19, measure 0.02, no findings**, as recorded for §49.2.1 in chapter
   49's provenance footer.
+- *Pointer added 2026-11-22 (Spec Reader round 0.5.0-21) -- the second note
+  after R35.1.3.* It names chapter 49 R49.35 and R49.36 and states no
+  behavior of its own; it travels with chapter 49 §49.2.2 for the KDF
+  Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
+  findings**, as recorded for §49.2.2 in chapter 49's provenance footer.
 - *Clean-context addition (2026-11-20, forbidden corpus not consulted):* the
   status note of this date after the 2026-11-17 TRON platform note records
   that `TRON_ACTIVATION_AVAILABLE` is `true` and that a TRON coin is

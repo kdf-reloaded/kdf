@@ -32,6 +32,10 @@ cargo test -p mm2_p2p --features application --lib t4a_
 cargo test -p coins --lib t4a_
 cargo test -p mm2_main --lib t4a_
 
+# The legacy taker-swap unit tests of `mm2_main`, offline with mocked coins (they run in the CI row
+# `maker-outbox`)
+cargo test -p mm2_main --lib -- lp_swap::taker_swap::
+
 # The node tests of `mm2_main` that need no public server (the CI row `node-tests`)
 cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::
 ```
@@ -812,6 +816,34 @@ first test below; the positive cases of T6 are unchanged.
 Not covered: the raw-transaction signing request end to end (a lab row on the wire covers the text); the four swap
 functions that pass the error on (it cannot occur for the outputs they build).
 
+## EVM HD balance maps of a platform ticker (9 tests, plus one emulator test)
+
+Location: `mm2src/coins_activation/src/evm_hd_p2_tests.rs` (names start with `evm_hd_p2_`) and one emulator test in
+`mm2src/coins/eth/eth_trezor_emulator_tests.rs`. CRD: chapter 49, R49.32 items 1 to 3, R49.33, T49.31; chapter 35,
+R35.1.3(b). Run with `cargo test -p coins_activation --lib evm_hd_p2_`. A platform with two ERC-20 tokens is activated
+through the public routines against a scripted EVM node that answers per address and per token contract and records
+every balance query. The tokens' `balanceOf` queries are recorded by contract.
+
+| Test | CRD | What is tested |
+|---|---|---|
+| `evm_hd_p2_get_new_address_for_the_platform_answers_the_platform_and_every_token` | R49.32 item 1, R49.33 | The map holds exactly the platform and both tokens, zero balances included; the address is the EIP-55 form |
+| `evm_hd_p2_account_balance_and_its_task_form_list_every_ticker_at_every_address` | R49.32 item 1 | `account_balance` and `task::account_balance::init` list the three tickers at every address; the task total sums each ticker |
+| `evm_hd_p2_the_scan_lists_intervening_addresses_with_an_empty_map_and_finds_a_token_only_address` | R49.32 items 2, 3 | From a known count of 1 the scan finds address 2 that holds only a token, lists address 1 with `{}` and address 2 with all tickers |
+| `evm_hd_p2_the_scan_counts_an_address_used_by_its_nonce_or_platform_balance_with_the_full_map` | R49.32 item 3 | A used address found by its nonce carries the full map |
+| `evm_hd_p2_a_token_removed_by_disable_coin_leaves_the_maps` | R49.32 item 1 | After `disable_coin` of one token, each address lists two tickers |
+| `evm_hd_p2_a_token_ticker_answers_that_token_only_and_the_platform_counts_the_new_address` | R49.32 | `get_new_address` for a token answers that token only, asks no other token, and the platform then lists the address |
+| `evm_hd_p2_a_failing_token_balance_fails_the_platform_ticker_request_as_a_whole` | R49.32 item 1 | One failing token query fails the four methods of the platform ticker; no partial map |
+| `evm_hd_p2_a_token_ticker_asks_no_other_tokens_balance` | R49.32 | With another token's `balanceOf` failing, a token ticker's `account_balance`, its task form and its scan still answer, and no other token is asked |
+| `evm_hd_p2_the_activation_report_keeps_the_platform_and_every_token_and_asks_each_token_once_per_address` | R35.1.3(b) | The activation report's maps and total hold the platform and every token, and each token's `balanceOf` is asked once per address |
+
+The Trezor policy: `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens` checks the
+maps and the total of `task::account_balance::init` of a Trezor HD platform with one token; it runs in the emulator job
+and prints a skip line when no emulator is reachable. The scan and `get_new_address` under the Trezor policy are not
+covered by an emulator test. The unchanged answers of a TRON platform and of a TRC20 ticker are pinned by
+`a_trc20_ticker_answers_its_own_ticker_only_and_its_scan_finds_a_token_only_address` and
+`an_address_is_used_when_the_chain_has_its_account_or_an_enabled_token_balance_is_not_zero` in
+`mm2src/coins/eth/tron/hd_tests.rs`.
+
 ## EVM HD address methods and ERC-20 `from` (10 tests)
 
 Location: `mm2src/coins_activation/src/evm_hd_p1_tests.rs` (names start with `evm_hd_p1_`). CRD: chapter 49, R49.32 (last
@@ -821,11 +853,11 @@ address and records every balance and nonce query.
 
 | Test | CRD | What is tested |
 |---|---|---|
-| `evm_hd_p1_get_new_address_answers_the_full_checksummed_address` | R49.33, R35.1.3 | `get_new_address` on an EVM HD platform answers the full 42-character EIP-55 address and the platform ticker only |
+| `evm_hd_p1_get_new_address_answers_the_full_checksummed_address` | R49.33, R35.1.3 | `get_new_address` on an EVM HD platform answers the full 42-character EIP-55 address and the platform and its token |
 | `evm_hd_p1_the_scan_task_for_an_evm_hd_platform_reaches_the_evm_scan` | ch.05 R54 | `task::scan_for_new_addresses::init` on an EVM HD platform runs the EVM scan, finds a used address and answers it in the full form |
 | `evm_hd_p1_get_new_address_with_a_token_ticker_answers_the_token_only_and_the_platform_lists_it` | R49.32, T49.31 | A token ticker answers a map with that token only; the platform's `account_balance` then lists the new address |
 | `evm_hd_p1_account_balance_with_a_token_ticker_answers_token_only_maps` | R49.32 | `account_balance` and the account balance of the task route answer token-only maps and token-only totals |
-| `evm_hd_p1_the_scan_with_a_token_ticker_finds_an_address_that_holds_only_that_token` | R49.32 | The token scan finds an address with nonce 0 and only the token; the platform ticker's scan still does not |
+| `evm_hd_p1_the_scan_with_a_token_ticker_finds_an_address_that_holds_only_that_token` | R49.32 | The token scan finds an address with nonce 0 and only the token, which the platform's wallet then knows |
 | `evm_hd_p1_a_token_on_a_single_key_platform_keeps_its_current_answer` | R49.32 | A token on a single-key platform answers `CoinIsActivatedNotWithHDWallet` on the three methods |
 | `evm_hd_p1_a_token_withdraw_with_from_is_sent_from_the_selected_address_on_both_routes` | R49.34, T49.32 | Both selector forms on `withdraw` and `task::withdraw::init`: the selected address supplies balance and nonce, its key signs, `from` is that address |
 | `evm_hd_p1_a_token_withdraw_without_from_is_sent_from_the_activated_address` | R49.34 item 4 | Without `from` both routes send from the activated address |

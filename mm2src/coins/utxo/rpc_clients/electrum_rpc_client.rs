@@ -1,3 +1,4 @@
+use super::electrum_client_registry::ReleaseNote;
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
 use super::electrum_pool::{call_budget_of_caller, ElectrumPoolOptions, ElectrumServersView, PoolShared};
 use super::*;
@@ -518,6 +519,8 @@ pub struct ElectrumClientImpl {
     /// An owner is unique to its instance and never given again, so this costs one entry for each removed instance for
     /// the lifetime of the client. Never held across an await.
     retired_owners: StdMutex<HashSet<ElectrumOwner>>,
+    /// Set once for a client of the registry of shared clients: logs the client's release when it is dropped.
+    release_note: std::sync::OnceLock<ReleaseNote>,
 }
 
 /// A subscription a client remembers: the instances that remember it, and whether it is placed in the current session.
@@ -2057,8 +2060,12 @@ impl ElectrumClientImpl {
             watched_script_hashes: StdMutex::new(HashMap::new()),
             watched_contract_events: StdMutex::new(Vec::new()),
             retired_owners: StdMutex::new(HashSet::new()),
+            release_note: std::sync::OnceLock::new(),
         }
     }
+
+    /// Marks the client as shared through the registry: `note` logs the release when the client is dropped.
+    pub(super) fn note_release(&self, note: ReleaseNote) { let _ = self.release_note.set(note); }
 
     #[cfg(test)]
     pub fn with_protocol_version(

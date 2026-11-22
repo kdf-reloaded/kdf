@@ -1880,6 +1880,60 @@ fn tx_details_prev_output_index_out_of_range_is_an_error() {
     );
 }
 
+/// CRD ch.38 T38.6.10.3: the history row of a Dash-layout special transaction carries the chain's txid as its
+/// hash and internal id (the payload is part of the hashed bytes). The row is built by `tx_details_by_hash` from
+/// the bytes the backend serves.
+#[test]
+fn special_transaction_history_row_carries_the_chain_txid() {
+    let fixtures = [
+        (
+            include_str!("../../kdf_chain/src/test_data/dash_2576221_type5_cbtx.hex"),
+            "82efdfbb4adb79d9c590cd83c316acb8c40d51c975a519733ff2d420d469e7ed",
+        ),
+        (
+            include_str!("../../kdf_chain/src/test_data/dash_2576170_type9_assetunlock.hex"),
+            "0bfefcc1c944d1a0c885a1de834d7587c4069d944b6b28e9c2e16b80a07a3cc4",
+        ),
+    ];
+    for (hex_text, txid) in fixtures {
+        let raw = BytesJson::from(hex::decode(hex_text.trim()).unwrap());
+        NativeClient::get_verbose_transaction.mock_safe(move |_coin, _txid| {
+            let verbose = RpcTransaction {
+                hex: raw.clone(),
+                txid: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                hash: None,
+                size: Default::default(),
+                vsize: Default::default(),
+                version: 3,
+                locktime: 0,
+                vin: vec![],
+                vout: vec![],
+                blockhash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                confirmations: 1,
+                rawconfirmations: None,
+                time: 1,
+                blocktime: 1,
+                height: Some(101),
+            };
+            MockResult::Return(Box::new(futures01::future::ok(verbose)))
+        });
+        let client = NativeClient(Arc::new(NativeClientImpl::default()));
+        let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+            UtxoRpcClientEnum::Native(client),
+            None,
+            false,
+        ));
+        let mut input_transactions = HistoryUtxoTxMap::default();
+        let details = block_on(coin.tx_details_by_hash(&[0u8; 32], &mut input_transactions)).unwrap();
+        assert_eq!(
+            details.internal_id,
+            BytesJson::from(hex::decode(txid).unwrap()),
+            "{txid}"
+        );
+        assert_eq!(details.tx_hash, txid);
+    }
+}
+
 #[test]
 fn kmd_rewards_prev_output_index_out_of_range_is_an_error() {
     let (spending_tx, mut input_transactions) = spend_of_a_missing_output();
@@ -7342,6 +7396,7 @@ mod header_layout_fallback_tests {
             (json!([]), vec![]),
             (json!(["BTC"]), vec!["BTC"]),
             (json!(["BTC", "PPC"]), vec!["BTC", "PPC"]),
+            (json!(["KRGN"]), vec!["KRGN"]),
         ] {
             let got = header_layout_fallback_families(&ctx_with(json!({ "header_layout_fallback_families": value })))
                 .unwrap();
@@ -7760,6 +7815,18 @@ pub(crate) mod header_read_path_tests {
     const MEWC_LONE_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_lone_native.hex");
     const MEWC_ALL_AUXPOW: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124789_x6_all_auxpow.hex");
     const MEWC_ALL_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_x11_all_native.hex");
+    /// Real Kerrigan chain data (see `kdf_chain/src/test_data/README.md`): heights 188818 to 188828.
+    const KRGN_WINDOW: &str = include_str!("../../kdf_chain/src/test_data/krgn_188818_mixed_sizes.hex");
+    /// Real Kerrigan chain data: heights 191181 to 191191, all four header sizes in one window.
+    const KRGN_WINDOW_ALL_SIZES: &str = include_str!("../../kdf_chain/src/test_data/krgn_191181_window11.hex");
+    const KRGN_LONE_X11: &str = include_str!("../../kdf_chain/src/test_data/krgn_188629_lone_x11.hex");
+    const KRGN_LONE_KAWPOW: &str = include_str!("../../kdf_chain/src/test_data/krgn_188823_lone_kawpow.hex");
+    const KRGN_LONE_EQUIHASH_200_9: &str =
+        include_str!("../../kdf_chain/src/test_data/krgn_188818_lone_equihash_200_9.hex");
+    const KRGN_LONE_EQUIHASH_192_7: &str =
+        include_str!("../../kdf_chain/src/test_data/krgn_188820_lone_equihash_192_7.hex");
+    /// The median of the eleven times of `KRGN_WINDOW`, read from the chain bytes.
+    pub(crate) const KRGN_WINDOW_MEDIAN: u64 = 1_794_970_885;
 
     const TICKER: &str = "PLUMB";
 
@@ -7962,6 +8029,19 @@ pub(crate) mod header_read_path_tests {
                 lone: list[..112].to_vec(),
                 count: 11,
                 list,
+                time_offset: 100,
+            }
+        }
+
+        /// The real Kerrigan window of heights 188818 to 188828 (eleven headers of three sizes, 8492 bytes);
+        /// the lone header is the Equihash(200,9) header of height 188818, the first of the window, whose time
+        /// sits at byte 100.
+        pub(crate) fn kerrigan() -> Self {
+            Fixture {
+                layout: CoinVariant::Kerrigan,
+                lone: served(KRGN_LONE_EQUIHASH_200_9),
+                list: served(KRGN_WINDOW),
+                count: 11,
                 time_offset: 100,
             }
         }
@@ -8528,6 +8608,11 @@ pub(crate) mod header_read_path_tests {
             assert!(text.contains(TICKER), "{text}");
             assert!(text.contains("chain_variant"), "{text}");
             assert!(text.contains(&bad.to_string()), "{text}");
+            // The error lists the nine spellings, the Kerrigan one included.
+            assert!(
+                text.contains("BTC, QTUM, LBC, PPC, RICK, MORTY, RVN, PIVX, KRGN"),
+                "{text}"
+            );
         }
         // Read and validated even when header_layout pins the layout (R37.5.9a).
         let err = conf_from_protocol(
@@ -8536,8 +8621,8 @@ pub(crate) mod header_read_path_tests {
         )
         .expect_err("the key does not excuse an invalid chain_variant");
         assert!(err.to_string().contains("chain_variant"));
-        // The eight spellings are accepted verbatim.
-        for ok in ["BTC", "QTUM", "LBC", "PPC", "RICK", "MORTY", "RVN", "PIVX"] {
+        // The nine spellings are accepted verbatim.
+        for ok in ["BTC", "QTUM", "LBC", "PPC", "RICK", "MORTY", "RVN", "PIVX", "KRGN"] {
             conf_from_protocol(utxo(json!(ok)), None).unwrap();
         }
     }
@@ -8612,6 +8697,140 @@ pub(crate) mod header_read_path_tests {
                 assert!(!logged(&coin), "{name}/{window}: an LBC coin never falls back");
             }
         }
+    }
+
+    /// CRD ch.37 T37.5.11.1: a `"KRGN"` coin reads the real mixed window (three sizes, 8492 bytes) to the
+    /// chain's median, through the median-time-past path of the coin.
+    #[test]
+    fn krgn_chain_variant_reads_the_mixed_window_to_the_chains_median() {
+        let fx = Fixture::kerrigan();
+        let coin = coin_from_protocol(utxo(json!("KRGN")), None);
+        assert_eq!(policy_of(&coin).layout(), CoinVariant::Kerrigan);
+        assert_eq!(fx.median(), KRGN_WINDOW_MEDIAN);
+        assert_eq!(path_median(&coin, &fx), Ok(KRGN_WINDOW_MEDIAN));
+        // The layout of step 1 read it: neither the structural fallback nor the time-only steps ran.
+        assert!(!logged(&coin));
+        assert!(!coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
+    }
+
+    /// CRD ch.37 T37.5.11.1: a `"KRGN"` coin reads the real window of all four sizes (80, 124, 543 and 1487
+    /// bytes, 7085 bytes in all) to the median of its eleven times, read from the chain bytes (the times of
+    /// the window rise from header to header, so the median is the sixth).
+    #[test]
+    fn krgn_chain_variant_reads_the_window_of_all_four_sizes_to_the_chains_median() {
+        let mut fx = Fixture::kerrigan();
+        fx.list = served(KRGN_WINDOW_ALL_SIZES);
+        assert_eq!(fx.list.len(), 7085);
+        let coin = coin_from_protocol(utxo(json!("KRGN")), None);
+        assert_eq!(fx.median(), 1_795_296_411);
+        assert_eq!(path_median(&coin, &fx), Ok(1_795_296_411));
+        assert!(!logged(&coin));
+        assert!(!coin.as_ref().conf.header_time_only_logged.load(Ordering::Relaxed));
+    }
+
+    /// CRD ch.37 T37.5.11.1 and T37.5.11.5: without `"KRGN"` the list read of the window yields no value, and
+    /// the median query gives an error, never another value.
+    #[test]
+    fn the_kerrigan_window_without_krgn_gives_an_error_and_never_another_median() {
+        let fx = Fixture::kerrigan();
+        for protocol in [json!({ "type": "UTXO" }), utxo(json!("BTC"))] {
+            for families in [None, Some(&[][..])] {
+                let conf = conf_from_protocol(protocol.clone(), families).unwrap();
+                assert!(
+                    HeaderReadPolicy::for_conf(&conf).read_list(&fx.list, fx.count).is_err(),
+                    "{protocol} {families:?}: the list read must yield no value"
+                );
+                let coin = coin_from_protocol(protocol.clone(), families);
+                let read = path_median(&coin, &fx);
+                assert!(read.is_err(), "{protocol} {families:?}: {read:?}");
+            }
+        }
+    }
+
+    /// CRD ch.37 T37.5.11.2: a block-timestamp read of a `"KRGN"` coin returns the true time of the header of
+    /// each algorithm (the Equihash time at byte 100, never the zero reserved field), under the coin's policy.
+    #[test]
+    fn krgn_block_timestamp_returns_the_true_time_of_each_algorithms_header() {
+        let coin = coin_from_protocol(utxo(json!("KRGN")), None);
+        let policy = policy_of(&coin);
+        for (name, hex, time) in [
+            ("X11", KRGN_LONE_X11, 1_794_947_320u64),
+            ("KawPoW", KRGN_LONE_KAWPOW, 1_794_970_885),
+            ("Equihash(200,9)", KRGN_LONE_EQUIHASH_200_9, 1_794_969_614),
+            ("Equihash(192,7)", KRGN_LONE_EQUIHASH_192_7, 1_794_970_194),
+        ] {
+            serve(&served(hex), &[], 0);
+            let read = block_on(coin.as_ref().rpc_client.get_block_timestamp_with_policy(77, &policy));
+            assert_eq!(read.map_err(describe), Ok(time), "{name}");
+        }
+        // The read without a policy keeps the standard layout, which does not read an Equihash header.
+        serve(&served(KRGN_LONE_EQUIHASH_192_7), &[], 0);
+        assert!(block_on(coin.as_ref().rpc_client.get_block_timestamp(77)).is_err());
+    }
+
+    /// A `"KRGN"` coin that is listed in the node switch still reads its own layout, and the cascade of
+    /// CRD ch.37 R37.5.9e does not know the Kerrigan layout.
+    #[test]
+    fn a_krgn_coin_in_the_fallback_switch_reads_its_own_layout_and_the_cascade_is_unchanged() {
+        use crate::utxo::header_layout_fallback::FALLBACK_CASCADE;
+
+        assert_eq!(FALLBACK_CASCADE, [CoinVariant::Riecoin, CoinVariant::KawpowAuxpowMixed]);
+        let fx = Fixture::kerrigan();
+        let coin = coin_from_protocol(utxo(json!("KRGN")), Some(&["KRGN"]));
+        assert_eq!(path_median(&coin, &fx), Ok(KRGN_WINDOW_MEDIAN));
+        assert!(
+            !logged(&coin),
+            "the Kerrigan read succeeded, so no cascade layout was tried"
+        );
+        // A window the Kerrigan layout refuses is refused by the list read: no layout of the cascade reads it.
+        let policy = policy_of(&coin);
+        assert!(policy.read_list(&fx.list[..fx.list.len() - 1], fx.count).is_err());
+        assert!(!logged(&coin));
+    }
+
+    /// CRD ch.37 D37.5.11.2: header verification for a `"KRGN"` coin is refused at activation, naming the
+    /// ticker, the key and the reason; `"KRGN"` alone is accepted, and so is header verification for another
+    /// family.
+    #[test]
+    fn krgn_with_header_verification_is_refused_and_krgn_alone_is_accepted() {
+        use crate::utxo::utxo_builder::UnrecognisedEnumPolicy;
+
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        let build = |extra: Json, family: &str| -> UtxoConfResult<UtxoCoinConf> {
+            let mut coin_conf = json!({ "coin": TICKER, "protocol": utxo(json!(family)) });
+            for (key, value) in extra.as_object().expect("an object") {
+                coin_conf[key] = value.clone();
+            }
+            UtxoConfBuilder::new(&coin_conf, &params, TICKER).build()
+        };
+        let spv_conf =
+            json!({ "starting_block_header": { "height": 1, "hash": "00".repeat(32), "time": 1, "bits": 1 } });
+
+        build(json!({}), "KRGN").unwrap();
+        build(json!({ "enable_spv_proof": false, "spv_conf": null }), "KRGN").unwrap();
+        for (extra, keys) in [
+            (json!({ "enable_spv_proof": true }), "'enable_spv_proof'"),
+            (json!({ "spv_conf": spv_conf.clone() }), "'spv_conf'"),
+            (
+                json!({ "enable_spv_proof": true, "spv_conf": spv_conf.clone() }),
+                "'enable_spv_proof' and 'spv_conf'",
+            ),
+        ] {
+            let err = build(extra, "KRGN").expect_err("header verification is refused for KRGN");
+            let text = err.to_string();
+            for wanted in [TICKER, "KRGN", keys, "block identity hash"] {
+                assert!(text.contains(wanted), "{wanted}: {text}");
+            }
+            assert!(matches!(err.into_inner(), UtxoConfError::KerriganWithSpv { .. }));
+        }
+        // Another family may enable header verification as before.
+        build(json!({ "enable_spv_proof": true, "spv_conf": spv_conf }), "BTC").unwrap();
+        // A caller that reads only the address fields never verifies headers and is not refused.
+        let coin_conf = json!({ "coin": TICKER, "protocol": utxo(json!("KRGN")), "enable_spv_proof": true });
+        UtxoConfBuilder::new(&coin_conf, &params, TICKER)
+            .with_unrecognised_enum_policy(UnrecognisedEnumPolicy::NotUsed)
+            .build()
+            .unwrap();
     }
 
     /// The swap-critical case: the median time past of the latest eleven headers is the true
@@ -8906,6 +9125,143 @@ pub(crate) mod header_read_path_tests {
         let ric = chain::BlockHeader::from_served_bytes(&Fixture::riecoin().lone, CoinVariant::Riecoin).unwrap();
         block_on(storage.add_block_headers_to_storage(TICKER, [(1u64, ric)].into_iter().collect())).unwrap();
         assert!(block_on(storage.get_block_header(TICKER, 1)).is_err());
+    }
+}
+
+/// CRD ch.37 T37.5.11.4 for a `"KRGN"` coin: the claims and refunds of a legacy swap form their lock-time from the
+/// median that the Kerrigan layout reads from the served window, and carry the sequence of their path. With a failing
+/// median query nothing is signed or broadcast. The Electrum fetches are mocked, so nothing touches the network.
+#[cfg(not(target_arch = "wasm32"))]
+mod kerrigan_htlc_locktime_tests {
+    use super::header_read_path_tests::{coin_from_protocol, serve, Fixture, KRGN_WINDOW_MEDIAN};
+    use super::*;
+    use crate::utxo::utxo_common::{send_maker_refunds_payment, send_maker_spends_taker_payment,
+                                   send_taker_refunds_payment, send_taker_spends_maker_payment};
+    use crate::TransactionFut;
+    use futures::compat::Future01CompatExt;
+    use serialization::serialize;
+    use std::sync::Mutex;
+
+    const HTLC_VALUE: u64 = 1_000_000;
+    /// The sequence of a claim (final) and of a refund (non-final).
+    const SEQUENCE_CLAIM: u32 = 0xffff_ffff;
+    const SEQUENCE_REFUND: u32 = 0xffff_fffe;
+
+    type Spend = fn(UtxoStandardCoin, &[u8], u32, &[u8], &[u8], &[u8]) -> TransactionFut;
+
+    /// Runs `spend` on a `"KRGN"` coin whose Electrum client serves `list` as the median window, and returns
+    /// the transaction that reached the broadcast, if any. The broadcast is mocked to record it and to fail.
+    fn run_spend(list: &[u8], spend: Spend, time_lock: u32, secret_or_hash: &[u8]) -> Option<UtxoTx> {
+        let coin = coin_from_protocol(json!({ "type": "UTXO", "chain_variant": "KRGN" }), None);
+        serve(&Fixture::kerrigan().lone, list, 11);
+        ElectrumClient::get_block_count.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(5000u64))));
+        let broadcast: Arc<Mutex<Option<UtxoTx>>> = Arc::new(Mutex::new(None));
+        let recorded = broadcast.clone();
+        ElectrumClient::send_transaction.mock_safe(move |_, tx| {
+            *recorded.lock().unwrap() = Some(tx.clone());
+            MockResult::Return(Box::new(futures01::future::err(
+                UtxoRpcError::Internal("recorded".to_owned()).into(),
+            )))
+        });
+
+        let mine = key_pair_from_seed("krgn htlc spender").unwrap();
+        let other_pub = key_pair_from_seed("krgn htlc counterparty").unwrap().public().to_vec();
+        let mut payment = UtxoTx::default();
+        payment.version = 2;
+        payment.inputs.push(TransactionInput {
+            previous_output: OutPoint {
+                hash: H256::from([7; 32]),
+                index: 0,
+            },
+            script_sig: Default::default(),
+            sequence: 0xffff_ffff,
+            script_witness: vec![],
+        });
+        payment.outputs.push(TransactionOutput {
+            value: HTLC_VALUE,
+            script_pubkey: vec![0xa9; 23].into(),
+        });
+        let payment_bytes = serialize(&payment).take();
+
+        let _ = block_on(
+            spend(
+                coin,
+                &payment_bytes,
+                time_lock,
+                &other_pub,
+                secret_or_hash,
+                &mine.private().secret.to_vec(),
+            )
+            .compat(),
+        );
+        let recorded = broadcast.lock().unwrap().clone();
+        recorded
+    }
+
+    #[test]
+    fn a_krgn_claim_and_refund_carry_the_median_lock_time_and_the_sequence_of_their_path() {
+        let window = Fixture::kerrigan().list;
+        let secret = [0x22u8; 32];
+        let secret_hash = [0x44u8; 20];
+        let median = KRGN_WINDOW_MEDIAN as u32;
+        let cases: [(&str, Spend, &[u8], u32); 4] = [
+            (
+                "legacy claim, maker spends the taker payment",
+                send_maker_spends_taker_payment::<UtxoStandardCoin>,
+                &secret[..],
+                SEQUENCE_CLAIM,
+            ),
+            (
+                "legacy claim, taker spends the maker payment",
+                send_taker_spends_maker_payment::<UtxoStandardCoin>,
+                &secret[..],
+                SEQUENCE_CLAIM,
+            ),
+            (
+                "legacy refund, taker",
+                send_taker_refunds_payment::<UtxoStandardCoin>,
+                &secret_hash[..],
+                SEQUENCE_REFUND,
+            ),
+            (
+                "legacy refund, maker",
+                send_maker_refunds_payment::<UtxoStandardCoin>,
+                &secret_hash[..],
+                SEQUENCE_REFUND,
+            ),
+        ];
+        for (name, spend, secret_or_hash, sequence) in cases {
+            // An HTLC lock-time far below the median, exactly at median - 1, and above it.
+            for time_lock in [median - 1_000_000, median - 1, median + 1_000] {
+                let tx = run_spend(&window, spend, time_lock, secret_or_hash)
+                    .unwrap_or_else(|| panic!("{name} at {time_lock}: no transaction reached the broadcast"));
+                assert_eq!(tx.lock_time, (median - 1).max(time_lock), "{name} at {time_lock}");
+                assert_eq!(tx.inputs[0].sequence, sequence, "{name} at {time_lock}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_krgn_spend_is_not_signed_or_broadcast_when_the_median_query_fails() {
+        // Eleven 100-byte records of zeros: the Kerrigan layout does not read them, the even split reads a zero
+        // time, and the range check refuses it, so the median query fails.
+        let unreadable = vec![0u8; 11 * 100];
+        let secret = [0x22u8; 32];
+        let secret_hash = [0x44u8; 20];
+        assert!(run_spend(
+            &unreadable,
+            send_maker_spends_taker_payment::<UtxoStandardCoin>,
+            1_700_000_000,
+            &secret
+        )
+        .is_none());
+        assert!(run_spend(
+            &unreadable,
+            send_maker_refunds_payment::<UtxoStandardCoin>,
+            1_700_000_000,
+            &secret_hash
+        )
+        .is_none());
     }
 }
 

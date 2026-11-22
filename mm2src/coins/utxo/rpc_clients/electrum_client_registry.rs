@@ -11,7 +11,9 @@
 //! locks are released. Nothing here calls into the coin registry.
 
 use super::{ElectrumClient, ElectrumClientImpl, ElectrumRpcRequest};
+use crate::node_url::{electrum_server_name, UNNAMED_SERVER};
 use crate::utxo::ElectrumBuilderArgs;
+use common::log::info;
 use futures::lock::Mutex as AsyncMutex;
 use serde_json::Value as Json;
 use std::future::Future;
@@ -78,6 +80,33 @@ impl ClientKey {
             args: (args.spawn_ping, args.negotiate_version, args.collect_metrics),
         }
     }
+
+    /// The servers as a text may name them: `host:port` each, in the configured order, comma separated. Nothing else of
+    /// an entry (scheme, user info, path, query) reaches the text (CRD ch.38 R38.6.9a).
+    fn servers_text(&self) -> String {
+        self.servers
+            .iter()
+            .map(|server| electrum_server_name(&server.url).unwrap_or_else(|| UNNAMED_SERVER.to_owned()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Kept by a shared client, it logs the release of the client when the last holder lets go of it and the client is
+/// dropped.
+#[derive(Debug)]
+pub(crate) struct ReleaseNote {
+    platform: String,
+    servers: String,
+}
+
+impl Drop for ReleaseNote {
+    fn drop(&mut self) {
+        info!(
+            "Shared Electrum client of {} released, servers: {}",
+            self.platform, self.servers
+        );
+    }
 }
 
 /// The shared Electrum clients of a node, by weak reference.
@@ -126,8 +155,12 @@ impl ElectrumClientRegistry {
     ///   ([`ElectrumClientImpl::chain_disagreement`]), the caller is refused with `disagreement(text)`, the error a
     ///   fresh build gives (R38.6.4o item 12), and holds no part of the client.
     /// - A build that failed is not remembered: the caller that waited for it builds from the start.
+    ///
+    /// One INFO line each says that the client was created or reused, by `instance`; the release is logged when the
+    /// last holder drops the client (see [`ReleaseNote`]).
     pub(crate) async fn get_or_build<E, Fut>(
         &self,
+        instance: &str,
         key: ClientKey,
         disagreement: impl FnOnce(String) -> E,
         build: impl FnOnce() -> Fut,
@@ -140,11 +173,28 @@ impl ElectrumClientRegistry {
         if let Some(client) = self.lookup(&key) {
             return match client.chain_disagreement() {
                 Some(text) => Err(disagreement(text)),
-                None => Ok(ElectrumClient(client)),
+                None => {
+                    info!(
+                        "Shared Electrum client of {} reused by {}, servers: {}",
+                        key.platform,
+                        instance,
+                        key.servers_text()
+                    );
+                    Ok(ElectrumClient(client))
+                },
             };
         }
         let client = build().await?;
-        self.remember(key, &client.0);
+        self.remember(key.clone(), &client.0);
+        let servers = key.servers_text();
+        info!(
+            "Shared Electrum client of {} created by {}, servers: {}",
+            key.platform, instance, servers
+        );
+        client.0.note_release(ReleaseNote {
+            platform: key.platform,
+            servers,
+        });
         Ok(client)
     }
 }
@@ -176,14 +226,14 @@ mod tests {
         let servers = [server("127.0.0.1:1"), server("127.0.0.1:2")];
         let key = || key_with(&servers, ElectrumBuilderArgs::default());
 
-        let first = block_on(registry.get_or_build(key(), |text| text, || built(&builds))).unwrap();
-        let second = block_on(registry.get_or_build(key(), |text| text, || built(&builds))).unwrap();
+        let first = block_on(registry.get_or_build("QTUM", key(), |text| text, || built(&builds))).unwrap();
+        let second = block_on(registry.get_or_build("QTUM", key(), |text| text, || built(&builds))).unwrap();
         assert!(Arc::ptr_eq(&first.0, &second.0));
         assert_eq!(builds.load(Ordering::SeqCst), 1);
 
         // The registry owns none of them: with the last holder gone the entry is stale and a new build follows.
         drop((first, second));
-        let third = block_on(registry.get_or_build(key(), |text| text, || built(&builds))).unwrap();
+        let third = block_on(registry.get_or_build("QTUM", key(), |text| text, || built(&builds))).unwrap();
         assert_eq!(builds.load(Ordering::SeqCst), 2);
         drop(third);
         assert!(registry.lookup(&key()).is_none());
@@ -355,13 +405,14 @@ mod tests {
             collect_metrics: false,
         };
         let first = block_on(registry.get_or_build(
+            "QTUM",
             key_with(&servers, ElectrumBuilderArgs::default()),
             |text| text,
             || built(&builds),
         ))
         .unwrap();
         let second =
-            block_on(registry.get_or_build(key_with(&servers, quiet), |text| text, || built(&builds))).unwrap();
+            block_on(registry.get_or_build("QTUM", key_with(&servers, quiet), |text| text, || built(&builds))).unwrap();
         assert!(!Arc::ptr_eq(&first.0, &second.0));
         assert_eq!(builds.load(Ordering::SeqCst), 2);
     }
@@ -373,6 +424,7 @@ mod tests {
         let key = || key_with(&servers, ElectrumBuilderArgs::default());
 
         let failed = block_on(registry.get_or_build(
+            "QTUM",
             key(),
             |text| text,
             || async { Err::<ElectrumClient, _>("no server answered".to_owned()) },
@@ -383,9 +435,56 @@ mod tests {
 
         // The next instance builds from the start, and the lock entry nobody holds is dropped meanwhile.
         let builds = AtomicUsize::new(0);
-        let client = block_on(registry.get_or_build(key(), |text| text, || built(&builds))).unwrap();
+        let client = block_on(registry.get_or_build("QTUM", key(), |text| text, || built(&builds))).unwrap();
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert_eq!(registry.build_locks.lock().unwrap().len(), 1);
         drop(client);
+    }
+
+    /// A server entry with user info, a path and a query is named `host:port` in the INFO lines of the client, and
+    /// nothing else of it.
+    #[test]
+    fn the_info_lines_name_each_server_as_host_and_port_only() {
+        use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+        let capturing = install_log_capture();
+        let registry = ElectrumClientRegistry::default();
+        let builds = AtomicUsize::new(0);
+        let servers = [
+            server("ssl://user:pw-placeholder@info-lines-test.invalid:50002/some/path?token=abc#frag"),
+            server("info-lines-test.invalid:50001"),
+            server("pw-placeholder"),
+        ];
+        let key = || key_with(&servers, ElectrumBuilderArgs::default());
+        let expected = "info-lines-test.invalid:50002, info-lines-test.invalid:50001, <invalid server address>";
+
+        let first = block_on(registry.get_or_build("QRC20", key(), |text| text, || built(&builds))).unwrap();
+        let second = block_on(registry.get_or_build("QRC20B", key(), |text| text, || built(&builds))).unwrap();
+        drop((first, second));
+        if capturing {
+            let lines: Vec<String> = captured_log_lines()
+                .into_iter()
+                .filter(|line| line.contains("info-lines-test.invalid"))
+                .collect();
+            let wanted = [
+                format!("INFO Shared Electrum client of QTUM created by QRC20, servers: {expected}"),
+                format!("INFO Shared Electrum client of QTUM reused by QRC20B, servers: {expected}"),
+                format!("INFO Shared Electrum client of QTUM released, servers: {expected}"),
+            ];
+            assert!(
+                lines == wanted,
+                "the INFO lines of the shared client are not the expected three"
+            );
+            for line in captured_log_lines()
+                .iter()
+                .filter(|line| line.contains("Shared Electrum client"))
+            {
+                assert!(
+                    !["pw-placeholder", "token", "some/path", "frag", "user", "ssl://"]
+                        .iter()
+                        .any(|secret| line.contains(secret) && line.contains("info-lines-test")),
+                    "an INFO line of the shared client carries more than host:port"
+                );
+            }
+        }
     }
 }

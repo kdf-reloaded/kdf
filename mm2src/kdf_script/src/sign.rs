@@ -387,6 +387,7 @@ impl From<TransactionInputSigner> for Transaction {
             sapling_v5: s.sapling_v5,
             orchard: s.orchard,
             opaque: None,
+            extra_payload: None,
         }
     }
 }
@@ -585,6 +586,7 @@ impl TransactionInputSigner {
             sapling_v5: SaplingBundleV5::default(),
             orchard: OrchardBundle::default(),
             opaque: None,
+            extra_payload: None,
         };
 
         let mut s = Stream::default();
