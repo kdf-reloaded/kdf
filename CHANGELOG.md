@@ -1247,7 +1247,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
-  the closing note names what no row covers, in PR #PLACEHOLDER.
+  the closing note names what no row covers, in PR #497.
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
