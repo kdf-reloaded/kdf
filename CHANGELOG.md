@@ -979,7 +979,7 @@ the previous version used. The safe way:
   And when a subscription could not be placed again over a new connection, it still counted as placed, so a later
   request for it sent nothing. Now a disabled instance records nothing, and a subscription is skipped only while it is
   placed over the current connection. One instance sends at most one request per subscription at a time. Detail:
-  PR #P8PR; CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
+  PR #473; CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
 
 #### TRON coins
 
@@ -1071,7 +1071,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
-  shared QTUM Electrum client after a disable or a failed placement, in PR #P8PR.
+  shared QTUM Electrum client after a disable or a failed placement, in PR #473.
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
   confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
   PR #461; step 3, the lab row, is listed there.
