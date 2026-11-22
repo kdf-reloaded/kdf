@@ -1049,6 +1049,14 @@ the previous version used. The safe way:
   with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
   supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
 
+#### Legacy swaps
+
+- **A spend of a UTXO swap payment is read from the input that spends it.** When the node looked for the claim or
+  refund of a swap payment (UTXO coins, BCH, Qtum, SLP tokens), it judged the spending transaction by its first
+  input. A claim or refund that put another input first could be taken for the other branch, or not read at all.
+  The node now reads the input that spends the payment. The same applies to the search of a version-2 swap's funding
+  transaction. Detail: PR #NNN; CRD ch.51, status note of 2026-11-22 after R31a.
+
 ### Tests
 
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
