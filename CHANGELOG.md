@@ -894,19 +894,6 @@ the previous version used. The safe way:
   single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
   CRD ch.40 R40.2A.4, D40.2A.1.
 
-#### TRON coins
-
-- **Methods that work only for EVM coins now answer "not supported" for a TRON coin at once.** A TRX or TRC20
-  coin has no EVM node, yet seven methods asked its TRON nodes in the EVM format and failed with an error
-  that looked like a node outage. Each now refuses a TRON coin with a typed error before any request to a
-  node: `get_raw_transaction` and `sign_raw_transaction` with `NotImplemented` (HTTP 501, and
-  `sign_raw_transaction` no longer waits for a nonce first), `get_eth_estimated_fee_per_gas` with
-  `CoinNotSupported` (HTTP 501), `stream::fee_estimator::enable` with `NotSupportedFor` (HTTP 501, no streamer
-  is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
-  (HTTP 400), the legacy `get_trade_fee` with the text "TRON trade fee is not supported", and `trade_preimage`
-  with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
-  supported". EVM coins are unchanged. Detail: CRD ch.21 §21.11 (D7).
-
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
@@ -991,6 +978,17 @@ the previous version used. The safe way:
   request failed parsing, for example when the `fee_details` of an earlier TRON result was sent back as `fee`.
   TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
   form that is not its own. Detail: PR #455; CRD ch.21 R-WP6.
+
+- **Methods that work only for EVM coins now answer "not supported" for a TRON coin at once.** A TRX or TRC20
+  coin has no EVM node, yet seven methods asked its TRON nodes in the EVM format and failed with an error
+  that looked like a node outage. Each now refuses a TRON coin with a typed error before any request to a
+  node: `get_raw_transaction` and `sign_raw_transaction` with `NotImplemented` (HTTP 501, and
+  `sign_raw_transaction` no longer waits for a nonce first), `get_eth_estimated_fee_per_gas` with
+  `CoinNotSupported` (HTTP 501), `stream::fee_estimator::enable` with `NotSupportedFor` (HTTP 501, no streamer
+  is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
+  (HTTP 400), the legacy `get_trade_fee` with the text "TRON trade fee is not supported", and `trade_preimage`
+  with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
+  supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
 
 ### Tests
 

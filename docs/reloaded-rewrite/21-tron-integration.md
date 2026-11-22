@@ -1891,14 +1891,15 @@ a single flag.
 
   - `get_raw_transaction`: `NotImplemented` naming the coin, HTTP 501.
   - `sign_raw_transaction`: `NotImplemented` naming the coin, HTTP 501.
-  - Legacy `get_trade_fee`: the legacy error body, with the text "TRON
-    trade fee is not supported".
-  - `trade_preimage` whose receiving side is a TRON coin:
-    `InternalError`, HTTP 500, with the text "TRON V1 receiver trade
-    fee is not supported", the same form in which the sending side was
-    already refused. The check of the coins-config `wallet_only` flag
-    in front of it is unchanged, so only a TRON entry without that flag
-    gets here.
+  - Legacy `get_trade_fee`: the coin's trade fee fails with the text
+    "TRON trade fee is not supported" (the unit tests call the coin
+    method; the legacy error body around it is not asserted).
+  - `trade_preimage` whose receiving side is a TRON coin: the coin's
+    receiver trade fee fails with `InternalError` and the text "TRON V1
+    receiver trade fee is not supported", the same form in which the
+    sending side was already refused (the unit tests call the coin
+    method; the RPC status is not asserted). The check of the
+    coins-config `wallet_only` flag in `trade_preimage` is not changed.
   - `get_eth_estimated_fee_per_gas`: `CoinNotSupported`, HTTP 501.
   - `stream::fee_estimator::enable`: `NotSupportedFor` naming the coin,
     HTTP 501; no streamer is started.
