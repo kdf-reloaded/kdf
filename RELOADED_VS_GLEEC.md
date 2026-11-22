@@ -880,7 +880,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   history of the payment's sender, so a refund of the other side's payment is found as well. GLEEC KDF's search is
   recorded in CRD ch.51 §51.6E R89. No message and no transaction a peer validates changes, so no switch exists; row
   in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). Plan
-  [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 4 (PR to follow); CRD ch.51,
+  [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 4 (PR #496); CRD ch.51,
   status note of 2026-11-22 after §51.6E R92.
 
 ### Removed / disabled in KDF Reloaded
