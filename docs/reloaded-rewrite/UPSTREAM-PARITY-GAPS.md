@@ -291,7 +291,7 @@ preimage/conversion flows.
   operations stay refused (ch. 60 R60.6.5), and history is still open
   (ch. 40 D40.1).
   *Status 2026-11-22 (history):* SOL and SPL transaction history is built
-  (PR #S10PR; ch. 40 §40.6C), Reloaded's own design: the reference has none.
+  (PR #494; ch. 40 §40.6C), Reloaded's own design: the reference has none.
 - [ ] **Activation compatibility surface (decided 2026-10-11, deferred).**
   Reloaded's `enable_solana_with_tokens` / `enable_spl` stay the primary
   activation surface. The reference's `experimental::enable_solana_with_assets`

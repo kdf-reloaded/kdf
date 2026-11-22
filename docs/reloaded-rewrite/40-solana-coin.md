@@ -409,7 +409,7 @@ proceed as with `false`.
 
 > *Reloaded status (clean side, 2026-11-22):* `tx_history` now takes
 > effect in this repository: `true` starts the history of §40.6C on this
-> method and on `enable_solana_with_tokens` (PR #S10PR). A value of another
+> method and on `enable_solana_with_tokens` (PR #494). A value of another
 > type is still `InvalidRequest` (T40.7).
 
 ## 40.2A The string form of balances and amounts (reference behavior)
@@ -1325,7 +1325,7 @@ abnormally with nothing registered (R40.2.5's note); the legacy
 of history (§40.6B.8).
 
 > *Reloaded status (clean side, 2026-11-22):* Reloaded has a Solana and SPL
-> history of its own design since PR #S10PR (§40.6C); nothing in it comes
+> history of its own design since PR #494 (§40.6C); nothing in it comes
 > from the reference, which has none.
 
 ### 40.6B.7 Swaps
@@ -1563,7 +1563,7 @@ to match.
 > forced clauses.
 
 > *Reloaded status (clean side, 2026-11-22):* transaction history is built
-> in PR #S10PR (§40.6C). With `tx_history: true` at the platform's activation,
+> in PR #494 (§40.6C). With `tx_history: true` at the platform's activation,
 > both forms of `my_tx_history` serve the platform and its tokens; without
 > it they answer as the note of 2026-11-17 states.
 
@@ -2084,7 +2084,7 @@ A unit test; it needs no activation and runs while Solana is switched off.
 
 D40.1 Solana transaction history.
 
-> *Reloaded status (clean side, 2026-11-22):* done in PR #S10PR (§40.6C):
+> *Reloaded status (clean side, 2026-11-22):* done in PR #494 (§40.6C):
 > Reloaded's own design on the public Solana JSON-RPC, for SOL and SPL
 > coins, on native and browser builds.
 

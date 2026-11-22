@@ -537,7 +537,7 @@ transaction is never written to both by one activation.
 > *Reloaded status (clean side, 2026-11-22):* a Solana platform coin and its
 > SPL tokens with history enabled are also served by the mmrpc-2.0 method
 > from the per-ticker history list, as TRON coins are (chapter 40 §40.6C,
-> PR #S10PR).
+> PR #494).
 
 R38.5A.8 **QRC20 token history.** The legacy `my_tx_history` method for a QRC20
 token is served from the token's own history collector and shall follow the
