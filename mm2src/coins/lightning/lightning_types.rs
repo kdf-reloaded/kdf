@@ -1,6 +1,9 @@
 // lightning_types — LightningCoin struct, LightningParams, start_lightning activation
 use super::*;
 
+/// The text of every swap operation of a Lightning coin: swaps are not supported.
+pub(crate) fn swaps_unsupported(ticker: &str) -> String { format!("Lightning swaps are not supported ({ticker})") }
+
 type Router = DefaultRouter<Arc<NetworkGraph>, Arc<LogState>>;
 pub(crate) type InvoicePayer<E> =
     payment::InvoicePayer<Arc<ChannelManager>, Router, Arc<Mutex<Scorer>>, Arc<LogState>, E>;

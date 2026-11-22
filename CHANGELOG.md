@@ -770,6 +770,11 @@ the previous version used. The safe way:
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
+- **An operation that a Lightning coin does not support answers an error instead of stopping the process.** The swap
+  operations, the trade-fee estimates, the waits for a confirmation or a spend and the transaction decoding of a
+  Lightning coin aborted the node when they were reached; each now answers an error. Orders and trade previews with
+  a Lightning coin were already refused. The public key of a Lightning coin, which `get_private_keys` reads, is its
+  node id. Detail: PR #479.
 
 #### WalletConnect
 
@@ -1057,6 +1062,9 @@ the previous version used. The safe way:
 
 ### Tests
 
+- **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
+  network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
+  Detail: PR #479.
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
   runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
   because the locked test library was far older than the locked `wasm-bindgen`. The test library is
