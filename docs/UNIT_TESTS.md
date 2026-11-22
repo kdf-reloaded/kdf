@@ -837,9 +837,10 @@ every balance query. The tokens' `balanceOf` queries are recorded by contract.
 | `evm_hd_p2_the_activation_report_keeps_the_platform_and_every_token_and_asks_each_token_once_per_address` | R35.1.3(b) | The activation report's maps and total hold the platform and every token, and each token's `balanceOf` is asked once per address |
 
 The Trezor policy: `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens` checks the
-maps and the total of `task::account_balance::init` of a Trezor HD platform with one token; it runs in the emulator job
-and prints a skip line when no emulator is reachable. The scan and `get_new_address` under the Trezor policy are not
-covered by an emulator test. The unchanged answers of a TRON platform and of a TRC20 ticker are pinned by
+maps and the total of `task::account_balance::init` of a Trezor HD platform with one token in the emulator job.
+In that job (`TREZOR_EMULATOR_UDP` set) an unreachable emulator fails the test; without the variable the test prints a
+skip line when no emulator is reachable. The scan and `get_new_address` under the Trezor policy are not covered by an
+emulator test. The unchanged answers of a TRON platform and of a TRC20 ticker are pinned by
 `a_trc20_ticker_answers_its_own_ticker_only_and_its_scan_finds_a_token_only_address` and
 `an_address_is_used_when_the_chain_has_its_account_or_an_enabled_token_balance_is_not_zero` in
 `mm2src/coins/eth/tron/hd_tests.rs`.

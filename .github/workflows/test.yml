@@ -502,8 +502,11 @@ jobs:
     # trezor-user-env emulator (Docker, host networking) so no physical
     # device is required. The emulator speaks the Trezor v1 wire protocol
     # over UDP :21324 and exposes a controller WebSocket on :9001 (+ a
-    # DebugLink on :21325 used to auto-confirm on-device prompts); the tests
-    # drive it via mm2src/trezor/tests/emulator/emulator_control.py
+    # DebugLink on :21325 used to auto-confirm on-device prompts). The
+    # container starts only the controller; the "Start and seed the emulator"
+    # step below starts the emulator itself through
+    # mm2src/trezor/tests/emulator/emulator_control.py, which the tests also
+    # use to re-seed the device
     # (python3 + websockets). Everything is gated behind the
     # `trezor-emulator-tests` cargo feature and the TREZOR_EMULATOR_UDP env
     # var, so the ordinary unit/docker jobs never build or run it.
@@ -540,18 +543,50 @@ jobs:
       - name: Check Docker availability
         run: docker --version && docker info --format '{{.ServerVersion}}'
 
-      - name: Start Trezor emulator (trezor-user-env)
+      - name: Start Trezor controller (trezor-user-env)
+        # Pinned by digest. To move the pin: pull the image, read its digest
+        # (docker image inspect --format '{{index .RepoDigests 0}}'), replace it here.
         run: |
           docker rm -f tenv 2>/dev/null || true
           docker run -d --name tenv --network host \
-            ghcr.io/trezor/trezor-user-env:latest
-          # Wait for the controller dashboard to answer before starting tests.
-          for i in $(seq 1 90); do
-            if curl -s -o /dev/null http://localhost:9002; then
-              echo "trezor-user-env up after ${i}s"; break
-            fi
-            sleep 1
-          done
+            ghcr.io/trezor/trezor-user-env@sha256:3cb7a725fd5b6a1b2905c511b255d19a20cc8ae8a3401f64d4289cfd43f2efab
+          # Wait for the controller WebSocket on :9001; fail if it never answers.
+          python3 - <<'PY'
+          import socket, sys, time
+          for i in range(1, 91):
+              try:
+                  socket.create_connection(("127.0.0.1", 9001), timeout=1).close()
+                  print(f"controller up after {i}s")
+                  sys.exit(0)
+              except OSError:
+                  time.sleep(1)
+          print("controller WebSocket on :9001 did not answer within 90s", file=sys.stderr)
+          sys.exit(1)
+          PY
+
+      - name: Start and seed the emulator
+        # The container runs only the controller; the emulator starts when a
+        # client sends emulator-start. setup does that and seeds the device.
+        run: |
+          python3 mm2src/trezor/tests/emulator/emulator_control.py setup
+          python3 - <<'PY'
+          import socket, sys, time
+          deadline = time.time() + 30
+          while time.time() < deadline:
+              s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+              s.settimeout(1)
+              try:
+                  s.sendto(b"PINGPING", ("127.0.0.1", 21324))
+                  if s.recv(8) == b"PONGPONG":
+                      print("emulator answers on UDP 21324")
+                      sys.exit(0)
+              except OSError:
+                  time.sleep(1)
+              finally:
+                  s.close()
+          print("emulator did not answer PONGPONG on UDP 21324 within 30s", file=sys.stderr)
+          sys.exit(1)
+          PY
 
       - name: Run Trezor emulator acceptance tests
         # Serialize (single emulated device). The suites seed the device
