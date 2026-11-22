@@ -883,24 +883,41 @@ impl SwapOps for TendermintCoin {
             .map_err(|e| e.to_string())
     }
 
-    fn extract_secret(&self, _secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+    /// CRD ch.51 §51.6E R91: every message of the transaction is examined; the first claim message whose
+    /// secret passes the secret-hash rule gives the secret.
+    fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
         let tx = try_s!(cosmrs::Tx::from_bytes(spend_tx));
-        let msg = try_s!(tx.body.messages.first().ok_or("Tx body couldn't be read."));
-
         let htlc_type = try_s!(HtlcType::from_str(&self.protocol_info.account_prefix));
-        let htlc_proto = try_s!(ClaimHtlcProto::decode(htlc_type, msg.value.as_slice()));
-        let htlc = try_s!(ClaimHtlcMsg::try_from(htlc_proto));
 
-        // CRD ch.18 R18.11.14: the secret of a claim is exactly 32 bytes.
-        let secret = hex::decode(htlc.secret()).map_err(|e| format!("{}", e))?;
-        if secret.len() != SECRET_LEN {
-            return Err(format!(
-                "Invalid secret length: {} bytes, expected {}",
-                secret.len(),
-                SECRET_LEN
-            ));
+        let mut refusal = String::new();
+        for msg in &tx.body.messages {
+            let Ok(htlc_proto) = ClaimHtlcProto::decode(htlc_type, msg.value.as_slice()) else {
+                continue;
+            };
+            let Ok(htlc) = ClaimHtlcMsg::try_from(htlc_proto) else {
+                continue;
+            };
+            // CRD ch.18 R18.11.14: the secret of a claim is exactly 32 bytes.
+            let Ok(secret) = hex::decode(htlc.secret()) else {
+                continue;
+            };
+            if secret.len() != SECRET_LEN {
+                refusal = format!(
+                    " Invalid secret length: {} bytes, expected {}.",
+                    secret.len(),
+                    SECRET_LEN
+                );
+                continue;
+            }
+            if crypto::secret_hash_algo::secret_matches_hash(&secret, secret_hash)? {
+                return Ok(secret);
+            }
         }
-        Ok(secret)
+        Err(format!(
+            "None of the {} messages of the spend transaction is a claim with the secret of the swap.{}",
+            tx.body.messages.len(),
+            refusal
+        ))
     }
 
     fn negotiate_swap_contract_addr(
