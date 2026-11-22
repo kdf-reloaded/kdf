@@ -200,8 +200,8 @@ fn evm_hd_p1_get_new_address_answers_the_full_checksummed_address() {
     assert_eq!(address.to_lowercase(), address_at(&ctx, 3));
     assert_eq!(
         tickers(&answer["new_address"]["balance"]),
-        vec![PLATFORM.to_owned()],
-        "the platform ticker only"
+        vec![PLATFORM.to_owned(), TOKEN.to_owned()],
+        "the platform ticker and the activated token (R49.32 item 1)"
     );
 }
 
@@ -258,7 +258,7 @@ fn evm_hd_p1_get_new_address_with_a_token_ticker_answers_the_token_only_and_the_
     assert_eq!(tickers(&answer["new_address"]["balance"]), vec![TOKEN.to_owned()]);
     assert_eq!(answer["new_address"]["balance"][TOKEN]["spendable"], "5");
 
-    // The platform's own answer lists the generated address, with the platform ticker only.
+    // The platform's own answer lists the generated address, with the platform ticker and the token.
     assert_eq!(known_addresses(&ctx), 4);
     let platform = coin(&ctx, PLATFORM);
     let listed = block_on(platform.account_balance_rpc(account_params())).unwrap_or_else(|e| panic!("{e}"));
@@ -267,7 +267,7 @@ fn evm_hd_p1_get_new_address_with_a_token_ticker_answers_the_token_only_and_the_
     assert_eq!(addresses.len(), 4);
     assert_eq!(addresses[3]["address"].as_str().unwrap().to_lowercase(), fourth);
     for entry in addresses {
-        assert_eq!(tickers(&entry["balance"]), vec![PLATFORM.to_owned()]);
+        assert_eq!(tickers(&entry["balance"]), vec![PLATFORM.to_owned(), TOKEN.to_owned()]);
     }
 }
 
@@ -312,11 +312,8 @@ fn evm_hd_p1_the_scan_with_a_token_ticker_finds_an_address_that_holds_only_that_
     let token_only = address_at(&ctx, 3);
     chain.set_token(&token_only, 4_000_000);
 
-    // The platform ticker's rule is unchanged: it does not find the address.
-    let platform = coin(&ctx, PLATFORM);
-    let by_platform =
-        block_on(platform.init_scan_for_new_addresses_rpc(scan_params(2))).unwrap_or_else(|e| panic!("{e}"));
-    assert!(by_platform.new_addresses.is_empty());
+    // (The platform ticker's scan finds this address too, by the token-aware rule of R49.32 item 3; see
+    // `evm_hd_p2_the_scan_lists_unqueried_addresses_with_an_empty_map_and_finds_a_token_only_address`.)
     assert_eq!(known_addresses(&ctx), 3);
 
     let token = coin(&ctx, TOKEN);

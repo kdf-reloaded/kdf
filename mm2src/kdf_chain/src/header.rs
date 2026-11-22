@@ -79,6 +79,21 @@ const MAX_SOLUTION_BYTES: usize = 1 << 20;
 /// a wide margin for variable-length encodings.
 const MAX_BLOCK_SIG_DLGT_BYTES: usize = 4096;
 
+/// Bits 8 to 11 of a Kerrigan header's version select the mining algorithm and with it the layout
+/// (CRD ch.37 R37.5.11).
+const KERRIGAN_ALGO_MASK: u32 = 0x0000_0F00;
+/// X11: the standard 80-byte header.
+const KERRIGAN_ALGO_X11: u32 = 0x0000;
+/// KawPoW: the standard 80 bytes with the 32-bit nonce kept, then a 44-byte trailer (124 bytes).
+const KERRIGAN_ALGO_KAWPOW: u32 = 0x0200;
+/// Equihash(200,9): the Equihash form with a 1344-byte solution.
+const KERRIGAN_ALGO_EQUIHASH_200_9: u32 = 0x0400;
+/// Equihash(192,7): the Equihash form with a 400-byte solution.
+const KERRIGAN_ALGO_EQUIHASH_192_7: u32 = 0x0600;
+/// Upper bound on a Kerrigan Equihash solution in bytes: the chain's own wire bound. No exact
+/// length is applied per algorithm.
+const KERRIGAN_MAX_SOLUTION_BYTES: usize = 1400;
+
 /// AuxPoW merkle proof branch (used by Doge/Syscoin merged mining).
 #[derive(Clone, Debug, PartialEq, Serializable)]
 pub struct MerkleBranch {
@@ -131,6 +146,16 @@ pub struct ProgPow {
     mix_hash: H256,
 }
 
+/// Kerrigan KawPoW header tail: block height, 64-bit nonce and mix hash, written after the 32-bit
+/// nonce (CRD ch.37 R37.5.11). Kept apart from `n_height`, `n_nonce_u64` and `mix_hash` because the
+/// serializer omits the 32-bit nonce whenever `n_height` is set (the Ravencoin layout).
+#[derive(Clone, Debug, Deserializable, PartialEq, Serializable)]
+pub struct KerriganKawpow {
+    pub height: u32,
+    pub nonce64: u64,
+    pub mix_hash: H256,
+}
+
 /// Firo MTP header tail.
 /// <https://github.com/firoorg/firo/blob/75f72d061eb793c39148c6d3f3eb5595159fdca0/src/primitives/block.h#L159>
 #[derive(Clone, Debug, Deserializable, PartialEq, Serializable)]
@@ -179,6 +204,9 @@ pub struct BlockHeader {
     /// `hash_final_sapling_root`, which sits before the time in the Equihash layout. Set only by the
     /// `Pivx` layout.
     pub pivx_trailer: Option<H256>,
+    /// Kerrigan KawPoW: the 44-byte trailer after the 32-bit nonce (CRD ch.37 R37.5.11). Set only by
+    /// the `Kerrigan` layout, for headers whose version selects KawPoW.
+    pub kerrigan_kawpow: Option<KerriganKawpow>,
 }
 
 impl BlockHeader {
@@ -187,6 +215,11 @@ impl BlockHeader {
     /// The identity hash is a double-SHA256 of the full header bytes for every family and every PIVX
     /// header version, matching the reference (CRD ch.37 R37.5.7); the chain's own pre-version-4 Quark
     /// hash is not used for identity.
+    ///
+    /// For a header read with the `Kerrigan` layout this is not the chain's block identity, which is an
+    /// X11 hash over the first 80 bytes (X11 and KawPoW headers) or the first 140 bytes (Equihash
+    /// headers). That layout serves the median-time-past and block-timestamp reads, which take the time
+    /// field only; nothing on those paths uses this value (CRD ch.37 R37.5.11, D37.5.11.2).
     pub fn hash(&self) -> H256 { dhash256(&serialize(self)) }
 
     pub fn is_prog_pow(&self) -> bool { self.version == MTP_POW_VERSION && self.time >= PROG_POW_SWITCH_TIME }
@@ -234,6 +267,9 @@ impl BlockHeader {
             // LBRY fixes its layout unconditionally: a header of any other length is malformed, so
             // there is no std-80 re-read (R37.5.6).
             CoinVariant::Lbc => return read_all(bytes, coin_variant, BlockHeader::read_lbc),
+            // Kerrigan takes each header's layout from its own version and has no fixed length, so a
+            // header that does not read exactly is malformed: there is no std-80 re-read (R37.5.11).
+            CoinVariant::Kerrigan => return read_all(bytes, coin_variant, BlockHeader::read_kerrigan),
             // The trailing field is chosen by the header's own version, a within-family choice that
             // the guard of R37.5.6 covers.
             CoinVariant::Pivx => {
@@ -298,6 +334,14 @@ impl BlockHeader {
             CoinVariant::Lbc => {
                 return read_all(bytes, coin_variant, |reader| {
                     (0..count).map(|_| BlockHeader::read_lbc(reader)).collect()
+                });
+            },
+            CoinVariant::Kerrigan => {
+                // Each header's layout, and so its length, comes from its own version field, so the
+                // list is read header by header at the true boundaries, and must end exactly at the
+                // end of `bytes` (R37.5.11.2). No std-80 re-read.
+                return read_all(bytes, coin_variant, |reader| {
+                    (0..count).map(|_| BlockHeader::read_kerrigan(reader)).collect()
                 });
             },
             CoinVariant::Pivx => {
@@ -383,6 +427,7 @@ impl BlockHeader {
             wide_time: false,
             claim_trie_root: None,
             pivx_trailer: None,
+            kerrigan_kawpow: None,
         }
     }
 
@@ -427,6 +472,44 @@ impl BlockHeader {
             header.pivx_trailer = Some(reader.read()?);
         }
         Ok(header)
+    }
+
+    /// Reads one Kerrigan header: the layout follows bits 8 to 11 of the header's own version (CRD
+    /// ch.37 R37.5.11). X11 is the standard 80 bytes. KawPoW is the standard 80 bytes, the 32-bit
+    /// nonce included, then the 44-byte trailer. Both Equihash algorithms use one form: a 32-byte
+    /// reserved field between the Merkle root and the time, compact bits, a 256-bit nonce and a
+    /// length-prefixed solution of at most [`KERRIGAN_MAX_SOLUTION_BYTES`]. Any other value of the
+    /// algorithm bits is an error naming the version.
+    fn read_kerrigan<T: io::Read>(reader: &mut Reader<T>) -> Result<Self, serialization::Error> {
+        let version: u32 = reader.read()?;
+        let algorithm = version & KERRIGAN_ALGO_MASK;
+        match algorithm {
+            KERRIGAN_ALGO_X11 | KERRIGAN_ALGO_KAWPOW => {
+                let mut header = Self::read_standard_after_version(reader, version)?;
+                if algorithm == KERRIGAN_ALGO_KAWPOW {
+                    header.kerrigan_kawpow = Some(reader.read()?);
+                }
+                Ok(header)
+            },
+            KERRIGAN_ALGO_EQUIHASH_200_9 | KERRIGAN_ALGO_EQUIHASH_192_7 => {
+                let previous_header_hash = reader.read()?;
+                let merkle_root_hash = reader.read()?;
+                let reserved: H256 = reader.read()?;
+                let time = reader.read()?;
+                let bits = BlockHeaderBits::Compact(reader.read()?);
+                let nonce = BlockHeaderNonce::H256(reader.read()?);
+                let solution: Vec<u8> = reader.read_list_max(KERRIGAN_MAX_SOLUTION_BYTES)?;
+                let mut header = Self::plain(version, previous_header_hash, merkle_root_hash, time, bits, nonce);
+                header.hash_final_sapling_root = Some(reserved);
+                header.solution = Some(solution);
+                Ok(header)
+            },
+            other => Err(serialization::Error::Custom(format!(
+                "Kerrigan header version {version:#010x}: the algorithm bits (8 to 11) hold {:#x}, which the \
+                 chain does not use",
+                other >> 8
+            ))),
+        }
     }
 
     /// Reads one header of the mixed KawPoW/merged-mined layout, choosing by the header's own
@@ -492,6 +575,7 @@ where
     }
 }
 
+#[cfg(test)] mod kerrigan_tests;
 #[cfg(test)] mod layout_tests;
 #[cfg(test)] mod pivx_lbc_tests;
 
@@ -530,6 +614,10 @@ impl Serializable for BlockHeader {
         // still has its 4-byte nonce, including a nonce of zero.
         if self.n_height.is_none() && self.prog_pow.is_none() {
             s.append(&self.nonce);
+        }
+        // The Kerrigan KawPoW trailer follows the 32-bit nonce, which that layout keeps.
+        if let Some(trailer) = &self.kerrigan_kawpow {
+            s.append(trailer);
         }
         if let Some(field) = &self.pivx_trailer {
             s.append(field);
@@ -669,6 +757,7 @@ impl Deserializable for BlockHeader {
             wide_time: false,
             claim_trie_root: None,
             pivx_trailer: None,
+            kerrigan_kawpow: None,
         })
     }
 }

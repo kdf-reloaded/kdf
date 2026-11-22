@@ -226,6 +226,12 @@ jobs:
           # from the workspace, so it is run by manifest path (its own Cargo.lock).
           - name: bounded-close
             cmd: "cargo test --manifest-path vendor-patches/libp2p-yamux-0.44.0/Cargo.toml"
+          # The Noise crate on x25519-dalek 2 (RUSTSEC-2024-0344): the vendored crate's own
+          # tests, which include the RFC 7748 Diffie-Hellman vectors and the handshake round
+          # trip. The crate is excluded from the workspace, so it is run by manifest path
+          # (its own Cargo.lock).
+          - name: noise-dalek
+            cmd: "cargo test --manifest-path vendor-patches/libp2p-noise-0.43.0/Cargo.toml"
           # The withdraw, Qtum, Bitcoin Cash and SLP tests of `coins`, selected by a substring of
           # the test path. The tests of these paths that need a public server carry
           # `#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]`

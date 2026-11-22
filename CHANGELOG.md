@@ -112,6 +112,13 @@ or undo, and every change that needs a step from you.
   confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
   servers now report at another height shows that height and its block's time.
   - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
+- **A Kerrigan (KRGN) coin entry needs `"chain_variant": "KRGN"` in its `protocol` object.** Without it, the
+  coin's Electrum headers cannot be read, so its median block time is almost always unknown, and claims and refunds
+  of a KRGN swap fail, as they did before this release. With the value, the headers are read and claims and refunds
+  follow the same lock-time rule as those of any UTXO coin. A KRGN entry with
+  `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
+  - *What you see:* a KRGN entry without the value still activates, but its claims and refunds keep failing.
+  - Detail: PR #468; CRD ch.37 status note of 2026-11-18.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -698,8 +705,9 @@ the previous version used. The safe way:
   signature, a SOL and an SPL transfer, and the token-account address under both token programs. The
   old `ed25519-dalek` 1.0.1 library leaves the dependency tree, so the dependency policy no longer
   ignores RUSTSEC-2022-0093.
-  RUSTSEC-2024-0344 stays ignored: `curve25519-dalek` 3.2.0 still comes in through the peer-to-peer
-  library's encryption layer, not through Solana. Detail: PR #465.
+  RUSTSEC-2024-0344 is not cleared by this change: `curve25519-dalek` 3.2.0 also came in through the
+  peer-to-peer library's encryption layer, which PR #470 moves to the new library line.
+  Detail: PR #465.
 
 #### UTXO coins and Electrum
 
@@ -728,10 +736,32 @@ the previous version used. The safe way:
 
   Detail: PR #431; CRD ch.39 R39.11.4V.10 status note.
 
+#### Transport, TLS and dependencies
+
+- **The peer-to-peer encryption no longer uses the old curve25519 library with the timing advisory.** The
+  encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
+  (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
+  (`x25519-dalek` 2, `curve25519-dalek` 4). The handshake itself is unchanged, byte for byte, and nodes running
+  older versions connect as before. With the Solana libraries already moved off it, the old library is now out
+  of the build, and the dependency policy no longer ignores RUSTSEC-2024-0344. Detail: PR #470; CRD ch.28 OQ2
+  status note of 2026-11-22;
+  `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
+
 ### Fixed
 
 #### EVM, BCH, Sia and Lightning coins
 
+- **The HD address methods of an EVM platform list its tokens.** `get_new_address`, `account_balance`,
+  `task::account_balance::init` and `task::scan_for_new_addresses::init` asked for the platform coin now answer, per
+  address, the platform and every ERC-20 token activated on it at that moment, including tokens with a zero balance;
+  the total of `task::account_balance::init` sums each. They showed the platform coin only. If one balance cannot be
+  read, the request fails instead of returning a partial list; `get_new_address` still keeps the new address, as it
+  already did when the platform balance could not be read. Asked for a token, they still answer that token only.
+  Detail: PR #463; CRD ch.49 R49.32.
+- **A scan for new addresses of an EVM platform finds token-only addresses.** An address counts as used when its
+  transaction count, its platform balance or the balance of any activated token is not zero, so an address that only
+  received a token is found. The unused addresses between the known range and a newly found address are listed with
+  an empty balance map. The scan made during activation is unchanged. Detail: PR #463; CRD ch.49 R49.32.
 - **A quick disable and re-enable no longer leaves the old history loop running, and a failed legacy activation no
   longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
   of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at
@@ -891,6 +921,16 @@ the previous version used. The safe way:
   transaction of another coin family. It now refuses the transaction with an error message. In the
   same way, a payment event that a node reports without a transaction hash is an error, not an abort.
   Detail: PR #452.
+
+#### Kerrigan (KRGN)
+
+- **KRGN swaps can claim and refund over Electrum.** Kerrigan headers are 80, 124, 543 or 1487 bytes long,
+  depending on the mining algorithm, and two of the four layouts carry the block time 32 bytes later than the
+  standard header. The node could not read them, so the median block time a claim or refund needs was almost
+  always unknown, and KRGN claims and refunds failed with an error, including refunds through
+  `recover_funds_of_swap`. With `"chain_variant": "KRGN"` in the coin's entry, each header is now read by its
+  algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #468; CRD ch.37
+  §37.5.11.
 
 #### Siacoin
 
@@ -1118,7 +1158,8 @@ the previous version used. The safe way:
   last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — done: the Solana crates moved to the 3.x
   line (package S5 of `solana-support`, PR #465); RUSTSEC-2022-0093 is cleared, and RUSTSEC-2024-0344
-  moves to the libp2p modernization task (it comes in through the peer-to-peer library).
+  moves to the libp2p modernization task (it comes in through the peer-to-peer library); PR #470 clears
+  it by vendoring the Noise crate.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,

@@ -71,8 +71,9 @@ pub trait Deserializable {
 ///
 /// `Riecoin` and `KawpowAuxpowMixed` are the two header layouts a coin selects through the
 /// Reloaded-only `protocol.header_layout` key (CRD ch.37 R37.5.9); they are never
-/// inferred from a version value. `Lbc` and `Pivx` are the readers of the `"LBC"` and `"PIVX"`
-/// values of `chain_variant` (R37.5.2, R37.5.5); no `header_layout` value names them.
+/// inferred from a version value. `Lbc`, `Pivx` and `Kerrigan` are the readers of the `"LBC"`,
+/// `"PIVX"` and `"KRGN"` values of `chain_variant` (R37.5.2, R37.5.5, R37.5.11); no `header_layout`
+/// value names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoinVariant {
     Standard,
@@ -85,6 +86,12 @@ pub enum CoinVariant {
     Lbc,
     /// PIVX: std-80, plus a 32-byte field after the nonce for header versions 4-6 and 8 and above.
     Pivx,
+    /// Kerrigan: the layout of each header follows the mining algorithm in bits 8 to 11 of its own
+    /// version (CRD ch.37 R37.5.11): 0 is the standard 80 bytes, 2 is KawPoW (the standard 80 bytes
+    /// with the 32-bit nonce kept, then height, 64-bit nonce and mix hash, 124 bytes), 4 and 6 are the
+    /// Equihash form (a 32-byte reserved field before the time, a 256-bit nonce and a length-prefixed
+    /// solution); any other value is an error.
+    Kerrigan,
 }
 
 impl CoinVariant {
