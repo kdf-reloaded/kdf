@@ -795,7 +795,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **TRON has an HD wallet on the standard methods; the legacy route keeps the internal key.**
   Under a global-HD login `enable_eth_with_tokens` and `task::enable_eth::init` derive the TRX address under the
   `derivation_path` of the coin config (coin type 195), as GLEEC KDF does; the HD methods (`get_new_address`,
-  `account_balance` and the task forms of `get_new_address`, `scan_for_new_addresses` and `account_balance`) answer
+  `account_balance` and the task forms of `scan_for_new_addresses` and `account_balance`; this build has no task form
+  of `get_new_address`) answer
   base58check addresses and a balance map (over TRX and the enabled TRC20 tokens for the TRX ticker, that token only for
   a TRC20 ticker, as GLEEC KDF does), and `task::create_new_account::init` fails with `Internal`. An address counts as
   used when the chain has created its account or an enabled TRC20 token has a balance there. For a scan asked for a
@@ -896,7 +897,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Reloaded has no TRON swap, and neither has a GLEEC KDF release. `setprice`,
   `buy`, `sell` and `start_swap` refuse a TRON coin with the usual "… is wallet
   only" answer, a TRON coin declines to match, an order with a TRON coin
-  saved earlier is cancelled at startup, and an unfinished saved swap that names
+  saved earlier is kept at startup but never announced or matched, and an
+  unfinished saved swap that names
   a TRON coin is not resumed at startup (its record is kept, with a line in the
   log). This holds whatever the coins-file entry says. For an entry with
   `"wallet_only": true`, which every published TRON entry has, the answer is
@@ -1005,8 +1007,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **Tendermint (Cosmos) coins and tokens are wallet-only in this beta.**
   Activation, balances and `withdraw` work; `setprice`, `buy`, `sell` and
   `start_swap` refuse the coin with the usual "… is wallet only" answer, and an
-  order with a Tendermint coin saved by an earlier version is cancelled at
-  startup. A swap already in progress still
+  order with a Tendermint coin saved by an earlier version is kept at
+  startup but never announced or matched. A swap already in progress still
   completes or is recovered. Orders and swaps are planned to return in a later
   release. No switch exists: the build constant `TENDERMINT_SWAPS_AVAILABLE`
   (`coins/lp_coins_ops.rs`) is `false`. When they return, three points will
