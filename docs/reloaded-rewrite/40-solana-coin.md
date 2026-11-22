@@ -2098,14 +2098,19 @@ third-party role).
 **R40.6D.1 (the program and its deployment).** The program is the public program
 of F40.6B.5 at the state `satomic-swap fix/htlc-correctness (as of 2026-10-28)`
 of chapter 02 §2.15A (crate `satomic-swap` 0.2.0; licensed MIT by its crate
-manifest; the repository has no license file). Its build is reproduced from that
-state and compared with the devnet program of F40.6B.5 before any deployment.
-Reloaded deploys it once per cluster without an upgrade authority, so no one can
-change the program after deployment: on devnet with a lab key and faucet funds
-(the devnet lab runs on that deployment), on mainnet from the maintainer's
-wallet. The program address of each cluster is recorded in a dated status note
-of this section once deployed. By its own record the program is not audited;
-Reloaded's review of its source is not an audit.
+manifest; the repository has no license file). Two builds are made from that
+state in a pinned build environment: the unchanged source, whose program must
+equal the devnet program of F40.6B.5 byte for byte, and the same source with
+only its declared program address changed to the address of Reloaded's
+deployment (the program refuses to run under any other address than the one it
+declares), whose differences from the first build must lie only in that address.
+The second build is the one deployed. Reloaded deploys it once per cluster
+without an upgrade authority, so no one can change the program after deployment:
+on devnet with a lab key and faucet funds (the devnet lab runs on that
+deployment), on mainnet from the maintainer's wallet. The program address of
+each cluster is recorded in a dated status note of this section once deployed.
+By its own record the program is not audited; Reloaded's review of its source is
+not an audit.
 
 **R40.6D.2 (configuration and tradability).** A platform entry of type `SOLANA`
 names its cluster's program in `protocol.protocol_data.swap_program_id`
@@ -2136,7 +2141,9 @@ other leg derives its own form from that value (R72A, R72B).
 §40.1A); it is the same in every swap. On the wire it is the 32-byte public key
 followed by one zero byte (chapter 51 R63, R64). A counterparty key whose last
 byte is not zero, or whose first 32 bytes are not a point of the ed25519 curve,
-is refused (the receiver must be able to sign its claim).
+is refused (the receiver must be able to sign its claim), and so is a
+counterparty key equal to the coin's own key (the program refuses a payment to
+its own sender).
 
 **R40.6D.6 (payment).** A payment is the program's `lamports_payment` (SOL) or
 `spl_payment` (SPL) instruction with the agreed secret hash, the payment's lock
@@ -2176,15 +2183,19 @@ configured program, top-level or inner, that is the payment instruction for this
 coin with exactly the agreed secret hash, lock time, amount, sender, receiver
 and (SPL) mint, and when the payment account derived from those terms is owned
 by the program and holds at least the amount above its rent-exempt minimum
-(SOL), or the vault holds at least the amount (SPL). A failed read is
-undetermined: the validation is tried again until its deadline and never answers
-"valid" on it.
+(SOL), or the vault holds at least the amount and is not frozen (SPL). A failed
+read is undetermined: the validation is tried again until its deadline and never
+answers "valid" on it.
 
 **R40.6D.10 (claim and refund).** The receiver claims with `receiver_spend_*`
 and the secret; for SPL, when the receiver has no associated token account for
 the mint, the claim transaction first creates it (idempotently; the receiver
-pays its rent). The sender refunds with `sender_refund_*` once the refund gate
-(R40.6D.11) is open.
+pays its rent). A claim is sent only while the payment account is present at
+`finalized` (as R40.6D.16 requires), only after the node's simulation of the
+transaction succeeds, and only while the cluster time (R40.6D.11) is at least
+300 seconds before the lock time, because the data of a claim that fails on
+chain still shows the secret. The sender refunds with `sender_refund_*` once the
+refund gate (R40.6D.11) is open.
 
 **R40.6D.11 (refund gate).** The time compared with the lock is the cluster's:
 the block time of the latest `finalized` slot. The gate answers "wait" with the
@@ -2252,9 +2263,12 @@ that does not answer (no other node is taken in its place); the node then waits.
 
 **R40.6D.17 (limits).** A cluster without a deployed program has no tradable
 Solana coin. The program is unaudited (R40.6D.1). The counterparty of a Solana
-swap is a Reloaded node. A swap stopped part-way follows the legacy machine's
-recovery like every other coin. Not set by this section: a compute-unit price
-for claims and refunds under load, and how long a claim or refund is retried.
+swap is a Reloaded node. A token whose mint has a freeze authority can have the
+vault or a party's token account frozen, which makes claim and refund fail; this
+is a risk of each such token. A swap stopped part-way follows the legacy
+machine's recovery like every other coin. Not set by this section: a
+compute-unit price for claims and refunds under load, and how long a claim or
+refund is retried.
 
 ### 40.6D.1 Tests
 
@@ -2267,8 +2281,8 @@ T40.6D.2 Contract field: equal 32 bytes accepted; other length, other bytes and
 an absent field refused with the named errors (R40.6D.3).
 T40.6D.3 The pair rule selects SHA-256 for a Solana or SPL leg on either side
 (R40.6D.4).
-T40.6D.4 Keys: the wire form; a non-zero last byte and an off-curve key refused
-(R40.6D.5).
+T40.6D.4 Keys: the wire form; a non-zero last byte, an off-curve key and the
+coin's own key refused (R40.6D.5).
 T40.6D.5 Payment, claim and refund instructions for SOL and SPL byte-exact
 against captured devnet transactions of the program, and the derived payment and
 vault addresses equal to those of the captured transactions (R40.6D.6,
@@ -2298,6 +2312,10 @@ T40.6D.12 A repeated payment send with the same terms does not pay twice; a
 failed read before it sends nothing (R40.6D.7).
 T40.6D.13 Evidence: two agreeing nodes, a disagreement, one answer, and the
 named evidence node (R40.6D.16).
+T40.6D.14 Claim conditions: no claim is sent when the payment account is gone,
+when the simulation fails, or when the cluster time is less than 300 seconds
+before the lock time; an SPL vault that is frozen fails validation (R40.6D.9,
+R40.6D.10).
 
 ## 40.7 Tests
 
