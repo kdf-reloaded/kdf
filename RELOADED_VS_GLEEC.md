@@ -795,7 +795,8 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 - **TRON has an HD wallet on the standard methods; the legacy route keeps the internal key.**
   Under a global-HD login `enable_eth_with_tokens` and `task::enable_eth::init` derive the TRX address under the
   `derivation_path` of the coin config (coin type 195), as GLEEC KDF does; the HD methods (`get_new_address`,
-  `account_balance` and the task forms of `get_new_address`, `scan_for_new_addresses` and `account_balance`) answer
+  `account_balance` and the task forms of `scan_for_new_addresses` and `account_balance`; this build has no task form
+  of `get_new_address`) answer
   base58check addresses and a balance map (over TRX and the enabled TRC20 tokens for the TRX ticker, that token only for
   a TRC20 ticker, as GLEEC KDF does), and `task::create_new_account::init` fails with `Internal`. An address counts as
   used when the chain has created its account or an enabled TRC20 token has a balance there. For a scan asked for a

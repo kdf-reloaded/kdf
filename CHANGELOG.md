@@ -664,6 +664,11 @@ the previous version used. The safe way:
   balance is not zero. Detail: PR #438; CRD ch.49 R49.32.
 - **`task::scan_for_new_addresses::init` serves EVM coins under an HD wallet.** It was answered only for TRON coins
   and UTXO coins; an EVM platform now answers it. Detail: PR #438; CRD ch.05 R54.
+- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
+  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
+  transaction of another coin family. It now refuses the transaction with an error message. In the
+  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
+  Detail: PR #452.
 
 #### Solana coins
 
@@ -967,14 +972,6 @@ the previous version used. The safe way:
   server with the ones it already holds. When they differ, the history collectors run at once instead of waiting for a
   balance change, and one WARN line names the height from which the chain changed. At most one small request is made
   per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
-
-#### EVM coins
-
-- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
-  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
-  transaction of another coin family. It now refuses the transaction with an error message. In the
-  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
-  Detail: PR #452.
 
 #### Kerrigan (KRGN)
 
@@ -1302,6 +1299,12 @@ the previous version used. The safe way:
   and repeating the request later succeeded. For regular use, set a TronGrid API key (`tron_api_key`) or use your
   own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: PR #467;
   CRD ch.21 §21.9.
+- **No watcher can refund a Siacoin (SC) payment yet.** The 0.4.0-beta.1 item "Siacoin (SC) swaps: what is not
+  covered" says that a node watching other traders' swaps can refund a Siacoin payment for an offline taker. That
+  overstated it: a taker hands its swap data to watchers only when both coins of the swap offer watching, and
+  Siacoin is the only coin that does, so no swap hands its data to a watcher, as the 0.4.0-beta.1 item "The swap
+  watcher does not work yet" says. Keep your node running until your swaps have finished. Detail: CRD ch.09 R17,
+  ch.20 D7.
 
 ## [0.4.1-beta.1] — 2026-11-21
 
