@@ -514,7 +514,7 @@ activation (R49.36), and what remains recorded when the balance query of a
 newly generated address fails (R49.37). No sentence above was changed.
 
 *Status note (2026-11-22), the task form of `get_new_address` and Sia under
-HD (Spec Reader round 0.5.0-26; pending the KDF Dirty Gate with §49.2.3).*
+HD (Spec Reader round 0.5.0-26; passed the KDF Dirty Gate with §49.2.3).*
 R49.32 and R49.33 name `task::get_new_address::init` without its wire form,
 and R49.37 item 4 gives only its precondition and order. The request, the
 status values with the device-confirmation state, cancel, the error set and
@@ -845,7 +845,8 @@ the divergence is recorded here.
 
 ### 49.2.3 The task form of `get_new_address`, and Sia under an HD login (reference behavior)
 
-> **Provenance status: pending the KDF Dirty Gate** (chapter 01 R38, R41).
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-22, measure 0.03**
+> (chapter 01 R40; attestation in the Provenance Footer).
 > This subsection was written by the dirty-side specification author on
 > 2026-11-22 (Spec Reader round 0.5.0-26) under the two-team procedure of
 > chapter 01 §1.4A, from the rows `v2.6.0-beta` and `v3.0.0-beta` of
@@ -1987,9 +1988,9 @@ addresses.
 - *Scoped addition (2026-11-22, Spec Reader round 0.5.0-26) -- §49.2.3
   (R49.38 -- R49.43, the two code-quality findings, the Reloaded status
   note, T49.36 -- T49.39) and the second status note of 2026-11-22 in
-  §49.2.1.* **KDF Dirty Gate: pending** (chapter 01 R38, R41); no clearance
-  is recorded yet, and the scope attestation (extent, method, measure) is
-  not recorded until the gate returns it. *Inputs:* the forbidden corpus at
+  §49.2.1.* **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden
+  corpus at
   the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, with the
   row `main (as of 2026-10-07)` compared by difference only, consulted
   **only** to establish: for the task form of the new-address command, its
@@ -2011,3 +2012,19 @@ addresses.
   states read already have rows. The notes of the same date in chapter 05
   (after the as-built note of R35c), chapter 20 (§20.10 D1) and chapter 21
   (after R21.10B.4) travel with this item.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings, in a single pass; the chapter 02 §2.15A rows `v2.6.0-beta`,
+  `v3.0.0-beta` and `main (as of 2026-10-07)` were checked. *Extent:* the HD
+  new-address command in its direct and task forms, the device
+  address-confirmation step, the error surface of the task's status, user
+  action and cancel, and the hardware error vocabulary, at both release rows;
+  the row `main (as of 2026-10-07)` by its difference from `v3.0.0-beta` only;
+  1,701 source files of the two release rows (827 and 874) compared
+  mechanically, one file read in full and parts of four more; Sia and TRON
+  covered by the mechanical comparison only, not by reading; on the candidate
+  side, the 390 added lines. *Method:* reading, a per-token lookup of all 60
+  identifier-shaped tokens of the additions, and a word-sequence comparison
+  (six-word sequences: 0 of 3,902 shared; five-word: 3 of 3,906; four-word: 31
+  of 3,910, all common phrases or wire fragments); the repository's clean-room
+  gate tool was not applicable because the additions embed no code blocks.
+  *Measure:* 0.03, on the discretionary-expression basis.

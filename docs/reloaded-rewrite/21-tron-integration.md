@@ -916,7 +916,7 @@ platform; the used-address criterion does not. The sentences of
 R21.10B.4 above are unchanged.
 
 *Status note (2026-11-22), the task form of `get_new_address` for a TRON
-ticker (Spec Reader round 0.5.0-26; pending the KDF Dirty Gate with chapter
+ticker (Spec Reader round 0.5.0-26; passed the KDF Dirty Gate with chapter
 49 §49.2.3).* The "HD methods" item of R21.10B.4 lists
 `task::get_new_address::init` among the methods that work for a TRX or
 TRC20 ticker. At the row `v3.0.0-beta` init answers a task id for such a
@@ -2983,5 +2983,6 @@ V3. The address encoding, protobuf transaction/contract formats,
   `task::get_new_address::init`, the "HD methods" item of R21.10B.4 from
   chapter 49 R49.38 and R49.42, read at the row `v3.0.0-beta` of chapter 02
   §2.15A; it travels with chapter 49 §49.2.3 for the KDF Dirty Gate. **KDF
-  Dirty Gate: pending** (chapter 01 R38, R41), as recorded for §49.2.3 in
-  chapter 49's provenance footer. No cleared sentence was edited.
+  Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for
+  §49.2.3 in chapter 49's provenance footer. No cleared sentence was
+  edited.

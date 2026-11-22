@@ -1092,7 +1092,7 @@ rather than defects. None is a correctness claim.
   `siacoin_helpers.rs`, `mod.rs`,
   `mm2src/coins_activation/src/sia_activation.rs`.
 
-  *Pointer (2026-11-22, Spec Reader round 0.5.0-26; pending the KDF Dirty
+  *Pointer (2026-11-22, Spec Reader round 0.5.0-26; passed the KDF Dirty
   Gate with chapter 49 §49.2.3).* What the reference releases do for a Sia
   coin under an HD login is recorded in
   [Chapter 49](49-withdrawal-task-path.md) R49.43: a single address, the
@@ -1448,5 +1448,5 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
 - *Pointer added 2026-11-22 (Spec Reader round 0.5.0-26) -- under D1 of
   §20.10.* It names chapter 49 R49.43 and states no behavior of its own; it
   travels with chapter 49 §49.2.3 for the KDF Dirty Gate. **KDF Dirty
-  Gate: pending** (chapter 01 R38, R41), as recorded for §49.2.3 in chapter
-  49's provenance footer. No cleared sentence was edited.
+  Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for §49.2.3
+  in chapter 49's provenance footer. No cleared sentence was edited.
