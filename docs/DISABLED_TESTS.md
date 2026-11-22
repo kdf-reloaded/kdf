@@ -50,6 +50,19 @@ env-gated tests:
   node are removed. The ETH raw-hex and "hash does not exist" checks were dropped (no
   node to serve them); the hash-format checks now run against DOC. Lost coverage: ETH
   `get_raw_transaction` retrieval.
+- `test_solana_and_spl_balance_enable_spl_v2`, `test_sign_verify_message_solana`,
+  `test_sign_verify_message_spl` (`mm2_main/src/docker_tests/solana_tests.rs`) —
+  were ignored while Solana activation was switched off for the beta. Solana is
+  switched on again (CRD ch.40 D40.4), so they run again behind the
+  `live-network-tests` feature (`cfg_attr(not(feature = "live-network-tests"),
+  ignore = …)`), like the repository's other tests that need public servers. They
+  need network access to the public Solana devnet
+  (`https://api.devnet.solana.com`); no docker container is involved, because
+  `solana_supplied_node` only starts a node with a Solana coins configuration.
+  The offline tests in `rpc/dispatcher/dispatcher.rs` and `lp_commands_legacy.rs`
+  now check that the four Solana activation methods reach the activation and
+  that legacy `enable` / `electrum` reject a Solana coin as needing an mmrpc 2.0
+  activation.
 
 ## Group 1 — Genuine code failures worth fixing (inherited from the 2022 fork)
 
@@ -141,18 +154,8 @@ they can fail when that server is down or slow, without any fault in the code. S
 
 ## Group 6 — Family switched off for the beta (re-enable when the family returns)
 
-- `test_solana_and_spl_balance_enable_spl_v2`, `test_sign_verify_message_solana`,
-  `test_sign_verify_message_spl` (`mm2_main/src/docker_tests/solana_tests.rs`) —
-  they activate Solana through `enable_solana_with_tokens` / `enable_spl`, which
-  refuse while `SOLANA_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`
-  (Solana is postponed for the current beta). Effort to re-enable: flip the
-  constant to `true` and remove the three `#[ignore]` attributes. They need
-  network access to the public Solana devnet (`https://api.devnet.solana.com`);
-  no docker container is involved, because `solana_supplied_node` only starts a
-  node with a Solana coins configuration. Lost coverage while off:
-  Solana/SPL activation, balances and message signing against a live node.
-  The refusal itself is covered by offline tests in `rpc/dispatcher/dispatcher.rs`
-  and `lp_commands_legacy.rs`.
+_None outstanding._ The three Solana tests were re-enabled when Solana was
+switched back on (see above).
 
 > Note: `coins/eth/abi_golden_tests.rs` mentions `#[ignore]` only in a doc
 > comment (pending an ethabi 17 upgrade); those golden tests are **active**, not

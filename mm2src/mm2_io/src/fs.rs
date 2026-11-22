@@ -12,12 +12,13 @@ use std::ffi::OsStr;
 use std::fs::{self, DirEntry};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 pub type FsJsonResult<T> = Result<T, MmError<FsJsonError>>;
 pub type IoResult<T> = Result<T, MmError<io::Error>>;
 
-#[derive(Display)]
+#[derive(Debug, Display)]
 pub enum FsJsonError {
     IoReading(io::Error),
     IoWriting(io::Error),
@@ -225,31 +226,148 @@ where
     Ok(result)
 }
 
+/// Process-wide counter that makes every temp file name of [`write_json`] unique within the process.
+static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Set once the first failed directory sync of [`write_json_durable`] has been logged as a warning.
+#[cfg(unix)]
+static DIR_SYNC_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// A temp path next to `path`: `<file name>.<process id>.<counter>.tmp`. Two writers of the same target never
+/// share one.
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_else(|| OsStr::new("file"));
+    let mut tmp_name = name.to_os_string();
+    tmp_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    path.with_file_name(tmp_name)
+}
+
+/// Serialize `t` as JSON into the file at `path`.
+///
+/// With `use_tmp_file = true` the content is written to a unique temp file in the same directory, flushed, and
+/// renamed over `path`. The target therefore holds either its old or its new complete content, never a truncated
+/// one, also after an application crash. There is no `sync_all`: after a power loss the new content may be lost
+/// (use [`write_json_durable`] for that). On an error the temp file is removed (best effort) and the original
+/// error is returned. Left-over `*.tmp` files (e.g. after a crash) are ignored by [`read_dir_json`], [`read_dir`]
+/// and [`json_dir_entries`], which read only `*.json`.
+///
+/// With `use_tmp_file = false` the target is truncated and rewritten in place, without a sync.
 pub async fn write_json<T>(t: &T, path: &Path, use_tmp_file: bool) -> FsJsonResult<()>
 where
     T: Serialize,
 {
     let content = json::to_vec(t).map_to_mm(FsJsonError::Serializing)?;
 
-    let path_tmp = if use_tmp_file {
-        PathBuf::from(format!("{}.tmp", path.display()))
+    let res: io::Result<()> = if use_tmp_file {
+        write_atomically(&content, path, false).await
     } else {
-        path.to_path_buf()
+        let fs_fut = async {
+            let mut file = async_fs::File::create(path).await?;
+            file.write_all(&content).await?;
+            file.flush().await?;
+            Ok(())
+        };
+        fs_fut.await
     };
+    res.map_to_mm(FsJsonError::IoWriting)
+}
 
+/// Serialize `t` as JSON into the file at `path`, atomically and durably.
+///
+/// Same as [`write_json`] with a temp file (unique temp name, rename over the target, temp file removed on
+/// error), and in addition the temp file is synced to disk (`sync_all`) before the rename and, on Unix, the
+/// directory is synced after it. A `sync_all` failure of the temp file returns the error, nothing is replaced.
+/// A failure to open or sync the directory never returns an error: the record is already replaced, so one
+/// `warn!` is logged (at most once per process, later ones go to `debug!`) and `Ok` is returned; on such a filesystem (e.g. a network or FUSE mount that cannot sync a
+/// directory) the rename may not survive a power loss. Windows cannot open a directory as a file, so the
+/// directory sync is skipped there. On Windows a rename refused with `PermissionDenied`, a sharing violation or a lock violation is retried a few times
+/// (see [`write_json`] as well, it retries too).
+pub async fn write_json_durable<T>(t: &T, path: &Path) -> FsJsonResult<()>
+where
+    T: Serialize,
+{
+    let content = json::to_vec(t).map_to_mm(FsJsonError::Serializing)?;
+    write_atomically(&content, path, true)
+        .await
+        .map_to_mm(FsJsonError::IoWriting)
+}
+
+/// Rename `from` over `to`. On Windows a rename can fail with `PermissionDenied` (sharing violation or access
+/// denied) while a virus scanner or an indexer briefly holds the new file, so it is retried a few times with a
+/// growing delay. Unix has no such transient failure and does not retry.
+async fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        for delay_ms in [20u32, 40, 80, 160, 320] {
+            match async_fs::rename(from, to).await {
+                // A file held without delete sharing can surface as ERROR_SHARING_VIOLATION (32) or
+                // ERROR_LOCK_VIOLATION (33), which std does not necessarily map to `PermissionDenied`.
+                Err(e)
+                    if e.kind() == io::ErrorKind::PermissionDenied
+                        || matches!(e.raw_os_error(), Some(32) | Some(33)) =>
+                {
+                    common::executor::Timer::sleep_ms(delay_ms).await;
+                },
+                res => return res,
+            }
+        }
+    }
+    async_fs::rename(from, to).await
+}
+
+async fn write_atomically(content: &[u8], path: &Path, durable: bool) -> io::Result<()> {
+    let path_tmp = unique_tmp_path(path);
     let fs_fut = async {
         let mut file = async_fs::File::create(&path_tmp).await?;
-        file.write_all(&content).await?;
+        file.write_all(content).await?;
         file.flush().await?;
-
-        if use_tmp_file {
-            async_fs::rename(path_tmp, path).await?;
+        if durable {
+            file.sync_all().await?;
         }
-        Ok(())
+        drop(file);
+
+        rename_replace(&path_tmp, path).await
     };
 
-    let res: io::Result<_> = fs_fut.await;
-    res.map_to_mm(FsJsonError::IoWriting)
+    if let Err(e) = fs_fut.await {
+        // Best effort: nothing was replaced, drop the temp file.
+        let _ = async_fs::remove_file(&path_tmp).await;
+        return Err(e);
+    }
+
+    // Make the rename itself durable. The record is already replaced, so a failure here is only logged.
+    #[cfg(unix)]
+    if durable {
+        let dir = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        let sync_res: io::Result<()> = async { async_fs::File::open(dir).await?.sync_all().await }.await;
+        if let Err(e) = sync_res {
+            // One warning per process is enough: a filesystem that cannot sync a directory fails on every write.
+            if !DIR_SYNC_WARNED.swap(true, Ordering::Relaxed) {
+                common::log::warn!(
+                    "Error '{}' syncing the directory {} after replacing {}; further directory sync errors are \
+                     logged at debug level",
+                    e,
+                    dir.display(),
+                    path.display()
+                );
+            } else {
+                common::log::debug!(
+                    "Error '{}' syncing the directory {} after replacing {}",
+                    e,
+                    dir.display(),
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn json_dir_entries(path: &dyn AsRef<Path>) -> Result<Vec<DirEntry>, String> {
@@ -270,4 +388,173 @@ pub fn json_dir_entries(path: &dyn AsRef<Path>) -> Result<Vec<DirEntry>, String>
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use serde_json::json;
+
+    fn new_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mm2-io-{}-{}-{}", tag, std::process::id(), random::<u64>()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn write_json_durable_replaces_content_and_leaves_no_tmp() {
+        let dir = new_dir("durable");
+        let path = dir.join("a.json");
+        block_on(write_json_durable(&json!({"v": 1}), &path)).unwrap();
+        block_on(write_json_durable(&json!({"v": 2}), &path)).unwrap();
+
+        let read: Option<serde_json::Value> = block_on(read_json(&path)).unwrap();
+        assert_eq!(read, Some(json!({"v": 2})));
+        assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `write_json(.., true)`: atomic replacement without sync.
+    #[test]
+    fn write_json_with_tmp_file_replaces_content_and_leaves_no_tmp() {
+        let dir = new_dir("replace");
+        let path = dir.join("a.json");
+        block_on(write_json(&json!({"v": 1}), &path, true)).unwrap();
+        block_on(write_json(&json!({"v": 2}), &path, true)).unwrap();
+
+        let read: Option<serde_json::Value> = block_on(read_json(&path)).unwrap();
+        assert_eq!(read, Some(json!({"v": 2})));
+        assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The failure is injected by making the target a non-empty directory: the temp file is written and synced,
+    /// then the rename onto the directory fails.
+    #[test]
+    fn failed_rename_keeps_old_content_and_removes_tmp() {
+        let dir = new_dir("failed-rename");
+        let path = dir.join("a.json");
+        // A non-empty directory cannot be replaced by a file. It stands for the "existing target".
+        fs::create_dir_all(path.join("inner")).unwrap();
+        fs::write(path.join("inner").join("old"), b"old").unwrap();
+
+        assert!(block_on(write_json(&json!({"v": 1}), &path, true)).is_err());
+        assert!(block_on(write_json_durable(&json!({"v": 1}), &path)).is_err());
+
+        assert_eq!(fs::read(path.join("inner").join("old")).unwrap(), b"old");
+        assert_eq!(
+            file_names(&dir),
+            vec!["a.json".to_owned()],
+            "the temp file must be removed"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_dir_json_ignores_left_over_tmp_files() {
+        let dir = new_dir("leftover");
+        block_on(write_json(&json!({"v": 1}), &dir.join("a.json"), true)).unwrap();
+        fs::write(dir.join("x.json.tmp"), b"{\"v\": 2}").unwrap();
+        fs::write(dir.join("y.json.123.0.tmp"), b"{\"v\": 3}").unwrap();
+
+        let read: Vec<serde_json::Value> = block_on(read_dir_json(&dir)).unwrap();
+        assert_eq!(read, vec![json!({"v": 1})]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_writes_end_with_one_complete_record() {
+        let dir = new_dir("concurrent");
+        let path = dir.join("a.json");
+        let big = |c: char| json!({ "v": c.to_string().repeat(100_000) });
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                let value = big((b'a' + i as u8) as char);
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        block_on(write_json_durable(&value, &path)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let read: serde_json::Value = block_on(read_json(&path)).unwrap().expect("the record exists");
+        let v = read["v"].as_str().unwrap();
+        assert_eq!(v.len(), 100_000);
+        assert!(
+            v.chars().all(|c| c == v.chars().next().unwrap()),
+            "the record is one complete write"
+        );
+        assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opens `path` for reading without `FILE_SHARE_DELETE` (share mode READ | WRITE = 1 | 2), so renaming over it
+    /// fails. Returns once the handle is open; the handle is released after `hold`.
+    #[cfg(windows)]
+    fn hold_without_delete_share(path: &Path, hold: std::time::Duration) -> std::thread::JoinHandle<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = path.to_path_buf();
+        let handle = std::thread::spawn(move || {
+            let file = fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(hold);
+            drop(file);
+        });
+        rx.recv().unwrap();
+        handle
+    }
+
+    /// The target is held for ~100 ms, within the retry window: the write succeeds through the retry.
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_is_retried_while_target_is_held() {
+        let dir = new_dir("win-retry");
+        let path = dir.join("a.json");
+        block_on(write_json_durable(&json!({"v": "old"}), &path)).unwrap();
+
+        let holder = hold_without_delete_share(&path, std::time::Duration::from_millis(100));
+        block_on(write_json_durable(&json!({"v": "new"}), &path)).unwrap();
+        holder.join().unwrap();
+
+        let read: Option<serde_json::Value> = block_on(read_json(&path)).unwrap();
+        assert_eq!(read, Some(json!({"v": "new"})));
+        assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The target is held for ~1.5 s, beyond the ~620 ms retry window: the write fails, the old content stays and
+    /// no temp file is left.
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_gives_up_when_target_stays_held() {
+        let dir = new_dir("win-giveup");
+        let path = dir.join("a.json");
+        block_on(write_json_durable(&json!({"v": "old"}), &path)).unwrap();
+
+        let holder = hold_without_delete_share(&path, std::time::Duration::from_millis(1500));
+        assert!(block_on(write_json_durable(&json!({"v": "new"}), &path)).is_err());
+        holder.join().unwrap();
+
+        let read: Option<serde_json::Value> = block_on(read_json(&path)).unwrap();
+        assert_eq!(read, Some(json!({"v": "old"})));
+        assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
