@@ -23,6 +23,7 @@
 //!   * T50.7         — `emulator_trezor_withdraw_passphrase_action_mismatch`
 //!   * T50.10        — `emulator_trezor_withdraw_bad_from_selector`
 //!   * T50.11        — `emulator_trezor_withdraw_tron_unsupported`
+//!   * T49.31        — `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens`
 //! The passphrase tests (T50.6 / T50.7) re-seed the shared device with
 //! passphrase protection ON and, via a teardown RAII guard, restore the clean
 //! SLIP-14 (no-pin, no-passphrase) state so the other serialized tests stay
@@ -924,6 +925,72 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
         "tx `to` must be the token contract"
     );
     assert!(signed.value.is_zero(), "ERC20 transfer must carry zero value");
+}
+
+/// T49.31 (last paragraph), CRD ch.49 R49.32 item 1: under the Trezor policy, `task::account_balance::init` of the
+/// platform ticker lists the platform and every token activated on it at each address, and its `total_balance`
+/// sums each ticker. The address list and the balances come from the account xpub and the node; no device exchange
+/// is needed, as the platform's Trezor coin derives the addresses from the xpub.
+#[test]
+fn emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens() {
+    let addr = emulator_addr();
+    if !emulator_reachable(&addr) {
+        println!("SKIP emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens: emulator unreachable at {addr}");
+        return;
+    }
+    emulator_setup();
+
+    let material = fetch_device_material();
+    let device_addr = material.eth_address;
+    let ctx = ctx_with_hw(material.client, material.internal_pubkey);
+    // native balance 100 coins, nonce 0, `balanceOf` = 1000 tokens.
+    let node = spawn_mock_node(
+        "0x56bc75e2d63100000",
+        "0x0",
+        "0x00000000000000000000000000000000000000000000003635c9adc5dea00000",
+    );
+    let platform = device_trezor_hd_coin_with_addresses(
+        &ctx,
+        EthCoinType::Eth,
+        node.url.clone(),
+        material.eth_account_xpub.clone(),
+        device_addr,
+        material.eth_public,
+        2,
+    );
+    let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+    block_on(coins_ctx.add_coin(MmCoinEnum::EthCoin(platform.clone()))).unwrap();
+    let token = block_on(platform.erc20_token_from_conf_or_contract(
+        "JST".to_string(),
+        Address::from_str(TOKEN_ADDR.trim_start_matches("0x")).unwrap(),
+        1,
+        false,
+    ))
+    .expect("the token builds from its platform coin");
+    platform.add_erc20_token_info("JST".to_string(), token.erc20_token_info().expect("a token"));
+
+    use crate::rpc_command::init_account_balance::InitAccountBalanceRpcOps;
+    let params = serde_json::from_value(serde_json::json!({ "account_index": 0 })).unwrap();
+    let report = block_on(platform.init_account_balance_rpc(params)).expect("the account balance");
+    let report = serde_json::to_value(&report).unwrap();
+    let tickers = |map: &serde_json::Value| {
+        let mut tickers: Vec<String> = map.as_object().unwrap().keys().cloned().collect();
+        tickers.sort();
+        tickers
+    };
+    let addresses = report["addresses"].as_array().unwrap();
+    assert_eq!(addresses.len(), 2);
+    for entry in addresses {
+        assert_eq!(tickers(&entry["balance"]), vec!["ETH".to_owned(), "JST".to_owned()]);
+        assert_eq!(entry["balance"]["JST"]["spendable"], "1000");
+        let address = entry["address"].as_str().unwrap();
+        assert_eq!(address, checksum_address(&address.to_lowercase()), "EIP-55 form");
+    }
+    assert_eq!(tickers(&report["total_balance"]), vec![
+        "ETH".to_owned(),
+        "JST".to_owned()
+    ]);
+    assert_eq!(report["total_balance"]["JST"]["spendable"], "2000");
 }
 
 /// T50.11: a TRON-family coin under the Trezor policy reaches a terminal

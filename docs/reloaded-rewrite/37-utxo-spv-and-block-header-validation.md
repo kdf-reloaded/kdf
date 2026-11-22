@@ -1978,6 +1978,42 @@ two cooperative version-two spends still build with lock-time 0.
 family or `"BTC"`, the median query returns either the chain's median or an
 error, never another value.
 
+> **Status note (2026-11-18, Reloaded-original).** The maintainer resolved
+> D37.5.11.1 on 2026-11-18 with option (d), and only (d): Reloaded accepts the
+> `protocol.chain_variant` value `"KRGN"`, the spelling of the newest upstream
+> state, so one value serves both sides if the reference adopts it. The closed
+> set of R37.5.1 has nine values in Reloaded from this change. There is no
+> `header_layout` value for Kerrigan, nothing is added to the structural
+> fallback of R37.5.9e (option (b) not chosen), and the time-only read of
+> R37.5.10 is unchanged (option (c) not chosen). The node switch of R37.5.9e
+> accepts `KRGN` as its ninth spelling; naming it there changes nothing, since a
+> `"KRGN"` coin reads its own layout and never falls back. A Kerrigan entry
+> without the value keeps failing loudly as R37.5.11.9 describes; the user adds
+> the value.
+>
+> Under `"KRGN"` each header is read by the algorithm in bits 8 to 11 of its
+> version, with the sizes and time offsets of the table above; any other value
+> of those bits is refused, as the chain refuses it. The solution length is
+> bounded by the chain's own limit of 1400 bytes. Lists are read header by
+> header and must end exactly at the end of the served bytes. The single-header
+> read and the block-timestamp read take the same layout. Each header written
+> back is byte-identical to the served one. One correction to the table: the
+> 32-bit nonce of the KawPoW form is not always zero on the real chain (the
+> header at height 188823 carries a non-zero value); Reloaded reads and writes
+> it as it is.
+>
+> D37.5.11.2 stays deferred: activation refuses a `"KRGN"` coin whose entry
+> enables `enable_spv_proof` or carries a `spv_conf`, with an error that names
+> the key. The header hash Reloaded computes is a double-SHA256, not the chain's
+> X11 identity; besides SPV, the only other use is the WalletConnect chain
+> identifier on an Electrum connection, which is therefore not the chain's for
+> this coin (a native-daemon connection takes the node's genesis hash and is not
+> affected). Lock-time and sequence of claims and refunds are unchanged
+> (R37.5.11.6): with the median readable, Kerrigan follows the rule of every
+> UTXO coin. The tests cover T37.5.11.1, T37.5.11.2 and T37.5.11.5 with real
+> headers of all four algorithms, and T37.5.11.4 for the four legacy claim and
+> refund rows; the version-two rows are not driven for Kerrigan.
+
 ## 37.6 Use in swap confirmation & current MTP
 
 R37.6.1 The verified header chain shall back the SPV confirmation path used when
@@ -3344,3 +3380,8 @@ before the wait is deferred.
   02 §2.15A for it: a sibling-repository citation under chapter 01 R14 is the
   second place chapter 02 R13 admits for a sibling commit identifier. No
   other gated sentence was changed.
+- *Status note added 2026-11-18 -- after T37.5.11.5.* Reloaded-original, clean
+  side: it records the maintainer's resolution of D37.5.11.1 and what this
+  repository builds for it, from the cleared section, the chain's published
+  source and public chain data; no forbidden-class input, chapter 01 R38 not
+  engaged. Built in PR #468.

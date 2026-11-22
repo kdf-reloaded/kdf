@@ -70,6 +70,8 @@ mod solana_wallet_answers_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod solana_withdraw_tests;
 pub mod spl;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod spl_sdk_vectors_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod spl_tests;
 
 mod solana_helpers;

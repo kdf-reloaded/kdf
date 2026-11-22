@@ -212,6 +212,20 @@ pub enum UtxoConfError {
         ticker: String,
         value: String,
     },
+    /// A coin with `chain_variant` `"KRGN"` asks for header verification (CRD ch.37 D37.5.11.2).
+    #[display(
+        fmt = "{}: 'protocol.chain_variant' \"{}\" cannot be combined with {}: header verification (SPV) needs the \
+               chain's block identity hash, which is not supported for this chain; remove {} from the coin entry",
+        ticker,
+        "ChainVariant::Krgn.name()",
+        keys,
+        keys
+    )]
+    KerriganWithSpv {
+        ticker: String,
+        /// The key or keys that asked for header verification, quoted and joined with " and ".
+        keys: String,
+    },
 }
 
 /// The `MM2.json` key of the node switch that names the coin families whose header reads may fall back
@@ -223,7 +237,7 @@ const HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT: &[&str] = &["BTC"];
 
 /// The `chain_variant` spellings (CRD ch.37 R37.5.1) a family in the switch may take.
 /// Reads the node switch `header_layout_fallback_families` (CRD ch.37 R37.5.9e): an array whose every
-/// element is one of the eight `chain_variant` spellings, without duplicates; default `["BTC"]` when
+/// element is one of the nine `chain_variant` spellings, without duplicates; default `["BTC"]` when
 /// the key is absent. Anything else (a non-array, a non-string element, an unknown or lowercase
 /// spelling, a duplicate) is a configuration error, so a typo cannot quietly change which coins are
 /// probed. `[]` is valid and turns the fallback off.
@@ -406,6 +420,11 @@ impl<'a> UtxoConfBuilder<'a> {
         let enable_spv_proof = self.enable_spv_proof();
         let header_layout = self.header_layout()?;
         let chain_variant = self.chain_variant()?;
+        // The callers that read only address-related fields never verify headers, so the refusal is not for them.
+        if chain_variant == Some(ChainVariant::Krgn) && self.unrecognised_enum_policy != UnrecognisedEnumPolicy::NotUsed
+        {
+            self.refuse_kerrigan_spv(enable_spv_proof)?;
+        }
         let protocol_header_reader = self.protocol_header_reader();
 
         let conf = UtxoCoinConf {
@@ -679,6 +698,26 @@ impl<'a> UtxoConfBuilder<'a> {
 
     fn enable_spv_proof(&self) -> bool { self.conf["enable_spv_proof"].as_bool().unwrap_or(false) }
 
+    /// Refuses header verification for a `"KRGN"` coin (CRD ch.37 D37.5.11.2): `enable_spv_proof` set to
+    /// true or a non-null `spv_conf`. Header storage, proofs and linkage need the chain's X11 block
+    /// identity hash, which `BlockHeader::hash` does not compute for this layout.
+    fn refuse_kerrigan_spv(&self, enable_spv_proof: bool) -> UtxoConfResult<()> {
+        let mut keys = Vec::new();
+        if enable_spv_proof {
+            keys.push("'enable_spv_proof'");
+        }
+        if !self.conf["spv_conf"].is_null() {
+            keys.push("'spv_conf'");
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+        MmError::err(UtxoConfError::KerriganWithSpv {
+            ticker: self.ticker.to_owned(),
+            keys: keys.join(" and "),
+        })
+    }
+
     /// Reads the Reloaded-only `protocol.header_layout` key (CRD ch.37 R37.5.9): from the
     /// raw `protocol` object beside `type`, as a plain case-sensitive string, outside the typed
     /// protocol descriptor. Absent means no effect; any present value that is not one of the closed
@@ -701,9 +740,9 @@ impl<'a> UtxoConfBuilder<'a> {
     }
 
     /// Reads `protocol.chain_variant` (CRD ch.37 R37.5.1): from the raw `protocol` object beside
-    /// `type`, as a plain string compared exactly and case-sensitively against the eight spellings,
+    /// `type`, as a plain string compared exactly and case-sensitively against the nine spellings,
     /// outside the typed protocol descriptor. Absent means no key; any present value that is not one
-    /// of the eight (including a non-string) fails the coin build.
+    /// of the nine (including a non-string) fails the coin build.
     fn chain_variant(&self) -> UtxoConfResult<Option<ChainVariant>> {
         let Some(value) = self.conf["protocol"].get("chain_variant") else {
             return Ok(None);

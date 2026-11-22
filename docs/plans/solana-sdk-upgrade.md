@@ -1,6 +1,6 @@
 # Plan: Solana SDK ed25519-dalek 1.x → 2.x
 
-**Status:** parked (deferred by choice 2026-08-06; upstream-pinned, would need a fork) — **Last reviewed:** 2026-11-15
+**Status:** done (the Solana crates moved to the 3.x line in PR #465; RUSTSEC-2024-0344 moved to the libp2p modernization task) — **Last reviewed:** 2026-11-22
 
 > **Context: scoped, deferred by choice — 2026-08-06.** Checked reloaded's
 > actual Solana signing code (see "Confirmed root cause" below): the
@@ -25,6 +25,27 @@
 > address and signature checks under "Required verification" apply unchanged.
 > Whether the move happens in the 0.5.0 cycle is an open maintainer decision;
 > `solana-support.md` lists it as package S5.
+
+> **State (2026-11-22): the move is built (PR #465).** Every `solana-*` crate
+> the coin uses is on the 3.x line, `spl-token` on 9, and the associated
+> token address comes from `spl-associated-token-account-interface` 2.0.0,
+> the successor crate. Regression vectors written before the move (keypair
+> and address for a single key and the HD path, a signature, a SOL and an SPL
+> transfer, the associated token address under both token programs) pass
+> unchanged after it; they run natively, and the wasm32 build and test build
+> compile. The lock carries two majors of six Solana crates (`address` 1/2,
+> `clock` 3/4, `define-syscall` 4/5, `hash` 3/4, `instruction` 3/4, `pubkey`
+> 3/4) as transitive duplicates. `cargo tree -i ed25519-dalek@1.0.1`
+> is empty, so RUSTSEC-2022-0093 leaves `deny.toml`. `cargo tree -i
+> curve25519-dalek@3.2.0` is not: the remaining path is the libp2p fork's
+> Noise stack (`libp2p-noise` 0.43 -> `x25519-dalek` 1.1), so
+> RUSTSEC-2024-0344 stays ignored with its comment naming that path. The
+> Solana side of this plan is complete; the second advisory belongs to the
+> libp2p fork's modernization. By the maintainer's decision of 2026-11-22
+> the plan is done and the `curve25519-dalek` 3.2.0 item moves to the libp2p
+> modernization task. The five new Apache-2.0 license entries are allowed at
+> parity with their predecessors; the licensing of the Apache-2.0-only Solana
+> crates stays an open question.
 
 ## Goal
 
