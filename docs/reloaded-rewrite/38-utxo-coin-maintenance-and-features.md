@@ -5777,6 +5777,19 @@ value is a zero `CoinBalance`, not an untyped empty object. This preserves the
 wire shape consumed by wallet SDKs and keeps an intentionally empty HD wallet
 distinguishable from a malformed balance response.
 
+*Status note (2026-11-22), the page total is a map (as built; clean side, not
+corpus-sourced).* `account_balance` of every HD family now answers
+`page_balance` as a ticker-keyed map of the same type as an address's
+`balance`, where it answered one `{spendable, unspendable}` balance
+([Chapter 49](49-withdrawal-task-path.md) R49.35). Where the reference answers
+`{}` -- a page that lists no address, and the `total_balance` of an account with
+no known address -- this repository keeps the form of this rule: a one-entry map
+holding the requested coin's ticker and a zero balance. That is a recorded
+divergence, decided by the maintainer on 2026-11-22. A UTXO or QTUM coin's page
+total therefore holds its own ticker, summed over the addresses of the returned
+page; `total_balance` of the task form and of the activation report is formed as
+before.
+
 > **Cross-reference (informative).** The full wire contract of the UTXO-family
 > task activations (`task::enable_utxo`, `task::enable_qtum`,
 > `task::enable_bch`) -- request fields, success object including the Iguana

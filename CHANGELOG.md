@@ -119,6 +119,24 @@ or undo, and every change that needs a step from you.
   `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
   - *What you see:* a KRGN entry without the value still activates, but its claims and refunds keep failing.
   - Detail: PR #468; CRD ch.37 status note of 2026-11-18.
+- **`account_balance` now answers `page_balance` as an object keyed by ticker, for every HD coin, and the activation
+  report of an EVM platform lists `{}` for the addresses its scan passed over.** Until now `page_balance` was one
+  balance, `{"spendable": "...", "unspendable": "..."}`. It is now an object with one balance per ticker, the same
+  type as the `balance` of one address: `{"RIN": {"spendable": "...", "unspendable": "..."}}`. Each ticker is summed
+  over the addresses of the returned page only, not of the whole account.
+  - *What you see:* a UTXO, QTUM or Sia coin answers its own ticker. An EVM platform ticker answers the platform and
+    every ERC-20 token activated on it, a token with a zero balance included; a TRX ticker answers TRX and its enabled
+    TRC20 tokens; an ERC-20 or TRC20 ticker answers that token only. A page that lists no address (a page past the
+    known range) answers a map with the requested ticker and a zero balance. GLEEC KDF answers `{}` there; the
+    maintainer decided on 2026-11-22 to keep the entry for the requested ticker, as the `total_balance` of an account
+    without a known address already does.
+  - *What to do:* read `page_balance` as an object and take a ticker's balance from `page_balance["<TICKER>"]`; the
+    members `spendable` and `unspendable` no longer sit directly under `page_balance`.
+  - *Activation report of an EVM platform:* the unused addresses that the scan at activation passes over on its way to
+    a used address (not on a TRON platform) carry an empty balance map, `{}`, where they used to carry a zero entry
+    for the platform ticker. A client that reads the platform ticker's balance of every listed address must accept
+    an empty map. A later `account_balance` lists those addresses with the full map and zero values.
+  - Detail: PR #TBD; CRD ch.49 R49.35, R49.36.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -751,7 +769,22 @@ the previous version used. The safe way:
 - **A scan for new addresses of an EVM platform finds token-only addresses.** An address counts as used when its
   transaction count, its platform balance or the balance of any activated token is not zero, so an address that only
   received a token is found. The unused addresses between the known range and a newly found address are listed with
-  an empty balance map. The scan made during activation is unchanged. Detail: PR #463; CRD ch.49 R49.32.
+  an empty balance map. The scan made during activation now follows the same rule (next item). Detail: PR #463; CRD
+  ch.49 R49.32.
+- **The address scan at activation of an EVM platform takes the tokens of the same request into account.**
+  `enable_eth_with_tokens` and `task::enable_eth::init` under an HD login now count an address as used when its
+  transaction count, its platform balance or the balance of any token named in the request is not zero, so an address
+  that only holds a token is found and listed. The unused addresses the scan passes over are listed with an empty
+  balance map, and each token's balance is asked once per listed address. If a node query of the scan fails, the
+  activation fails with `Transport` and the scan records no address. A TRON platform keeps its answers.
+  Detail: PR #TBD; CRD ch.49 R49.36.
+- **An HD account that knows no address is scanned again at the next activation under the default scan policy.** A
+  first activation that fails while it scans leaves the account stored with no known address, and later activations
+  under `scan_if_new_wallet` used to treat it as an existing wallet and never scan it, so used addresses beyond the
+  minimum stayed unlisted until a scan was asked for. Such an account is now scanned as a new one would be, for UTXO
+  coins, QTUM, Sia and EVM coins including TRON. An account that knows an address is not scanned again under the
+  default policy, and `do_not_scan` never scans. GLEEC KDF does not scan such an account. Detail: PR #TBD; CRD ch.49
+  R49.36 item 7, ch.05 R35a.
 - **A quick disable and re-enable no longer leaves the old history loop running, and a failed legacy activation no
   longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
   of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at

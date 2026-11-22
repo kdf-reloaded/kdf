@@ -853,7 +853,9 @@ impl PlatformWithTokensActivationOps for EthCoin {
                 iguana_activation_result(self, activation_request, current_block, nfts_infos).await
             },
             coins::DerivationMethod::HDWallet(hd_wallet) => {
-                let mut wallet_balance = self
+                // The platform's tokens of this request are on its record already, so the scan and the report take
+                // them into account (CRD ch.49 R49.36).
+                let wallet_balance = self
                     .enable_hd_wallet(
                         hd_wallet,
                         xpub_extractor,
@@ -865,9 +867,6 @@ impl PlatformWithTokensActivationOps for EthCoin {
                     )
                     .await
                     .mm_err(enable_balance_error)?;
-                self.add_erc20_balances_to_hd_report(&mut wallet_balance)
-                    .await
-                    .mm_err(balance_error)?;
                 Ok(EthWithTokensActivationResult::HD(HDEthWithTokensActivationResult {
                     current_block,
                     ticker: self.ticker().to_owned(),

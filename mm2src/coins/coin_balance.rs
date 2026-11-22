@@ -178,6 +178,28 @@ pub trait HDWalletBalanceOps: HDWalletCoinOps {
 
     async fn produce_hd_address_scanner(&self) -> BalanceResult<Self::HDAddressScanner>;
 
+    /// The scanner of the scan an activation runs (CRD ch.49 R49.36). It is [`Self::produce_hd_address_scanner`]
+    /// unless the coin's activation counts an address as used by more than the coin's own history, as an EVM
+    /// platform does with the tokens activated on it.
+    async fn produce_hd_activation_scanner(&self) -> BalanceResult<Self::HDAddressScanner> {
+        self.produce_hd_address_scanner().await
+    }
+
+    /// Completes the balance maps of the entries an activation reports for the addresses it does not scan: the
+    /// already known ones and the ones generated to reach the minimum count. The entries of the activation's scan are
+    /// not passed; the scan builds them itself (CRD ch.49 R49.36 item 4). A coin whose activation report carries
+    /// nothing beyond its own ticker leaves the entries as they are.
+    ///
+    /// `address_scanner` is the scanner of [`Self::produce_hd_activation_scanner`]; it may hold what the scan already
+    /// read at an address it probed.
+    async fn complete_activation_entries(
+        &self,
+        _address_scanner: &Self::HDAddressScanner,
+        _entries: &mut [HDAddressBalance],
+    ) -> BalanceResult<()> {
+        Ok(())
+    }
+
     /// Requests balances of already known addresses, and if it's prescribed by [`EnableCoinParams::scan_policy`],
     /// scans for new addresses of every HD account by using [`HDWalletBalanceOps::scan_for_new_addresses`].
     /// This method is used on coin initialization to index working addresses and to return the wallet balance to the user.
@@ -320,6 +342,16 @@ pub mod common_impl {
         (external, internal)
     }
 
+    /// Whether `hd_account` knows no address on any chain it has. A chain the coin does not use (the internal chain of
+    /// an EVM coin) holds none.
+    fn account_has_no_known_address<Account: HDAccountOps>(hd_account: &Account) -> bool {
+        [Bip44Chain::External, Bip44Chain::Internal].into_iter().all(|chain| {
+            hd_account
+                .known_addresses_number(chain)
+                .map_or(true, |known| known == 0)
+        })
+    }
+
     /// Activates `hd_account`: reports its known addresses, scans it when asked, and raises its chains to the
     /// minimum counts of [`minimum_known_addresses`]. `path_to_address` is `Some` for the path's account only.
     pub(crate) async fn enable_hd_account<Coin>(
@@ -337,6 +369,9 @@ pub mod common_impl {
     {
         let gap_limit = hd_wallet.gap_limit();
         let mut addresses = coin.all_known_addresses_balances(hd_account).await.mm_err(Into::into)?;
+        coin.complete_activation_entries(address_scanner, &mut addresses)
+            .await
+            .mm_err(Into::into)?;
         if scan_new_addresses {
             addresses.extend(
                 coin.scan_for_new_addresses(hd_wallet, hd_account, address_scanner, gap_limit)
@@ -344,6 +379,7 @@ pub mod common_impl {
                     .mm_err(Into::into)?,
             );
         }
+        let listed_before_minimum = addresses.len();
         let (external_minimum, internal_minimum) = minimum_known_addresses(min_addresses_number, path_to_address);
         ensure_minimum_addresses(
             coin,
@@ -368,6 +404,11 @@ pub mod common_impl {
             .await
             .mm_err(Into::into)?;
         }
+
+        // The addresses generated to reach the minimum count (CRD ch.49 R49.36 item 4); the scan's entries are complete.
+        coin.complete_activation_entries(address_scanner, &mut addresses[listed_before_minimum..])
+            .await
+            .mm_err(Into::into)?;
 
         let total_balance = sum_hd_address_balances(coin.ticker(), &addresses);
         let account_balance = HDAccountBalance {
@@ -433,7 +474,7 @@ pub mod common_impl {
         Coin::Address: fmt::Display + Clone,
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        let address_scanner = coin.produce_hd_address_scanner().await.mm_err(Into::into)?;
+        let address_scanner = coin.produce_hd_activation_scanner().await.mm_err(Into::into)?;
 
         // The account the activation must create (CRD ch.05 R35a item 1): the path's account when the wallet holds
         // none at that index; without a path, the first account of an empty wallet.
@@ -490,8 +531,15 @@ pub mod common_impl {
         let mut result = HDWalletBalance {
             accounts: Vec::with_capacity(accounts.len()),
         };
-        let scan_new_addresses = matches!(scan_policy, EnableCoinScanPolicy::Scan);
         for (account_id, hd_account) in accounts.iter_mut() {
+            // `scan` scans every stored account. `scan_if_new_wallet` scans a stored account that has no known address
+            // as it would a new one: such an account is what a first activation that failed during its scan leaves
+            // behind (CRD ch.49 R49.36 item 7, ch.05 R35a).
+            let scan_new_addresses = match scan_policy {
+                EnableCoinScanPolicy::Scan => true,
+                EnableCoinScanPolicy::ScanIfNewWallet => account_has_no_known_address(hd_account),
+                EnableCoinScanPolicy::DoNotScan => false,
+            };
             // Only the path's account is raised to the activated address.
             let account_path = path_to_address.as_ref().filter(|path| path.account_id == *account_id);
             let account_balance = enable_hd_account(
