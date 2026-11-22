@@ -29,7 +29,7 @@ or undo, and every change that needs a step from you.
     not answer, the step waits; no other node is asked in its place.
   - *Coin families covered:* TRON (TRX, TRC20). The rule is switched on family by family as each family's chain
     reads move onto it, and this list grows with them.
-  - Detail: PR #508; CRD ch.51 §51.6G R100. TRON: PR #NNN.
+  - Detail: PR #508; CRD ch.51 §51.6G R100. TRON: PR #509.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
   instead of running on a database layout it does not know. No released version of KDF Reloaded or GLEEC KDF records
@@ -537,7 +537,7 @@ the previous version used. The safe way:
   notes"); a value that is not in the list refuses the activation with `SwapEvidenceNodeNotInList`. TRON swaps stay
   off: the part of a TRON swap that reads the chain (checking the other side's payment and the DEX fee, this node's
   claim and refund, the refund time, the search for a claim and its secret) is built and waits for the switch-on.
-  Detail: PR #NNN; CRD ch.21 §21.11D.
+  Detail: PR #509; CRD ch.21 §21.11D.
 
 #### Tendermint (Cosmos) coins
 
