@@ -82,7 +82,9 @@ or undo, and every change that needs a step from you.
   activated.
   - *What to do:* to remove the platform and its tokens, send `"force_disable": true`.
   - *Versioned form:* the `mmrpc: "2.0"` `disable_coin` does not change. It neither makes a platform passive nor
-    reads `force_disable`: it removes the platform, and its tokens stay registered.
+    reads `force_disable`: it removes the platform, and its tokens stay registered and active, but the platform no
+    longer collects their history; it does so again once the platform is activated again with `tx_history` and the
+    token named in the request.
   - *Activating it again:* `enable_eth_with_tokens` and the other platform-with-tokens methods activate a passive
     platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
     Disabling a coin now ends its background work (see "Changed" below).
@@ -679,6 +681,17 @@ the previous version used. The safe way:
   takes its decimals from `protocol_data` only. Solana stays switched off in this build. Detail:
   PR #371; CRD ch.40 §40.3A, R40.6B.2.
 
+- **Solana libraries moved to their 3.x line.** The Solana and SPL token libraries the coin is built on
+  moved from the 2.x line to the 3.x line (`spl-token` 9). Addresses, signatures and the bytes of the
+  transfers the coin builds are unchanged: fixed test vectors check a single-key and an HD key, a
+  signature, a SOL and an SPL transfer, and the token-account address under both token programs. The
+  old `ed25519-dalek` 1.0.1 library leaves the dependency tree, so the dependency policy no longer
+  ignores RUSTSEC-2022-0093.
+  RUSTSEC-2024-0344 is not cleared by this change: `curve25519-dalek` 3.2.0 also came in through the
+  peer-to-peer library's encryption layer, which PR #470 moves to the new library line. Solana stays
+  switched off in this build.
+  Detail: PR #465.
+
 #### UTXO coins and Electrum
 
 - **Signing a Radiant (RXD) transaction with a malformed output script now fails with an error.** Radiant's
@@ -712,8 +725,9 @@ the previous version used. The safe way:
   encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
   (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
   (`x25519-dalek` 2, `curve25519-dalek` 4). The handshake itself is unchanged, byte for byte, and nodes running
-  older versions connect as before. The advisory stays listed in `deny.toml` for now, because the Solana
-  libraries still bring the old library into the build. Detail: PR #470; CRD ch.28 OQ2 status note of 2026-11-22;
+  older versions connect as before. With the Solana libraries already moved off it, the old library is now out
+  of the build, and the dependency policy no longer ignores RUSTSEC-2024-0344. Detail: PR #470; CRD ch.28 OQ2
+  status note of 2026-11-22;
   `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
 
 ### Fixed
@@ -1105,12 +1119,14 @@ the previous version used. The safe way:
   activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
   parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
   last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
-- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
-  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
+- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — done: the Solana crates moved to the 3.x
+  line (package S5 of `solana-support`, PR #465); RUSTSEC-2022-0093 is cleared, and RUSTSEC-2024-0344
+  moves to the libp2p modernization task (it comes in through the peer-to-peer library); PR #470 clears
+  it by vendoring the Noise crate.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
+  S5 in PR #465, S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
   withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
@@ -1151,6 +1167,14 @@ the previous version used. The safe way:
 - **The TRON transaction history needs a TronGrid API key.** Without a keyed TronGrid node, or without
   `tx_history: true` in the activation request, `my_tx_history` answers as for a coin without a history. Detail:
   CRD ch.21 §21.10C.
+- **TRON on public TronGrid without an API key can be refused with HTTP 429.** In a mainnet withdrawal test with
+  the keyless public TronGrid endpoint, some requests were answered with HTTP 429 (too many requests). KDF counts
+  such an answer as a failed node and asks the next node of the list; when every node refuses, the method returns
+  the error (for example a transport error from `withdraw`, or "TRON broadcast failed" from
+  `send_raw_transaction`) and does not wait and try again. In the test, a broadcast refused this way sent nothing,
+  and repeating the request later succeeded. For regular use, set a TronGrid API key (`tron_api_key`) or use your
+  own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: PR #467;
+  CRD ch.21 §21.9.
 
 ## [0.4.1-beta.1] — 2026-11-21
 

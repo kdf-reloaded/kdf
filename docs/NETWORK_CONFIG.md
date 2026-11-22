@@ -516,6 +516,14 @@ The node that answers a request is tried first by the next one; a node that fail
 status outside 2xx, with something that is not the expected JSON, or does not answer within 10
 seconds is skipped for that request. Several requests of one coin can run at the same time.
 
+In a mainnet test with the keyless public TronGrid endpoint, some requests were answered with HTTP
+429 (too many requests). Such an answer counts as a failed node, like any status outside 2xx: the
+next node of the list is asked, and when every node refuses, the method returns the error; KDF
+does not wait and try again. In the test, a broadcast refused this way sent nothing, and repeating
+the request later succeeded. For regular use, set `tron_api_key` (it is sent with the wallet
+requests, such as balance, withdraw and broadcast, as well as with the history requests) or use
+your own full node.
+
 > **Compatibility:** Komodo DeFi Framework and GLEEC KDF ignore the object form, the `headers` member
 > of a `nodes` entry and `tron_api_key`; a client written for them never sends any of them. GLEEC KDF
 > activates TRON only through the mmrpc 2.0 methods, so a client written for it never uses `urls`.
