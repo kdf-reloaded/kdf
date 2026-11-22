@@ -1460,6 +1460,22 @@ payment transaction. The two rows are identical.
    surveyed in this reading, apart from the baseline comparison in R90
    item 5.
 
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-22).** Reloaded answers "can this payment be refunded now" from
+> the chain's time for three families that R88 item 2 records under the
+> general rule. An SLP token answers with its platform coin's rule (R88
+> item 3). A QRC20 token answers with the QTUM base coin's rule: the payment
+> is refundable once the QTUM chain's median time past is past the lock time.
+> An ETH or ERC20 coin waits on the local clock as in R88 item 1 until the
+> lock time, then reads the latest block's timestamp: the payment is
+> refundable when that timestamp is past the lock time; otherwise the answer
+> is to wait for the difference plus one second, at most 3600 seconds. A
+> failed read is an error, which the refund stages of R18 and R31 retry. The
+> Tron-VM form of the EVM family (R92 item 3), Tendermint, Sia and the
+> shielded coin keep the rules R88 records. The manual recovery and the
+> clock check before a refund are unchanged. No message and no transaction a
+> peer validates changes, which §51.6E permits.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -3013,6 +3029,11 @@ reference rows alike.
   maintainer's decision of 2026-11-22 and this workspace's own UTXO spend
   search; no reference input was consulted, the note makes no parity claim,
   and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-22, a third one: the status note after §51.6E R92 is
+  a Reloaded addition written in a clean session from the maintainer's
+  decision of 2026-11-22, the cleared §51.6E and this workspace's own refund
+  gate code; no other reference input was consulted, the note makes no
+  parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's

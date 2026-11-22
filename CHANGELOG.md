@@ -1121,6 +1121,10 @@ the previous version used. The safe way:
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
   CRD ch.51, status note of 2026-11-22 after R31a.
+- **The refund of an SLP, QRC20, ETH or ERC20 swap payment waits for the chain's time.** The node asks whether a
+  payment can be refunded from the chain: an SLP token by the median time past of BCH, a QRC20 token by that of
+  QTUM, and an ETH or ERC20 coin by the timestamp of the latest block, once the node's own clock is past the lock
+  time. Detail: PR (to follow); CRD ch.51, status note of 2026-11-22 after §51.6E R92.
 
 ### Tests
 
@@ -1208,6 +1212,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 3 in PR (to follow).
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
