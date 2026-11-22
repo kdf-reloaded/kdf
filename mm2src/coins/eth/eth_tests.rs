@@ -1197,13 +1197,16 @@ mod search_for_swap_tx_spend_scripted {
 
             let time_lock = 1_000;
             let secret_hash = [7u8; 20];
-            let found = block_on(
+            // CRD ch.39 R39.11.5A.4, D39.11.5A.1 (a): the contract reports the payment and the whole range holds
+            // no event for it, so the answer is undetermined; the windows searched are the same.
+            let err = block_on(
                 fx.coin
                     .check_if_my_payment_sent(time_lock, &[], &[], &secret_hash, 0, &fx.coin.swap_contract_address())
                     .compat(),
             )
-            .unwrap();
-            assert!(found.is_none());
+            .unwrap_err();
+            assert!(err.contains("Undetermined whether the payment was sent"), "{err}");
+            assert!(err.contains("no payment event was found in blocks 0 to 2499"), "{err}");
             assert_eq!(fx.windows("PaymentSent"), expected);
 
             // V2 search: a poll covers the same windows (the search then polls until its deadline).
@@ -4933,6 +4936,235 @@ mod scripted_node_ports {
             assert!(err.contains("(1000000000 wei)"), "{err}");
             assert!(err.contains("(1000000001 wei)"), "{err}");
             assert!(err.contains("below the block base fee"), "{err}");
+        }
+    }
+
+    /// CRD ch.39 §39.11.5A (T39.11.5A.2 -- T39.11.5A.5): what the already-sent query of an EVM coin answers for
+    /// each read of R39.11.5A.2. A contradictory read is an undetermined answer that names the condition
+    /// (D39.11.5A.1 (a)), never "not sent".
+    mod already_sent_query {
+        use super::*;
+
+        const TIP: u64 = 150;
+        const FROM_BLOCK: u64 = 100;
+        const TIME_LOCK: u32 = 1_000;
+        const SECRET_HASH: [u8; 20] = [7u8; 20];
+        const UNDETERMINED: &str = "Undetermined whether the payment was sent";
+
+        /// What the scripted node answers.
+        #[derive(Clone)]
+        struct Script {
+            /// The state `payments(id)` reports (0 is `Uninitialized`).
+            state: u8,
+            tip: u64,
+            /// Whether `eth_getLogs` reports the `PaymentSent` event of the payment.
+            event: bool,
+            /// Whether `eth_getTransactionByHash` knows the transaction the event names (otherwise it answers null).
+            transaction: bool,
+            /// A method that answers with an error response.
+            failing: Option<&'static str>,
+        }
+
+        impl Script {
+            fn state(state: u8) -> Script {
+                Script {
+                    state,
+                    tip: TIP,
+                    event: false,
+                    transaction: false,
+                    failing: None,
+                }
+            }
+        }
+
+        struct Outcome {
+            answer: Result<Option<TransactionEnum>, String>,
+            /// The methods the node was asked, in order.
+            methods: Vec<String>,
+            /// The inclusive block ranges of the `eth_getLogs` requests, in order.
+            windows: Vec<(u64, u64)>,
+            payment: SignedEthTx,
+        }
+
+        fn hex_u64(v: &Json) -> u64 { u64::from_str_radix(v.as_str().unwrap().trim_start_matches("0x"), 16).unwrap() }
+
+        /// Runs the query from `FROM_BLOCK` against a node that follows `script`.
+        fn query(script: Script) -> Outcome {
+            // Any legacy transaction serves as the one the event names: the query returns it as it is.
+            let payment = fee_tx(false);
+            let payment_json = rpc_tx(&payment, FROM_BLOCK + 1);
+            let payment_hash = format!("{:#x}", payment.tx_hash());
+            let sent_topic = format!("{:#x}", SWAP_CONTRACT.event("PaymentSent").unwrap().signature());
+            // The payment id depends on the coin, which is built after the node it talks to.
+            let id_cell: Arc<Mutex<Vec<u8>>> = Arc::default();
+            let methods: Arc<Mutex<Vec<String>>> = Arc::default();
+            let windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+            let (id_h, methods_h, windows_h, script_h) = (id_cell.clone(), methods.clone(), windows.clone(), script);
+            let node = spawn(move |method, params| {
+                methods_h.lock().unwrap().push(method.to_owned());
+                if script_h.failing == Some(method) {
+                    return json!({"__rpc_error": {"code": -32000, "message": "boom"}});
+                }
+                match method {
+                    // `payments(id)`: payment hash, lock time, state.
+                    "eth_call" => json!(format!(
+                        "0x{}{}{:064x}",
+                        "00".repeat(32),
+                        "00".repeat(32),
+                        script_h.state
+                    )),
+                    "eth_blockNumber" => json!(format!("{:#x}", script_h.tip)),
+                    "eth_getLogs" => {
+                        let (from, to) = (hex_u64(&params[0]["fromBlock"]), hex_u64(&params[0]["toBlock"]));
+                        windows_h.lock().unwrap().push((from, to));
+                        if !script_h.event {
+                            return json!([]);
+                        }
+                        json!([{
+                            "address": params[0]["address"],
+                            "topics": [sent_topic],
+                            "data": format!("0x{}", hex::encode(&*id_h.lock().unwrap())),
+                            "blockHash": format!("0x{}", "22".repeat(32)),
+                            "blockNumber": format!("{:#x}", from),
+                            "transactionHash": payment_hash,
+                            "transactionIndex": "0x0",
+                            "logIndex": "0x0",
+                            "removed": false,
+                        }])
+                    },
+                    "eth_getTransactionByHash" if script_h.transaction => payment_json.clone(),
+                    "eth_getTransactionByHash" => Json::Null,
+                    other => panic!("the scripted node does not serve `{}`", other),
+                }
+            });
+            let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec![node.url.clone()], None);
+            *id_cell.lock().unwrap() = coin.etomic_swap_id(TIME_LOCK, &SECRET_HASH);
+            let answer = block_on(
+                coin.check_if_my_payment_sent(
+                    TIME_LOCK,
+                    &[],
+                    &[],
+                    &SECRET_HASH,
+                    FROM_BLOCK,
+                    &coin.swap_contract_address(),
+                )
+                .compat(),
+            );
+            let (methods, windows) = (methods.lock().unwrap().clone(), windows.lock().unwrap().clone());
+            Outcome {
+                answer,
+                methods,
+                windows,
+                payment,
+            }
+        }
+
+        /// The harness itself: with the state, the event and the transaction all served, the answer is "sent".
+        #[test]
+        fn r39_11_5a_2_evm_state_event_and_transaction_answer_sent() {
+            let outcome = query(Script {
+                event: true,
+                transaction: true,
+                ..Script::state(1)
+            });
+            assert_eq!(outcome.answer.unwrap(), Some(outcome.payment.into()));
+            assert_eq!(outcome.methods, [
+                "eth_call",
+                "eth_blockNumber",
+                "eth_getLogs",
+                "eth_getTransactionByHash"
+            ]);
+        }
+
+        /// T39.11.5A.2: an `Uninitialized` state answers "not sent" at once; a failing state read is an error.
+        #[test]
+        fn t39_11_5a_2_evm_uninitialized_state_is_not_sent_without_a_block_number_or_log_request() {
+            let outcome = query(Script::state(0));
+            assert_eq!(outcome.answer.unwrap(), None);
+            assert_eq!(outcome.methods, ["eth_call"]);
+
+            let outcome = query(Script {
+                failing: Some("eth_call"),
+                ..Script::state(0)
+            });
+            let err = outcome.answer.unwrap_err();
+            assert!(err.contains("boom"), "{err}");
+            assert!(outcome.windows.is_empty());
+        }
+
+        /// T39.11.5A.3: with the state present, a failing block-number read, a failing log request and a failing
+        /// transaction read each give an error that carries the node's answer.
+        #[test]
+        fn t39_11_5a_3_evm_failed_reads_are_errors() {
+            for failing in ["eth_blockNumber", "eth_getLogs", "eth_getTransactionByHash"] {
+                let outcome = query(Script {
+                    event: true,
+                    transaction: true,
+                    failing: Some(failing),
+                    ..Script::state(1)
+                });
+                let err = outcome.answer.expect_err(failing);
+                assert!(err.contains("boom"), "{failing}: {err}");
+                assert!(!err.contains(UNDETERMINED), "{failing}: {err}");
+            }
+        }
+
+        /// T39.11.5A.4: with the node's block number below the start block, the search asks for the start block
+        /// alone. The state is present and that block holds no event, so the answer is undetermined.
+        #[test]
+        fn t39_11_5a_4_evm_tip_below_the_start_block_asks_for_the_start_block_only() {
+            let outcome = query(Script {
+                tip: FROM_BLOCK - 50,
+                ..Script::state(1)
+            });
+            assert_eq!(outcome.windows, [(FROM_BLOCK, FROM_BLOCK)]);
+            let err = outcome.answer.unwrap_err();
+            assert!(err.contains(UNDETERMINED), "{err}");
+            assert!(err.contains("in blocks 100 to 100"), "{err}");
+        }
+
+        /// T39.11.5A.5 (R39.11.5A.4): every state but `Uninitialized` without an event in the searched range is
+        /// undetermined, and the error names the condition and the range.
+        #[test]
+        fn t39_11_5a_5_evm_state_without_event_is_undetermined() {
+            // Sent, spent by the receiver, refunded to the sender.
+            for state in [1, 2, 3] {
+                let outcome = query(Script::state(state));
+                let err = outcome.answer.unwrap_err();
+                assert!(err.contains(UNDETERMINED), "{err}");
+                assert!(
+                    err.contains(
+                        "the swap contract reports the payment as sent, but no payment event was found in blocks \
+                         100 to 150"
+                    ),
+                    "{err}"
+                );
+                assert_eq!(outcome.windows, [(FROM_BLOCK, TIP)]);
+                assert!(!outcome.methods.iter().any(|m| m == "eth_getTransactionByHash"));
+            }
+        }
+
+        /// T39.11.5A.5 (R39.11.5A.6): an event whose transaction the node does not return is undetermined, and the
+        /// error names the condition and the transaction.
+        #[test]
+        fn t39_11_5a_5_evm_event_without_transaction_is_undetermined() {
+            let outcome = query(Script {
+                event: true,
+                ..Script::state(1)
+            });
+            let err = outcome.answer.unwrap_err();
+            assert!(err.contains(UNDETERMINED), "{err}");
+            assert!(
+                err.contains("a payment event was found in block range 100 to 150"),
+                "{err}"
+            );
+            assert!(
+                err.contains(&format!(
+                    "the node does not return its transaction {:#x}",
+                    outcome.payment.tx_hash()
+                )),
+                "{err}"
+            );
         }
     }
 }

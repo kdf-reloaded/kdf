@@ -186,9 +186,10 @@ jobs:
           # `scripted_node_ports` runs real EVM code against an in-process scripted
           # JSON-RPC node: deterministic, no binary, no network. Previously
           # unreachable from any cell (the `eth-utility` cell names five tests).
-          # See docs/plans/evm-test-infrastructure.md.
+          # See docs/plans/evm-test-infrastructure.md. The second path adds the bounded
+          # `eth_getLogs` window tests (CRD ch.17 T17.8.1 -- T17.8.7), which use the same node.
           - name: eth-scripted-node
-            cmd: "cargo test -p coins --lib eth::eth_tests::scripted_node_ports::"
+            cmd: "cargo test -p coins --lib -- eth::eth_tests::scripted_node_ports:: eth::eth_tests::search_for_swap_tx_spend_scripted::bounded_windows::"
           # The per-connection gossip send queue bound (CRD ch.28 §28.9B RQ1): the
           # vendored gossipsub crate's own tests for it, then the in-process
           # integration test with the production node. The vendored crate is
@@ -237,9 +238,10 @@ jobs:
           # the test path. The tests of these paths that need a public server carry
           # `#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]`
           # (docs/UNIT_TESTS.md, "Tests that need public servers"), so without that feature this
-          # cell runs only the offline ones.
+          # cell runs only the offline ones. The path `siacoin::` adds the Sia tests of `coins`
+          # (all offline: pure checks and loopback walletd stubs).
           - name: withdraw-family
-            cmd: "cargo test -p coins --lib -- withdraw qtum bch slp"
+            cmd: "cargo test -p coins --lib -- withdraw qtum bch slp siacoin::"
           # The Tendermint coin tests of `coins` (the swap-flow, priority-fee and WalletConnect signer
           # tests included), selected by the `tendermint::` module path, and the tests of the
           # postponed-family switches. They run against in-process loopback nodes: no public server,

@@ -514,6 +514,13 @@ pub enum SiaCheckIfMyPaymentSentError {
     MyKeypair(#[from] SiaCoinMyKeypairError),
     #[error("[chk-payment] unexpected event variant: {0:?}")]
     EventVariant(EventDataWrapper),
+    /// CRD ch.39 R39.11.5A.8, D39.11.5A.1 (a): a failed request does not show that no payment exists. Carries
+    /// the request failure as [`sia_text`] renders it.
+    #[error(
+        "[chk-payment] Undetermined whether the payment was sent: the request for the events of the HTLC address \
+         failed: {0}"
+    )]
+    EventsRequest(String),
 }
 
 /// Errors raised while searching for the spend of an HTLC payment (CRD

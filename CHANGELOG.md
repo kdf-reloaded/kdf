@@ -1128,6 +1128,13 @@ the previous version used. The safe way:
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
   CRD ch.51, status note of 2026-11-22 after R31a.
+- **A swap no longer sends its payment when the check for an earlier payment is contradictory or fails.** Before a
+  swap sends its payment, it checks whether it already sent one. For EVM coins and tokens, QRC20 tokens and Sia, some
+  answers of that check were treated as "not sent" although they did not show it: the swap contract reports the
+  payment but no payment event or transaction is found, an EVM node reports the payment event but does not return
+  its transaction, or the request for the Sia payment address's events fails. The payment step now fails in these
+  cases instead, so the swap cannot send a second payment, and the error names the condition. Detail: CRD ch.39
+  §39.11.5A.
 
 ### Tests
 
