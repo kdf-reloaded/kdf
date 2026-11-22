@@ -544,7 +544,14 @@ Solana request shall terminate abnormally.
 > gets no connect message, and no swap starts from it. One INFO line per
 > order, written once while the node runs, names the order, the pair, the
 > coin and the reason. The order is not cancelled and not deleted; the
-> operator decides.
+> operator decides. `cancel_order` on a kept maker order still publishes
+> its cancel message, which peers that never saw the order ignore.
+>
+> A kept taker order still reaches its timeout, as any taker order does.
+> A fill-or-kill order is then deleted as timed out. A
+> good-till-cancelled order becomes a maker order with the same uuid;
+> that maker order is kept and not announced, and a balance watch starts
+> for its base coin, whose readings neither resize nor cancel it.
 >
 > Two checks apply the rule. At startup no coin is active, so the coins
 > configuration decides: the protocol type (`LIGHTNING`; `SOLANA`,
@@ -554,7 +561,9 @@ Solana request shall terminate abnormally.
 > both coins are active, the check of order creation runs on the coins
 > themselves: the refusal of R60.2.3 and of this rule, and the coin's own
 > wallet-only answer. An order that fails it is not announced and not
-> matched, whether or not the startup had marked it. The coins of an
+> matched, whether or not the startup had marked it, and it is neither
+> resized nor cancelled by a balance change and starts no swap from a
+> match it already holds. The coins of an
 > order the startup marked stay among those the kick-start asks to be
 > enabled (`coins_needed_for_kick_start`), as the coins of any other
 > restored order.

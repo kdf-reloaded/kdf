@@ -8428,6 +8428,17 @@ mod tendermint_saved_orders {
     /// volume check of the maintenance loop, and nothing about it is published.
     #[test]
     fn a_balance_change_neither_resizes_nor_cancels_a_kept_order() {
+        a_balance_change_leaves_the_untradable_orders(true);
+    }
+
+    /// The same for an order the startup did not mark, which is untradable only by the check on its active coins
+    /// (its rel coin is wallet-only): no resize, no cancel, nothing published, and one line per order.
+    #[test]
+    fn a_balance_change_neither_resizes_nor_cancels_an_order_untradable_by_the_live_check() {
+        a_balance_change_leaves_the_untradable_orders(false);
+    }
+
+    fn a_balance_change_leaves_the_untradable_orders(marked_at_startup: bool) {
         mock_balance("0.5");
         let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
         node.activate(&TEST_COINS);
@@ -8449,7 +8460,10 @@ mod tendermint_saved_orders {
             add_maker(&node, order);
         }
         for order in [&kept, &kept_too_small] {
-            assert!(octx.keep_untradable_saved_order(&node.ctx, "Maker", &order.uuid, &order.base, &order.rel));
+            if marked_at_startup {
+                assert!(octx.keep_untradable_saved_order(&node.ctx, "Maker", &order.uuid, &order.base, &order.rel));
+            }
+            assert_eq!(octx.is_kept_untradable(&order.uuid), marked_at_startup);
         }
 
         // The balance 0.5 supports the volume 0.4, below the minimum volume 1 of the three orders.
@@ -8463,6 +8477,7 @@ mod tendermint_saved_orders {
         for order in [&kept, &kept_too_small] {
             let order_mutex = octx.maker_orders_ctx.lock().get_order(&order.uuid).unwrap();
             assert_eq!(block_on(order_mutex.lock()).max_base_vol, order.max_base_vol);
+            assert_eq!(node.lines_of(&order.uuid), 1);
         }
         // The only message is the cancellation of the plain order.
         let published = node.published();

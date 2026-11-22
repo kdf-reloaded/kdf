@@ -745,6 +745,17 @@ the previous version used. The safe way:
 
 ### Fixed
 
+#### Orders
+
+- **Saved orders of a coin that cannot be traded are kept, but no longer announced or matched.** After a restart,
+  a saved order of a coin this build cannot trade stays in `my_orders` but is not announced to the order book and
+  is not matched, and one line in the log names it. This covers wallet-only coins, Lightning, Solana, and
+  Tendermint and TRON while their swaps are off. Before, a saved Lightning or Solana order returned to the order
+  book and every match failed, and a saved Tendermint or TRON order was cancelled. The operator can still cancel
+  such an order with `cancel_order`, which still sends its cancel message. A kept taker order still times out as
+  before: fill-or-kill is removed, good-till-cancelled becomes a maker order that is kept and not announced.
+  Detail: PR #485; CRD ch.60 R60.6.5.
+
 #### EVM, BCH, Sia and Lightning coins
 
 - **The HD address methods of an EVM platform list its tokens.** `get_new_address`, `account_balance`,
@@ -963,13 +974,6 @@ the previous version used. The safe way:
   and the mint's decimals for a token, for example `1.000000000` or `-1.500000`. The values are unchanged;
   single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
   CRD ch.40 R40.2A.4, D40.2A.1.
-- **Saved orders of a coin that cannot be traded are kept, but no longer announced or matched.** After a restart,
-  a saved order of a coin this build cannot trade stays in `my_orders` but is not announced to the order book and
-  is not matched, and one line in the log names it. This covers wallet-only coins, Lightning, Solana, and
-  Tendermint and TRON while their swaps are off. Before, a saved Lightning or Solana order returned to the order
-  book and every match failed, and a saved Tendermint or TRON order was cancelled. The operator can still cancel
-  such an order with `cancel_order`. Detail: PR #485; CRD ch.60 R60.6.5.
-
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation

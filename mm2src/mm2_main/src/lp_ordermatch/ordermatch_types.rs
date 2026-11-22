@@ -316,6 +316,26 @@ impl OrdermatchContext {
         true
     }
 
+    /// [`Self::order_is_untradable`] for a path that holds the tickers of the order only: the coins are looked up,
+    /// and the check runs on them when both are active. With a coin inactive, the answer is whether the startup
+    /// found the order untradable.
+    pub(crate) async fn order_is_untradable_by_tickers(
+        &self,
+        ctx: &MmArc,
+        kind: &str,
+        uuid: &Uuid,
+        base: &str,
+        rel: &str,
+    ) -> bool {
+        if self.is_kept_untradable(uuid) {
+            return true;
+        }
+        match find_pair(ctx, base, rel).await {
+            Ok(Some((base, rel))) => self.order_is_untradable(ctx, kind, uuid, &base, &rel),
+            _ => false,
+        }
+    }
+
     /// The lines logged for untradable orders since the node started, in order.
     #[cfg(test)]
     pub(crate) fn untradable_order_lines(&self) -> Vec<String> { self.untradable_orders.lock().lines.clone() }

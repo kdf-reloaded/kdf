@@ -573,9 +573,12 @@ impl BalanceUpdateOrdermatchHandler {
                 if order.base != coin.ticker() {
                     continue;
                 }
-                // CRD ch.60 R60.6.5: an order kept although its pair cannot trade is neither resized nor cancelled
-                // here, so nothing about it is published.
-                if ordermatch_ctx.is_kept_untradable(&order.uuid) {
+                // CRD ch.60 R60.6.5: an order whose pair cannot trade, by the startup's mark or by the check on its
+                // active coins, is neither resized nor cancelled here, so nothing about it is published.
+                if ordermatch_ctx
+                    .order_is_untradable_by_tickers(&ctx, "Maker", &order.uuid, &order.base, &order.rel)
+                    .await
+                {
                     continue;
                 }
 
@@ -1543,8 +1546,12 @@ pub(crate) async fn check_balance_for_maker_orders(ctx: MmArc, ordermatch_ctx: &
             if order.available_amount() >= order.min_base_vol || order.has_ongoing_matches() {
                 continue;
             }
-            // CRD ch.60 R60.6.5: an order kept although its pair cannot trade is not cancelled for its volume.
-            if ordermatch_ctx.is_kept_untradable(&order.uuid) {
+            // CRD ch.60 R60.6.5: an order whose pair cannot trade, by the startup's mark or by the check on its
+            // active coins, is not cancelled for its volume.
+            if ordermatch_ctx
+                .order_is_untradable_by_tickers(&ctx, "Maker", &order.uuid, &order.base, &order.rel)
+                .await
+            {
                 continue;
             }
 
@@ -1732,16 +1739,32 @@ pub(crate) async fn process_maker_connected(ctx: MmArc, from_pubkey: H256Json, c
         return;
     }
 
-    // CRD ch.60 R60.6.5: a taker order kept although its pair cannot trade starts no swap, whatever match it was
-    // saved with.
-    if ordermatch_ctx.is_kept_untradable(&connected.taker_order_uuid) {
-        return;
-    }
     let mut my_taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
     let my_order_entry = match my_taker_orders.entry(connected.taker_order_uuid) {
         Entry::Occupied(e) => e,
         Entry::Vacant(_) => return,
     };
+    // CRD ch.60 R60.6.5: a taker order whose pair cannot trade, by the startup's mark or by the check on its active
+    // coins, starts no swap, whatever match it holds.
+    let (maker_coin_ticker, taker_coin_ticker) = {
+        let my_order = my_order_entry.get();
+        (
+            my_order.maker_coin_ticker().to_owned(),
+            my_order.taker_coin_ticker().to_owned(),
+        )
+    };
+    if ordermatch_ctx
+        .order_is_untradable_by_tickers(
+            &ctx,
+            "Taker",
+            &connected.taker_order_uuid,
+            &maker_coin_ticker,
+            &taker_coin_ticker,
+        )
+        .await
+    {
+        return;
+    }
     let order_match = match my_order_entry.get().matches.get(&connected.maker_order_uuid) {
         Some(o) => o,
         None => {
@@ -1895,11 +1918,6 @@ pub(crate) async fn process_taker_connect(ctx: MmArc, sender_pubkey: H256Json, c
         return;
     }
 
-    // CRD ch.60 R60.6.5: a maker order kept although its pair cannot trade starts no swap, whatever match it was
-    // saved with.
-    if ordermatch_ctx.is_kept_untradable(&connect_msg.maker_order_uuid) {
-        return;
-    }
     let order_mutex = {
         match ordermatch_ctx
             .maker_orders_ctx
@@ -1911,6 +1929,14 @@ pub(crate) async fn process_taker_connect(ctx: MmArc, sender_pubkey: H256Json, c
         }
     };
     let mut my_order = order_mutex.lock().await;
+    // CRD ch.60 R60.6.5: a maker order whose pair cannot trade, by the startup's mark or by the check on its active
+    // coins, starts no swap, whatever match it holds.
+    if ordermatch_ctx
+        .order_is_untradable_by_tickers(&ctx, "Maker", &my_order.uuid, &my_order.base, &my_order.rel)
+        .await
+    {
+        return;
+    }
     let order_match = match my_order.matches.get_mut(&connect_msg.taker_order_uuid) {
         Some(o) => o,
         None => {
