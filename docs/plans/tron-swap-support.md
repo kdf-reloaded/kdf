@@ -1,6 +1,6 @@
 # Plan: Tron V1 atomic-swap participation
 
-**Status:** parked (the branch is not revived; its topics move to the 0.4.0 TRON work, see below) — **Last reviewed:** 2026-11-08
+**Status:** parked (the branch is not revived; its topics move to the 0.4.0 TRON work, see below) — **Last reviewed:** 2026-11-22
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a fully wired Tron V1 swap implementation and a 568-line
@@ -23,6 +23,13 @@
 > wallet-only coin family: `TRON_ACTIVATION_AVAILABLE` is `true`, and swaps stay
 > off behind `TRON_SWAPS_AVAILABLE` (`false`) (CRD ch.21 D6 and its status
 > note; plan `tron-support`). The box above describes the tree until that date.
+
+> **Note (2026-11-22).** The TRON arm of the legacy pair selection is built:
+> a TRX or TRC20 coin on either side selects the 32-byte SHA-256 secret hash
+> (CRD ch.51, the status note after R72; ch.21, the note after R21.B6). The
+> binding of the arm that the section "Discard the shared-driver change" and
+> item 3 of "Revival sequence" below describe as open is therefore done, in
+> the code and in the CRD.
 
 ## Relation to the TRON work (2026-11-08)
 

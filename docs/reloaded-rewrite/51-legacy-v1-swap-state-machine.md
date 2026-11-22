@@ -2437,6 +2437,26 @@ algorithm per R71/R72 and proceeds like any other pairing, including
 pairings where the *other* side is a coin family that has no native
 32-byte hash-lock of its own.
 
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer
+> decision of 2026-11-08).** TRON (a TRX coin and a TRC20 token) joins
+> the forcing families of this rule, as
+> [Chapter 21](21-tron-integration.md) R21.B6 requires: the Tron-VM V1
+> swap contract chosen there (chapter 21 D21.B2) locks with SHA-256 over
+> 32 bytes. `select_secret_hash_algo` has the arm: a TRX or TRC20 coin on
+> either side of the pair selects the 32-byte alternate. An ETH or ERC20
+> coin is not in the family and keeps the 20-byte default, unless the
+> other side of its pair forces the alternate. No TRON swap runs until
+> the TRON swap switch is on (chapter 21, the status note at R21.B3), so
+> the arm changes no swap that can run today. A saved swap keeps the
+> secret hash it was started with: the selection is evaluated once, by
+> the maker at the start of a new swap, and the result is saved with the
+> swap. The TRON payment path that carries the 32-byte value unnarrowed
+> (R72A) is not built yet; it comes with the TRON swap operations. The
+> remark that "the TRON V1 path has no secret hash", at the end of the
+> note of 2026-11-08 on the EVM leg further below, describes the tree
+> before this note; the TRON payment path will carry the 32-byte value
+> as R72A requires. The cleared text above is unchanged.
+
 **R72A.** *Every leg consumes the one shared value; each coin family's
 own construction decides how.* R71's `secret_hash` is computed once per
 swap and used identically by both legs (R71); it is never renegotiated,
@@ -3607,6 +3627,11 @@ reference rows alike.
   field `swap_evidence_node`. It is Reloaded-original, records only the
   maintainer's decisions of 2026-11-22, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-22:* the status note after R72 on TRON
+  as a forcing family. It is Reloaded-original, rests only on the cleared
+  text of R71, R72 and R72A, of chapter 21 §21.11B.2, R21.B3 and R21.B6, the
+  maintainer's decision of 2026-11-08 on chapter 21 D21.B2 and D21.B4, and
+  this repository's own swap code, and changes no sentence of the chapter.
 - *Clean-side addition of 2026-11-22, a third one:* R100 items 6 to 9 and
   T43, the maintainer's refinements of 2026-11-22 (the operator's own daemon,
   two hosts, no outvoting, swaps already running). Reloaded-original; no
