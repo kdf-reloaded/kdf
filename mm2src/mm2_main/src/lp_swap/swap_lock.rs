@@ -58,9 +58,10 @@ pub async fn touch_until_lost<L: SwapLockOps>(lock: L, uuid: Uuid, interval_sec:
     }
 }
 
-/// Drives `swap_fut` while `lock` is refreshed. If the lock is lost the swap future is dropped before its next
-/// step, so it makes no further broadcast and no record write, and an error is logged. No event is written
-/// (CRD ch.51 R5 with ch.44 R44.9A.13 item 3). The caller's registry guard releases as on every other exit.
+/// Drives `swap_fut` while `lock` is refreshed. If the lock is lost the swap future is dropped at whatever await
+/// it is suspended on: the run is stopped where it stands, like an abrupt stop, and starts no further step. An
+/// error is logged and no event is written (CRD ch.51 R5 with ch.44 R44.9A.13 item 3). The caller's registry guard
+/// releases as on every other exit.
 pub async fn run_while_lock_held<L: SwapLockOps, F: Future<Output = ()>>(
     swap_fut: F,
     lock: L,
@@ -73,7 +74,7 @@ pub async fn run_while_lock_held<L: SwapLockOps, F: Future<Output = ()>>(
     select! {
         _swap = swap_fut => (),
         reason = touch_loop => error!(
-            "Swap {} run stopped: its swap lock was lost ({}); the swap continues only through a restart",
+            "Swap {} run stopped because its swap lock was lost ({}); the swap resumes from its saved record",
             uuid, reason
         ),
     }

@@ -459,7 +459,8 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
     );
     let mut shutdown_fut = Box::pin(shutdown_rx.recv().fuse());
     let do_nothing = (); // to fix https://rust-lang.github.io/rust-clippy/master/index.html#unused_unit
-                         // Ends when the swap finishes, or, if the swap lock is lost, before the swap's next step (ch.44 R44.9A.13).
+                         // Ends when the swap finishes, or, if the swap lock is lost, the run is stopped where it stands and starts no
+                         // further step (ch.44 R44.9A.13).
     let mut held_swap_fut = Box::pin(run_while_lock_held(swap_fut, swap_lock, lock_uuid, 30.).fuse());
     select! {
         _swap = held_swap_fut => do_nothing, // swap finished normally, or its lock was lost
