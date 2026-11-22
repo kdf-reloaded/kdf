@@ -1161,15 +1161,14 @@ rule.
 
 > **Status (2026-11-22; KDF Spec Reader, round 0.5.0-23).** Reference record,
 > read at the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A. The
-> two rows behave alike except where a rule names a difference. **Gate
-> status: not yet cleared; this section awaits the KDF Dirty Gate (chapter 01
-> R40) and is not an input for an implementer until the clearance is recorded
-> in §51.16.** R85–R92 state what the reference does. They do not require
-> Reloaded to copy a missing check: none of the behavior below is carried on
-> the wire, so a stricter check on Reloaded's side changes no message and no
-> transaction a peer validates. The findings are informative (chapter 01).
-> The reading was of source only; nothing here was observed on a running
-> reference node.
+> two rows behave alike except where a rule names a difference. **Gate status:
+> passed the KDF Dirty Gate on 2026-11-22, measure 0.03 (chapter 01 R40;
+> attestation in §51.16).** R85–R92 state what the reference does. They do not
+> require Reloaded to copy a missing check: none of the behavior below is
+> carried on the wire, so a stricter check on Reloaded's side changes no
+> message and no transaction a peer validates. The findings are informative
+> (chapter 01). The reading was of source only; nothing here was observed on a
+> running reference node.
 
 The legacy machines of this chapter rely on four operations that every coin
 family supplies in its own way:
@@ -3115,7 +3114,23 @@ reference rows alike.
   the public JSON-RPC and Electrum method names, and the public transaction
   search key of the HTLC module. No private identifier, function body,
   helper decomposition, log or error literal was reproduced. The proposed
-  fixes in the findings are the author's own. **KDF Dirty Gate: not yet
-  cleared.** The clearance record (outcome, extent, method, measure) is to be
-  entered here when the gate has passed; until then the three attestation
-  elements are not recorded.
+  fixes in the findings are the author's own. **KDF Dirty Gate: PASS on
+  2026-11-22, measure 0.03, no findings** (chapter 01 R40; the attestation
+  closes this item).
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings, in a single pass; the chapter 02 §2.15A rows were verified
+  (`v2.6.0-beta`, `v3.0.0-beta` and the baseline anchor (R1)). *Extent:* the
+  legacy-swap operations of the coin families -- the spend wait, the spend and
+  refund search, the secret extraction and the refund-eligibility answer --
+  for ETH/ERC20, QRC20, the standard UTXO family, BCH, the QTUM base coin, SLP
+  and Tendermint, and the taker's use of the extraction; the row `v3.0.0-beta`
+  read in full (nine source files), the row `v2.6.0-beta` in part (the
+  differences of the EVM family) and the baseline anchor in part (the UTXO
+  extraction and classification), with a mechanical pass over 275, 263 and 105
+  files of these three rows respectively; not read: KMD, Sia, the shielded
+  coins, the watcher, the version-two swap and the TRON virtual machine; on
+  the candidate side, the 413 added lines. *Method:* reading plus a per-token
+  forced-versus-free test and a five-word sequence comparison; the
+  repository's clean-room gate tool was not applicable because the additions
+  embed no code blocks. *Measure:* 0.03, on the discretionary-expression
+  basis.

@@ -6631,5 +6631,5 @@ R38.8.6 **Tests (two-direction, observable).**
 - *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
   at the end of §38.6.4Q.* It names chapter 51 §51.6E (R88, R89, R90) and
   summarizes what those rules record; its reference content is that of its
-  target and is judged with it. **KDF Dirty Gate: not yet cleared**; the
-  clearance is recorded in chapter 51 §51.16.
+  target and is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure
+  0.03, no findings**, as recorded in chapter 51 §51.16.

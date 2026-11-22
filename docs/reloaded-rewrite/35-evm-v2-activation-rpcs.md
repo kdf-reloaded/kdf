@@ -2935,5 +2935,6 @@ is decided together with this item.
 - *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
   before §35.9.* It names chapter 51 §51.6E (R86, R87, R88) and summarizes
   what those rules record; its reference content is that of its target and
-  is judged with it. **KDF Dirty Gate: not yet cleared**; the clearance is
-  recorded in chapter 51 §51.16. No cleared sentence was edited.
+  is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
+  findings**, as recorded in chapter 51 §51.16. No cleared sentence was
+  edited.
