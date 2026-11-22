@@ -114,8 +114,7 @@ PR #473 fixes them: a subscription request that waited for its answer while its 
 later by a handle of the disabled instance, remembered that instance again; and a subscription whose placement over
 a new session failed still counted as placed, so the next request of the same instance sent nothing. The rules are
 in the status note of 2026-11-22 after D38.6.4Q.1 in CRD ch.38. A disabled instance's balance streamer and a
-notification after the removal add nothing back (tests). Still open in Phase C: item 5, the INFO lines (decided
-2026-11-21, a separate PR).
+notification after the removal add nothing back (tests). Phase C item 5 is done (PR #476).
 
 ## Non-goals and compatibility guardrails
 
