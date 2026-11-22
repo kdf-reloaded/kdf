@@ -271,6 +271,7 @@ pub(crate) use qrc20::{qrc20_coin_from_conf_and_params, Qrc20Coin, Qrc20FeeDetai
 pub(crate) use qtum::{Qrc20AddressError, ScriptHashTypeNotSupported};
 pub(crate) use rpc_command::init_account_balance::{AccountBalanceTaskManager, AccountBalanceTaskManagerShared};
 pub(crate) use rpc_command::init_create_account::{CreateAccountTaskManager, CreateAccountTaskManagerShared};
+pub(crate) use rpc_command::init_get_new_address::{GetNewAddressTaskManager, GetNewAddressTaskManagerShared};
 pub(crate) use rpc_command::init_scan_for_new_addresses::{ScanAddressesTaskManager, ScanAddressesTaskManagerShared};
 pub(crate) use rpc_command::init_withdraw::{WithdrawTaskManager, WithdrawTaskManagerShared};
 pub(crate) use utxo::bch::{bch_coin_from_conf_and_params, BchActivationRequest, BchCoin};
