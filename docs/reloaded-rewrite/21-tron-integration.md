@@ -2898,15 +2898,18 @@ by R21.11D.1 MUST be in state 1; any other state, or an undetermined read, is a
 typed error and nothing is broadcast.
 
 **R21.11D.4A (the two claims).** The claim that reveals the secret (the maker
-claiming the taker payment) is sent only after its dry run succeeded, with the
-`fee_limit` of R21.11C.7; when the dry run reverts nothing is signed or
-broadcast and the swap goes on to its refund. The claim whose secret is already
-public (the taker claiming the maker payment) is sent while the `payments(id)`
-record does not show it claimed or refunded, whatever the chain time, also past
-the lock time, with no margin before or after it. Its `fee_limit` comes from the
-dry run when the dry run succeeds; when the dry run reverts, fails, or needs
-more than the cap, the call is sent with the fixed `fee_limit` of 100 TRX, the
-cap of R21.11C.7.
+claiming the taker payment) is signed only when all of these hold: the
+`payments(id)` record agreed by R21.11D.1 is in state 1; the chain time agreed
+by R21.11D.1 plus a margin of 300 seconds is below the record's stored lock
+time; the claim's dry run succeeded, which gives its `fee_limit` (R21.11C.7);
+and the coin's TRX balance covers that `fee_limit`. When any of these fails
+nothing is signed or broadcast and the swap goes on to its refund. The claim
+whose secret is already public (the taker claiming the maker payment) is sent
+while the `payments(id)` record does not show it claimed or refunded, whatever
+the chain time, also past the lock time, with no margin before or after it. Its
+`fee_limit` comes from the dry run when the dry run succeeds; when the dry run
+reverts, fails, or needs more than the cap, the call is sent with the fixed
+`fee_limit` of 100 TRX, the cap of R21.11C.7.
 
 **R21.11D.5 (refund gate).** A refund is allowed once the chain time agreed by
 R21.11D.1 is at or past the lock time; before that the swap waits (chapter 51
@@ -2932,6 +2935,10 @@ decision of 2026-11-08 on D21.B8:
   matching event. Any other candidate is skipped.
 - *Secret.* The secret is taken from the event or the call and used only when
   its SHA-256 equals the swap's secret hash.
+- *Window.* The search made by the wait for a spend starts at the last
+  block at which the record was read as unspent, one block earlier; the
+  one-time search starts at the payment's block. The caps count from that
+  start.
 - *Failure.* When a source fails, or a cap is reached (logged as a warning
   naming the payment), or the record says claimed but no consuming transaction
   is found, the search gives a typed error, never "not spent". The wait for a

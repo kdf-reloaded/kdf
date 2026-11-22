@@ -159,6 +159,9 @@ struct World {
     events: Option<Json>,
     /// The dry run of a call that is going to be sent reverts.
     dry_run_reverts: bool,
+    /// The TRX balance, in SUN, of the coin's account, and whether the read of it fails.
+    balance: i64,
+    balance_down: bool,
 }
 
 impl World {
@@ -178,6 +181,8 @@ impl World {
             broadcasts: Vec::new(),
             events: None,
             dry_run_reverts: false,
+            balance: 1_000_000_000_000,
+            balance_down: false,
         }
     }
 
@@ -258,6 +263,8 @@ fn answer(world: &Mutex<World>, path: &str, body: &str) -> Reply {
         "/wallet/triggerconstantcontract" => Reply::ok(
             &json!({ "result": { "result": true }, "constant_result": ["00"], "energy_used": 50_000 }).to_string(),
         ),
+        "/wallet/getaccount" if w.balance_down => Reply::status(500, "down"),
+        "/wallet/getaccount" => Reply::ok(&json!({ "balance": w.balance, "create_time": 1 }).to_string()),
         "/wallet/getchainparameters" => Reply::ok(
             &json!({ "chainParameter": [{ "key": "getTransactionFee", "value": 1000 },
                                         { "key": "getEnergyFee", "value": 420 }] })
@@ -357,12 +364,35 @@ fn expected_hash(me: &TronAddress) -> [u8; 32] {
 
 /// A node that holds the payment, its receipt in `PAYMENT_BLOCK`, and the payment record in `state`.
 fn payment_node(index: u8, payment: &TronSwapTx, me: &TronAddress, state: u8) -> Node {
-    Node::start(
-        index,
-        World::new()
-            .with_state(expected_hash(me), u64::from(LOCK_TIME), state)
-            .with_tx(payment, PAYMENT_BLOCK, "SUCCESS", vec![]),
-    )
+    let mut world = World::new()
+        .with_state(expected_hash(me), u64::from(LOCK_TIME), state)
+        .with_tx(payment, PAYMENT_BLOCK, "SUCCESS", vec![]);
+    // The solidified chain time is well before the lock time.
+    world.solid_time_ms = Some((i64::from(LOCK_TIME) - 10_000) * 1000);
+    Node::start(index, world)
+}
+
+/// Two nodes that agree the payment is `PaymentSent` and far from its lock time: what the revealing claim needs.
+fn claim_nodes(payment: &TronSwapTx, me: &TronAddress) -> (Node, Node) {
+    (payment_node(0, payment, me, 1), payment_node(1, payment, me, 1))
+}
+
+fn broadcast_count(nodes: &[&Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| node.world.lock().unwrap().broadcasts.len())
+        .sum()
+}
+
+fn reveal(coin: &EthCoin, payment: &TronSwapTx) -> Result<TronSwapTx, super::watch::OwnStepFailure> {
+    block_on(spend_payment_with(
+        coin,
+        &payment.to_bytes(),
+        &SECRET,
+        &selected(&contract()),
+        ClaimKind::RevealsSecret,
+        FAST,
+    ))
 }
 
 fn my_address_of_test_coin() -> TronAddress {
@@ -1054,20 +1084,100 @@ fn the_wait_keeps_polling_past_a_failed_candidate() {
 fn our_spend_counts_after_a_successful_receipt_and_goes_to_the_selected_contract() {
     let me = my_address_of_test_coin();
     let payment = good_payment(&me);
-    let node = payment_node(0, &payment, &me, 1);
-    let (_ctx, coin) = coin_over(&[&node], None, 1);
-    let tx = block_on(spend_payment_with(
-        &coin,
-        &payment.to_bytes(),
-        &SECRET,
-        &selected(&contract()),
-        ClaimKind::RevealsSecret,
-        FAST,
-    ))
-    .expect("the spend is confirmed");
+    let (a, b) = claim_nodes(&payment, &me);
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    let tx = reveal(&coin, &payment).expect("the spend is confirmed");
     let (to, _, call) = super::call_of(&tx).unwrap();
     assert_eq!(to, contract());
-    assert!(matches!(call, TronSwapCall::ReceiverSpend { secret, .. } if secret == SECRET));
+    assert!(matches!(call, TronSwapCall::ReceiverSpend { .. }));
+    assert_eq!(broadcast_count(&[&a, &b]), 1);
+}
+
+/// Each precondition of the revealing claim, in order: the agreed state, the margin before the lock, the dry run,
+/// the balance. A failure signs and sends nothing, and the error is plain.
+fn assert_not_sent(result: Result<TronSwapTx, super::watch::OwnStepFailure>, nodes: &[&Node]) -> String {
+    let failure = result.expect_err("a failed precondition sends nothing");
+    assert!(failure.tx.is_none());
+    let error = {
+        let text = failure.error.to_string();
+        let plain = TransactionErr::from(failure);
+        assert!(matches!(plain, TransactionErr::Plain(ref shown) if *shown == text));
+        text
+    };
+    assert_eq!(broadcast_count(nodes), 0, "{error}");
+    error
+}
+
+#[test]
+fn a_revealing_claim_is_not_sent_unless_the_agreed_state_is_payment_sent() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    for state in [2, 3] {
+        let (a, b) = (
+            payment_node(0, &payment, &me, state),
+            payment_node(1, &payment, &me, state),
+        );
+        let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+        let failure = reveal(&coin, &payment).expect_err("no claim");
+        assert!(
+            matches!(failure.error, TronSwapError::Mismatch { field: "payment state" }),
+            "state {state}"
+        );
+        assert_eq!(broadcast_count(&[&a, &b]), 0);
+    }
+    // The nodes disagree: undetermined.
+    let (a, b) = (payment_node(0, &payment, &me, 1), payment_node(1, &payment, &me, 2));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert!(matches!(
+        reveal(&coin, &payment).expect_err("no claim").error,
+        TronSwapError::NodesDisagree
+    ));
+}
+
+#[test]
+fn a_revealing_claim_needs_the_margin_before_the_lock_time() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let lock = i64::from(LOCK_TIME);
+    // Exactly the margin before the lock: not below it, so no claim; one second more: the claim goes.
+    for (before_lock_s, sent) in [(299, false), (300, false), (301, true)] {
+        let (a, b) = claim_nodes(&payment, &me);
+        for node in [&a, &b] {
+            node.edit(|w| w.solid_time_ms = Some((lock - before_lock_s) * 1000));
+        }
+        let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+        let result = reveal(&coin, &payment);
+        if sent {
+            result.expect("sent with the margin");
+        } else {
+            let failure = result.expect_err("no claim inside the margin");
+            assert!(matches!(failure.error, TronSwapError::Mismatch {
+                field: "lock margin"
+            }));
+            assert!(failure.tx.is_none());
+            assert_eq!(broadcast_count(&[&a, &b]), 0);
+        }
+    }
+}
+
+#[test]
+fn a_revealing_claim_needs_the_balance_to_cover_the_fee_limit() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let (a, b) = claim_nodes(&payment, &me);
+    for node in [&a, &b] {
+        node.edit(|w| w.balance = 1_000_000);
+    }
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    let error = assert_not_sent(reveal(&coin, &payment), &[&a, &b]);
+    assert!(error.contains("balance"), "{error}");
+    // A failed balance read is an error, not a pass.
+    let (a, b) = claim_nodes(&payment, &me);
+    for node in [&a, &b] {
+        node.edit(|w| w.balance_down = true);
+    }
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_not_sent(reveal(&coin, &payment), &[&a, &b]);
 }
 
 /// The claim is sent only after its dry run succeeded: a reverting dry run sends nothing, keeps no transaction
@@ -1076,28 +1186,24 @@ fn our_spend_counts_after_a_successful_receipt_and_goes_to_the_selected_contract
 fn a_revealing_claim_whose_dry_run_reverts_is_not_signed_or_sent() {
     let me = my_address_of_test_coin();
     let payment = good_payment(&me);
-    let node = payment_node(0, &payment, &me, 1);
-    node.edit(|w| w.dry_run_reverts = true);
-    let (_ctx, coin) = coin_over(&[&node], None, 1);
-    let failure = block_on(spend_payment_with(
-        &coin,
-        &payment.to_bytes(),
-        &SECRET,
-        &selected(&contract()),
-        ClaimKind::RevealsSecret,
-        FAST,
-    ))
-    .expect_err("a reverting dry run sends nothing");
+    let (a, b) = claim_nodes(&payment, &me);
+    for node in [&a, &b] {
+        node.edit(|w| w.dry_run_reverts = true);
+    }
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    let failure = reveal(&coin, &payment).expect_err("a reverting dry run sends nothing");
     assert!(matches!(failure.error, TronSwapError::Reverted { .. }));
     assert!(failure.tx.is_none());
     assert!(matches!(TransactionErr::from(failure), TransactionErr::Plain(_)));
-    assert!(node.world.lock().unwrap().broadcasts.is_empty());
+    assert_eq!(broadcast_count(&[&a, &b]), 0);
     let secret_hex = hex::encode(SECRET);
-    let requests = node.stub.requests();
-    assert!(requests.iter().all(|(path, _)| path != "/wallet/broadcasthex"));
-    for (path, body) in requests {
-        if body.contains(&secret_hex) {
-            assert_eq!(path, "/wallet/triggerconstantcontract", "the secret went to {path}");
+    for node in [&a, &b] {
+        let requests = node.stub.requests();
+        assert!(requests.iter().all(|(path, _)| path != "/wallet/broadcasthex"));
+        for (path, body) in requests {
+            if body.contains(&secret_hex) {
+                assert_eq!(path, "/wallet/triggerconstantcontract", "the secret went to {path}");
+            }
         }
     }
 }
@@ -1125,18 +1231,12 @@ fn a_secret_that_does_not_open_the_hash_is_never_sent() {
 fn a_reverted_receipt_of_our_spend_is_reverted_and_keeps_the_transaction() {
     let me = my_address_of_test_coin();
     let payment = good_payment(&me);
-    let node = payment_node(0, &payment, &me, 1);
-    node.edit(|w| w.broadcast_result = "REVERT".to_owned());
-    let (_ctx, coin) = coin_over(&[&node], None, 1);
-    let failure = block_on(spend_payment_with(
-        &coin,
-        &payment.to_bytes(),
-        &SECRET,
-        &selected(&contract()),
-        ClaimKind::RevealsSecret,
-        FAST,
-    ))
-    .expect_err("a reverted spend");
+    let (a, b) = claim_nodes(&payment, &me);
+    for node in [&a, &b] {
+        node.edit(|w| w.broadcast_result = "REVERT".to_owned());
+    }
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    let failure = reveal(&coin, &payment).expect_err("a reverted spend");
     assert!(matches!(failure.error, TronSwapError::Reverted { .. }));
     assert!(failure.tx.is_some());
 }
@@ -1145,18 +1245,10 @@ fn a_reverted_receipt_of_our_spend_is_reverted_and_keeps_the_transaction() {
 fn a_spend_that_is_not_yet_at_depth_is_not_counted() {
     let me = my_address_of_test_coin();
     let payment = good_payment(&me);
-    let node = payment_node(0, &payment, &me, 1);
+    let (a, b) = claim_nodes(&payment, &me);
     // Five confirmations are required; the receipt's block is the head.
-    let (_ctx, coin) = coin_over(&[&node], None, 5);
-    let failure = block_on(spend_payment_with(
-        &coin,
-        &payment.to_bytes(),
-        &SECRET,
-        &selected(&contract()),
-        ClaimKind::RevealsSecret,
-        FAST,
-    ))
-    .expect_err("not deep enough");
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 5);
+    let failure = reveal(&coin, &payment).expect_err("not deep enough");
     assert!(matches!(failure.error, TronSwapError::NotYetFinal));
     assert!(failure.tx.is_some());
 }
@@ -1244,4 +1336,74 @@ fn a_failed_state_read_does_not_block_a_public_secret_claim() {
     node.edit(|w| w.ordinary = None);
     let (_ctx, coin) = coin_over(&[&node], None, 1);
     public_claim(&coin, &payment).expect("sent although the read failed");
+}
+
+// ---- the search window of the wait, and the transaction id of a validated payment ---------------------------------
+
+/// The wait remembers the last read that showed the payment unspent and searches from there: the claim lies beyond
+/// the walk cap counted from the payment and within it counted from that read.
+#[test]
+fn the_wait_searches_from_the_last_unspent_read_not_from_the_payment() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let spend = the_spend(&me);
+    let log = spent_log(&contract(), pay_id(), SECRET);
+    let node = Node::start(0, {
+        let mut world = World::new()
+            .with_state(expected_hash(&me), u64::from(LOCK_TIME), 1)
+            .with_tx(&payment, PAYMENT_BLOCK, "SUCCESS", vec![])
+            .with_tx(&spend, 505, "SUCCESS", vec![log]);
+        world.head_number = 500;
+        world
+    });
+    let (_ctx, coin) = coin_over(&[&node], None, 1);
+    let world = node.world.clone();
+    let helper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
+        w.head_number = 510;
+        w.ordinary = Some(Rec {
+            hash: expected_hash(&my_address_of_test_coin()),
+            lock: u64::from(LOCK_TIME),
+            state: 2,
+        });
+    });
+    let caps = Caps {
+        event_pages: 3,
+        walk_blocks: 20,
+    };
+    let wait_until = common::now_ms() / 1000 + 10;
+    let found = block_on(wait_for_spend_with(
+        &coin,
+        &payment.to_bytes(),
+        wait_until,
+        &selected(&contract()),
+        0.05,
+        caps,
+    ))
+    .expect("the claim is found from the last unspent read");
+    helper.join().unwrap();
+    assert_eq!(found, spend);
+    // Counted from the payment (block 100) the claim at block 505 is far beyond the cap of 20 blocks.
+    assert!(505 - PAYMENT_BLOCK > caps.walk_blocks);
+}
+
+#[test]
+fn a_transaction_the_node_returns_under_another_id_is_refused() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let other = call_tx(
+        &counterparty().1,
+        &contract(),
+        &payment_call(me.clone(), u64::from(LOCK_TIME)),
+        UNITS as i64 + 7,
+    );
+    let (a, b) = (payment_node(0, &payment, &me, 1), payment_node(1, &payment, &me, 1));
+    for node in [&a, &b] {
+        node.edit(|w| {
+            w.txs.insert(txid(&payment), other.clone());
+        });
+    }
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_mismatch(validate(&coin, &payment, &contract()), "transaction id");
 }

@@ -9,6 +9,7 @@
 //!   ([`read_node`]) and the decision an answer falls into. The distinct-host and no-outvoting rules, the trusted
 //!   node and the "fewer than two answers" outcome are the engine's. No error is ever mapped to a state.
 
+use super::REVEALING_CLAIM_LOCK_MARGIN_SECS;
 use crate::eth::tron::api::{GetNowBlockResponse, TriggerConstantContractResponse, TriggerConstantDataRequest,
                             TronApiClient, TronApiError};
 use crate::eth::tron::swap::{decode_payments_output, encode_payments_query, PaymentRecord, PaymentState, TronSwapError};
@@ -209,6 +210,30 @@ pub(in crate::eth::tron::swap) async fn agreed_chain_time(
         policy,
         |index| head_time_of_node(api, index),
         |time: &u64| *time >= lock_time,
+    )
+    .await
+}
+
+/// The read of the claim that reveals the secret: the nodes must agree on the payment state and on whether the
+/// solidified chain time plus [`REVEALING_CLAIM_LOCK_MARGIN_SECS`] is below the stored lock time. The answer carries
+/// both the chain time and the record.
+pub(in crate::eth::tron::swap) async fn agreed_claim_read(
+    api: &TronApiClient,
+    policy: &SwapEvidencePolicy,
+    owner: &TronAddress,
+    contract: &TronAddress,
+    id: &[u8; 32],
+) -> Result<SolidifiedRead, TronSwapError> {
+    agreed_answer(
+        api,
+        policy,
+        |index| read_node(api, index, owner, contract, id),
+        |read: &SolidifiedRead| {
+            (
+                read.record.state,
+                read.chain_time_s.saturating_add(REVEALING_CLAIM_LOCK_MARGIN_SECS) < read.record.lock_time,
+            )
+        },
     )
     .await
 }

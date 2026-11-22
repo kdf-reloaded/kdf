@@ -22,10 +22,11 @@ pub(super) mod discovery;
 pub(super) mod evidence;
 
 use self::discovery::{find_consumer, Caps, Kind, DEFAULT_CAPS};
-use self::evidence::{agreed_chain_time, agreed_payment, agreed_state, record_of};
+use self::evidence::{agreed_chain_time, agreed_claim_read, agreed_payment, agreed_state, record_of};
 use super::{call_of, encode_call, encode_payments_query, require_32_byte_hash, tron_payment_hash, tron_swap_id,
             PaymentState, TronSwapCall, TronSwapError, TronSwapEvent, TronSwapTx};
-use crate::eth::tron::api::TronApiClient;
+use crate::eth::tron::api::{TronApiClient, TronApiError};
+use crate::eth::tron::balance::{trx_balance_sun, TronBalanceError};
 use crate::eth::tron::fee::TRC20_FEE_LIMIT_MAX_SUN;
 use crate::eth::tron::proto::{Transaction as ProtoTransaction, TransactionRaw, TransferContract,
                               TRANSFER_CONTRACT_TYPE_URL};
@@ -46,6 +47,9 @@ pub(super) struct Waits {
     pub poll_s: f64,
     pub window_ms: u64,
 }
+
+/// The block time of the chain, in milliseconds.
+const BLOCK_TIME_MS: i64 = 3_000;
 
 /// The wait of a payment or fee validation for the data to reach the node and to solidify.
 pub(super) const VALIDATION_WAITS: Waits = Waits {
@@ -337,6 +341,9 @@ pub(super) async fn validate_payment_with(
         let (api, txid) = (&api, txid.as_str());
         poll(waits, || async move { fetch_swap_tx(api, txid).await.map(Some) }).await?
     };
+    if format!("{:x}", tx.txid()) != txid {
+        return Err(mismatch("transaction id"));
+    }
     let facts = facts_of(&tx, &selected)?;
     if facts.sender != counterparty {
         return Err(mismatch("sender"));
@@ -527,21 +534,47 @@ pub enum ClaimKind {
 /// other swap call, [`TRC20_FEE_LIMIT_MAX_SUN`] (100 TRX).
 pub const PUBLIC_SECRET_CLAIM_FALLBACK_FEE_LIMIT_SUN: u64 = TRC20_FEE_LIMIT_MAX_SUN;
 
+/// The claim that reveals the secret is signed only when the agreed chain time plus this margin, in seconds, is below
+/// the stored lock time.
+pub const REVEALING_CLAIM_LOCK_MARGIN_SECS: u64 = 300;
+
+/// How the `fee_limit` of a sent call is settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendMode {
+    /// The `fee_limit` of the swap policy; any failure of it is the error.
+    Strict,
+    /// As [`SendMode::Strict`], and the coin's TRX balance must cover the `fee_limit` before the broadcast.
+    StrictWithBalance,
+    /// The `fee_limit` of the swap policy, or [`PUBLIC_SECRET_CLAIM_FALLBACK_FEE_LIMIT_SUN`] when that fails.
+    PublicSecret,
+}
+
 /// Sends the call through S2's `send_trigger` under the shared `fee_limit` policy.
 async fn send_swap_call(
     coin: &EthCoin,
     contract: &TronAddress,
     data: Vec<u8>,
     call_value: i64,
-    public_secret: bool,
+    mode: SendMode,
 ) -> Result<TronSwapTx, TronSwapError> {
-    // The one call site of the shared fee policy of the swap track (dry-run energy with a margin, capped). A claim
-    // whose secret is public already falls back to a fixed limit on any failure of it.
+    // The one call site of the shared fee policy of the swap track (dry-run energy with a margin, capped).
     let fee_limit_sun = match super::swap_call_fee_limit(coin, contract, &data, call_value).await {
         Ok((_energy, fee_limit_sun)) => fee_limit_sun,
-        Err(_) if public_secret => PUBLIC_SECRET_CLAIM_FALLBACK_FEE_LIMIT_SUN,
+        Err(_) if mode == SendMode::PublicSecret => PUBLIC_SECRET_CLAIM_FALLBACK_FEE_LIMIT_SUN,
         Err(e) => return Err(e),
     };
+    if mode == SendMode::StrictWithBalance {
+        let api = tron_api(coin)?;
+        let balance = trx_balance_sun(&api, &my_address(coin)).await.map_err(|e| match e {
+            TronBalanceError::Node(error) => TronSwapError::Node(error),
+            other => TronSwapError::Node(TronApiError::InvalidResponse(format!(
+                "the TRX balance cannot be read: {other}"
+            ))),
+        })?;
+        if balance < U256::from(fee_limit_sun) {
+            return Err(mismatch("TRX balance"));
+        }
+    }
     super::send_trigger(coin, contract, data, call_value, fee_limit_sun).await
 }
 
@@ -549,13 +582,13 @@ async fn send_and_confirm(
     coin: &EthCoin,
     contract: &TronAddress,
     call: &TronSwapCall,
-    public_secret: bool,
+    mode: SendMode,
     waits: Waits,
 ) -> Result<TronSwapTx, OwnStepFailure> {
     let plain = |error| OwnStepFailure { error, tx: None };
     let api = tron_api(coin).map_err(plain)?;
     let data = encode_call(call).map_err(plain)?;
-    let tx = match send_swap_call(coin, contract, data, 0, public_secret).await {
+    let tx = match send_swap_call(coin, contract, data, 0, mode).await {
         Ok(tx) => tx,
         Err(TronSwapError::Broadcast { tx, error }) => {
             return Err(OwnStepFailure {
@@ -634,7 +667,26 @@ pub(super) async fn spend_payment_with(
             }
         }
     }
-    send_and_confirm(coin, &selected, &call, kind == ClaimKind::SecretPublic, waits).await
+    let mode = match kind {
+        ClaimKind::RevealsSecret => {
+            // The agreed solidified record must say `PaymentSent` and the chain time plus the margin must be below
+            // the stored lock time; the dry run and the balance check follow in `send_swap_call`.
+            let read = agreed_claim_read(
+                &api,
+                &coin.swap_evidence_policy(),
+                &my_address(coin),
+                &selected,
+                &facts.id,
+            )
+            .await
+            .map_err(plain)?;
+            require_payment_sent(read.record.state).map_err(plain)?;
+            revealing_claim_margin(read.chain_time_s, read.record.lock_time).map_err(plain)?;
+            SendMode::StrictWithBalance
+        },
+        ClaimKind::SecretPublic => SendMode::PublicSecret,
+    };
+    send_and_confirm(coin, &selected, &call, mode, waits).await
 }
 
 /// Refunds our own payment `payment_tx` (A4), after the agreed solidified state says it is still `PaymentSent`. The
@@ -685,7 +737,7 @@ pub(super) async fn refund_payment_with(
         token: facts.token,
         receiver: facts.receiver,
     };
-    send_and_confirm(coin, &selected, &call, false, waits).await
+    send_and_confirm(coin, &selected, &call, SendMode::Strict, waits).await
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -718,6 +770,19 @@ pub(super) fn require_payment_sent(state: PaymentState) -> Result<(), TronSwapEr
         Ok(())
     } else {
         Err(mismatch("payment state"))
+    }
+}
+
+/// Whether the agreed chain time plus [`REVEALING_CLAIM_LOCK_MARGIN_SECS`] is below the stored lock time.
+///
+/// # Errors
+///
+/// [`TronSwapError::Mismatch`] naming the lock margin when it is not.
+pub(super) fn revealing_claim_margin(chain_time_s: u64, lock_time: u64) -> Result<(), TronSwapError> {
+    if chain_time_s.saturating_add(REVEALING_CLAIM_LOCK_MARGIN_SECS) < lock_time {
+        Ok(())
+    } else {
+        Err(mismatch("lock margin"))
     }
 }
 
@@ -853,6 +918,8 @@ pub(super) async fn wait_for_spend_with(
     let selected = selected_contract(swap_contract)?;
     let me = my_address(coin);
     let mut context: Option<PaymentContext> = None;
+    // The head block and its time (ms) at the last read that showed the payment unspent.
+    let mut last_unspent: Option<(u64, i64)> = None;
     let mut last: Option<TronSwapError> = None;
     loop {
         let attempt: Result<Option<TronSwapTx>, TronSwapError> = async {
@@ -860,20 +927,37 @@ pub(super) async fn wait_for_spend_with(
                 context = Some(payment_context(&api, payment_tx, &selected).await?);
             }
             let known = context.as_ref().ok_or(TronSwapError::NotYetFinal)?;
+            // The head is read before the state, so a state of `PaymentSent` was true at or after this head.
+            let head = api.get_now_block().await.map_err(TronSwapError::Node)?;
+            let head_point = (head.block_header.raw_data.number, head.block_header.raw_data.timestamp);
             match ordinary_state(&api, &me, &selected, &known.facts.id).await? {
-                PaymentState::PaymentSent | PaymentState::Uninitialized => Ok(None),
+                PaymentState::PaymentSent => {
+                    last_unspent = Some(head_point);
+                    Ok(None)
+                },
+                PaymentState::Uninitialized => Ok(None),
                 PaymentState::SenderRefunded => Err(mismatch("payment state")),
-                PaymentState::ReceiverSpent => find_consumer(
-                    &api,
-                    &selected,
-                    &known.facts.id,
-                    Kind::Spend,
-                    known.block,
-                    known.block_time_ms,
-                    caps,
-                )
-                .await
-                .map(Some),
+                PaymentState::ReceiverSpent => {
+                    // The search starts at the last unspent read, with an overlap of one block, and at the
+                    // payment when no such read was made.
+                    let (from_block, since_ms) = match last_unspent {
+                        Some((block, time_ms)) => {
+                            (block.saturating_sub(1), Some(time_ms.saturating_sub(BLOCK_TIME_MS)))
+                        },
+                        None => (known.block, known.block_time_ms),
+                    };
+                    find_consumer(
+                        &api,
+                        &selected,
+                        &known.facts.id,
+                        Kind::Spend,
+                        from_block,
+                        since_ms,
+                        caps,
+                    )
+                    .await
+                    .map(Some)
+                },
             }
         }
         .await;
