@@ -625,6 +625,33 @@ address `0`) as follows:
 > `eth_with_tokens_activation` tests (module `hd_accounts_at_index`),
 > `t14a_the_path_raises_its_own_chain`, and `new_account_index_tests`.
 
+*Status note (2026-11-22), a stored account that has no known address (as built;
+clean side, not corpus-sourced; recorded divergence).* Item 1 above scans an
+existing account only under `scan`. Under the default `scan_if_new_wallet` this
+repository now also scans a stored account that has no known address on any of
+its chains, as it would a new one; an account that knows an address is left
+alone, and `do_not_scan` never scans. Such an account is what a first activation
+that failed while scanning leaves behind ([Chapter
+49](49-withdrawal-task-path.md) R49.36 item 7), and the reference does not scan
+it, so its used addresses stay unlisted there until `scan` or
+`task::scan_for_new_addresses::init` is asked for. The maintainer decided on
+2026-11-22 to scan it. The rule does not tell such an account apart from one
+that knows no address because it was never used, for example one made by
+`task::create_new_account` and activated with `min_addresses_number` 0: that
+account is scanned again at every activation under the default policy, up to
+`gap_limit` addresses per chain, and on an EVM platform every token's balance is
+asked at each of them. The decision is made in the shared `enable_hd_wallet`
+(`coins/coin_balance.rs`), so it holds for every family that activates through
+it: UTXO coins, QTUM, Sia and the EVM coins including TRON. Tests:
+`t14a_a_stored_account_with_no_known_address_is_scanned_under_the_default_policy`,
+`t14a_an_account_with_a_known_address_is_not_rescanned_under_the_default_policy`
+and `t14a_do_not_scan_leaves_a_stored_account_with_no_known_address_alone`
+(`coins/src/utxo/utxo_tests.rs`), and
+`evm_hd_p3_a_stored_account_with_no_known_address_is_scanned_under_the_default_policy`
+and
+`evm_hd_p3_an_account_with_known_addresses_is_not_rescanned_under_the_default_policy`
+(`coins_activation/src/evm_hd_p3_tests.rs`).
+
 **R35b.** *UTXO maintenance commands under a global-HD login.* *(Same
 provenance and gate status as R35a.)* At both rows the two commands below
 serve a UTXO coin of the standard family only; for every other coin type
@@ -2519,3 +2546,9 @@ surface.
   of that secret) and the transparent key; an absent value and `ContextPrivKey` keep the HD derivation;
   under a single-key login every value selects the single key. A hardware value is refused, an unknown
   value fails the request. The wallet database of each key is kept apart (chapter 39 R39.8.0bd).
+- *Status note added 2026-11-22 (after R35a).* Reloaded-original, clean side:
+  it records the scan at activation of a stored account that has no known
+  address under the default scan policy, a divergence the maintainer decided
+  on 2026-11-22, written from the cleared text of chapter 49 §49.2.2 and this
+  repository's code; no forbidden-class input, chapter 01 R38 not engaged. No
+  cleared sentence was edited.
