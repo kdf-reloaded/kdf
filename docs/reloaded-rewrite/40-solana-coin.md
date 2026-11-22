@@ -1926,18 +1926,25 @@ previous page; a page with fewer than 1000 entries is the last. The watched
 accounts are the platform address and, for each served token, every token
 account the platform address owns for the token's mint
 (`getTokenAccountsByOwner` with the mint filter, read again on each pass).
-Every new signature is read once by `getTransaction` with
-encoding `base64`, commitment `finalized` and `maxSupportedTransactionVersion`
-0; a signature listed by two watched accounts is read once. The block height
-of a new slot is read once by `getBlock` with `transactionDetails` `none` and
-`rewards` `false`. The requests go to the coin's node pool like every other
-request of the coin (R40.1.5, §40.5A), at most four per
-second. A failed request ends the pass, which is tried again after the pause
-of R40.6C.9; rows already stored stay.
+Every new signature is read once by `getTransaction` with encoding `base64`,
+commitment `finalized` and `maxSupportedTransactionVersion` 0; a signature
+listed by two watched accounts is read once. The block height of a new slot is
+read once by `getBlock` with `transactionDetails` `none` and `rewards` `false`.
+The requests go to the coin's node pool like every other request of the coin
+(R40.1.5, §40.5A), at most four per second. A failed request, or an answer that
+has no finalized transaction or block for a listed signature or its slot, ends
+the pass, which is tried again after the pause of R40.6C.9; rows already stored
+stay.
 
 **R40.6C.5 (depth).** The first pass after a start walks each watched
 account's listing to its end. A later pass stops at the first
-page that brings no new signature.
+page that brings no new signature. A listed signature is not read again when
+its transaction is in a stored row the listing can produce: for the platform
+address's listing, a row of the platform's or of any served token's list; for
+a token account's listing, a row of that token's list. A transaction that made
+no row may be read again after a restart. When a token is served that the
+earlier passes of the process did not serve, the listings are walked to their
+end again, so the transactions read before it was served get its rows.
 
 **R40.6C.6 (accounts of a transaction).** The accounts of a transaction are its
 static account keys followed by the addresses of `meta.loadedAddresses`,
@@ -1947,7 +1954,10 @@ the first account. A *transfer* is a System program `Transfer` or
 `TransferWithSeed` instruction, top-level or inner; a *creation* is a System
 program `CreateAccount` or `CreateAccountWithSeed` instruction, top-level or
 inner; a *token transfer* is an SPL Token `Transfer` or `TransferChecked`
-instruction, top-level or inner.
+instruction, top-level or inner. Another instruction of these two programs, or
+one that does not decode, has no effect of its own (the amounts still come
+from the balances); an instruction that names an account outside the list
+makes the transaction unreadable (R40.6C.11).
 
 **R40.6C.7 (SOL rows).** A transaction is a row of the platform coin when the
 lamports of the platform address change (`postBalances` minus `preBalances`)
@@ -1970,8 +1980,8 @@ or when the platform address is its fee payer. Its members:
   `total_amount` their sum. Amounts carry the coin's full decimals, as a
   withdraw's sums do (D40.2A.1's status note);
 - `transaction_type`: `FeeForTokenTx` when the platform address is the fee
-  payer, the transaction has a token transfer and no transfer names the
-  platform address; else `StandardTransfer`;
+  payer, the transaction has a token transfer (of any mint) and no transfer
+  names the platform address; else `StandardTransfer`;
 - `tx_hash`: the signature in base58; `internal_id`: the 64 bytes of the
   signature; `tx_hex`: the transaction's wire bytes; `timestamp`: `blockTime`;
   `block_height`: the block height of the transaction's slot (R40.6C.4).
@@ -1983,7 +1993,10 @@ mint whose owner is the platform address; an account absent on one side counts
 0 there). Its members follow R40.6C.7 in the token's own units and decimals,
 with token transfers of the mint in place of transfers, and the owner of a
 token account (from the token balance entries) in place of the account when
-the entry names one. `fee_details` is the SOL fee of R40.6C.7, so the fee is
+the entry names one. A token balance entry without an owner is not the
+wallet's. For a row without a token transfer of the mint, `total_amount` is
+the change without sign, with no fee subtracted (the fee is SOL), `from` the
+fee payer and `to` the platform address. `fee_details` is the SOL fee of R40.6C.7, so the fee is
 never part of the token's `spent_by_me`. `transaction_type` is
 `TokenTransfer` with the token's id. One transaction is at most one row in each
 list.
@@ -1997,12 +2010,14 @@ logged only.
 
 **R40.6C.10 (failed transactions).** A transaction with a non-null `meta.err`
 is a row when the platform address paid its fee: a SOL row whose only change
-is the fee, by R40.6C.7. It is no token row, since a failed
+is the fee, by R40.6C.7. No instruction of a failed transaction is read: `from`
+is the fee payer, `to` the platform address, `total_amount` 0, `rent_amount`
+0, and `transaction_type` `StandardTransfer`. It is no token row, since a failed
 transaction changes no token balance.
 
-**R40.6C.11 (rows not read).** A transaction that cannot be decoded, or whose
-block has no `blockHeight`, is logged and left out; it does not stop the
-history (R38.5A.9). No member is filled with a stand-in value.
+**R40.6C.11 (rows not read).** A transaction that cannot be decoded, that has
+no `blockTime`, or whose block has no `blockHeight`, is logged and left out;
+it does not stop the history (R38.5A.9). No member is filled with a stand-in value.
 
 **R40.6C.12 (limits).** Finalized transactions only; a transaction appears
 after finalization, so a withdraw shows in the history some seconds after its

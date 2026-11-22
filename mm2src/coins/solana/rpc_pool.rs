@@ -23,7 +23,8 @@
 //!
 //! The clock and the random source are injectable, so the behavior is tested without sleeping.
 
-use crate::solana::rpc_client::{RpcError, RpcErrorKind, SolanaRpcClient, TokenAccountsFilter};
+use crate::solana::rpc_client::{BlockSummary, ConfirmedTransaction, RpcError, RpcErrorKind, SignatureInfo,
+                                SolanaRpcClient, TokenAccountsFilter};
 use common::log::warn;
 use common::now_ms;
 use mm2_core::mm_ctx::MmArc;
@@ -406,5 +407,33 @@ impl SolanaRpcPool {
         let address = *address;
         self.run(move |c| async move { c.get_account_owner(&address).await })
             .await
+    }
+
+    pub async fn get_signatures_for_address(
+        &self,
+        address: &Pubkey,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SignatureInfo>, RpcError> {
+        let address = *address;
+        let before = before.map(str::to_owned);
+        self.run(move |c| {
+            let before = before.clone();
+            async move { c.get_signatures_for_address(&address, before.as_deref(), limit).await }
+        })
+        .await
+    }
+
+    pub async fn get_transaction_base64(&self, signature: &str) -> Result<Option<ConfirmedTransaction>, RpcError> {
+        let signature = signature.to_owned();
+        self.run(move |c| {
+            let signature = signature.clone();
+            async move { c.get_transaction_base64(&signature).await }
+        })
+        .await
+    }
+
+    pub async fn get_block_summary(&self, slot: u64) -> Result<Option<BlockSummary>, RpcError> {
+        self.run(move |c| async move { c.get_block_summary(slot).await }).await
     }
 }

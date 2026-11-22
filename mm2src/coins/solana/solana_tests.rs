@@ -318,9 +318,3 @@ fn solana_test_transactions() {
 
     //println!("{:?}", res);
 }
-
-// This test is just a unit test for brainstorming around tx_history for base_coin.
-// Disabled in P14: requires `getSignaturesForAddress` / `getTransaction` JSON-RPC
-// endpoints that are out of scope for the minimal in-tree `SolanaRpcClient`.
-#[allow(dead_code)]
-fn solana_test_tx_history() {}
