@@ -1230,6 +1230,10 @@ the previous version used. The safe way:
 
 ### Tests
 
+- **The `get_private_keys` warning tests no longer fail when the whole `coins` test suite runs in parallel.** The
+  test log capture is one list for the whole process, and another test writes the same warning line, so the line
+  counts of the per-call warning test were sometimes off. Each captured line now records the thread that wrote it,
+  and the two tests that count lines count only their own. No production code changes. Detail: PR #507.
 - **The Trezor emulator tests now run in CI.** The emulator job passed while every test was skipped: the
   container starts only the emulator's controller, and each test looked for the emulator before anything had
   started it. The job now starts and seeds the emulator and checks that it answers before the tests run, and in
