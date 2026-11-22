@@ -922,3 +922,25 @@ fn install_log_capture_answers_the_same_to_concurrent_callers() {
     assert!(answers.iter().all(|a| *a == answers[0]), "{answers:?}");
     assert_eq!(install_log_capture(), answers[0]);
 }
+
+#[test]
+fn captured_log_lines_of_this_thread_leaves_out_the_lines_of_other_threads() {
+    let capturing = install_log_capture();
+    let own = "THREADSCOPE own line";
+    let foreign = "THREADSCOPE line of another thread";
+
+    common::log::warn!("{own}");
+    std::thread::spawn(move || common::log::warn!("{foreign}"))
+        .join()
+        .unwrap();
+
+    let mine = captured_log_lines_of_this_thread();
+    assert!(!mine.iter().any(|l| l.contains(foreign)), "{mine:?}");
+    if capturing {
+        assert_eq!(mine.iter().filter(|l| l.contains(own)).count(), 1, "{mine:?}");
+        // The process-wide list still holds both lines.
+        let all = captured_log_lines();
+        assert_eq!(all.iter().filter(|l| l.contains(own)).count(), 1);
+        assert_eq!(all.iter().filter(|l| l.contains(foreign)).count(), 1);
+    }
+}
