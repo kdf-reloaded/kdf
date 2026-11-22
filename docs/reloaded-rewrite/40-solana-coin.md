@@ -2200,9 +2200,11 @@ time (R40.6D.11) is at least 300 seconds before the lock time; otherwise it is
 not sent and the swap goes to its refund. The 300 seconds are this section's own
 figure. The taker's claim of the maker's payment is sent unless the payment
 account is known to be gone at `finalized` (an undetermined read does not hold
-it back), before or after the lock time, after a successful simulation, and is
-tried again until the account is known to be gone. The sender refunds with
-`sender_refund_*` once the refund gate (R40.6D.11) is open.
+it back; chapter 51 R100: this claim rests only on the secret, which proves
+itself, and the account read can only stop it), before or after the lock time,
+after a successful simulation, and is tried again until the account is known to
+be gone. The sender refunds with `sender_refund_*` once the refund gate
+(R40.6D.11) is open.
 
 **R40.6D.11 (refund gate).** The time compared with the lock is the cluster's:
 the block time of the latest `finalized` slot. The gate answers "wait" with the
