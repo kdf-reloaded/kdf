@@ -94,6 +94,24 @@ fn unreadable_native_configuration_is_a_coin_creation_error_object() {
     }
 }
 
+/// CRD ch.37 D37.5.11.2: header verification asked for a coin with `chain_variant` `"KRGN"` is refused at
+/// activation, as a configuration error of the coin: `CoinCreationError`, with the coin's ticker and a text that
+/// names the key and the reason.
+#[test]
+fn kerrigan_with_header_verification_is_a_coin_creation_error_naming_the_key() {
+    let build_err = UtxoCoinBuildError::from(UtxoConfError::KerriganWithSpv {
+        ticker: "KRGN".to_owned(),
+        keys: "'enable_spv_proof'".to_owned(),
+    });
+    let (wire, status) = wire_of(InitUtxoStandardError::from_build_err(build_err, "KRGN".to_owned()));
+    assert_eq!(wire["error_type"], json!("CoinCreationError"));
+    assert_eq!(wire["error_data"]["ticker"], json!("KRGN"));
+    let text = wire["error_data"]["error"].as_str().expect("the error is a string");
+    assert!(text.contains("KRGN") && text.contains("'enable_spv_proof'"), "{text}");
+    assert!(text.contains("block identity hash"), "{text}");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 /// CRD ch.39 R39.11.4V.2: an overwintered entry whose transaction version this software cannot build is refused
 /// at activation as a coin creation error, like an invalid branch id, and the error text names the field.
 #[test]

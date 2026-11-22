@@ -112,6 +112,13 @@ or undo, and every change that needs a step from you.
   confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
   servers now report at another height shows that height and its block's time.
   - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
+- **A Kerrigan (KRGN) coin entry needs `"chain_variant": "KRGN"` in its `protocol` object.** Without it, the
+  coin's Electrum headers cannot be read, so its median block time is almost always unknown, and claims and refunds
+  of a KRGN swap fail, as they did before this release. With the value, the headers are read and claims and refunds
+  follow the same lock-time rule as those of any UTXO coin. A KRGN entry with
+  `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
+  - *What you see:* a KRGN entry without the value still activates, but its claims and refunds keep failing.
+  - Detail: PR #468; CRD ch.37 status note of 2026-11-18.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -892,6 +899,16 @@ the previous version used. The safe way:
   transaction of another coin family. It now refuses the transaction with an error message. In the
   same way, a payment event that a node reports without a transaction hash is an error, not an abort.
   Detail: PR #452.
+
+#### Kerrigan (KRGN)
+
+- **KRGN swaps can claim and refund over Electrum.** Kerrigan headers are 80, 124, 543 or 1487 bytes long,
+  depending on the mining algorithm, and two of the four layouts carry the block time 32 bytes later than the
+  standard header. The node could not read them, so the median block time a claim or refund needs was almost
+  always unknown, and KRGN claims and refunds failed with an error, including refunds through
+  `recover_funds_of_swap`. With `"chain_variant": "KRGN"` in the coin's entry, each header is now read by its
+  algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #468; CRD ch.37
+  §37.5.11.
 
 #### Siacoin
 
