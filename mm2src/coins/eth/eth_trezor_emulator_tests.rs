@@ -2044,7 +2044,6 @@ fn drive_with_passphrases(
     let mut confirm: Option<ConfirmLoop> = None;
     loop {
         let status = get_new_address_status(ctx, task_id).expect("the task exists");
-        println!("  status: {status}");
         if matches!(status["status"].as_str(), Some("Ok") | Some("Error")) {
             return (status, answered);
         }
@@ -2096,19 +2095,24 @@ fn emulator_trezor_get_new_address_another_passphrase_is_a_device_address_mismat
 
     let task_id = start_get_new_address(&ctx, "ETH");
     let (status, requests) = drive_with_passphrases(&ctx, task_id, &["pp-one", "pp-two"], Duration::from_secs(180));
-    println!("passphrase requests answered: {requests}");
-    assert_eq!(
-        status["status"], "Error",
-        "the device asked for the passphrase {requests} time(s); a mismatch needs a second request: {status}"
+    let ended_in_error = status["status"] == "Error";
+    assert!(
+        ended_in_error,
+        "the task did not end in an error; a mismatch needs a second passphrase request"
     );
-    assert_eq!(status["details"]["error_type"], "DeviceAddressMismatch", "{status}");
+    assert!(
+        requests >= 2,
+        "the device asked for the passphrase fewer than two times"
+    );
+    assert_eq!(
+        status["details"]["error_type"], "DeviceAddressMismatch",
+        "the task ended with another error type"
+    );
     let data = &status["details"]["error_data"];
     let expected = data["expected_address"].as_str().expect("the expected address");
     let device = data["device_address"].as_str().expect("the device's address");
-    assert!(
-        !expected.eq_ignore_ascii_case(device),
-        "the two addresses differ: {data}"
-    );
+    let addresses_differ = !expected.eq_ignore_ascii_case(device);
+    assert!(addresses_differ, "the two addresses do not differ");
     assert_eq!(known_external_addresses(&platform), 1, "nothing is recorded");
 }
 
