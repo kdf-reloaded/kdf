@@ -1,3 +1,4 @@
+use super::electrum_client_registry::ReleaseNote;
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
 use super::electrum_pool::{call_budget_of_caller, ElectrumPoolOptions, ElectrumServersView, PoolShared};
 use super::*;
@@ -514,6 +515,8 @@ pub struct ElectrumClientImpl {
     /// remember it (CRD ch.38 D38.6.4Q.3 status note, D38.6.4Q.1 status note item 6). Held so each can be placed again
     /// once over a newly maintained connection, as the script hashes are. Never held across an await.
     watched_contract_events: StdMutex<Vec<([Json; 3], HashSet<ElectrumOwner>)>>,
+    /// Set once for a client of the registry of shared clients: logs the client's release when it is dropped.
+    release_note: std::sync::OnceLock<ReleaseNote>,
 }
 
 /// The identity of a coin instance towards an Electrum client that several instances share (CRD ch.38 D38.6.4Q.1
@@ -1811,8 +1814,12 @@ impl ElectrumClientImpl {
             list_unspent_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
             watched_script_hashes: StdMutex::new(HashMap::new()),
             watched_contract_events: StdMutex::new(Vec::new()),
+            release_note: std::sync::OnceLock::new(),
         }
     }
+
+    /// Marks the client as shared through the registry: `note` logs the release when the client is dropped.
+    pub(super) fn note_release(&self, note: ReleaseNote) { let _ = self.release_note.set(note); }
 
     #[cfg(test)]
     pub fn with_protocol_version(

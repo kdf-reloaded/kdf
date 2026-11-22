@@ -4418,6 +4418,18 @@ on 2026-11-18.
    removed from the shared client, unless another live instance remembers
    the same one. They are then no longer placed again after a reconnect.
 
+*Status note (2026-11-22, clean side; maintainer decision of 2026-11-21).*
+A client of the QTUM family's registry (item 2), shared or built for one
+instance whose inputs differ, writes one INFO line when it is created,
+naming the platform ticker and the instance that built it; one each time an
+instance reuses it, naming that instance; and one when the last holder lets
+go of it and it closes. Each line lists the servers in the configured order
+as `host:port` only, as the server names of R38.6.9a; an entry without a
+usable host and port is shown as a placeholder. A failed build and a refused
+reuse (item 3) write nothing, and an instance that lets go while others still
+hold the client writes nothing. No line is written per request or on a
+timer. Every other coin writes none of these lines.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -6612,5 +6624,11 @@ R38.8.6 **Tests (two-direction, observable).**
   reader as built).* Written by a session that never read the forbidden
   corpus, from the maintainer's decision, the cleared section, the published
   Dash special-transaction format, public DASH and Kerrigan chain data and
+  this repository's code. It takes no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.
+- *Maintainer decision (2026-11-21), clean side -- status note of
+  2026-11-22 after the D38.6.4Q.1 status note (INFO lines for the creation,
+  reuse and release of a QTUM-family Electrum client).* Written by a session
+  that never read the forbidden corpus, from the maintainer's decision and
   this repository's code. It takes no forbidden-class input, so chapter 01
   R38 is not engaged and no gate pass is required.
