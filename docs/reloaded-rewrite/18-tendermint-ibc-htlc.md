@@ -955,6 +955,11 @@ The chapter relies on one baseline-state claim:
   maintainer's decision of 2026-11-22 on stored orders of untradable
   coins. It was written by a context that never read the forbidden
   corpus, takes no forbidden-class input and needs no Dirty Gate pass.
+- *Status note added 2026-11-22, clean side (PR #493).* The status note
+  after R18.11.19, on the claim lookup that the spend search and the claim
+  polling share, records this repository's own behavior. It was written by
+  a context that never read the forbidden corpus, takes no forbidden-class
+  input and needs no Dirty Gate pass.
 
 ---
 
@@ -1238,6 +1243,18 @@ The module refunds an expired HTLC itself; there is no refund message
   (ascending, one result) every 5 seconds until a claim is found or the
   deadline passes; the found claim is returned re-encoded as a raw
   transaction (body, auth info, signatures).
+
+> **Reloaded status note (2026-11-22, Reloaded-original; informative; PR
+> #493).** The spend search of R18.11.16 and the claim polling of
+> R18.11.19 share one lookup. It runs the same transaction search,
+> ascending, 100 results per page, until the results are exhausted or 10
+> pages have been read, and takes the oldest result whose result code is 0
+> and one of whose messages has the claim message type of the coin's
+> dialect and the id of this HTLC (compared without regard to letter
+> case). Other results are skipped. When none passes, the search answers
+> that the claim was not found and the polling continues until its
+> deadline. Chapter 51 R91 records that the reference takes the first
+> result. No message or transaction a peer sees changes.
 
 ### 18.11.6 Dex-fee transaction, its validation, and "my payment sent"
 

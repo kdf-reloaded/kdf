@@ -910,6 +910,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   content is the same in both, so each respects the other's lock by its timestamp. No peer sees it, so no switch
   exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.51 R5, ch.44 §44.9A.
 
+- **A Tendermint swap takes only a successful claim of its payment as the claim.** Both find the claim of a
+  Tendermint swap payment by a transaction search for the payment's HTLC id. KDF Reloaded pages through the results
+  and takes the oldest one that succeeded and holds a claim message for that HTLC in any of its messages; it skips
+  the others. GLEEC KDF reads the search result differently (CRD ch.51 R91). No peer sees it, so no switch exists;
+  row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.18 R18.11.16 and R18.11.19.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
