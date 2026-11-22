@@ -1400,7 +1400,7 @@ wire compatibility of Solana or SPL swaps with `v2.6.0-beta`,
 `v3.0.0-beta` or `main (as of 2026-10-07)`; all three lack the capability.
 
 > *Reloaded status (clean side, 2026-11-22):* §40.6D builds Solana swaps between
-> Reloaded nodes (PR #N); this rule is unchanged.
+> Reloaded nodes (PR #501); this rule is unchanged.
 
 **The public swap program's interface (dictated interop, conditional).**
 The following is the interop surface of the program of F40.6B.5, read from
@@ -1693,7 +1693,7 @@ R40.6B.16 holds meanwhile.
 > 2026-11-22 to build the swap client to the public program of F40.6B.5 and to
 > deploy that program for Reloaded on devnet and mainnet, immutable, after a
 > clean review of its source, a reproducible build matched to the devnet program
-> and a license check (§40.6D, PR #N). The dex fee goes to the Solana address of
+> and a license check (§40.6D, PR #501). The dex fee goes to the Solana address of
 > the network's ed25519 dex-fee key; an SPL fee creates the fee owner's token
 > account when it is missing; the minimum trading volume stays 0.00777.
 
