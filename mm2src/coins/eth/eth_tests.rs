@@ -4387,10 +4387,7 @@ mod scripted_node_ports {
             other => panic!("the scripted node does not serve `{}`", other),
         });
         // A closed loopback port stands in for the node that never answers.
-        let dead_url = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://127.0.0.1:{}", l.local_addr().unwrap().port())
-        };
+        let dead_url = crate::closed_port::closed_url();
         let instances: Vec<Web3Instance> = [behind.url.clone(), ahead.url.clone(), dead_url]
             .into_iter()
             .map(|url| Web3Instance {
