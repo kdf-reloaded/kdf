@@ -869,6 +869,12 @@ the previous version used. The safe way:
 
 #### Tendermint (Cosmos) coins
 
+- **The search for the claim of a Tendermint swap payment takes only a successful claim of that payment.** The search
+  for a claimed payment and the wait for its claim took the first transaction the node listed for the payment's HTLC
+  id, without checking that the transaction succeeded or that it holds the claim. They now page through the node's
+  results and take the oldest transaction that succeeded and has a claim message for this HTLC in any of its
+  messages; failed or unrelated transactions are skipped. Tendermint swaps stay switched off in this version. Detail:
+  PR #NNN; CRD ch.51 R91, ch.18 R18.11.16 and R18.11.19.
 - **The fee reported for a transaction signed by a WalletConnect wallet is the fee of that transaction.**
   `fee_details` of `withdraw` and the staking requests is read from the signed transaction; it showed the
   computed fee even when the wallet signed another one. Detail: PR #393; CRD ch.36 R36.14.15.
