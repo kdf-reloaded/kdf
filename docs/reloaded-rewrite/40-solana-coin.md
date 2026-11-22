@@ -1693,9 +1693,9 @@ R40.6B.16 holds meanwhile.
 > *Reloaded status (clean side, 2026-11-22):* the maintainer decided on
 > 2026-11-22 to build the swap client to the public program of F40.6B.5 and to
 > deploy that program for Reloaded on devnet and mainnet, immutable, after a
-> clean review of its source, a reproducible build matched to the devnet program
-> and a license check (§40.6D, PR #501). The dex fee goes to the Solana address
-> of the network's ed25519 dex-fee key; an SPL fee creates the fee owner's token
+> clean review of its source, a reproducible build of the reviewed source and a
+> license check (§40.6D, PR #501). The dex fee goes to the Solana address of the
+> network's ed25519 dex-fee key; an SPL fee creates the fee owner's token
 > account when it is missing; the minimum trading volume stays 0.00777.
 
 ### 40.6B.10 Acceptance tests
@@ -2098,16 +2098,17 @@ third-party role).
 **R40.6D.1 (the program and its deployment).** The program is the public program
 of F40.6B.5 at the state `satomic-swap fix/htlc-correctness (as of 2026-10-28)`
 of chapter 02 §2.15A (crate `satomic-swap` 0.2.0; licensed MIT by its crate
-manifest; the repository has no license file). Two builds are made from that
-state in a pinned build environment: the unchanged source, whose program must
-equal the devnet program of F40.6B.5 byte for byte, and the same source with
-only its declared program address changed to the address of Reloaded's
-deployment (the program refuses to run under any other address than the one it
-declares), whose differences from the first build must lie only in that address.
-The second build is the one deployed. Reloaded deploys it once per cluster
-without an upgrade authority, so no one can change the program after deployment:
-on devnet with a lab key and faucet funds (the devnet lab runs on that
-deployment), on mainnet from the maintainer's wallet. The program address of
+manifest; the repository has no license file). The deployed program is built
+from that state, the state whose source was reviewed, with only its declared
+program address changed to the address of Reloaded's deployment (the program
+refuses to run under any other address than the one it declares). It is built
+twice in a pinned build environment, the two builds must be equal, and after
+deployment the program's hash on chain must equal theirs. The devnet program of
+F40.6B.5 is not matched: the source it was built from is not public. Reloaded
+deploys it once per cluster without an upgrade authority, so no one can change
+the program after deployment: on devnet with a lab key and faucet funds (the
+devnet lab runs on that deployment), and on mainnet from the maintainer's wallet
+once the maintainer decides it, which is after 0.5.0. The program address of
 each cluster is recorded in a dated status note of this section once deployed.
 By its own record the program is not audited; Reloaded's review of its source is
 not an audit.
@@ -2279,6 +2280,16 @@ is a risk of each such token, which the coins file qualifies per token
 remove. A swap stopped part-way follows the legacy machine's recovery like every
 other coin. Not set by this section: a compute-unit price for claims and refunds
 under load, and how long a claim or refund is retried.
+
+> *Reloaded status (clean side, 2026-11-22):* the devnet deployment of R40.6D.1
+> is at `Hebok2uz2WrP6aaMAiiQYX1VzusCUC8TuCXXphJpksxd` (program data
+> `FkyivRqHcwcoyL6FBdbHABoyZrVu2HVb1gGKvbFZy4YP`, 270,453 bytes, no upgrade
+> authority). Its two builds were equal, and its hash on chain equals theirs
+> (`7d253acfec3527c76698278d696a8b36495dccb6f2a94687f07b6f86a3718962`); it
+> differs from a build with the original declared address only in the words of
+> that address. There is no mainnet deployment. By the maintainer's decision of
+> 2026-11-22, Solana swaps are postponed until after 0.5.0: the SOL legs land
+> unreachable, and the SPL legs and the switch-on follow later (plan S11).
 
 ### 40.6D.1 Tests
 
