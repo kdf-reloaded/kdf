@@ -1523,6 +1523,20 @@ payment transaction. The two rows are identical.
 > is unchanged, as is the clock check before a refund. No message and no
 > transaction a peer validates changes, which §51.6E permits.
 
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-22).** Reloaded's QRC20 search and wait take a candidate
+> transaction as the spend (the refund) of the payment only when one of its
+> outputs is the `receiverSpend` (`senderRefund`) call of the swap to the swap
+> contract the payment used, and the receipt of that same output reports no
+> exception and holds the `ReceiverSpent` (`SenderRefunded`) event, with the
+> event signature as its only topic, emitted by that swap contract, its data
+> beginning with the swap id. A candidate that fails is skipped and the search
+> goes on. The refund candidates come from the history of the payment's
+> sender, whichever side the node is. The payment checks of R89 item 1, the
+> secret-hash check of the spend and the extraction of R89 item 6 are
+> unchanged. This is stricter than the reference record of R89, which §51.6E
+> permits; no message and no transaction a peer validates changes.
+
 ## 51.6F Reference Behavior of an EVM Token Leg: Fee Descriptors, Volume Limits, Swap-Contract Negotiation
 
 > **Status (2026-11-22; KDF Spec Reader, round 0.5.0-27).** Reference record,
@@ -1795,12 +1809,33 @@ answer.
 3. *Undetermined.* When the nodes disagree, or fewer than two answer (with the
    field set: when the named node does not answer; no other node and no single
    other answer is taken in its place), the read is undetermined. The step
-   waits, and it MUST NOT refund or claim on an undetermined read.
+   waits, and it MUST NOT refund or claim on an undetermined read. A claim that
+   rests only on a secret proven by its hash (the last sentence of R100's head)
+   needs no agreeing read, and an undetermined read does not hold it back.
 4. *Admission.* A coin whose node list has fewer than two nodes and which has
    no `swap_evidence_node` does not start a swap: an order with it is refused
    at placement and at the swap start, with a reason that names
    `swap_evidence_node`.
 5. *Scope.* R100 applies to every coin family.
+6. *The operator's own daemon.* A coin activated in native mode reads its chain
+   through the operator's own full-node daemon (native RPC); that daemon counts
+   as the node the operator trusts (item 2), no `swap_evidence_node` is needed,
+   and item 4 does not refuse the coin.
+7. *Two nodes are two hosts.* The two nodes of R100 are two distinct hosts.
+   Entries of the coin's node list that name the same host (for example its TCP
+   and its SSL port) are one node. Whether two entries name the same host is
+   judged by the host part of each address as written, compared without regard
+   to letter case and without name resolution, so two names of one machine
+   count as two nodes. Hosts run by the same operator count as two nodes, and
+   no warning is given for them.
+8. *No outvoting.* Each attempt of a read takes its own pair of answers. When
+   the two disagree, the attempt is undetermined (item 3), and a later attempt
+   needs a new pair that agrees; answers of different attempts are not
+   combined, and a disagreement is not outvoted by further answers.
+9. *Swaps already running.* A swap that is running when its coin stops meeting
+   item 4 follows R100 as well: its reads are undetermined and wait (item 3),
+   and the node logs how to fix it, by adding a second node to the coin's node
+   list or by setting `swap_evidence_node`.
 
 **T42.** *Agreement of the reads (R100).* Over two scripted nodes: answers that
 agree by item 1 let the refund step and the step that uses the secret go on
@@ -1812,6 +1847,14 @@ nodes, that node's answer alone is taken, and when it does not answer the step
 waits; a `swap_evidence_node` outside the coin's node list is not accepted; a
 coin with one node and no `swap_evidence_node` is refused at order placement
 and at the swap start.
+
+**T43.** *Refinements of R100 (items 6 to 9).* A coin read through the
+operator's own daemon starts swaps and takes that daemon's answer alone; a node
+list whose two entries name one host (TCP and SSL) counts as one node and is
+refused by item 4; two hosts of one operator count as two nodes, with no
+warning; after a disagreement, one further agreeing answer does not decide, and
+a new agreeing pair does; a running swap whose coin loses its second node waits
+and logs the two ways to fix it.
 
 ## 51.7 Bound Message Contract
 
@@ -3398,6 +3441,11 @@ reference rows alike.
   decision of 2026-11-22, the cleared §51.6E and this workspace's own refund
   gate code; no other reference input was consulted, the note makes no
   parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-22, a fourth one: the status note after §51.6E R92
+  on the QRC20 search is a Reloaded addition written in a clean session from
+  the maintainer's decision of 2026-11-22, the cleared §51.6E and this
+  workspace's own QRC20 search code; no other reference input was consulted,
+  the note makes no parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
@@ -3603,3 +3651,8 @@ reference rows alike.
   text of R71, R72 and R72A, of chapter 21 §21.11B.2, R21.B3 and R21.B6, the
   maintainer's decision of 2026-11-08 on chapter 21 D21.B2 and D21.B4, and
   this repository's own swap code, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-22, a third one:* R100 items 6 to 9 and
+  T43, the maintainer's refinements of 2026-11-22 (the operator's own daemon,
+  two hosts, no outvoting, swaps already running). Reloaded-original; no
+  reference input and no forbidden-class input; no sentence of the chapter is
+  changed.

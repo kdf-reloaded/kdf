@@ -412,36 +412,14 @@ mod tests {
         );
     }
 
-    /// T46.8.3 (R46.2.4): under an HD context the default `wallet_balance` is the HD report with account 0 and
-    /// exactly its address 0 -- the address `my_address()` answers -- and that address's balance. The mock
-    /// walletd serves the consensus tip and the balance only; a request for an address's events (a scan) would
-    /// be answered with a 404 and fail the activation.
+    /// A Siacoin built under a global-HD login against a mock walletd that serves the consensus tip and a balance of
+    /// 5 SC for every address, and nothing else (an address's events, a scan, would be answered with a 404).
     #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn hd_activation_report_lists_account_0_with_its_single_address() {
-        use async_trait::async_trait;
-        use coins::hd_pubkey::HDExtractPubkeyError;
+    fn hd_sia_coin_on_a_mock_walletd() -> (mm2_core::mm_ctx::MmArc, SiaCoin) {
         use common::block_on;
-        use crypto::trezor::utxo::TrezorUtxoCoin;
-        use crypto::{DerivationPath, HardwareWalletArc, XPub};
         use mm2_core::mm_ctx::MmCtxBuilder;
         use std::io::{Read, Write};
         use std::net::TcpListener;
-
-        struct NoExtractor;
-
-        #[async_trait]
-        impl HDXPubExtractor for NoExtractor {
-            async fn extract_utxo_xpub(
-                &self,
-                _trezor_utxo_coin: TrezorUtxoCoin,
-                _derivation_path: DerivationPath,
-            ) -> MmResult<XPub, HDExtractPubkeyError> {
-                MmError::err(HDExtractPubkeyError::CoinDoesntSupportTrezor)
-            }
-
-            fn hardware_context(&self) -> Option<HardwareWalletArc> { None }
-        }
 
         // 5 SC in hastings.
         const SPENDABLE_HASTINGS: &str = "5000000000000000000000000";
@@ -496,6 +474,38 @@ mod tests {
             priv_key_policy,
         ))
         .expect("the coin is built against the mock walletd");
+        (ctx, coin)
+    }
+
+    /// T46.8.3 (R46.2.4): under an HD context the default `wallet_balance` is the HD report with account 0 and
+    /// exactly its address 0 -- the address `my_address()` answers -- and that address's balance. The mock
+    /// walletd serves the consensus tip and the balance only; a request for an address's events (a scan) would
+    /// be answered with a 404 and fail the activation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hd_activation_report_lists_account_0_with_its_single_address() {
+        use async_trait::async_trait;
+        use coins::hd_pubkey::HDExtractPubkeyError;
+        use common::block_on;
+        use crypto::trezor::utxo::TrezorUtxoCoin;
+        use crypto::{DerivationPath, HardwareWalletArc, XPub};
+
+        struct NoExtractor;
+
+        #[async_trait]
+        impl HDXPubExtractor for NoExtractor {
+            async fn extract_utxo_xpub(
+                &self,
+                _trezor_utxo_coin: TrezorUtxoCoin,
+                _derivation_path: DerivationPath,
+            ) -> MmResult<XPub, HDExtractPubkeyError> {
+                MmError::err(HDExtractPubkeyError::CoinDoesntSupportTrezor)
+            }
+
+            fn hardware_context(&self) -> Option<HardwareWalletArc> { None }
+        }
+
+        let (_ctx, coin) = hd_sia_coin_on_a_mock_walletd();
 
         let report = match block_on(activation_wallet_balance(&coin, &json!({}), None::<&NoExtractor>)) {
             Ok(report) => report,
@@ -513,5 +523,92 @@ mod tests {
             addresses[0]["balance"]["SC"],
             json!({ "spendable": "5", "unspendable": "0" })
         );
+    }
+
+    /// `task::get_new_address` for a Siacoin under a software HD login (CRD ch.49 R49.43 item 5, a Reloaded extension
+    /// the maintainer decided on 2026-11-22): the task is served on the software path, reaches `Ok` with the result
+    /// shape of the direct method, shows only the software statuses, and records the address. The internal chain is
+    /// refused as the direct method refuses it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_get_new_address_task_is_served_for_a_siacoin_on_the_software_path() {
+        use coins::rpc_command::init_get_new_address::{init_get_new_address, init_get_new_address_status};
+        use coins::{lp_register_coin, MmCoinEnum, RegisterCoinParams};
+        use common::block_on;
+        use rpc_task::rpc_common::RpcTaskStatusRequest;
+
+        let (ctx, coin) = hd_sia_coin_on_a_mock_walletd();
+        // Activation creates account 0 with its address 0.
+        struct NoExtractor;
+        #[async_trait]
+        impl HDXPubExtractor for NoExtractor {
+            async fn extract_utxo_xpub(
+                &self,
+                _trezor_utxo_coin: crypto::trezor::utxo::TrezorUtxoCoin,
+                _derivation_path: crypto::DerivationPath,
+            ) -> MmResult<crypto::XPub, coins::hd_pubkey::HDExtractPubkeyError> {
+                MmError::err(coins::hd_pubkey::HDExtractPubkeyError::CoinDoesntSupportTrezor)
+            }
+
+            fn hardware_context(&self) -> Option<crypto::HardwareWalletArc> { None }
+        }
+        block_on(activation_wallet_balance(&coin, &json!({}), None::<&NoExtractor>)).unwrap_or_else(|e| panic!("{e}"));
+        block_on(lp_register_coin(
+            &ctx,
+            MmCoinEnum::SiaCoin(coin.clone()),
+            RegisterCoinParams {
+                ticker: "SC".to_owned(),
+                tx_history: false,
+            },
+        ))
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let run = |request: Json| -> (Json, Vec<Json>) {
+            let request = serde_json::from_value(request).unwrap();
+            let response = block_on(init_get_new_address(ctx.clone(), request)).unwrap_or_else(|e| panic!("{e}"));
+            let mut seen = Vec::new();
+            for _ in 0..4000 {
+                let status = block_on(init_get_new_address_status(
+                    ctx.clone(),
+                    serde_json::from_value::<RpcTaskStatusRequest>(
+                        json!({ "task_id": response.task_id, "forget_if_finished": false }),
+                    )
+                    .unwrap(),
+                ))
+                .unwrap_or_else(|e| panic!("{e}"));
+                let status = serde_json::to_value(&status).unwrap();
+                match status["status"].as_str() {
+                    Some("Ok") | Some("Error") => return (status, seen),
+                    _ => {
+                        if !seen.contains(&status["details"]) {
+                            seen.push(status["details"].clone());
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    },
+                }
+            }
+            panic!("the task did not finish");
+        };
+
+        let (status, seen) = run(json!({ "coin": "SC", "account_id": 0 }));
+        assert_eq!(status["status"], "Ok", "{status}");
+        for state in &seen {
+            assert!(
+                *state == json!("Preparing") || *state == json!("RequestingAccountBalance"),
+                "no state beyond the software ones, saw {state}"
+            );
+        }
+        let new_address = &status["details"]["new_address"];
+        assert_ne!(new_address["address"], coin.my_address().unwrap().as_str());
+        assert_eq!(new_address["chain"], "External");
+        assert_eq!(
+            new_address["balance"]["SC"],
+            json!({ "spendable": "5", "unspendable": "0" }),
+            "{status}"
+        );
+
+        let (status, _) = run(json!({ "coin": "SC", "account_id": 0, "chain": "Internal" }));
+        assert_eq!(status["status"], "Error", "{status}");
+        assert_eq!(status["details"]["error_type"], "InvalidBip44Chain", "{status}");
     }
 }

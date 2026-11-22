@@ -1379,6 +1379,13 @@ program address is merely intended.
 | devnet | `54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx` | Public-network observation on 2026-11-15 (chapter 01 R6): `getAccountInfo` returns an executable account owned by the upgradeable program loader |
 | mainnet | none | Public-network observation on 2026-11-15: no account exists at that address |
 
+> *Reloaded status (clean side, 2026-11-22):* public observation on 2026-11-22
+> (chapter 01 R6): mainnet still has no account at that address; the devnet
+> program's data account is 241,933 bytes and upgradeable, its authority a
+> single key. At the state `satomic-swap fix/htlc-correctness (as of
+> 2026-10-28)` of chapter 02 §2.15A, the program's crate manifest declares the
+> MIT license; the repository has no license file.
+
 The branch is a program-side artifact. Its documents speak of a framework
 client that builds the program's instructions itself and of swaps without
 watchers; **no state of the historical record contains such a client**, so
@@ -1392,6 +1399,9 @@ tested against, and no released behavior to be wire-compatible with.
 **R40.6B.16** *No compatibility claim.* Reloaded MUST NOT state or imply
 wire compatibility of Solana or SPL swaps with `v2.6.0-beta`,
 `v3.0.0-beta` or `main (as of 2026-10-07)`; all three lack the capability.
+
+> *Reloaded status (clean side, 2026-11-22):* §40.6D builds Solana swaps between
+> Reloaded nodes (PR #501); this rule is unchanged.
 
 **The public swap program's interface (dictated interop, conditional).**
 The following is the interop surface of the program of F40.6B.5, read from
@@ -1679,6 +1689,14 @@ R40.6B.16 holds meanwhile.
 > *Reloaded status (clean side, 2026-11-15):* by the maintainer's decision
 > of 2026-11-15, nothing is decided on the swap program; the Solana lane is
 > wallet-only first.
+
+> *Reloaded status (clean side, 2026-11-22):* the maintainer decided on
+> 2026-11-22 to build the swap client to the public program of F40.6B.5 and to
+> deploy that program for Reloaded on devnet and mainnet, immutable, after a
+> clean review of its source, a reproducible build of the reviewed source and a
+> license check (§40.6D, PR #501). The dex fee goes to the Solana address of the
+> network's ed25519 dex-fee key; an SPL fee creates the fee owner's token
+> account when it is missing; the minimum trading volume stays 0.00777.
 
 ### 40.6B.10 Acceptance tests
 
@@ -2064,6 +2082,266 @@ T40.6C.9 After `disable_coin` of the platform no history request is sent and no
 list is written; after a token's disable its list is no longer written while the
 platform's history goes on (R40.6C.1).
 
+## 40.6D Swaps (Reloaded-original, added 2026-11-22)
+
+Reloaded-original rules for SOL and SPL tokens in the legacy swap protocol
+(chapter 51). The reference swaps no Solana coin (F40.6B.3), so nothing in this
+section was taken from it, and R40.6B.16 holds: a Solana swap is a swap between
+Reloaded nodes, and no compatibility with another implementation is stated. The
+on-chain side is the public program of F40.6B.5; its interface, recorded in
+§40.6B.7 as conditional interop, binds by the maintainer's decision recorded
+after D40.6B.8. The request and answer shapes of the node are those of the
+public Solana JSON-RPC, as in §40.6C. Version two of the swap protocol is not
+offered for these coins, and they have no watcher support (the program has no
+third-party role).
+
+**R40.6D.1 (the program and its deployment).** The program is the public program
+of F40.6B.5 at the state `satomic-swap fix/htlc-correctness (as of 2026-10-28)`
+of chapter 02 §2.15A (crate `satomic-swap` 0.2.0; licensed MIT by its crate
+manifest; the repository has no license file). The deployed program is built
+from that state, the state whose source was reviewed, with only its declared
+program address changed to the address of Reloaded's deployment (the program
+refuses to run under any other address than the one it declares). It is built
+twice in a pinned build environment, the two builds must be equal, and after
+deployment the program's hash on chain must equal theirs. The devnet program of
+F40.6B.5 is not matched: a build of the reviewed state did not equal it
+(2026-11-22), and the commit the repository's own record names for that
+deployment is not in its public history. Reloaded deploys it once per cluster
+without an upgrade authority, so no one can change the program after deployment:
+on devnet with a lab key and faucet funds (the devnet lab runs on that
+deployment), and on mainnet from the maintainer's wallet once the maintainer
+decides it, which is after 0.5.0. The program address of each cluster is
+recorded in a dated status note of this section once deployed. By its own record
+the program is not audited; Reloaded's review of its source is not an audit.
+
+**R40.6D.2 (configuration and tradability).** A platform entry of type `SOLANA`
+names its cluster's program in `protocol.protocol_data.swap_program_id`
+(base58). A member that is not a base58 public key makes the entry unparsable
+(`CoinProtocolParseError`, as R40.6B.3 item 1). When the member is present, the
+activation reads that account once at `finalized`: it must exist, be executable,
+and have no upgrade authority (an account of the upgradeable loader whose
+program-data account names none, or an account of a loader without upgrades). A
+platform whose program passes, and its SPL tokens, can be traded unless the
+entry sets `wallet_only`. Without the member, or when the program does not pass
+or cannot be read, the coin and its tokens stay wallet-only, every order and
+swap request answers as before S11, and the reason the order refusal names says
+which of these applies; the activation itself succeeds.
+
+**R40.6D.3 (the contract field).** The coin's swap contract address is the 32
+bytes of its program address. On receipt, the counterparty's field must be those
+same 32 bytes: a field of another length answers `InvalidOtherAddrLen`, 32 other
+bytes answer `UnexpectedOtherAddr`, and an absent or empty field answers
+`NoSwapContract`; each ends the negotiation (chapter 51 R11, R34, R66). Orders
+do not carry the program, so a swap with a peer whose coin names another program
+ends at this step.
+
+**R40.6D.4 (secret hash).** A pair with a Solana or SPL leg uses SHA-256
+(chapter 51 R72: the program's hash lock is a native 32-byte SHA-256 value). The
+other leg derives its own form from that value (R72A, R72B).
+
+**R40.6D.5 (keys).** The swap key is the coin's activated key (one address,
+§40.1A); it is the same in every swap. On the wire it is the 32-byte public key
+followed by one zero byte (chapter 51 R63, R64). A counterparty key whose last
+byte is not zero, or whose first 32 bytes are not a point of the ed25519 curve,
+is refused (the receiver must be able to sign its claim), and so is a
+counterparty key equal to the coin's own key (the program refuses a payment to
+its own sender).
+
+**R40.6D.6 (payment).** A payment is the program's `lamports_payment` (SOL) or
+`spl_payment` (SPL) instruction with the agreed secret hash, the payment's lock
+time in seconds (the protocol's 32-bit value, widened) and the amount in the
+coin's smallest units. Both sides derive the payment address from that amount,
+so a volume that is not a whole number of the coin's smallest units is refused
+when the order is placed and at the swap start of both sides, before the taker
+fee is sent. The receiver is the counterparty's key. The payment account is the
+program-derived address of §40.6B.7; for SPL, the sender's token account is its
+associated token account for the mint under the token's program, and the vault
+is the payment address's associated token account. A Token-2022 mint is refused
+(D40.6B.4, until S6b). For an SPL leg, before the swap starts and again before
+the payment is sent, the node reads the token accounts involved that exist (its
+own, and the counterparty's associated token account for the mint) and refuses
+the swap when one of them is frozen. The sender pays the rent of the payment
+account and of the vault; the program returns both rents to the sender at
+settlement. The fee payer of every transaction this section names is the coin's
+key, and its only signer except where the program requires the counterparty.
+
+**R40.6D.7 (sending).** Every transaction is built with a recent block hash of
+the node and signed by the coin's key; a transaction not included before that
+block hash expires is dead, and the next attempt is a new transaction. Before a
+payment is sent again, the payment address is read (R40.6D.12): a second payment
+with the same terms cannot succeed, since the program refuses an existing
+payment account. A failed read is undetermined, and no payment is sent on it.
+
+**R40.6D.8 (finality).** A transaction counts when it is included, successful
+and `finalized`. An included transaction with an error has no effect and does
+not count. The confirmation count of the swap settings is not used, and
+notarization is never required, so the lock time is not multiplied for it.
+
+**R40.6D.9 (the other side's payment).** The payment message carries the payment
+transaction's wire bytes. The receiving side takes the transaction's first
+signature from those bytes and reads the transaction from the node by that
+signature (`getTransaction`, `finalized`); only the node's answer is validated,
+and the payment is valid only when the node's wire bytes equal the bytes the
+peer sent, so every later step reads verified bytes; it is also valid only when
+that transaction is final (R40.6D.8), has an instruction whose program is the
+configured program, top-level or inner, that is the payment instruction for this
+coin with exactly the agreed secret hash, lock time, amount, sender, receiver
+and (SPL) mint, and when the payment account derived from those terms is owned
+by the program and holds at least the amount above its rent-exempt minimum
+(SOL), or the vault holds at least the amount and is not frozen (SPL). A failed
+read is undetermined: the validation is tried again until its deadline and never
+answers "valid" on it.
+
+**R40.6D.10 (claim and refund).** The receiver claims with `receiver_spend_*`
+and the secret; for SPL, when the receiver has no associated token account for
+the mint, the claim transaction first creates it (idempotently; the receiver
+pays its rent). The maker's claim of the taker's payment is sent only while the
+payment account is present at `finalized` (as R40.6D.16 requires), only after
+the node's simulation of the transaction succeeds, and only while the cluster
+time (R40.6D.11) is at least 300 seconds before the lock time; otherwise it is
+not sent and the swap goes to its refund. The 300 seconds are this section's own
+figure. The taker's claim of the maker's payment is sent unless the payment
+account is known to be gone at `finalized` (an undetermined read does not hold
+it back; chapter 51 R100: this claim rests only on the secret, which proves
+itself, and the account read can only stop it), before or after the lock time,
+after a successful simulation, and is tried again until the account is known to
+be gone. The sender refunds with `sender_refund_*` once the refund gate
+(R40.6D.11) is open.
+
+**R40.6D.11 (refund gate).** The time compared with the lock is the cluster's:
+the block time of the latest `finalized` slot. The gate answers "wait" with the
+remaining seconds until that time reaches the lock, and "refund now" after. A
+failed read answers "wait"; the local clock alone never opens the gate.
+
+**R40.6D.12 (spend search and secret).** The signatures of the payment address
+(`getSignaturesForAddress`, `finalized`) are read only once the payment account
+is found gone at `finalized`: while it is present (agreed as R40.6D.16
+requires), the answer is "not spent" and no listed transaction is read. The
+signatures are read newest first; the walk ends at the payment's own signature,
+or at the first empty page if that comes first, and no page limit applies. Each
+transaction is read once (`getTransaction` of §40.6C), and only listed
+signatures whose slot lies between a lower and an upper bound are read: the
+lower bound is the last slot at which this node saw the payment account at
+`finalized`, or the payment transaction's own slot when this node has no such
+reading; the upper bound is the first slot at which this node found the account
+gone. Both bounds are included; when two nodes of the coin's pool answer, the
+earlier lower bound and the later upper bound are taken. The search is thus
+never narrower than from the payment to the account's disappearance. An
+instruction counts only when its program is the configured program and its
+`payment` account is this payment address, top-level or inner, in a successful
+transaction. A claim instruction gives the secret, the 32 bytes after the
+instruction's discriminator, accepted only when its SHA-256 equals the agreed
+hash. The payment is answered "spent" (claimed) or "refunded" only when such an
+instruction is found and the payment account is also gone at `finalized`. A
+failed transaction is neither. A failed read is undetermined, never "not spent"
+or "not sent". The account's absence alone does not mean "not paid" (§40.6B.7).
+
+**R40.6D.13 (dex fee).** Only the standard form is sent; no burn form exists for
+these coins. The fee goes to the Solana address whose 32 bytes are the network's
+ed25519 dex-fee key (the key the network also uses for Sia), as a System
+transfer (SOL) or a `TransferChecked` of the mint to that address's associated
+token account (SPL). When that token account does not exist, the fee transaction
+first creates it (idempotently; the taker pays its rent, once per mint for the
+whole network). The fee transaction also carries one instruction of the public
+Memo program whose data is the swap's uuid in its text form. The fee is valid
+when the transaction read from the node by its signature (as R40.6D.9) is final
+and successful, its fee payer is the taker's key, the transfer's source is that
+key (SOL) or a token account that key owns and signs for (SPL), it moves at
+least the expected amount to that destination, its memo is this swap's uuid, and
+its block height is not below the taker coin's block height recorded at the
+swap's start.
+
+**R40.6D.14 (trade fees and admission).** The fee answers are in SOL with its
+full decimals: for the sender, the payment's transaction fee plus the rents it
+deposits (paid back at settlement); for the receiver, the claim's fee plus, for
+SPL, the rent of its token account when it has none; for the taker fee, the fee
+transaction's fee plus the rent of the fee owner's token account when it does
+not exist. A swap is admitted only when the SOL balance covers, on the sending
+side, the payment's fee, its rent deposits and one refund's fee (and the taker
+fee's figures for a taker), and on the receiving side one claim's fee and, for
+SPL, the rent of its token account when it has none.
+
+**R40.6D.15 (floors).** The minimum trading volume stays 0.00777 for SOL and
+every SPL token (§40.6A); the minimum transaction amounts are those of S3 (one
+lamport; one smallest unit of the token).
+
+**R40.6D.16 (evidence for the refund and secret steps).** The reads behind
+R40.6D.9, R40.6D.11 and R40.6D.12 follow chapter 51 R100 (§51.6G): before a
+refund step or a secret step they must agree between two nodes of the coin's
+pool, or come from the one node the activation names in `swap_evidence_node`; a
+disagreement or fewer than two answers is undetermined, and so is a named node
+that does not answer (no other node is taken in its place); the node then waits.
+
+**R40.6D.17 (limits).** A cluster without a deployed program has no tradable
+Solana coin. The program is unaudited (R40.6D.1). The counterparty of a Solana
+swap is a Reloaded node. A token whose mint has a freeze authority can have the
+vault or a party's token account frozen, which makes claim and refund fail; this
+is a risk of each such token, which the coins file qualifies per token
+(`wallet_only`), and which the checks of R40.6D.6 and R40.6D.9 narrow but do not
+remove. A swap stopped part-way follows the legacy machine's recovery like every
+other coin. Not set by this section: a compute-unit price for claims and refunds
+under load, and how long a claim or refund is retried.
+
+> *Reloaded status (clean side, 2026-11-22):* the devnet deployment of R40.6D.1
+> is at `Hebok2uz2WrP6aaMAiiQYX1VzusCUC8TuCXXphJpksxd` (program data
+> `FkyivRqHcwcoyL6FBdbHABoyZrVu2HVb1gGKvbFZy4YP`, 270,453 bytes, no upgrade
+> authority). Its two builds were equal, and its hash on chain equals theirs
+> (`7d253acfec3527c76698278d696a8b36495dccb6f2a94687f07b6f86a3718962`); it
+> differs from a build with the original declared address only in the words of
+> that address. There is no mainnet deployment. By the maintainer's decision of
+> 2026-11-22, Solana swaps are postponed until after 0.5.0: the SOL legs land
+> unreachable, and the SPL legs and the switch-on follow later (plan S11).
+
+### 40.6D.1 Tests
+
+T40.6D.1 Configuration: an entry with a valid `swap_program_id` whose program
+passes is tradable; without the member, with a program that is missing, not
+executable or upgradeable, or that cannot be read, wallet-only with the matching
+reason and a successful activation; an invalid member the parse refusal; tokens
+follow their platform (R40.6D.2).
+T40.6D.2 Contract field: equal 32 bytes accepted; other length, other bytes and
+an absent field refused with the named errors (R40.6D.3).
+T40.6D.3 The pair rule selects SHA-256 for a Solana or SPL leg on either side
+(R40.6D.4).
+T40.6D.4 Keys: the wire form; a non-zero last byte, an off-curve key and the
+coin's own key refused (R40.6D.5).
+T40.6D.5 Payment, claim and refund instructions for SOL and SPL byte-exact
+against captured devnet transactions of the program, and the derived payment and
+vault addresses equal to those of the captured transactions (R40.6D.6,
+R40.6D.10).
+T40.6D.6 A volume with more decimals than the coin refused at order placement
+and at the swap start of both sides, before the taker fee (R40.6D.6).
+T40.6D.7 Validation over a scripted node: valid; each term different; not final;
+failed; account missing; vault short; peer bytes that differ from the node's
+transaction for the signature, including a different body under a true signature
+(refused); the payment instruction of another program (R40.6D.9).
+T40.6D.8 Refund gate: before, at and after the lock by the cluster's time; a
+failed read waits (R40.6D.11).
+T40.6D.9 Spend search: a claim (top-level and inner) gives the secret; a wrong
+secret refused; a refund is a refund; a failed claim is neither; a look-alike
+instruction of another program, or of the program for another payment address,
+is neither; "spent" and "refunded" only with the account gone; a failed read
+undetermined; a listing with many unrelated entries around the claim still gives
+the secret; a node serving short pages is read to its empty page; while the
+account is present no listed transaction is read (R40.6D.12).
+T40.6D.10 Dex fee: SOL and SPL, with and without the fee owner's token account;
+validation of amount, sender, destination, memo and block height; the fee of
+another swap (other memo) and a transfer from before the swap's start refused
+(R40.6D.13).
+T40.6D.11 Trade-fee answers and admission for SOL and SPL in both roles
+(R40.6D.14).
+T40.6D.12 A repeated payment send with the same terms does not pay twice; a
+failed read before it sends nothing (R40.6D.7).
+T40.6D.13 Evidence: two agreeing nodes, a disagreement, one answer, and the
+named evidence node (R40.6D.16).
+T40.6D.14 Claim conditions: the maker's claim is not sent when the payment
+account is gone, when the simulation fails, or when the cluster time is less
+than 300 seconds before the lock time; the taker's claim is sent unless the
+account is known to be gone, also after the lock time and with an undetermined
+read; an SPL vault that is frozen fails validation, and a frozen token account
+of either party refuses the swap at its start and before the payment (R40.6D.6,
+R40.6D.9, R40.6D.10).
+
 ## 40.7 Tests
 
 T40.1 Both `experimental::` methods are routed on native and WASM builds.
@@ -2367,3 +2645,10 @@ with the shapes listed in §40.6 items 3-5.
   decisions of 2026-11-22 on its depth, failed transactions, node source and
   token accounts. They take no forbidden-class input beyond the cleared rules
   they cite. No cleared sentence was edited.
+- *Clean-context addition (2026-11-22, forbidden corpus not consulted):*
+  §40.6D and the status notes after F40.6B.5, R40.6B.16 and D40.6B.8 record
+  Reloaded's own design of Solana and SPL swaps on the public program's recorded
+  interface, the public Solana JSON-RPC and the cleared rules of chapter 51 they
+  cite, public-chain observations, and the maintainer's decisions of 2026-11-22.
+  They take no forbidden-class input beyond the cleared rules they cite. No
+  cleared sentence was edited.

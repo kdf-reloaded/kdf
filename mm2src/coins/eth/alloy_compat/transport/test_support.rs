@@ -7,6 +7,7 @@ use crate::eth::alloy_compat::KdfProvider;
 use crate::node_url::listed_nodes;
 use serde_json::{json, Value as Json};
 use std::sync::OnceLock;
+use std::thread::ThreadId;
 
 /// What a stub node does with one request.
 pub(crate) enum Reply {
@@ -170,7 +171,8 @@ pub(crate) fn stub_provider(
 /// Collects every log line emitted while it is installed, so a test can look for a leaked credential.
 struct CapturingLogger;
 
-static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Each captured line with the id of the thread that wrote it.
+static CAPTURED: Mutex<Vec<(ThreadId, String)>> = Mutex::new(Vec::new());
 static INSTALL: OnceLock<bool> = OnceLock::new();
 static LOGGER: CapturingLogger = CapturingLogger;
 
@@ -178,22 +180,25 @@ impl common::log::log_crate::Log for CapturingLogger {
     fn enabled(&self, _: &common::log::log_crate::Metadata) -> bool { true }
 
     fn log(&self, record: &common::log::log_crate::Record) {
-        CAPTURED
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(format!("{} {}", record.level(), record.args()));
+        capture_line(format!("{} {}", record.level(), record.args()));
     }
 
     fn flush(&self) {}
+}
+
+/// Stores a line under the id of the calling thread. Both capture paths call it on the thread that logs.
+fn capture_line(line: String) {
+    CAPTURED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((std::thread::current().id(), line));
 }
 
 /// Collects the lines of the `log!` macro, which does not go through the `log` crate.
 struct CapturingCallback;
 
 impl common::log::LogCallback for CapturingCallback {
-    fn callback(&mut self, _level: common::log::LogLevel, line: String) {
-        CAPTURED.lock().unwrap_or_else(PoisonError::into_inner).push(line);
-    }
+    fn callback(&mut self, _level: common::log::LogLevel, line: String) { capture_line(line); }
 }
 
 /// Installs the capturing logger and the `log!` capture. The answer is decided once per process, by the first caller,
@@ -207,5 +212,26 @@ pub(crate) fn install_log_capture() -> bool {
     installed
 }
 
-/// Every line captured so far.
-pub(crate) fn captured_log_lines() -> Vec<String> { CAPTURED.lock().unwrap_or_else(PoisonError::into_inner).clone() }
+/// Every line captured so far, from every thread of the process.
+pub(crate) fn captured_log_lines() -> Vec<String> {
+    CAPTURED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|(_, line)| line.clone())
+        .collect()
+}
+
+/// The lines captured so far that the calling thread wrote itself, in the order it wrote them. A test that counts
+/// lines uses this, so that a test running at the same time on another thread cannot change its counts. A line
+/// that the code under test writes from another thread (a spawned task, a worker thread) is not in this list.
+pub(crate) fn captured_log_lines_of_this_thread() -> Vec<String> {
+    let this_thread = std::thread::current().id();
+    CAPTURED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|(thread, _)| *thread == this_thread)
+        .map(|(_, line)| line.clone())
+        .collect()
+}

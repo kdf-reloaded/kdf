@@ -15021,6 +15021,428 @@ pub(crate) mod hd_accounts_at_index_tests {
         );
         assert_eq!(error.status_code(), common::StatusCode::GONE);
     }
+
+    // -----------------------------------------------------------------------
+    // task::get_new_address (CRD ch.49 §49.2.3, R49.38 -- R49.42; the software case of ch.05 R54)
+    // -----------------------------------------------------------------------
+
+    use crate::rpc_command::init_get_new_address::{init_get_new_address, init_get_new_address_status,
+                                                   DeviceAddressRequest, InitGetNewAddressRpcOps};
+    use crate::MarketCoinOps;
+    use rpc_task::rpc_common::RpcTaskStatusRequest;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Stores account `0` with `external` known external addresses, as the wallet storage of a running node holds it.
+    fn store_account_zero(items: &StoredAccounts, external: u32) {
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account_zero().extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: external,
+            internal_addresses_number: 0,
+        });
+    }
+
+    /// A coin whose account `0` already knows `external` external addresses.
+    fn hd_coin_knowing(external: u32) -> UtxoStandardCoin {
+        let mut account = account_zero();
+        account.external_addresses_number = external;
+        hd_coin(HDAccountsMap::from([(0, account)]))
+    }
+
+    /// Runs the steps of the task of `coin` the way `InitGetNewAddressTask` runs them under the software policy:
+    /// plan, record, and balance. `recorded` counts how often the status callback after the recording ran.
+    fn software_steps<Coin>(
+        coin: &Coin,
+        account_id: u32,
+        chain: Bip44Chain,
+        gap_limit: Option<u32>,
+        recorded: &AtomicUsize,
+    ) -> MmResult<json::Value, HDWalletRpcError>
+    where
+        Coin: InitGetNewAddressRpcOps + Sync,
+    {
+        block_on(async {
+            let planned = coin.plan_new_address(account_id, chain, gap_limit).await?;
+            let on_recorded = || -> MmResult<(), HDWalletRpcError> {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            };
+            let response = coin.record_new_address(&planned, &on_recorded).await?;
+            Ok(json::to_value(&response).unwrap())
+        })
+    }
+
+    /// The error a node that cannot be reached gives to the RPC client.
+    fn node_error(text: &str) -> common::jsonrpc_client::JsonRpcError {
+        common::jsonrpc_client::JsonRpcError {
+            client_info: "test".to_owned(),
+            request: common::jsonrpc_client::JsonRpcRequestEnum::Single(common::jsonrpc_client::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: "0".to_owned(),
+                method: "getbalance".to_owned(),
+                params: Vec::new(),
+            }),
+            error: common::jsonrpc_client::JsonRpcErrorType::Transport(text.to_owned()),
+        }
+    }
+
+    fn error_type(error: &HDWalletRpcError) -> json::Value { json::to_value(error).unwrap()["error_type"].clone() }
+
+    /// T49.36 (the divergence, R54): under the software policy the steps of the task derive, record and query without
+    /// any device state, for a UTXO coin and for QTUM, in the shape of the direct method's answer.
+    fn software_task_steps_complete<Coin>(coin: &Coin, items: &StoredAccounts)
+    where
+        Coin: InitGetNewAddressRpcOps + MarketCoinOps + Sync,
+    {
+        let recorded = AtomicUsize::new(0);
+        let answer = software_steps(coin, 0, Bip44Chain::External, None, &recorded)
+            .unwrap_or_else(|e| panic!("the steps failed: {:?}", e));
+        let new_address = &answer["new_address"];
+        assert_eq!(new_address["derivation_path"], "m/44'/141'/0'/0/0");
+        assert_eq!(new_address["chain"], "External");
+        assert!(new_address["address"]
+            .as_str()
+            .is_some_and(|address| !address.is_empty()));
+        assert_eq!(
+            new_address["balance"],
+            json!({ coin.ticker(): { "spendable": "0", "unspendable": "0" } })
+        );
+        assert_eq!(answer.as_object().unwrap().len(), 1, "no wrapper");
+        assert_eq!(recorded.load(Ordering::SeqCst), 1);
+        assert_eq!(stored(items, 0).external_addresses_number, 1);
+    }
+
+    #[test]
+    fn leb_t4936_the_software_steps_complete_for_a_utxo_coin() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        store_account_zero(&items, 0);
+        let coin = hd_coin_with_account_zero();
+        software_task_steps_complete(&coin, &items);
+        // The answer's address is the one the coin derives at index 0.
+        let recorded = AtomicUsize::new(0);
+        let second = software_steps(&coin, 0, Bip44Chain::External, None, &recorded).unwrap();
+        assert_eq!(
+            second["new_address"]["address"],
+            external_address_of_account_zero(&coin, 1).as_str()
+        );
+    }
+
+    #[test]
+    fn leb_t4936_the_software_steps_complete_for_qtum() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        store_account_zero(&items, 0);
+        let arc: UtxoArc = hd_fields(HDAccountsMap::from([(0, account_zero())])).into();
+        software_task_steps_complete(&QtumCoin::from(arc), &items);
+    }
+
+    /// The internal chain stays accepted for UTXO and QTUM (decision 2 refuses it for EVM and TRON only).
+    #[test]
+    fn leb_the_internal_chain_is_accepted_for_a_utxo_coin() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        store_account_zero(&items, 0);
+        let coin = hd_coin_with_account_zero();
+        let answer = software_steps(&coin, 0, Bip44Chain::Internal, None, &AtomicUsize::new(0))
+            .unwrap_or_else(|e| panic!("the steps failed: {:?}", e));
+        assert_eq!(answer["new_address"]["derivation_path"], "m/44'/141'/0'/1/0");
+        assert_eq!(answer["new_address"]["chain"], "Internal");
+        assert_eq!(stored(&items, 0).internal_addresses_number, 1);
+    }
+
+    /// R49.41: an account the wallet does not hold is `UnknownAccount`; nothing is recorded.
+    #[test]
+    fn leb_an_unknown_account_is_refused_before_anything_is_recorded() {
+        let items = mock_storage();
+        mock_chain();
+        store_account_zero(&items, 0);
+        let recorded = AtomicUsize::new(0);
+        let error = software_steps(&hd_coin_with_account_zero(), 7, Bip44Chain::External, None, &recorded)
+            .err()
+            .expect("account 7 does not exist")
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::UnknownAccount { account_id: 7 }),
+            "{:?}",
+            error
+        );
+        assert_eq!(recorded.load(Ordering::SeqCst), 0);
+        assert_eq!(stored(&items, 0).external_addresses_number, 0);
+    }
+
+    /// Decision 5, R49.41 item 1: the gap check runs with the request's `gap_limit` (the wallet's, 3, by default).
+    #[test]
+    fn leb_the_gap_check_refuses_a_run_of_unused_addresses() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        store_account_zero(&items, 3);
+        let coin = hd_coin_knowing(3);
+        let recorded = AtomicUsize::new(0);
+
+        // Default gap limit 3: addresses 0, 1, 2 are all unused.
+        let error = software_steps(&coin, 0, Bip44Chain::External, None, &recorded)
+            .err()
+            .expect("the gap check must refuse")
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::EmptyAddressesLimitReached { gap_limit: 3 }),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), common::StatusCode::BAD_REQUEST);
+        // The request's own limit applies.
+        let error = software_steps(&coin, 0, Bip44Chain::External, Some(2), &recorded)
+            .err()
+            .expect("the gap check must refuse")
+            .into_inner();
+        assert!(
+            matches!(error, HDWalletRpcError::EmptyAddressesLimitReached { gap_limit: 2 }),
+            "{:?}",
+            error
+        );
+        assert_eq!(recorded.load(Ordering::SeqCst), 0);
+        assert_eq!(stored(&items, 0).external_addresses_number, 3, "nothing is recorded");
+
+        // Address 0 is outside the last two addresses: its use does not help a limit of 2.
+        mock_chain_with_a_used_address(external_address_of_account_zero(&coin, 0));
+        assert!(software_steps(&coin, 0, Bip44Chain::External, Some(2), &recorded).is_err());
+        // It is inside the last three.
+        let answer = software_steps(&coin, 0, Bip44Chain::External, None, &recorded)
+            .unwrap_or_else(|e| panic!("a used address lets the task through: {:?}", e));
+        assert_eq!(answer["new_address"]["derivation_path"], "m/44'/141'/0'/0/3");
+        assert_eq!(stored(&items, 0).external_addresses_number, 4);
+    }
+
+    /// R49.41 item 1: fewer known addresses than the limit never hit the gap check, and a node that cannot be asked
+    /// is not asked.
+    #[test]
+    fn leb_fewer_known_addresses_than_the_limit_are_not_checked() {
+        let items = mock_storage();
+        mock_chain();
+        mock_address_balance();
+        // The scan would fail the request if it ran.
+        NativeClient::list_all_transactions.mock_safe(|_, _| {
+            MockResult::Return(Box::new(futures01::future::err(node_error(
+                "the node must not be asked",
+            ))))
+        });
+        store_account_zero(&items, 2);
+        let coin = hd_coin_knowing(2);
+        let answer = software_steps(&coin, 0, Bip44Chain::External, None, &AtomicUsize::new(0))
+            .unwrap_or_else(|e| panic!("{:?}", e));
+        assert_eq!(answer["new_address"]["derivation_path"], "m/44'/141'/0'/0/2");
+    }
+
+    /// R49.37 item 1, R49.41: a node that fails during the gap check ends the task before any address is recorded.
+    #[test]
+    fn leb_a_failure_during_the_gap_check_records_nothing() {
+        let items = mock_storage();
+        mock_chain();
+        NativeClient::list_all_transactions
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::err(node_error("the node is down")))));
+        store_account_zero(&items, 3);
+        let recorded = AtomicUsize::new(0);
+        assert!(software_steps(&hd_coin_knowing(3), 0, Bip44Chain::External, None, &recorded).is_err());
+        assert_eq!(recorded.load(Ordering::SeqCst), 0);
+        assert_eq!(stored(&items, 0).external_addresses_number, 3);
+    }
+
+    /// R49.40 item 3, decision 6: a balance query that fails after the recording leaves the address known, and the
+    /// status callback of the recording ran before the query.
+    #[test]
+    fn leb_a_failing_balance_query_leaves_the_address_known() {
+        let items = mock_storage();
+        mock_chain();
+        NativeClient::display_balance
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::err(node_error("the node is down")))));
+        store_account_zero(&items, 0);
+        let coin = hd_coin_with_account_zero();
+        let recorded = AtomicUsize::new(0);
+        let error = software_steps(&coin, 0, Bip44Chain::External, None, &recorded)
+            .err()
+            .expect("the balance query fails")
+            .into_inner();
+        assert!(
+            matches!(error_type(&error).as_str(), Some("Transport") | Some("Internal")),
+            "{:?}",
+            error
+        );
+        assert_eq!(recorded.load(Ordering::SeqCst), 1);
+        assert_eq!(stored(&items, 0).external_addresses_number, 1, "the raised count stays");
+        assert_eq!(
+            block_on(
+                coin.as_ref()
+                    .derivation_method
+                    .hd_wallet_or_err()
+                    .unwrap()
+                    .get_account(0)
+            )
+            .unwrap()
+            .external_addresses_number,
+            1,
+            "and so does the loaded wallet's"
+        );
+    }
+
+    /// R49.42: the device is asked with the coin's `trezor_coin` and the script type of its address format; a coin
+    /// without `trezor_coin` answers `Internal` (R49.41 item 3).
+    #[test]
+    fn leb_r4942_the_device_request_of_a_utxo_coin() {
+        use crypto::trezor::utxo::TrezorInputScriptType;
+
+        let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        match utxo_coin_from_fields(fields).device_address_request() {
+            Ok(DeviceAddressRequest::Utxo {
+                trezor_coin,
+                script_type,
+            }) => {
+                assert!(matches!(trezor_coin, TrezorUtxoCoin::Komodo));
+                assert!(matches!(script_type, TrezorInputScriptType::SpendAddress));
+            },
+            _ => panic!("the Bitcoin-family request is expected"),
+        }
+
+        let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+        if let DerivationMethod::HDWallet(wallet) = &mut fields.derivation_method {
+            wallet.address_format = UtxoAddressFormat::Segwit;
+        }
+        match utxo_coin_from_fields(fields).device_address_request() {
+            Ok(DeviceAddressRequest::Utxo { script_type, .. }) => {
+                assert!(matches!(script_type, TrezorInputScriptType::SpendWitness));
+            },
+            _ => panic!("the Bitcoin-family request is expected"),
+        }
+
+        let mut fields = hd_fields(HDAccountsMap::from([(0, account_zero())]));
+        fields.conf.trezor_coin = None;
+        let error = match utxo_coin_from_fields(fields).device_address_request() {
+            Err(error) => error.into_inner(),
+            Ok(_) => panic!("a coin without a device name must be refused"),
+        };
+        assert!(matches!(error, HDWalletRpcError::Internal(_)), "{:?}", error);
+    }
+
+    // The tests below start the task through the dispatcher's entry points. Their failures all come before any node
+    // is asked, so they need no mock (the mocks are thread-local and the task runs on the executor).
+
+    fn register(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str, coin: crate::MmCoinEnum) {
+        let coins_ctx = crate::CoinsContext::from_ctx(ctx).unwrap();
+        block_on(async { coins_ctx.coins.lock().await.insert(ticker.to_owned(), coin) });
+    }
+
+    /// Starts the task and polls it to its end; returns the final status.
+    fn run_new_address_task(ctx: &mm2_core::mm_ctx::MmArc, request: json::Value) -> json::Value {
+        let request = json::from_value(request).expect("a task request");
+        let response = block_on(init_get_new_address(ctx.clone(), request))
+            .unwrap_or_else(|e| panic!("the task must start: {}", e.get_inner()));
+        for _ in 0..4000 {
+            let status = block_on(init_get_new_address_status(
+                ctx.clone(),
+                json::from_value::<RpcTaskStatusRequest>(
+                    json!({ "task_id": response.task_id, "forget_if_finished": false }),
+                )
+                .unwrap(),
+            ))
+            .unwrap_or_else(|e| panic!("status failed: {e}"));
+            let status = json::to_value(&status).unwrap();
+            if matches!(status["status"].as_str(), Some("Ok") | Some("Error")) {
+                return status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the task did not finish");
+    }
+
+    /// R54, T35 for the task: a Trezor-policy coin whose hardware slot is empty ends in an `Error` status
+    /// `HwContextNotInitialized` before any address is derived; the known count is unchanged.
+    #[test]
+    fn leb_a_trezor_policy_coin_with_an_empty_slot_ends_with_hw_context_not_initialized() {
+        let items = mock_storage();
+        let coin = trezor_policy_hd_coin();
+        let ctx = node_with_hd_coins(false, vec![("TRZ", coin.clone())], &items);
+        let status = run_new_address_task(&ctx, json!({ "coin": "TRZ", "account_id": 0 }));
+        assert_eq!(status["status"], "Error", "{status}");
+        assert_eq!(status["details"]["error_type"], "HwContextNotInitialized", "{status}");
+        assert_eq!(stored(&items, 0).external_addresses_number, 0);
+        assert_eq!(
+            block_on(
+                coin.as_ref()
+                    .derivation_method
+                    .hd_wallet_or_err()
+                    .unwrap()
+                    .get_account(0)
+            )
+            .unwrap()
+            .external_addresses_number,
+            0
+        );
+    }
+
+    /// R49.41 item 1: with a device of another seed than the coin's, the Trezor-policy task ends with
+    /// `FoundUnexpectedDevice` (ch.05 R58a) before the device is asked.
+    #[test]
+    fn leb_a_replaced_device_ends_the_trezor_policy_task_with_found_unexpected_device() {
+        let items = mock_storage();
+        let ctx = node_with_hd_coins(true, vec![("TRZ", trezor_policy_hd_coin())], &items);
+        replace_the_device_with_b(&ctx);
+        let status = run_new_address_task(&ctx, json!({ "coin": "TRZ", "account_id": 0 }));
+        assert_eq!(status["status"], "Error", "{status}");
+        assert_eq!(status["details"]["error_type"], "HwError", "{status}");
+        assert_eq!(status["details"]["error_data"], "FoundUnexpectedDevice", "{status}");
+        assert_eq!(stored(&items, 0).external_addresses_number, 0);
+    }
+
+    /// R49.38 item 4: a coin kind the task does not serve gets a task id from init, and the task ends at once with
+    /// `CoinIsActivatedNotWithHDWallet`.
+    #[test]
+    fn leb_an_unsupported_coin_kind_ends_with_coin_is_activated_not_with_hd_wallet() {
+        let items = mock_storage();
+        let ctx = node_with_hd_coins(true, vec![], &items);
+        register(&ctx, "TESTCOIN", crate::MmCoinEnum::Test(crate::TestCoin::default()));
+        let status = run_new_address_task(&ctx, json!({ "coin": "TESTCOIN", "account_id": 0 }));
+        assert_eq!(status["status"], "Error", "{status}");
+        assert_eq!(
+            status["details"]["error_type"], "CoinIsActivatedNotWithHDWallet",
+            "{status}"
+        );
+    }
+
+    /// R49.38 item 3: a ticker that is not activated answers `NoSuchCoin` from init itself (HTTP 400).
+    #[test]
+    fn leb_a_ticker_that_is_not_activated_answers_no_such_coin_from_init() {
+        let items = mock_storage();
+        let ctx = node_with_hd_coins(false, vec![], &items);
+        let request = json::from_value(json!({ "coin": "NOPE", "account_id": 0 })).unwrap();
+        let error = match block_on(init_get_new_address(ctx, request)) {
+            Err(error) => error.into_inner(),
+            Ok(_) => panic!("init must refuse an unknown ticker"),
+        };
+        assert!(
+            matches!(&error, HDWalletRpcError::NoSuchCoin { coin } if coin == "NOPE"),
+            "{:?}",
+            error
+        );
+        assert_eq!(error.status_code(), common::StatusCode::BAD_REQUEST);
+    }
+
+    /// R49.41 item 1: a software-policy coin that has no account at the index ends the task with `UnknownAccount`,
+    /// also when a hardware context exists beside the software login, which the coin never consults.
+    #[test]
+    fn leb_a_software_coin_ignores_the_hardware_context_and_reports_an_unknown_account() {
+        let items = mock_storage();
+        let ctx = node_with_hd_coins(true, vec![("DOC", hd_coin_with_account_zero())], &items);
+        let status = run_new_address_task(&ctx, json!({ "coin": "DOC", "account_id": 4 }));
+        assert_eq!(status["status"], "Error", "{status}");
+        assert_eq!(status["details"]["error_type"], "UnknownAccount", "{status}");
+        assert_eq!(status["details"]["error_data"]["account_id"], 4, "{status}");
+    }
 }
 
 /// A Qtum coin over a scripted Electrum server that lists one large unspent output of the coin's address. The coin

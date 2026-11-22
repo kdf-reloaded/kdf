@@ -278,6 +278,7 @@ pub struct CoinsContext {
     unfinished_swaps_view: parking_lot::Mutex<Option<Arc<dyn crate::z_coin::UnfinishedSwapsView>>>,
     pub(crate) withdraw_task_manager: WithdrawTaskManagerShared,
     pub(crate) create_account_manager: CreateAccountTaskManagerShared,
+    pub(crate) get_new_address_manager: GetNewAddressTaskManagerShared,
     pub(crate) scan_addresses_manager: ScanAddressesTaskManagerShared,
     pub(crate) account_balance_task_manager: AccountBalanceTaskManagerShared,
     /// The fee estimates that order-posting requests obtained (CRD ch.38 R38.6.6j item 2).
@@ -362,6 +363,7 @@ impl CoinsContext {
                 unfinished_swaps_view: parking_lot::Mutex::new(None),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
                 create_account_manager: CreateAccountTaskManager::new_shared(),
+                get_new_address_manager: GetNewAddressTaskManager::new_shared(),
                 scan_addresses_manager: ScanAddressesTaskManager::new_shared(),
                 account_balance_task_manager: AccountBalanceTaskManager::new_shared(),
                 fee_estimate_cache: Arc::new(FeeEstimateCache::for_node(ctx)),
