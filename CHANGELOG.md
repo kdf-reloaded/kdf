@@ -249,7 +249,7 @@ the previous version used. The safe way:
   swaps stay off:* `setprice`, `buy`, `sell` and `trade_preimage` refuse a pair with a Solana coin or
   SPL token with "Trading is not supported for coin …", and every swap operation of such a coin
   answers an error that names it. *No transaction history yet:* the versioned `my_tx_history`
-  answers `NotSupportedFor` and the legacy one an error that names the coin. Detail: PR #S9PR; CRD
+  answers `NotSupportedFor` and the legacy one an error that names the coin. Detail: PR #475; CRD
   ch.40 D40.4.
 
 - **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
@@ -1124,7 +1124,7 @@ the previous version used. The safe way:
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
   S5 in PR #465, S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
   withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
-  S9 in PR #S9PR: on 2026-11-22 Solana was switched on as a wallet-only coin family; orders and
+  S9 in PR #475: on 2026-11-22 Solana was switched on as a wallet-only coin family; orders and
   swaps stay off, and the transaction history follows in S10.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
@@ -1160,7 +1160,7 @@ the previous version used. The safe way:
   `setprice`, `buy`, `sell` and `trade_preimage` refuse a pair with a Solana coin with "Trading is not supported for
   coin …". `my_tx_history` answers an error for a Solana coin, and a Token-2022 token is refused at activation. This
   replaces the item of 0.4.0-beta.1 that says Solana cannot be activated. More in
-  [`solana-support`](docs/plans/solana-support.md). Detail: PR #S9PR; CRD ch.40 D40.4.
+  [`solana-support`](docs/plans/solana-support.md). Detail: PR #475; CRD ch.40 D40.4.
 - **Gasless TRC20 transfers through GasFree are signed but not submitted.** A GasFree provider can be configured,
   the GasFree address (`gasfree_address`) is shown, and a withdrawal with `fee_method` `gasless` returns a signed
   authorization instead of a transaction. KDF does not hand it to the provider and no RPC does it yet, so this

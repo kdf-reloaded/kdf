@@ -17,7 +17,7 @@
 
 > **Switched on as wallet-only (2026-11-22).** `SOLANA_ACTIVATION_AVAILABLE`
 > and the "Solana support is not available in this build" refusal are removed
-> (S9, PR #S9PR): `enable_solana_with_tokens`, `enable_spl` and both
+> (S9, PR #475): `enable_solana_with_tokens`, `enable_spl` and both
 > `experimental::` methods activate SOL and SPL tokens on native and browser
 > builds, and the legacy `enable` / `electrum` answer the mmrpc 2.0 rejection
 > of CRD ch. 55 R55.4.7. Solana stays wallet-only: every order and swap entry
@@ -108,7 +108,7 @@ specifications unless a reference question below changes them.
 | S6c | A rent-exempt guard for SOL withdraws: a withdraw that would leave the sender's account between zero and Solana's rent-exempt minimum, or that sends less than that minimum to an address without an account, answers a structured error instead of a transaction the node refuses at broadcast (code-quality finding in ch. 40 R40.6B.10; kept out of S6 on 2026-11-18) | after S6 |
 | S7 | Compatibility methods `experimental::enable_solana_with_assets` and `experimental::enable_solana_token` over the same activation code, with the §40.2-§40.3 shapes, `getHealth` node selection and the §40.7 tests | done, PR #426 (WASM in PR #430) |
 | S8 | WASM routing for both surfaces; a build probe early in the cycle decides how it is built (for example a node client on the target-neutral HTTP layer) | done, PR #430 (on the 2.x crates; WASM re-checked on the 3.x crates in PR #465) |
-| S9 | Switch Solana back on (CRD ch. 40 D40.4): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable `docs/DISABLED_TESTS.md` group 6, retire the refusal tests and the beta notes in ch. 40, ch. 55, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md` and the README; devnet lab rows before it is marked ready | done, PR #S9PR (the constant and its refusal removed, so no route reads a switch; the four activation methods activate on native and browser builds; legacy `enable` / `electrum` answer the R55.4.7 rejection; group 6 re-enabled; refusal tests replaced by tests that the four methods reach the activation; Solana wallet-only, no orders, swaps or history) |
+| S9 | Switch Solana back on (CRD ch. 40 D40.4): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable `docs/DISABLED_TESTS.md` group 6, retire the refusal tests and the beta notes in ch. 40, ch. 55, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md` and the README; devnet lab rows before it is marked ready | done, PR #475 (the constant and its refusal removed, so no route reads a switch; the four activation methods activate on native and browser builds; legacy `enable` / `electrum` answer the R55.4.7 rejection; group 6 re-enabled; refusal tests replaced by tests that the four methods reach the activation; Solana wallet-only, no orders, swaps or history) |
 | S10 | Transaction history for SOL and SPL, Reloaded's own design on the public JSON-RPC | after S9 (planned for this cycle) |
 | S11 | Swap and market surface, after a statement of what a Solana swap payment is on chain and after the swap architecture decisions | waits |
 

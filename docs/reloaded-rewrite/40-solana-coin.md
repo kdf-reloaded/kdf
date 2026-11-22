@@ -16,7 +16,7 @@
 > maintainer decision below stands for when Solana returns.
 
 > *Reloaded status (clean side, 2026-11-22):* Solana is switched on (PR
-> #S9PR, D40.4). The build constant `SOLANA_ACTIVATION_AVAILABLE` and the
+> #475, D40.4). The build constant `SOLANA_ACTIVATION_AVAILABLE` and the
 > "Solana support is not available in this build" refusal no longer exist:
 > `enable_solana_with_tokens`, `enable_spl` and both `experimental::`
 > methods activate on native and browser (WASM) builds, and the legacy
@@ -1900,7 +1900,7 @@ available in this build"; legacy `enable` / `electrum` answer the same text; no
 Solana coin is registered.
 
 > *Reloaded status (clean side, 2026-11-22):* retired with D40.4 (PR
-> #S9PR); the refusal it checks no longer exists. Its tests are replaced by
+> #475); the refusal it checks no longer exists. Its tests are replaced by
 > tests that the four activation methods reach the activation (offline,
 > with an unreachable node, each answers its own typed error and registers
 > nothing, and none answers the refusal) and that legacy `enable` /
@@ -1947,7 +1947,7 @@ docker tests listed in `docs/DISABLED_TESTS.md` (group 6) and retire T40.9.
 Part of `docs/plans/solana-support.md`. R40.5A.1 has to hold before the switch
 is turned back on.
 
-> *Reloaded status (clean side, 2026-11-22):* done in PR #S9PR. The
+> *Reloaded status (clean side, 2026-11-22):* done in PR #475. The
 > constant is removed rather than set to `true`, together with its refusal
 > text, so no route reads a switch; the three Solana tests of
 > `docs/DISABLED_TESTS.md` group 6 are no longer ignored (they need the
@@ -2151,7 +2151,7 @@ with the shapes listed in §40.6 items 3-5.
   takes no forbidden-class input beyond the cleared rules it cites.
 - *Clean-context addition (2026-11-22, forbidden corpus not consulted):*
   the status notes after the availability note at the top, after T40.9 and
-  after D40.4 (Solana switched on as a wallet-only coin family, PR #S9PR)
+  after D40.4 (Solana switched on as a wallet-only coin family, PR #475)
   record this repository's own code and the maintainer's decision of
   2026-11-15 that Solana returns wallet-only once S1 to S8 have landed
   (`docs/plans/solana-support.md`, S9). They take no forbidden-class input
