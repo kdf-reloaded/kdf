@@ -398,12 +398,31 @@ fn failing_member<T: DeserializeOwned>(data: &Json) -> Option<String> {
 /// member per line and nested values indented: `data`, then the names from the outermost object inwards, with
 /// `[]` after the name of an array. Only names are taken from the text, never a value. A line without a member
 /// name ends a value and gives the path of that value.
+///
+/// The path is where the decoder of the JSON text stops. For a rule that is checked after a whole nested value
+/// was read, that is the end of that value, so the path names the value and not a member inside it.
 fn member_path(lines: &str, line: usize) -> String {
     /// The member name a line starts with, and whether its value is an array.
+    /// A line is a member line when it starts with a JSON string that `: ` follows directly. The string ends at
+    /// its first quote that no backslash escapes, so a string element of an array is never taken for a name,
+    /// whatever it contains.
     fn member(text: &str) -> Option<String> {
         let rest = text.trim_start().strip_prefix('"')?;
-        let end = rest.find("\": ")?;
-        let array = if rest[end..].starts_with("\": [") { "[]" } else { "" };
+        let mut escaped = false;
+        let end = rest.char_indices().find_map(|(at, character)| match character {
+            _ if escaped => {
+                escaped = false;
+                None
+            },
+            '\\' => {
+                escaped = true;
+                None
+            },
+            '"' => Some(at),
+            _ => None,
+        })?;
+        let value = rest[end + 1..].strip_prefix(": ")?;
+        let array = if value.starts_with('[') { "[]" } else { "" };
         Some(format!("{}{}", &rest[..end], array))
     }
     let indent = |text: &str| text.len() - text.trim_start().len();
@@ -684,6 +703,35 @@ mod tests {
             Err(GasFreeError::InvalidResponse(text)) => assert!(text.starts_with("data.assets[].decimal: ")),
             _ => panic!("the account record must not decode"),
         }
+    }
+
+    /// A string element of an array is never read as a member name, also when it holds an escaped quote followed
+    /// by a colon and a space; a member name with an escaped quote is read whole.
+    #[test]
+    fn no_part_of_an_array_element_enters_the_member_path() {
+        #[derive(Debug, Deserialize)]
+        struct Listing {
+            #[allow(dead_code)]
+            items: Vec<u64>,
+        }
+        for element in ["leak\": value", "\": leak", "a\\\": leak", "leak\": [", "plain"] {
+            let data = serde_json::json!({ "items": [element, element], "other": 1 });
+            match decode_data::<Listing>(&data) {
+                Err(GasFreeError::InvalidResponse(text)) => {
+                    assert!(text.starts_with("data.items[]: "), "the path is not the array");
+                    let path = text.split(": ").next().unwrap_or_default();
+                    assert!(!path.contains("leak"), "a part of the value is in the path");
+                },
+                _ => panic!("the data must not decode"),
+            }
+            assert_eq!(failing_member::<Listing>(&data).as_deref(), Some("data.items[]"));
+        }
+
+        // The lines themselves.
+        let lines = "{\n  \"a\\\"b\": [\n    \"x\\\": y\",\n    1\n  ],\n  \"c\": 2\n}";
+        assert_eq!(member_path(lines, 3), "data.a\\\"b[]");
+        assert_eq!(member_path(lines, 6), "data.c");
+        assert_eq!(member_path(lines, 1), "data");
     }
 
     /// ch.63 T4: a 200 HTTP answer with a non-200 envelope code is rejected, by the class of the code.
