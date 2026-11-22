@@ -1256,6 +1256,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
+  the closing note names what no row covers, in PR #497.
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 2 in PR #488.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
@@ -1333,6 +1335,11 @@ the previous version used. The safe way:
 
 ### Known limitations (additions since 0.4.0-beta.1)
 
+- **QRC20 transaction history needs Electrum servers that answer the contract-event methods.** As of 2026-11-22, the
+  QTUM servers of the published coins file answer them with an error. With only those servers, a QRC20 token's
+  history stops with error code -2 after three passes in a row in which every listed server answered with an error.
+  List QTUM Electrum servers that answer them, for example `s1.electrum.qtum.site:50001`, in the activation request.
+  Detail: PR #417; CRD ch.38 R38.6.4Q.6, amendment of 2026-11-17.
 - **TRON coins cannot be traded.** TRX and TRC20 tokens are wallet-only: activation, balances, addresses,
   withdrawals and the transaction history work, and orders and swaps do not. `setprice`, `buy`, `sell` and
   `start_swap` refuse a TRON coin with the "… is wallet only" answer. This replaces the item of 0.4.0-beta.1 that
