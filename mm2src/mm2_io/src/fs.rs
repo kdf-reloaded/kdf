@@ -12,7 +12,7 @@ use std::ffi::OsStr;
 use std::fs::{self, DirEntry};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 pub type FsJsonResult<T> = Result<T, MmError<FsJsonError>>;
@@ -229,6 +229,10 @@ where
 /// Process-wide counter that makes every temp file name of [`write_json`] unique within the process.
 static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Set once the first failed directory sync of [`write_json_durable`] has been logged as a warning.
+#[cfg(unix)]
+static DIR_SYNC_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// A temp path next to `path`: `<file name>.<process id>.<counter>.tmp`. Two writers of the same target never
 /// share one.
 fn unique_tmp_path(path: &Path) -> PathBuf {
@@ -278,9 +282,9 @@ where
 /// error), and in addition the temp file is synced to disk (`sync_all`) before the rename and, on Unix, the
 /// directory is synced after it. A `sync_all` failure of the temp file returns the error, nothing is replaced.
 /// A failure to open or sync the directory never returns an error: the record is already replaced, so one
-/// `warn!` is logged and `Ok` is returned; on such a filesystem (e.g. a network or FUSE mount that cannot sync a
+/// `warn!` is logged (at most once per process, later ones go to `debug!`) and `Ok` is returned; on such a filesystem (e.g. a network or FUSE mount that cannot sync a
 /// directory) the rename may not survive a power loss. Windows cannot open a directory as a file, so the
-/// directory sync is skipped there. On Windows a rename refused with `PermissionDenied` is retried a few times
+/// directory sync is skipped there. On Windows a rename refused with `PermissionDenied`, a sharing violation or a lock violation is retried a few times
 /// (see [`write_json`] as well, it retries too).
 pub async fn write_json_durable<T>(t: &T, path: &Path) -> FsJsonResult<()>
 where
@@ -300,7 +304,12 @@ async fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
     {
         for delay_ms in [20u32, 40, 80, 160, 320] {
             match async_fs::rename(from, to).await {
-                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                // A file held without delete sharing can surface as ERROR_SHARING_VIOLATION (32) or
+                // ERROR_LOCK_VIOLATION (33), which std does not necessarily map to `PermissionDenied`.
+                Err(e)
+                    if e.kind() == io::ErrorKind::PermissionDenied
+                        || matches!(e.raw_os_error(), Some(32) | Some(33)) =>
+                {
                     common::executor::Timer::sleep_ms(delay_ms).await;
                 },
                 res => return res,
@@ -339,12 +348,23 @@ async fn write_atomically(content: &[u8], path: &Path, durable: bool) -> io::Res
         };
         let sync_res: io::Result<()> = async { async_fs::File::open(dir).await?.sync_all().await }.await;
         if let Err(e) = sync_res {
-            common::log::warn!(
-                "Error '{}' syncing the directory {} after replacing {}",
-                e,
-                dir.display(),
-                path.display()
-            );
+            // One warning per process is enough: a filesystem that cannot sync a directory fails on every write.
+            if !DIR_SYNC_WARNED.swap(true, Ordering::Relaxed) {
+                common::log::warn!(
+                    "Error '{}' syncing the directory {} after replacing {}; further directory sync errors are \
+                     logged at debug level",
+                    e,
+                    dir.display(),
+                    path.display()
+                );
+            } else {
+                common::log::debug!(
+                    "Error '{}' syncing the directory {} after replacing {}",
+                    e,
+                    dir.display(),
+                    path.display()
+                );
+            }
         }
     }
     Ok(())
@@ -480,6 +500,60 @@ mod tests {
             v.chars().all(|c| c == v.chars().next().unwrap()),
             "the record is one complete write"
         );
+        assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opens `path` for reading without `FILE_SHARE_DELETE` (share mode READ | WRITE = 1 | 2), so renaming over it
+    /// fails. Returns once the handle is open; the handle is released after `hold`.
+    #[cfg(windows)]
+    fn hold_without_delete_share(path: &Path, hold: std::time::Duration) -> std::thread::JoinHandle<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = path.to_path_buf();
+        let handle = std::thread::spawn(move || {
+            let file = fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(hold);
+            drop(file);
+        });
+        rx.recv().unwrap();
+        handle
+    }
+
+    /// The target is held for ~100 ms, within the retry window: the write succeeds through the retry.
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_is_retried_while_target_is_held() {
+        let dir = new_dir("win-retry");
+        let path = dir.join("a.json");
+        block_on(write_json_durable(&json!({"v": "old"}), &path)).unwrap();
+
+        let holder = hold_without_delete_share(&path, std::time::Duration::from_millis(100));
+        block_on(write_json_durable(&json!({"v": "new"}), &path)).unwrap();
+        holder.join().unwrap();
+
+        let read: Option<serde_json::Value> = block_on(read_json(&path)).unwrap();
+        assert_eq!(read, Some(json!({"v": "new"})));
+        assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The target is held for ~1.5 s, beyond the ~620 ms retry window: the write fails, the old content stays and
+    /// no temp file is left.
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_gives_up_when_target_stays_held() {
+        let dir = new_dir("win-giveup");
+        let path = dir.join("a.json");
+        block_on(write_json_durable(&json!({"v": "old"}), &path)).unwrap();
+
+        let holder = hold_without_delete_share(&path, std::time::Duration::from_millis(1500));
+        assert!(block_on(write_json_durable(&json!({"v": "new"}), &path)).is_err());
+        holder.join().unwrap();
+
+        let read: Option<serde_json::Value> = block_on(read_json(&path)).unwrap();
+        assert_eq!(read, Some(json!({"v": "old"})));
         assert_eq!(file_names(&dir), vec!["a.json".to_owned()]);
         fs::remove_dir_all(&dir).unwrap();
     }

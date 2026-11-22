@@ -332,6 +332,46 @@ jobs:
         shell: bash
         run: cargo check --target wasm32-unknown-unknown -p mm2_main
 
+  # Windows-only code in mm2_io: `write_json` and `write_json_durable` retry the final rename when Windows refuses it
+  # (PermissionDenied, sharing violation, lock violation) because a virus scanner or indexer holds the file. That
+  # `cfg(windows)` code, and its tests, are never compiled on the Linux jobs, so this job builds and runs them.
+  # The second step also runs the two saved-record tests of `mm2_main` (swap and order records are written through
+  # `write_json_durable`); building `mm2_main` tests on Windows is heavy, so it is its own step and the mm2_io
+  # result stays visible when it fails.
+  windows-io:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install protoc
+        shell: powershell
+        run: choco install protoc -y
+
+      - name: Check Rust toolchain
+        shell: powershell
+        run: rustc --version; cargo --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-io-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            windows-io-
+
+      - name: mm2_io tests
+        shell: powershell
+        run: cargo test -p mm2_io --lib
+
+      - name: Saved swap and order record tests
+        shell: powershell
+        run: cargo test -p mm2_main --lib -- save_twice_keeps_events_in_order_and_leaves_no_tmp save_order_twice_loads_latest_and_leaves_no_tmp
+
   docker-tests:
     # GitHub-hosted Ubuntu runners ship Docker, so the integration suite
     # runs here without any self-hosted infrastructure. The standard runner
