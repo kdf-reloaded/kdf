@@ -616,6 +616,33 @@ an invalid provider response (§63.9.1), not a parsed one.
 > a negative or empty value is rejected. A signature or transaction
 > hash carrying a `0x` prefix, or of the wrong length, is rejected.
 
+> *Status note (2026-11-22, Reloaded-original; takes no reference input), the
+> transfer record as the provider sends it.* Sources: the provider's public
+> developer documentation (§63.14) and a live test on the Nile test network,
+> both of 2026-11-22. They disagree on the times, and the documentation's
+> trace answer has fewer members than its submit answer, so the implementation
+> reads the record of a submit or trace answer as follows:
+>
+> - *Times.* The documentation shows `createdAt`, `updatedAt` and `expiredAt`
+>   as ISO 8601 text; the live provider sends them as integers, Unix
+>   milliseconds. They are accepted as a number, as any text, as `null` and
+>   when absent, and nothing is decided from them.
+> - *Members a trace answer may lack.* `maxFee`, `signature`, `updatedAt` and
+>   `version` may be absent (or `null`). Where one is present its rule holds:
+>   an integer, 130 hexadecimal digits, the version 1.
+> - *Not yet on chain.* The documentation calls the `txn*` members empty
+>   until the transfer is on chain. For `txnHash`, `txnState`, the other
+>   `txn*` members, `estimatedTotalFee` and `estimatedTotalCost`, an absent
+>   member, `null` and the empty string all mean "not yet".
+> - *Unchanged.* The members the flow reads keep the strict rules above: `id`,
+>   the five addresses, `amount`, `nonce`, `state`, and a present `txnState`,
+>   `txnHash` and `version`. A required integer member is still rejected when
+>   it is empty or negative.
+> - *A decoding error names the member.* The text of an
+>   `InvalidProviderResponse` for a `data` that does not decode starts with
+>   the path of the member, as `data.createdAt`; it never repeats the value
+>   of a signature member.
+
 ## 63.5 GasFree Custody-Address Derivation -- Tron `CREATE2` (dictated interop)
 
 The custody address is derived **locally and deterministically**
@@ -2338,3 +2365,9 @@ V2. The baseline withdraw request has no fee-rail selector and no
   are Reloaded-original, clean side: they record the maintainer's decision
   under D63.9 and the submission flow as built, and take no reference input.
   No cleared sentence was edited.
+- *Addition of 2026-11-22 (the transfer record as the provider sends it):* the
+  status note of this date after §63.4.7 is Reloaded-original, clean side. Its
+  inputs are the provider's public developer documentation (chapter 01 R3,
+  §63.14) and an observation of the provider's answers on the Nile test
+  network (a public-network observation), both of 2026-11-22; it takes no
+  reference input. No cleared sentence was edited.

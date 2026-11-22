@@ -344,8 +344,90 @@ pub(crate) fn decode_answer<T: DeserializeOwned>(http_status: u16, body: &[u8]) 
     let data = envelope
         .data
         .ok_or_else(|| GasFreeError::InvalidResponse("a success envelope carries no data".to_owned()))?;
-    serde_json::from_value(data)
-        .map_err(|e| GasFreeError::InvalidResponse(sanitize_provider_text(&format!("the data does not decode: {e}"))))
+    decode_data(&data)
+}
+
+/// Decodes the `data` of a success envelope as `T`.
+///
+/// # Errors
+///
+/// [`GasFreeError::InvalidResponse`], whose text starts with the path of the member that does not decode, as
+/// `data.createdAt` or `data.assets[].decimal` (`data` alone for the value as a whole, and the object that lacks
+/// a member for a missing one). The decoding error follows; like every provider text it is collapsed and bounded
+/// (R10).
+fn decode_data<T: DeserializeOwned>(data: &Json) -> Result<T, GasFreeError> {
+    T::deserialize(data).map_err(|error| {
+        let path = failing_member::<T>(data).unwrap_or_else(|| "data".to_owned());
+        GasFreeError::InvalidResponse(sanitize_provider_text(&format!("{path}: {error}")))
+    })
+}
+
+/// The name of the member [`failing_member`] adds at the end of every object. It sorts after every name of the
+/// provider's payloads, and the payload types ignore a member they do not name.
+const LAST_MEMBER: &str = "~";
+
+/// `value` with [`LAST_MEMBER`] added to every object in it.
+fn with_last_members(value: &Json) -> Json {
+    match value {
+        Json::Object(object) => {
+            let mut marked: serde_json::Map<String, Json> = object
+                .iter()
+                .map(|(name, member)| (name.clone(), with_last_members(member)))
+                .collect();
+            marked.insert(LAST_MEMBER.to_owned(), Json::Null);
+            Json::Object(marked)
+        },
+        Json::Array(elements) => Json::Array(elements.iter().map(with_last_members).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The path of the member of `data` that does not decode as `T`, for the text of an error. `None` when it cannot
+/// be told.
+///
+/// The decoder of a JSON text reports the line where it fails, so `data` is written with one member per line and
+/// decoded again. A failure of the last member of an object would be reported at the end of the object, where a
+/// missing member is reported too; [`LAST_MEMBER`] keeps every real member from being the last one.
+fn failing_member<T: DeserializeOwned>(data: &Json) -> Option<String> {
+    let lines = serde_json::to_string_pretty(&with_last_members(data)).ok()?;
+    let error = serde_json::from_str::<T>(&lines).err()?;
+    Some(member_path(&lines, error.line()))
+}
+
+/// The path of the member that stands on line `line` (counted from 1) of `lines`, a JSON value written with one
+/// member per line and nested values indented: `data`, then the names from the outermost object inwards, with
+/// `[]` after the name of an array. Only names are taken from the text, never a value. A line without a member
+/// name ends a value and gives the path of that value.
+fn member_path(lines: &str, line: usize) -> String {
+    /// The member name a line starts with, and whether its value is an array.
+    fn member(text: &str) -> Option<String> {
+        let rest = text.trim_start().strip_prefix('"')?;
+        let end = rest.find("\": ")?;
+        let array = if rest[end..].starts_with("\": [") { "[]" } else { "" };
+        Some(format!("{}{}", &rest[..end], array))
+    }
+    let indent = |text: &str| text.len() - text.trim_start().len();
+
+    let upto: Vec<&str> = lines.lines().take(line).collect();
+    let Some((last, above)) = upto.split_last() else {
+        return "data".to_owned();
+    };
+    let mut names = Vec::new();
+    // Walking upwards, the next line with less indentation opens the value the current line is in. The end of a
+    // value has the indentation of the line that opens it, so the walk starts above it.
+    let mut depth = indent(last) + 1;
+    let walked = if member(last).is_some() { upto.as_slice() } else { above };
+    for text in walked.iter().rev() {
+        if indent(text) < depth {
+            depth = indent(text);
+            if let Some(name) = member(text) {
+                names.push(name);
+            }
+        }
+    }
+    names.push("data".to_owned());
+    names.reverse();
+    names.join(".")
 }
 
 #[cfg(test)]
@@ -528,6 +610,80 @@ mod tests {
         // A data of the wrong shape for the call.
         let error = decode_answer::<SupportedTokenList>(200, br#"{"code":200,"data":{"x":1}}"#).expect_err("no list");
         assert!(matches!(error, GasFreeError::InvalidResponse(_)));
+    }
+
+    /// §63.4.7, status note of 2026-11-22: a `data` that does not decode names the member, and no value of a
+    /// signature member.
+    #[test]
+    fn a_data_that_does_not_decode_names_the_member() {
+        use super::super::provider_payloads::{ProviderAccount, TransferRecord};
+        let sig = "ab".repeat(64);
+        let transfer = serde_json::json!({
+            "id": "6c3ff67e-0bf4-4c09-91ca-0c7c254b01a0",
+            "createdAt": 1_795_354_473_207u64,
+            "accountAddress": "TMVQGm1qAQYVdetCeGRRkTWYYrLXuHK2HC",
+            "gasFreeAddress": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
+            "providerAddress": "TDbJyQ6g1Lx9BAfEEeN5S5TMjjDRAVFCaA",
+            "targetAddress": "TDvSsdrNM5eeXNL3czpa6AxLDHZA9nwe9K",
+            "tokenAddress": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
+            "amount": 10000,
+            "nonce": 2,
+            "state": "WAITING",
+            "estimatedActivateFee": 0,
+            "estimatedTransferFee": 2000000
+        });
+        let failure = |data: &Json| {
+            let body = serde_json::json!({ "code": 200, "data": data }).to_string();
+            match decode_answer::<TransferRecord>(200, body.as_bytes()) {
+                Err(GasFreeError::InvalidResponse(text)) => text,
+                _ => panic!("the data must not decode"),
+            }
+        };
+        assert!(decode_data::<TransferRecord>(&transfer).is_ok());
+
+        let with = |member: &str, value: Json| {
+            let mut changed = transfer.clone();
+            changed[member] = value;
+            failure(&changed)
+        };
+        assert!(with("createdAt", serde_json::json!({ "at": 1 })).starts_with("data.createdAt: "));
+        assert!(with("nonce", serde_json::json!("-1")).starts_with("data.nonce: "));
+        assert!(with("amount", serde_json::json!(true)).starts_with("data.amount: "));
+        assert!(with("state", serde_json::json!("DONE")).starts_with("data.state: "));
+        assert!(with("txnHash", serde_json::json!("0x00")).starts_with("data.txnHash: "));
+        let text = with("signature", Json::String(sig.clone()));
+        assert!(text.starts_with("data.signature: "));
+        assert!(!text.contains(&sig), "the signature is repeated");
+        let text = with("signature", serde_json::json!([sig]));
+        assert!(text.starts_with("data.signature[]: ") && !text.contains(&sig));
+        // A missing member is named by the decoder; the path is the object that lacks it.
+        let mut without = transfer.clone();
+        without.as_object_mut().expect("an object").remove("state");
+        let text = failure(&without);
+        assert!(text.starts_with("data: ") && text.contains("state"));
+        assert!(failure(&serde_json::json!([1])).starts_with("data: "));
+        assert!(!with("nonce", serde_json::json!("-1")).contains(" at line "));
+
+        // A member of an array element.
+        let account = serde_json::json!({
+            "accountAddress": "TMVQGm1qAQYVdetCeGRRkTWYYrLXuHK2HC",
+            "gasFreeAddress": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
+            "active": true,
+            "nonce": 7,
+            "allowSubmit": true,
+            "assets": [{
+                "tokenAddress": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
+                "tokenSymbol": "USDT",
+                "activateFee": 1000000,
+                "transferFee": 2000000,
+                "decimal": "six",
+                "frozen": 0
+            }]
+        });
+        match decode_data::<ProviderAccount>(&account) {
+            Err(GasFreeError::InvalidResponse(text)) => assert!(text.starts_with("data.assets[].decimal: ")),
+            _ => panic!("the account record must not decode"),
+        }
     }
 
     /// ch.63 T4: a 200 HTTP answer with a non-200 envelope code is rejected, by the class of the code.

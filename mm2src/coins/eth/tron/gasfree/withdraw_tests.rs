@@ -253,6 +253,9 @@ struct Relay {
     submit_delay_ms: u64,
     /// Members that replace those of the record in the answer to a submit call.
     submit_patch: Json,
+    /// Whether the records have the shape the provider sends on the Nile test network instead of the shape of its
+    /// published API: see [`to_live_shape`].
+    live_shape: bool,
     /// The answers to the trace calls, one per call; the last one repeats.
     trace: Vec<Trace>,
     /// The body of the last submit call.
@@ -268,6 +271,7 @@ impl Relay {
             submit_raw: None,
             submit_delay_ms: 0,
             submit_patch: json!({}),
+            live_shape: false,
             trace: vec![Trace::Record("SUCCEED", Some(TXN_HASH), Some("ON_CHAIN"))],
             submitted: None,
             traced: 0,
@@ -280,13 +284,54 @@ impl Relay {
     }
 }
 
-/// The success envelope with the provider's record of the transfer the submit body `submitted` asks for.
+/// Rewrites `record` into the shape the provider sends on the Nile test network: the times as Unix milliseconds,
+/// the integers as numbers, the fee estimate without the `d`, no `version`. A trace answer (`trace`) also has no
+/// `signature`, `maxFee` and `updatedAt`, and carries the transaction members it does not know yet as `""`.
+fn to_live_shape(record: &mut Json, trace: bool) {
+    let Some(object) = record.as_object_mut() else { return };
+    for (member, millis) in [
+        ("createdAt", 1_795_354_473_207u64),
+        ("updatedAt", 1_795_354_473_300),
+        ("expiredAt", 1_795_354_773_000),
+    ] {
+        object.insert(member.to_owned(), json!(millis));
+    }
+    for member in ["amount", "maxFee", "nonce"] {
+        let number = object[member].as_str().and_then(|text| text.parse::<u64>().ok());
+        if let Some(number) = number {
+            object.insert(member.to_owned(), json!(number));
+        }
+    }
+    object.remove("version");
+    if let Some(fee) = object.remove("estimatedTransferFee") {
+        object.insert("estimateTransferFee".to_owned(), fee);
+    }
+    if trace {
+        for member in ["signature", "maxFee", "updatedAt"] {
+            object.remove(member);
+        }
+        for member in [
+            "txnHash",
+            "txnState",
+            "txnBlockNum",
+            "txnBlockTimestamp",
+            "txnTotalCost",
+        ] {
+            object.entry(member).or_insert(json!(""));
+        }
+    }
+}
+
+/// The success envelope with the provider's record of the transfer the submit body `submitted` asks for. `live`
+/// is `None` for the shape of the published API, and says whether the record is a trace answer for the shape of
+/// [`to_live_shape`].
 fn transfer_envelope(
     submitted: &Json,
     state: &str,
     txn_hash: Option<&str>,
     txn_state: Option<&str>,
     patch: &Json,
+    live: Option<bool>,
 ) -> String {
     let custody = submitted["user"]
         .as_str()
@@ -320,6 +365,9 @@ fn transfer_envelope(
     for (member, value) in patch.as_object().expect("an object").iter() {
         record[member] = value.clone();
     }
+    if let Some(trace) = live {
+        to_live_shape(&mut record, trace);
+    }
     json!({ "code": 200, "reason": null, "message": "", "data": record }).to_string()
 }
 
@@ -340,23 +388,33 @@ fn submit_reply(relay: &Mutex<Relay>, body: &str) -> Reply {
             None,
             None,
             &script.submit_patch,
+            script.live_shape.then_some(false),
         )),
     }
 }
 
 /// The stub provider's answer to a trace call.
 fn trace_reply(relay: &Mutex<Relay>) -> Reply {
-    let (step, submitted) = {
+    let (step, submitted, live) = {
         let mut relay = relay.lock().unwrap_or_else(|e| e.into_inner());
         let index = relay.traced.min(relay.trace.len().saturating_sub(1));
         relay.traced += 1;
-        (relay.trace.get(index).cloned(), relay.submitted.clone())
+        (
+            relay.trace.get(index).cloned(),
+            relay.submitted.clone(),
+            relay.live_shape.then_some(true),
+        )
     };
     match (step, submitted) {
         (Some(Trace::Raw(status, body)), _) => Reply::status(status, body),
-        (Some(Trace::Record(state, txn_hash, txn_state)), Some(submitted)) => {
-            Reply::ok(&transfer_envelope(&submitted, state, txn_hash, txn_state, &json!({})))
-        },
+        (Some(Trace::Record(state, txn_hash, txn_state)), Some(submitted)) => Reply::ok(&transfer_envelope(
+            &submitted,
+            state,
+            txn_hash,
+            txn_state,
+            &json!({}),
+            live,
+        )),
         _ => Reply::status(404, r#"{"code":404,"message":"no such transfer"}"#),
     }
 }
@@ -2549,4 +2607,32 @@ fn a_poll_interval_of_zero_is_raised_to_a_second() {
         elapsed >= Duration::from_millis(1_900) && elapsed < Duration::from_secs(10),
         "the trace requests are less than a second apart"
     );
+}
+
+/// §63.4.7, status note of 2026-11-22: the task route settles a transfer whose records have the shape the
+/// provider sends on the Nile test network (the times as Unix milliseconds, a trace answer without `signature`,
+/// `maxFee`, `updatedAt` and `version`, unknown transaction members as empty strings).
+#[test]
+fn the_task_route_settles_a_transfer_with_the_records_of_the_live_provider() {
+    let lab = Lab::new(Setup::usual());
+    let sender = lab.sender().to_base58();
+    lab.set_relay(|relay| {
+        relay.live_shape = true;
+        relay.set_trace(vec![
+            Trace::Record("WAITING", None, None),
+            Trace::Record("SUCCEED", Some(TXN_HASH), Some("ON_CHAIN")),
+        ]);
+    });
+    let (status, progress) = lab.task_withdraw(gasless(json!({})));
+    let status = serde_json::to_value(&status).expect("a status");
+    assert_eq!(status["status"], "Ok");
+    let text = serde_json::to_string(&status["details"]).expect("the details text");
+    assert_rail_result(&text, &sender, Some((TRACE_ID, TXN_HASH)));
+    assert!(
+        progress
+            .contains(&json!({ "WaitingForGaslessProvider": { "trace_id": TRACE_ID, "provider_state": "WAITING" } })),
+        "the waiting phase is not reported"
+    );
+    assert_eq!(lab.submit_calls().len(), 1);
+    assert_eq!(lab.trace_calls(), 2);
 }
