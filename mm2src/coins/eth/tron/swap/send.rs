@@ -96,7 +96,7 @@ pub(crate) enum TronSendError {
     /// A token approval that failed. Its transaction is not kept: it is not the payment.
     Approve(String),
     /// The contract holds a payment under the swap id whose stored payment hash is not the one of this swap's
-    /// terms: the id is taken by another payment.
+    /// terms.
     OtherPayment,
     /// The contract holds a payment under the swap id, and its transaction could not be found.
     Undetermined(String),
@@ -510,9 +510,8 @@ pub(crate) async fn send_dex_fee(
 /// confirmed transaction listing of the coin's address: a successful payment call of `contract` for the id,
 /// made by the coin's address.
 ///
-/// `terms`, when given, are the receiver and the amount of the payment this swap would send. The contract
-/// takes the first payment for an id from anyone, so the stored payment hash is compared with the one of these
-/// terms before anything is looked up.
+/// `terms`, when given, are the receiver and the amount of the payment this swap would send. The stored payment
+/// hash is compared with the one of these terms before anything is looked up; another hash is a typed error.
 ///
 /// # Errors
 ///

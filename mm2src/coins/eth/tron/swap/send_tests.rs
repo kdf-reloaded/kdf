@@ -1003,9 +1003,9 @@ fn a_sent_payment_that_cannot_be_found_is_undetermined() {
     }
 }
 
-/// The contract takes the first payment for an id from anyone. With the amount and the other side's key known,
-/// a stored payment hash that is not the one of this swap's terms is the typed "another payment" error at once:
-/// never "not sent", never undetermined, and nothing is looked up. An equal hash goes on to the lookup.
+/// With the amount and the other side's key known, a stored payment hash that is not the one of this swap's terms
+/// is the typed "another payment" error at once: never "not sent", never undetermined, and nothing is looked up.
+/// An equal hash goes on to the lookup.
 #[test]
 fn an_id_that_holds_another_payment_is_a_typed_error() {
     let for_amount = |coin: &EthCoin, amount: &str| {

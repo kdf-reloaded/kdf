@@ -2539,11 +2539,11 @@ D21.B2: 32-byte SHA-256 and the swap id over the 32-byte secret hash
 note at R21.B6); the swap id and the unnarrowed payment path come with
 the TRON swap operations.
 
-*Status note (2026-11-22), D21.B4 as built.* The swap id of a TRON leg is
-`SHA-256( little-endian uint32(lockTime) ‖ secretHash )` over the 32-byte
-secret hash, and a secret hash of another width is refused
-(§21.11C R21.11C.1, R21.11C.2). The helpers exist; no swap operation
-calls them yet.
+*Status note (2026-11-22), D21.B4 as built.* The swap id of a TRON leg
+is `SHA-256( little-endian uint32(lockTime) ‖ secretHash )` over the
+32-byte secret hash, and a secret hash of another width is refused
+(§21.11C R21.11C.1, R21.11C.2). The payment of a TRON leg uses both
+rules; validation, claim and refund do not exist yet.
 
 **D21.B5 -- Fee handling.** Native payment as a smart-contract trigger
 carrying the amount as call value (a plain transfer does not reach a
@@ -2821,9 +2821,8 @@ An operation that uses this type MUST take only the transaction id from
 bytes a peer sent. The transaction, its receipt and the contract's
 `payments(id)` are read from the node, under chapter 51 R100 (§51.6G),
 and a payment is judged by the stored payment hash (R21.11C.3) and the
-stored lock time, because the payment hash does not cover the lock
-time, not by decoding the peer's call data. That is what makes the
-decoder's tolerance of R21.11C.4 harmless.
+stored lock time, not by decoding the peer's call data. That is what
+makes the decoder's tolerance of R21.11C.4 harmless.
 
 **R21.11C.7 (sending a contract call).** A contract call is sent as a
 `TriggerSmartContract` with the call value and the `fee_limit` its
@@ -2981,16 +2980,15 @@ answers "not sent". States 1, 2 and 3 mean that the payment was sent;
 its transaction is then looked up in the confirmed transaction listing
 of the coin's address (§21.10C), among at most five pages: a successful
 call of the selected contract, made by the coin's own address, whose
-decoded call is a payment with that id. The contract takes the first
-payment for an id from anyone, so when the swap's amount and receiver
-are known the stored payment hash is compared with the hash of the
-swap's own terms (R21.11C.3) first: a payment under the id with another
-hash is a typed "the swap id holds another payment" error at once, never
-"not sent" and never "undetermined", and nothing is looked up. When the
-listing is not available, fails, or does not have the transaction, the
-answer is a typed "undetermined" error. A failed read, an unusable
-answer and a state outside 0 to 3 are errors. No error answers "not
-sent".
+decoded call is a payment with that id. When the swap's amount and
+receiver are known the stored payment hash is compared with the hash of
+the swap's own terms (R21.11C.3) first: a payment under the id with
+another hash is a typed "the swap id holds another payment" error at
+once, never "not sent" and never "undetermined", and nothing is looked
+up. When the listing is not available, fails, or does not have the
+transaction, the answer is a typed "undetermined" error. A failed read,
+an unusable answer and a state outside 0 to 3 are errors. No error
+answers "not sent".
 
 **R21.11C.14 (a token that takes a transfer fee is not swapped).**
 *(Maintainer decision of 2026-11-22.)* The swap contract accepts a token

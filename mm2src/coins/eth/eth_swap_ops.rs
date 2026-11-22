@@ -466,8 +466,8 @@ impl SwapOps for EthCoin {
         Box::new(fut.boxed().compat())
     }
 
-    /// A TRON coin also compares the stored payment hash with the one of the payment this swap would send, so
-    /// that an id another payment holds is told apart from the own payment (CRD ch.21 R21.11C.13). An EVM coin
+    /// A TRON coin also compares the stored payment hash with the one of the payment this swap would send;
+    /// another hash is a typed error (CRD ch.21 R21.11C.13). An EVM coin
     /// answers as [`SwapOps::check_if_my_payment_sent`] does.
     #[allow(clippy::too_many_arguments)]
     fn check_if_my_payment_sent_for_amount(
