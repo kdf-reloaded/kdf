@@ -1133,8 +1133,8 @@ the previous version used. The safe way:
   answers of that check were treated as "not sent" although they did not show it: the swap contract reports the
   payment but no payment event or transaction is found, an EVM node reports the payment event but does not return
   its transaction, or the request for the Sia payment address's events fails. The payment step now fails in these
-  cases instead, so the swap cannot send a second payment, and the error names the condition. Detail: CRD ch.39
-  §39.11.5A.
+  cases instead, so the swap cannot send a second payment, and the error names the condition. Detail: PR #489;
+  CRD ch.39 §39.11.5A.
 
 ### Tests
 
