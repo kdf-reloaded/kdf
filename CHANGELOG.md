@@ -777,6 +777,11 @@ the previous version used. The safe way:
 
 #### Transport, TLS and dependencies
 
+- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** The `url` crate moved from 2.5.8 to
+  2.5.9, and `form_urlencoded`, which the new version requires, from 1.2.2 to 1.2.3. KDF Reloaded's own code
+  does not call the affected function. The dependency policy needs no exception for this advisory. Detail:
+  PR #NNN.
+
 - **The peer-to-peer encryption no longer uses the old curve25519 library with the timing advisory.** The
   encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
   (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
