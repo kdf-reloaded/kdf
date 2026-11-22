@@ -9,6 +9,13 @@ impl MmCoin for SlpToken {
         crate::utxo::electrum_chain_disagreement(self.platform_coin.as_ref())
     }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(
+            crate::swap_evidence::SwapFamily::Slp,
+            &self.platform_coin.slp_swap_evidence_policy(),
+        )
+    }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(
             utxo_common::get_raw_transaction(self.platform_coin.as_ref(), req)

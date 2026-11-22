@@ -32,6 +32,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 ### Added in KDF Reloaded
 
+- Optional activation field `swap_evidence_node` for every coin family that can swap, with the activation error `SwapEvidenceNodeNotInList` for a value outside the coin's node list (CRD ch.51 §51.6G R100).
 - Compatibility convention and central admin chapter for GLEEC-equivalent operation; see [`docs/COMPAT_SWITCHES.md`](docs/COMPAT_SWITCHES.md) and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 - `regtest-netid` Cargo feature exposing test-only netids 8100, 8999, 9000, 9998 (off by default in production builds).
 - `allow_insecure_key_export` `MM2.json` switch (default `false`) gating GLEEC-parity key export (offline / no-activation, HD per-derivation-path ranges, shielded ZHTLC viewing keys); see [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and CRD chapter 07. The secure default refuses the export superset; the single-coin activated reveal and own-mnemonic self-export remain available regardless.
@@ -349,6 +350,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 These are divergences from GLEEC KDF that no compatibility switch reverses in this release. They are logged here and in [`CHANGELOG.md`](CHANGELOG.md) per the convention; a per-feature switch may be added in a later release. Where an entry names a setting, that setting adjusts the KDF Reloaded behavior it describes and does not restore GLEEC KDF's.
 
+- **Swap chain reads must agree between two nodes.** Before a refund, or a step that uses the swap's secret, KDF Reloaded acts only on chain reads that two distinct hosts of the coin agree on, or on the answer of the one node named in `swap_evidence_node`, or on the operator's own daemon in native mode. A coin with fewer than two distinct hosts and no `swap_evidence_node` starts no swap. GLEEC KDF acts on the first node that answers. The rule is switched on per coin family; the families it covers so far are listed in the CHANGELOG breaking change "A new swap needs two nodes of the coin that agree". Setting `swap_evidence_node` makes one node's answer suffice, but a silent trusted node makes the step wait where GLEEC KDF would ask another node. CRD ch.51 §51.6G R100.
 - **Order-management methods under `mmrpc: "2.0"`.** `setprice`, `update_maker_order`, `cancel_order`, `cancel_all_orders`, `my_orders` and `order_status` are legacy-only in GLEEC KDF: a versioned request answers `NoSuchMethod`. KDF Reloaded also routes them on the versioned surface, with the legacy members inside `params`, the legacy result under `result`, typed errors with HTTP statuses, and unknown `params` members ignored. The legacy forms and their success bodies are unchanged; a legacy error text no longer carries the inner `file:line]` trace tokens. Additive; no switch. Plan: [`docs/plans/mmrpc-v2-completion.md`](docs/plans/mmrpc-v2-completion.md); CRD ch.43 D43.1A.1 status note.
 - **Trading methods under `mmrpc: "2.0"`.** `buy`, `sell`, `orderbook_depth` and `orders_history_by_filter` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface in the same way as the order-management methods above (legacy members inside `params`, legacy result under `result`, typed errors with HTTP statuses, unknown `params` members ignored; legacy forms and success bodies unchanged). `get_trade_fee` stays legacy-only, as the reference documentation marks it deprecated in favor of the versioned `trade_preimage`. Additive; no switch. CRD ch.43 §43.1R.
 - **Wallet and coin methods under `mmrpc: "2.0"`.** `my_balance`, `disable_coin`, `send_raw_transaction`, `validateaddress`, `convertaddress`, `convert_utxo_address`, `kmd_rewards_info`, `coins_needed_for_kick_start`, `set_required_confirmations` and `set_requires_notarization` are legacy-only in GLEEC KDF. KDF Reloaded also routes them on the versioned surface as above; their typed errors follow the versioned `withdraw` as the reference answers it (an unknown coin 404, a transport failure 502), and `disable_coin` reports the blocking swaps or orders inside `error_data`. Legacy forms and success bodies unchanged. Additive; no switch. CRD ch.43 §43.1R.
@@ -931,6 +933,16 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   and takes the oldest one that succeeded and holds a claim message for that HTLC in any of its messages; it skips
   the others. GLEEC KDF reads the search result differently (CRD ch.51 R91). No peer sees it, so no switch exists;
   row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.18 R18.11.16 and R18.11.19.
+
+- **The refund gate of SLP, QRC20, ETH and ERC20 swap payments reads the chain's time.** KDF Reloaded judges whether
+  such a payment can be refunded now by the chain: an SLP token by the median time past of BCH, a QRC20 token by that
+  of QTUM, an ETH or ERC20 coin by the latest block's timestamp once the local clock is past the lock time (then a
+  wait is at most a minute at a time). GLEEC KDF's rule for each coin family is recorded in CRD ch.51 §51.6E R88. A
+  refund can therefore start later than on GLEEC KDF (for an SLP token up to about an hour); no message and no
+  transaction a peer validates changes, so no switch exists; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). Plan
+  [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 3 (PR #490); CRD ch.51,
+  status note of 2026-11-22 after §51.6E R92.
 
 ### Removed / disabled in KDF Reloaded
 

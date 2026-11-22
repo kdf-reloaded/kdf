@@ -119,6 +119,8 @@ pub struct SiaCoinGeneric<T: SiaApiClient + ApiClientHelpers> {
     /// `history_sync_state`) so `SiaCoinGeneric` can stay cheaply `Clone`: `SiaHDWallet`
     /// holds an internal `HDAccountsMutex` and is not itself `Clone`.
     pub derivation_method: Arc<DerivationMethod<Address, SiaHDWallet>>,
+    /// The swap-evidence policy fixed at activation (CRD ch.51 R100): over the one walletd `server_url`.
+    pub(crate) swap_evidence: crate::SwapEvidencePolicy,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

@@ -825,6 +825,13 @@ pub(crate) fn broadcast_ordermatch_message(
     );
 }
 
+/// The refusal text when either coin has fewer than two nodes for swap evidence and no `swap_evidence_node`
+/// (CRD ch.51 R100 item 4), `None` when both may trade.
+#[cfg_attr(test, mockable)]
+pub(crate) fn swap_evidence_admission(first: &MmCoinEnum, second: &MmCoinEnum) -> Option<String> {
+    first.swap_evidence_refusal().or_else(|| second.swap_evidence_refusal())
+}
+
 /// The error text while the Electrum servers of either coin disagree about the chain (CRD ch.38 R38.6.4o item 12).
 #[cfg_attr(test, mockable)]
 pub(crate) fn chain_disagreement(first: &MmCoinEnum, second: &MmCoinEnum) -> Option<String> {
@@ -870,6 +877,12 @@ pub(crate) async fn maker_swap_start(ctx: MmArc, maker_match: MakerMatch, maker_
     // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
     // moved yet.
     if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
+        log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
+        return;
+    }
+    // CRD ch.51 R100 item 4: no new swap with a coin that has fewer than two nodes for swap evidence and no
+    // `swap_evidence_node`. Nothing has moved yet.
+    if let Some(error) = swap_evidence_admission(&maker_coin, &taker_coin) {
         log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
         return;
     }
@@ -979,6 +992,11 @@ pub(crate) async fn taker_swap_start(ctx: MmArc, taker_order: TakerOrder, taker_
     // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
     // moved yet.
     if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
+        log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
+        return;
+    }
+    // CRD ch.51 R100 item 4, as for the maker.
+    if let Some(error) = swap_evidence_admission(&maker_coin, &taker_coin) {
         log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
         return;
     }
@@ -2345,6 +2363,10 @@ async fn taker_order_impl(
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
         return MmError::err(TakerOrderError::ChainDisagreement(error));
     }
+    // CRD ch.51 R100 item 4: no new order with a coin that has too few nodes for swap evidence.
+    if let Some(error) = swap_evidence_admission(&base_coin, &rel_coin) {
+        return MmError::err(TakerOrderError::SwapEvidenceInsufficient(error));
+    }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.
     if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
@@ -2399,6 +2421,10 @@ async fn place_taker_order(
     // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
     if let Some(error) = chain_disagreement(base_coin, rel_coin) {
         return MmError::err(TakerOrderError::ChainDisagreement(error));
+    }
+    // CRD ch.51 R100 item 4.
+    if let Some(error) = swap_evidence_admission(base_coin, rel_coin) {
+        return MmError::err(TakerOrderError::SwapEvidenceInsufficient(error));
     }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.
@@ -2859,6 +2885,10 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     // CRD ch.38 R38.6.4o item 12: no new order while a coin's Electrum servers disagree about the chain.
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
         return MmError::err(SetPriceError::ChainDisagreement(error));
+    }
+    // CRD ch.51 R100 item 4: no new order with a coin that has too few nodes for swap evidence.
+    if let Some(error) = swap_evidence_admission(&base_coin, &rel_coin) {
+        return MmError::err(SetPriceError::SwapEvidenceInsufficient(error));
     }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.

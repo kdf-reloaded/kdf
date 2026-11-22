@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::rpc_command::get_my_address::PathToAddress;
+use coins::swap_evidence::{swap_evidence_policy_from, SwapEvidenceNodeNotInList};
 use coins::tendermint::{tendermint_coin_from_conf_and_request, tendermint_coin_from_conf_and_request_with_global_hd,
                         tendermint_coin_from_conf_and_request_with_public_key,
                         tendermint_coin_from_conf_and_request_with_wallet_connect, RpcNode, TendermintCoin,
@@ -76,6 +77,9 @@ pub struct TendermintActivationParams {
     activation_params: Option<ActivationParamsForm>,
     #[serde(default)]
     priv_key_policy: Option<PrivKeyActivationPolicy>,
+    /// The node whose answer a swap-evidence read takes alone (CRD ch.51 R100 item 2); it must be one of `nodes`.
+    #[serde(default)]
+    swap_evidence_node: Option<String>,
 }
 
 /// The parsed `activation_params` of a request (CRD ch.36 R36.1.3).
@@ -361,7 +365,12 @@ impl CurrentBlock for TendermintActivationResult {
 
 #[derive(Debug)]
 pub enum TendermintActivationError {
-    PlatformCoinCreationError { ticker: String, error: String },
+    PlatformCoinCreationError {
+        ticker: String,
+        error: String,
+    },
+    /// A `swap_evidence_node` outside the request's `nodes` (CRD ch.51 R100 item 2).
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     UnexpectedDerivationMethod(String),
     Internal(String),
 }
@@ -371,6 +380,9 @@ impl From<TendermintActivationError> for EnablePlatformCoinWithTokensError {
         match err {
             TendermintActivationError::PlatformCoinCreationError { ticker, error } => {
                 EnablePlatformCoinWithTokensError::PlatformCoinCreationError { ticker, error }
+            },
+            TendermintActivationError::SwapEvidenceNodeNotInList(error) => {
+                EnablePlatformCoinWithTokensError::SwapEvidenceNodeNotInList(error)
             },
             TendermintActivationError::UnexpectedDerivationMethod(e) => {
                 EnablePlatformCoinWithTokensError::UnexpectedDerivationMethod(e)
@@ -393,6 +405,104 @@ impl From<TendermintInitError> for TendermintActivationError {
     }
 }
 
+/// Builds the platform coin of a Tendermint activation under the request's signing form.
+async fn build_platform_coin(
+    ctx: MmArc,
+    ticker: String,
+    platform_conf: Json,
+    activation_request: TendermintActivationParams,
+    priv_key: &[u8],
+) -> Result<TendermintCoin, MmError<TendermintActivationError>> {
+    // A public key activates a watch-only coin: nothing is derived from the login, and no node is contacted
+    // here (CRD ch.36 R36.14.16).
+    if let Some(ActivationParamsForm::PublicKey {
+        public_key,
+        is_ledger_connection,
+    }) = &activation_request.activation_params
+    {
+        return tendermint_coin_from_conf_and_request_with_public_key(
+            &ctx,
+            ticker,
+            &platform_conf,
+            activation_request.nodes,
+            *public_key,
+            *is_ledger_connection,
+            activation_request.get_balances,
+        )
+        .await
+        .mm_err(TendermintActivationError::from);
+    }
+
+    // A WalletConnect session: the account, its key and the Ledger flag are read from the session, the node's
+    // own login plays no part (CRD ch.36 R36.1.3 forms 2 and 3, R36.14.13, R36.14.14).
+    if let Some(ActivationParamsForm::WalletConnect { session_topic }) = &activation_request.activation_params {
+        return tendermint_coin_from_conf_and_request_with_wallet_connect(
+            &ctx,
+            ticker,
+            &platform_conf,
+            activation_request.nodes,
+            session_topic,
+            activation_request.get_balances,
+        )
+        .await
+        .mm_err(TendermintActivationError::from);
+    }
+
+    let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(|e| TendermintActivationError::Internal(e.to_string()))?;
+    let coin = match crypto_ctx.key_pair_policy() {
+        // An iguana login signs with the single key the generic activator passes.
+        KeyPairPolicy::Iguana => {
+            tendermint_coin_from_conf_and_request(
+                &ctx,
+                ticker,
+                &platform_conf,
+                activation_request.nodes,
+                priv_key,
+                activation_request.get_balances,
+            )
+            .await
+        },
+        // An HD login whose request asks for `IguanaPrivKey` signs with the single internal key of the context,
+        // the key the UTXO family takes for this case, and `path_to_address` plays no part (Reloaded-original,
+        // CRD ch.36 §36.7, status note of 2026-11-17). The `priv_key` the generic activator passes is the
+        // passphrase key of the legacy context under either login; it is not used for the HD login.
+        KeyPairPolicy::GlobalHDAccount(_)
+            if matches!(
+                activation_request.priv_key_policy,
+                Some(PrivKeyActivationPolicy::IguanaPrivKey)
+            ) =>
+        {
+            let internal_key = crypto_ctx.mm2_internal_privkey_secret();
+            tendermint_coin_from_conf_and_request(
+                &ctx,
+                ticker,
+                &platform_conf,
+                activation_request.nodes,
+                internal_key.as_slice(),
+                activation_request.get_balances,
+            )
+            .await
+        },
+        // An HD login signs with the key of the address at `path_to_address` under the coin's
+        // `derivation_path` (CRD ch.36 R36.1.2, R36.1.4 step 3).
+        KeyPairPolicy::GlobalHDAccount(global_hd) => {
+            let path_to_address = path_to_address_of(&ticker, &activation_request.path_to_address)?;
+            tendermint_coin_from_conf_and_request_with_global_hd(
+                &ctx,
+                ticker,
+                &platform_conf,
+                activation_request.nodes,
+                global_hd,
+                &path_to_address,
+                activation_request.get_balances,
+            )
+            .await
+        },
+    }
+    .mm_err(TendermintActivationError::from)?;
+    Ok(coin)
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl PlatformWithTokensActivationOps for TendermintCoin {
@@ -411,93 +521,16 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
     ) -> Result<Self, MmError<Self::ActivationError>> {
         reject_hardware_policy(&ticker, &activation_request.priv_key_policy).mm_err(TendermintActivationError::from)?;
 
-        // A public key activates a watch-only coin: nothing is derived from the login, and no node is contacted
-        // here (CRD ch.36 R36.14.16).
-        if let Some(ActivationParamsForm::PublicKey {
-            public_key,
-            is_ledger_connection,
-        }) = &activation_request.activation_params
-        {
-            return tendermint_coin_from_conf_and_request_with_public_key(
-                &ctx,
-                ticker,
-                &platform_conf,
-                activation_request.nodes,
-                *public_key,
-                *is_ledger_connection,
-                activation_request.get_balances,
-            )
-            .await
-            .mm_err(TendermintActivationError::from);
-        }
-
-        // A WalletConnect session: the account, its key and the Ledger flag are read from the session, the node's
-        // own login plays no part (CRD ch.36 R36.1.3 forms 2 and 3, R36.14.13, R36.14.14).
-        if let Some(ActivationParamsForm::WalletConnect { session_topic }) = &activation_request.activation_params {
-            return tendermint_coin_from_conf_and_request_with_wallet_connect(
-                &ctx,
-                ticker,
-                &platform_conf,
-                activation_request.nodes,
-                session_topic,
-                activation_request.get_balances,
-            )
-            .await
-            .mm_err(TendermintActivationError::from);
-        }
-
-        let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(|e| TendermintActivationError::Internal(e.to_string()))?;
-        let coin = match crypto_ctx.key_pair_policy() {
-            // An iguana login signs with the single key the generic activator passes.
-            KeyPairPolicy::Iguana => {
-                tendermint_coin_from_conf_and_request(
-                    &ctx,
-                    ticker,
-                    &platform_conf,
-                    activation_request.nodes,
-                    priv_key,
-                    activation_request.get_balances,
-                )
-                .await
-            },
-            // An HD login whose request asks for `IguanaPrivKey` signs with the single internal key of the context,
-            // the key the UTXO family takes for this case, and `path_to_address` plays no part (Reloaded-original,
-            // CRD ch.36 §36.7, status note of 2026-11-17). The `priv_key` the generic activator passes is the
-            // passphrase key of the legacy context under either login; it is not used for the HD login.
-            KeyPairPolicy::GlobalHDAccount(_)
-                if matches!(
-                    activation_request.priv_key_policy,
-                    Some(PrivKeyActivationPolicy::IguanaPrivKey)
-                ) =>
-            {
-                let internal_key = crypto_ctx.mm2_internal_privkey_secret();
-                tendermint_coin_from_conf_and_request(
-                    &ctx,
-                    ticker,
-                    &platform_conf,
-                    activation_request.nodes,
-                    internal_key.as_slice(),
-                    activation_request.get_balances,
-                )
-                .await
-            },
-            // An HD login signs with the key of the address at `path_to_address` under the coin's
-            // `derivation_path` (CRD ch.36 R36.1.2, R36.1.4 step 3).
-            KeyPairPolicy::GlobalHDAccount(global_hd) => {
-                let path_to_address = path_to_address_of(&ticker, &activation_request.path_to_address)?;
-                tendermint_coin_from_conf_and_request_with_global_hd(
-                    &ctx,
-                    ticker,
-                    &platform_conf,
-                    activation_request.nodes,
-                    global_hd,
-                    &path_to_address,
-                    activation_request.get_balances,
-                )
-                .await
-            },
-        }
-        .mm_err(TendermintActivationError::from)?;
+        // The policy is validated before any node is contacted and stored on the built coin (CRD ch.51 R100).
+        let urls: Vec<String> = activation_request
+            .nodes
+            .iter()
+            .map(|node| node.url().to_owned())
+            .collect();
+        let swap_evidence = swap_evidence_policy_from(&ticker, activation_request.swap_evidence_node.as_deref(), &urls)
+            .map_err(|e| MmError::new(TendermintActivationError::SwapEvidenceNodeNotInList(e)))?;
+        let coin = build_platform_coin(ctx, ticker, platform_conf, activation_request, priv_key).await?;
+        coin.set_swap_evidence_policy(swap_evidence);
         Ok(coin)
     }
 

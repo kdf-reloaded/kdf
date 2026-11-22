@@ -282,6 +282,7 @@ fn evm_coin(
         EthCoinType::Eth,
         web3,
         vec![Web3Instance {
+            url: String::new(),
             web3: single,
             is_parity: false,
         }],

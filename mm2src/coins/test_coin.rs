@@ -319,6 +319,13 @@ impl WatcherOps for TestCoin {}
 impl MmCoin for TestCoin {
     fn is_asset_chain(&self) -> bool { unimplemented!() }
 
+    /// A test double has two nodes for swap evidence (CRD ch.51 R100); a test that needs another policy mocks this.
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::SwapEvidencePolicy::TwoNodes {
+            hosts: vec!["a.test".to_owned(), "b.test".to_owned()],
+        }
+    }
+
     fn get_raw_transaction(&self, _req: RawTransactionRequest) -> RawTransactionFut { unimplemented!() }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut { unimplemented!() }

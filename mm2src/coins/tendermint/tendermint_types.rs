@@ -134,6 +134,9 @@ impl fmt::Debug for RpcNode {
 }
 
 impl RpcNode {
+    /// The configured URL of the node. It may carry a credential: name it host-only in any text.
+    pub fn url(&self) -> &str { &self.url }
+
     #[cfg(test)]
     pub fn for_test(url: &str) -> Self {
         Self {
@@ -416,6 +419,9 @@ pub struct TendermintCoinImpl {
     /// The per-coin swap fee policy (CRD ch.35 R35.6.8); `Legacy` until set. It selects the gas price of swap
     /// transactions and trade-fee simulations only (CRD ch.18 R18.6B.4).
     pub(super) swap_gas_fee_policy: Mutex<SwapGasFeePolicy>,
+    /// The swap-evidence policy fixed at activation (CRD ch.51 R100): over the RPC node URLs. Set by the activation
+    /// after the build; `NotAdopted` until then.
+    pub(super) swap_evidence: Mutex<crate::SwapEvidencePolicy>,
 }
 
 #[derive(Clone)]
@@ -449,6 +455,7 @@ impl TendermintCoinImpl {
             protocol_info,
             get_balances,
             swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
+            swap_evidence: Mutex::new(crate::SwapEvidencePolicy::NotAdopted),
         }
     }
 }

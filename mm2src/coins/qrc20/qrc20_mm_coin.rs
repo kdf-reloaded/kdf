@@ -8,6 +8,10 @@ impl MmCoin for Qrc20Coin {
 
     fn chain_disagreement(&self) -> Option<String> { crate::utxo::electrum_chain_disagreement(&self.utxo) }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Qrc20, &self.utxo.swap_evidence)
+    }
+
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         Box::new(qrc20_withdraw(self.clone(), req).boxed().compat())
     }

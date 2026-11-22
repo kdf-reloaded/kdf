@@ -7,6 +7,7 @@ use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use coins::sql_tx_history_storage::SqliteTxHistoryStorage;
+use coins::swap_evidence::SwapEvidenceNodeNotInList;
 use coins::{lp_coinfind_registered, CoinProtocol, CoinsContext, MmCoinEnum, RegisteredTokenPolicy};
 use common::mm_number::BigDecimal;
 use common::{log, HttpStatusCode, StatusCode};
@@ -325,6 +326,9 @@ pub enum EnablePlatformCoinWithTokensError {
     CustomTokenError(CustomTokenError),
     #[display(fmt = "Invalid payload: {}", _0)]
     InvalidPayload(String),
+    /// A `swap_evidence_node` outside the platform's node list (CRD ch.51 R100 item 2).
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     #[display(fmt = "The hardware wallet policy is available only through the task variant")]
     UnexpectedDeviceActivationPolicy,
     #[display(fmt = "WalletConnect error: {}", _0)]
@@ -362,6 +366,12 @@ pub(crate) fn rpc_task_error(err: RpcTaskError) -> EnablePlatformCoinWithTokensE
         RpcTaskError::NoSuchTask(task_id) => EnablePlatformCoinWithTokensError::NoSuchTask(task_id),
         RpcTaskError::Timeout(duration) => EnablePlatformCoinWithTokensError::TaskTimedOut { duration },
         other => EnablePlatformCoinWithTokensError::Internal(other.to_string()),
+    }
+}
+
+impl From<SwapEvidenceNodeNotInList> for EnablePlatformCoinWithTokensError {
+    fn from(error: SwapEvidenceNodeNotInList) -> Self {
+        EnablePlatformCoinWithTokensError::SwapEvidenceNodeNotInList(error)
     }
 }
 
@@ -411,6 +421,7 @@ impl HttpStatusCode for EnablePlatformCoinWithTokensError {
             EnablePlatformCoinWithTokensError::CoinProtocolParseError { .. }
             | EnablePlatformCoinWithTokensError::TokenProtocolParseError { .. }
             | EnablePlatformCoinWithTokensError::CustomTokenError(_)
+            | EnablePlatformCoinWithTokensError::SwapEvidenceNodeNotInList(_)
             | EnablePlatformCoinWithTokensError::PlatformCoinCreationError { .. }
             | EnablePlatformCoinWithTokensError::PrivKeyPolicyNotAllowed(_)
             | EnablePlatformCoinWithTokensError::UnexpectedDerivationMethod(_)

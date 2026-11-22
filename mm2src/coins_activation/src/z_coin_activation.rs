@@ -6,7 +6,9 @@ use crate::standalone_coin::{InitStandaloneCoinActivationOps, InitStandaloneCoin
 use async_trait::async_trait;
 use coins::coin_balance::{EnableCoinBalance, IguanaWalletBalance};
 use coins::node_url::lightwalletd_endpoint_label;
+use coins::swap_evidence::SwapEvidenceNodeNotInList;
 use coins::utxo::rpc_clients::ElectrumRpcRequest;
+use coins::utxo::utxo_builder::UtxoCoinBuildError;
 use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
 use coins::z_coin::{z_coin_from_conf_and_params, ZCoin, ZCoinBuildError, ZcoinBackend, ZcoinProtocolInfo};
 #[cfg(not(target_arch = "wasm32"))]
@@ -294,6 +296,10 @@ pub struct ZcoinActivationParams {
     /// only; ignored where shielded proving is unavailable.
     #[serde(default)]
     pub zcash_params_path: Option<String>,
+    /// The lightwalletd server whose answer a swap-evidence read takes alone (CRD ch.51 R100 item 2). It must be
+    /// one of `light_wallet_d_servers`.
+    #[serde(default)]
+    pub swap_evidence_node: Option<String>,
 }
 
 impl ZcoinActivationParams {
@@ -478,6 +484,9 @@ pub enum ZcoinInitError {
         ticker: String,
         error: String,
     },
+    /// A `swap_evidence_node` outside `light_wallet_d_servers` (CRD ch.51 R100 item 2).
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     Internal(String),
 }
 
@@ -511,6 +520,9 @@ impl ZcoinInitError {
     /// `CoinCreationError`) and the docs for the content, so clients that match on the token keep
     /// working. The descriptive text with the path goes to the log.
     pub fn from_build_err(build_err: ZCoinBuildError, ticker: String) -> Self {
+        if let ZCoinBuildError::UtxoBuilderError(UtxoCoinBuildError::SwapEvidenceNodeNotInList(error)) = build_err {
+            return ZcoinInitError::SwapEvidenceNodeNotInList(error);
+        }
         let error = match build_err {
             ZCoinBuildError::ZCashParamsNotFound | ZCoinBuildError::ZCashParamsDirNotFound { .. } => {
                 log::warn!("Cannot activate {}: {}", ticker, build_err);
@@ -570,6 +582,9 @@ impl From<ZcoinInitError> for InitStandaloneCoinError {
                 }
             },
             ZcoinInitError::TaskTimedOut { duration } => InitStandaloneCoinError::TaskTimedOut { duration },
+            ZcoinInitError::SwapEvidenceNodeNotInList(error) => {
+                InitStandaloneCoinError::SwapEvidenceNodeNotInList(error)
+            },
             ZcoinInitError::LightwalletdUnreachable { .. } => InitStandaloneCoinError::Transport(err.to_string()),
             ZcoinInitError::LightwalletdExcluded { ticker, error } => InitStandaloneCoinError::CoinCreationError {
                 ticker,
@@ -737,6 +752,7 @@ impl InitStandaloneCoinActivationOps for ZCoin {
             priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
             check_utxo_maturity: None,
             path_to_address: None,
+            swap_evidence_node: activation_request.swap_evidence_node.clone(),
         };
 
         // Wire sync parameters from RPC request into protocol_info (R39.6.2)
@@ -1412,6 +1428,27 @@ mod tests {
             assert!(wire["error_data"].is_string());
             assert_eq!(status, common::StatusCode::INTERNAL_SERVER_ERROR);
         }
+    }
+
+    /// CRD ch.51 R100 item 2: a `swap_evidence_node` outside `light_wallet_d_servers` is the wire error
+    /// `SwapEvidenceNodeNotInList` with `{ticker, node}`.
+    #[test]
+    fn a_swap_evidence_node_outside_the_lightwalletd_servers_is_its_own_wire_error() {
+        let build_err = ZCoinBuildError::UtxoBuilderError(UtxoCoinBuildError::SwapEvidenceNodeNotInList(
+            SwapEvidenceNodeNotInList {
+                ticker: "ARRR".to_owned(),
+                node: "other.example".to_owned(),
+            },
+        ));
+        let (wire, status) = task_error(ZcoinInitError::from_build_err(build_err, "ARRR".to_owned()));
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "error_type": "SwapEvidenceNodeNotInList",
+                "error_data": { "ticker": "ARRR", "node": "other.example" }
+            })
+        );
+        assert_eq!(status, common::StatusCode::BAD_REQUEST);
     }
 
     #[test]

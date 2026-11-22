@@ -4,7 +4,8 @@ use crate::prelude::*;
 use async_trait::async_trait;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
-use coins::utxo::bch::{bch_coin_from_conf_and_params, BchActivationRequest, BchCoin, CashAddrPrefix};
+use coins::swap_evidence::SwapEvidenceNodeNotInList;
+use coins::utxo::bch::{bch_coin_from_conf_and_params_typed, BchActivationRequest, BchCoin, CashAddrPrefix};
 use coins::utxo::bch_and_slp_tx_history::bch_and_slp_history_loop;
 use coins::utxo::rpc_clients::UtxoRpcError;
 use coins::utxo::slp::{SlpProtocolConf, SlpToken};
@@ -158,6 +159,9 @@ impl From<BchWithTokensActivationError> for EnablePlatformCoinWithTokensError {
             BchWithTokensActivationError::UnexpectedDerivationMethod(e) => {
                 EnablePlatformCoinWithTokensError::UnexpectedDerivationMethod(e)
             },
+            BchWithTokensActivationError::SwapEvidenceNodeNotInList(error) => {
+                EnablePlatformCoinWithTokensError::SwapEvidenceNodeNotInList(error)
+            },
             BchWithTokensActivationError::UnexpectedDeviceActivationPolicy => {
                 EnablePlatformCoinWithTokensError::UnexpectedDeviceActivationPolicy
             },
@@ -261,6 +265,8 @@ pub enum BchWithTokensActivationError {
     },
     PrivKeyNotAllowed(String),
     UnexpectedDerivationMethod(String),
+    /// A `swap_evidence_node` outside the platform's Electrum server list (CRD ch.51 R100 item 2).
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     /// The request selects a hardware wallet, which only the task methods accept.
     UnexpectedDeviceActivationPolicy,
     Transport(String),
@@ -346,7 +352,14 @@ impl PlatformWithTokensActivationOps for BchCoin {
 
         let policy = activation_request.platform_request.utxo_params.priv_key_policy;
         let key = platform_priv_key(&ctx, policy, priv_key)?;
-        let platform_coin = bch_coin_from_conf_and_params(
+        // The SLP-safety rule of the legacy builder (empty `bchd_urls` is unsafe), as the same text.
+        if activation_request.platform_request.has_unsafe_slp_configuration() {
+            return MmError::err(BchWithTokensActivationError::PlatformCoinCreationError {
+                ticker,
+                error: "Using empty bchd_urls is unsafe for SLP users!".to_owned(),
+            });
+        }
+        let platform_coin = bch_coin_from_conf_and_params_typed(
             &ctx,
             &ticker,
             &platform_conf,
@@ -355,7 +368,15 @@ impl PlatformWithTokensActivationOps for BchCoin {
             &key,
         )
         .await
-        .map_to_mm(|error| BchWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
+        .mm_err(|build_err| match build_err {
+            coins::utxo::utxo_builder::UtxoCoinBuildError::SwapEvidenceNodeNotInList(error) => {
+                BchWithTokensActivationError::SwapEvidenceNodeNotInList(error)
+            },
+            other => BchWithTokensActivationError::PlatformCoinCreationError {
+                ticker,
+                error: other.to_string(),
+            },
+        })?;
         Ok(platform_coin)
     }
 

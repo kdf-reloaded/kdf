@@ -1,6 +1,8 @@
 //! SwapOps and WatcherOps trait implementations for EthCoin.
 
 use super::*;
+use crate::utxo::utxo_common::capped_refund_wait;
+use crate::{wall_clock_refund_eligibility, CanRefundHtlc};
 
 #[async_trait]
 impl SwapOps for EthCoin {
@@ -481,6 +483,24 @@ impl SwapOps for EthCoin {
         }
     }
 
+    /// The Tron family keeps the wall-clock rule, with no chain read (CRD ch.51 §51.6E R92 item 3). Every other
+    /// EVM coin reads the latest block's timestamp once the local clock is past the lock time
+    /// (CRD ch.51 §51.6E R88). A failed read, or a block without a timestamp, is an error.
+    fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        let fut = async move {
+            let now = now_ms() / 1000;
+            if self.is_tron_family() {
+                return Ok(wall_clock_refund_eligibility(now, locktime));
+            }
+            if now < locktime {
+                return Ok(evm_refund_eligibility(now, locktime, None));
+            }
+            let tip_ts = self.latest_block_timestamp().await?;
+            Ok(evm_refund_eligibility(now, locktime, Some(tip_ts)))
+        };
+        Box::new(fut.boxed().compat())
+    }
+
     fn negotiate_swap_contract_addr(
         &self,
         other_side_address: Option<&[u8]>,
@@ -545,6 +565,122 @@ impl SwapOps for EthCoin {
 
 #[async_trait]
 impl WatcherOps for EthCoin {}
+
+impl EthCoin {
+    /// The timestamp of the latest block, read through the coin's node failover.
+    async fn latest_block_timestamp(&self) -> Result<u64, String> {
+        use crate::eth::alloy_compat::assert_send_future;
+        use alloy::eips::BlockNumberOrTag;
+        use alloy::providers::Provider;
+        use std::future::IntoFuture;
+
+        let provider = self.alloy_provider();
+        match assert_send_future(provider.get_block_by_number(BlockNumberOrTag::Latest).into_future()).await {
+            Ok(Some(block)) => Ok(block.header.timestamp),
+            Ok(None) => ERR!("The node returned no latest block"),
+            Err(e) => ERR!("Error {} on getting the latest block", e),
+        }
+    }
+}
+
+/// The longest wait, in seconds, after the latest block's timestamp has not passed the lock time while the
+/// local clock has: the node is behind, so the stage asks again soon.
+pub(crate) const EVM_TIP_RECHECK_MAX_SECS: u64 = 60;
+
+/// The refund gate of an EVM coin (CRD ch.51 §51.6E R88): while the local clock `now` has not passed the
+/// lock time the answer is a wait of at most one hour and no chain read is needed. Afterwards the latest
+/// block's timestamp `tip_ts` must be past the lock time; otherwise (no timestamp read, or the tip at or
+/// before the lock time) the answer is a wait of at most [`EVM_TIP_RECHECK_MAX_SECS`].
+pub(crate) fn evm_refund_eligibility(now: u64, locktime: u64, tip_ts: Option<u64>) -> CanRefundHtlc {
+    if now < locktime {
+        return capped_refund_wait(locktime - now + 1);
+    }
+    match tip_ts {
+        Some(tip_ts) if tip_ts > locktime => CanRefundHtlc::CanRefundNow,
+        Some(tip_ts) => CanRefundHtlc::HaveToWait((locktime - tip_ts + 1).min(EVM_TIP_RECHECK_MAX_SECS)),
+        None => CanRefundHtlc::HaveToWait(EVM_TIP_RECHECK_MAX_SECS),
+    }
+}
+
+#[cfg(test)]
+mod refund_gate_tests {
+    use super::*;
+
+    #[test]
+    fn the_tron_family_rule_is_the_wall_clock_rule_around_the_lock_time() {
+        // `can_refund_htlc` answers a Tron-family coin with `wall_clock_refund_eligibility` and no chain read;
+        // the trait default is the same function.
+        let lock = 5000;
+        assert!(matches!(
+            wall_clock_refund_eligibility(lock - 1, lock),
+            CanRefundHtlc::HaveToWait(2)
+        ));
+        assert!(matches!(
+            wall_clock_refund_eligibility(lock, lock),
+            CanRefundHtlc::HaveToWait(1)
+        ));
+        assert!(matches!(
+            wall_clock_refund_eligibility(lock + 1, lock),
+            CanRefundHtlc::CanRefundNow
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_before_the_lock_time_on_the_local_clock() {
+        assert!(matches!(
+            evm_refund_eligibility(1000, 1100, None),
+            CanRefundHtlc::HaveToWait(101)
+        ));
+        assert!(matches!(
+            evm_refund_eligibility(1000, 100_000, None),
+            CanRefundHtlc::HaveToWait(3600)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_while_the_tip_is_not_past_the_lock_time() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(1000)),
+            CanRefundHtlc::HaveToWait(1)
+        ));
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(990)),
+            CanRefundHtlc::HaveToWait(11)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_opens_when_the_tip_is_past_the_lock_time() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(1001)),
+            CanRefundHtlc::CanRefundNow
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_caps_the_wait_when_the_tip_is_far_behind() {
+        assert!(matches!(
+            evm_refund_eligibility(1_000_000, 100_000, Some(1000)),
+            CanRefundHtlc::HaveToWait(60)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_the_gap_when_the_tip_is_10_s_behind() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(990)),
+            CanRefundHtlc::HaveToWait(11)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_without_a_tip_timestamp() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, None),
+            CanRefundHtlc::HaveToWait(60)
+        ));
+    }
+}
 
 /// The secret of `secret_hash` in the call input of a spend: the third argument of a `receiverSpend` call, when
 /// it passes the secret-hash rule (CRD ch.51 §51.6E R86). `Ok(None)` when the input is not such a call.

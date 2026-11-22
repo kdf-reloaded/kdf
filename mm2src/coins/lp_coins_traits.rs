@@ -225,13 +225,10 @@ pub trait SwapOps {
     /// For example: there are no additional conditions for ETH, but for some UTXO coins we should wait for
     /// locktime < MTP
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
-        let now = now_ms() / 1000;
-        let result = if now > locktime {
-            CanRefundHtlc::CanRefundNow
-        } else {
-            CanRefundHtlc::HaveToWait(locktime - now + 1)
-        };
-        Box::new(futures01::future::ok(result))
+        Box::new(futures01::future::ok(wall_clock_refund_eligibility(
+            now_ms() / 1000,
+            locktime,
+        )))
     }
 
     /// CRD ch.39 R39.5.13. When the refund broadcast of this coin was rejected with `rejection` (the plain
@@ -706,6 +703,19 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
     /// of a new swap with it and a withdrawal of it are refused with this text.
     fn chain_disagreement(&self) -> Option<String> { None }
 
+    /// How this coin's swap-evidence reads are judged (CRD ch.51 R100). The default is
+    /// [`SwapEvidencePolicy::NotAdopted`]: today's reads and no admission refusal. A family answers its policy
+    /// stored at activation once its entry in [`crate::swap_evidence::R100_ADOPTED`] is `true`.
+    fn swap_evidence_policy(&self) -> SwapEvidencePolicy { SwapEvidencePolicy::NotAdopted }
+
+    /// The refusal text of an order or a swap start with this coin, `None` when the coin may trade (R100 item 4).
+    fn swap_evidence_refusal(&self) -> Option<String> {
+        match self.swap_evidence_policy() {
+            SwapEvidencePolicy::Insufficient { .. } => Some(crate::swap_evidence::insufficient_refusal(self.ticker())),
+            _ => None,
+        }
+    }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut;
 
     /// Maximum number of digits after decimal point used to denominate integer coin units (satoshis, wei, etc.)
@@ -870,5 +880,15 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
             try_s!(handler.on_connected(address.clone()))
         }
         Ok(())
+    }
+}
+
+/// The wall-clock refund rule (CRD ch.51 §51.6E R88 item 1): refundable once `now` is strictly past the lock
+/// time, otherwise a wait of the difference plus one second, uncapped.
+pub(crate) fn wall_clock_refund_eligibility(now: u64, locktime: u64) -> CanRefundHtlc {
+    if now > locktime {
+        CanRefundHtlc::CanRefundNow
+    } else {
+        CanRefundHtlc::HaveToWait(locktime - now + 1)
     }
 }

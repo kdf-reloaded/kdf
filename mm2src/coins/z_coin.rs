@@ -897,6 +897,25 @@ pub enum ZcoinBackend {
     },
 }
 
+/// The swap-evidence policy of a shielded coin (CRD ch.51 R100): over the lightwalletd servers of a Light-mode coin,
+/// `swap_evidence_node` being one of them; a Native-mode coin is served by its own daemon.
+pub(crate) fn zcoin_swap_evidence_policy(
+    ticker: &str,
+    field: Option<&str>,
+    backend: &ZcoinBackend,
+) -> Result<crate::SwapEvidencePolicy, crate::SwapEvidenceNodeNotInList> {
+    match backend {
+        #[cfg(not(target_arch = "wasm32"))]
+        ZcoinBackend::Native => {
+            crate::swap_evidence::swap_evidence_field_without_list(ticker, field)?;
+            Ok(crate::SwapEvidencePolicy::OwnDaemon)
+        },
+        ZcoinBackend::Light {
+            light_wallet_d_servers, ..
+        } => crate::swap_evidence::swap_evidence_policy_from(ticker, field, light_wallet_d_servers),
+    }
+}
+
 /// The debug form names each lightwalletd endpoint by its host-only form (CRD ch.35 R35.1.17, ch.39 R39.11.29).
 impl fmt::Debug for ZcoinBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3207,6 +3226,13 @@ impl<'a> UtxoCoinBuilderCommonOps for ZCoinBuilder<'a> {
 
     fn ticker(&self) -> &str { self.ticker }
 
+    /// The policy is over the lightwalletd servers of a Light-mode coin; `swap_evidence_node` must be one of them.
+    /// A Native-mode coin is served by its own daemon (CRD ch.51 R100).
+    fn swap_evidence_policy(&self) -> UtxoCoinBuildResult<crate::SwapEvidencePolicy> {
+        zcoin_swap_evidence_policy(self.ticker, self.params.swap_evidence_node.as_deref(), &self.backend)
+            .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))
+    }
+
     /// The RPC client is selected by the requested backend, never by `activation_params().mode`: a
     /// Light-mode coin is served by lightwalletd alone and no Electrum connection is built for it
     /// (R39.11.1, R39.11.5).
@@ -3723,6 +3749,10 @@ impl InitWithdrawCoin for ZCoin {
 
 #[async_trait]
 impl MmCoin for ZCoin {
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Zcoin, &self.utxo_arc.swap_evidence)
+    }
+
     /// Reports the coin as non-tradeable while the Ironwood swap freeze is in
     /// force, which rejects it at order placement (`buy`, `sell`, `setprice` all
     /// gate on this) with a clean error instead of letting a swap start that this
@@ -4415,5 +4445,53 @@ mod shielded_sync_pass_tests {
             Call::RecordError("could not reach the chain tip: no route to host".to_owned()),
             Call::Refresh(100),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod swap_evidence_tests {
+    use super::*;
+    use crate::SwapEvidencePolicy;
+
+    fn light(servers: &[&str]) -> ZcoinBackend {
+        ZcoinBackend::Light {
+            light_wallet_d_servers: servers.iter().map(|s| (*s).to_owned()).collect(),
+            electrum_servers: Vec::new(),
+        }
+    }
+
+    /// CRD ch.51 R100: a Light-mode coin counts the distinct hosts of `light_wallet_d_servers`; the field must be one
+    /// of them; a Native-mode coin is its own daemon and takes no field.
+    #[test]
+    fn the_zcoin_policy_is_over_the_lightwalletd_servers() {
+        let one = light(&["https://lightd.example:443", "https://lightd.example:9067"]);
+        assert_eq!(
+            zcoin_swap_evidence_policy("ARRR", None, &one).unwrap(),
+            SwapEvidencePolicy::Insufficient { hosts: 1 }
+        );
+        let two = light(&["https://a.example:443", "https://b.example:443"]);
+        assert!(matches!(
+            zcoin_swap_evidence_policy("ARRR", None, &two).unwrap(),
+            SwapEvidencePolicy::TwoNodes { .. }
+        ));
+        assert_eq!(
+            zcoin_swap_evidence_policy("ARRR", Some("https://a.example:443"), &one).unwrap_err(),
+            crate::SwapEvidenceNodeNotInList {
+                ticker: "ARRR".to_owned(),
+                node: "a.example:443".to_owned()
+            }
+        );
+        assert!(matches!(
+            zcoin_swap_evidence_policy("ARRR", Some("a.example"), &two).unwrap(),
+            SwapEvidencePolicy::Trusted { .. }
+        ));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            assert_eq!(
+                zcoin_swap_evidence_policy("ARRR", None, &ZcoinBackend::Native).unwrap(),
+                SwapEvidencePolicy::OwnDaemon
+            );
+            assert!(zcoin_swap_evidence_policy("ARRR", Some("a.example"), &ZcoinBackend::Native).is_err());
+        }
     }
 }

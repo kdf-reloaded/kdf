@@ -1,6 +1,7 @@
 // siacoin_helpers — Constructor, builder, and internal utility methods.
 
 use super::*;
+use crate::swap_evidence::{swap_evidence_policy_from, SwapEvidencePolicy};
 
 impl SiaCoin {
     pub async fn new(
@@ -43,11 +44,30 @@ impl SiaCoin {
         };
 
         let conf: SiaCoinConf = serde_json::from_value(json_conf)?;
+        // The one `server_url` is the only node the field can name; checked before any network access.
+        let swap_evidence = sia_swap_evidence_policy(
+            &conf.ticker,
+            request.swap_evidence_node.as_deref(),
+            request.client_conf.server_url.as_str(),
+        )
+        .map_err(SiaCoinNewError::SwapEvidenceNodeNotInList)?;
 
-        Ok(SiaCoinBuilder::new(conf, key_pair, derivation_method, request)
-            .build(_ctx)
-            .await?)
+        Ok(
+            SiaCoinBuilder::new(conf, key_pair, derivation_method, request, swap_evidence)
+                .build(_ctx)
+                .await?,
+        )
     }
+}
+
+/// The swap-evidence policy of a Sia coin (CRD ch.51 R100): it has one walletd `server_url`, so it is `Trusted` when
+/// `swap_evidence_node` names it and `Insufficient` otherwise; a field naming another node is refused.
+pub(crate) fn sia_swap_evidence_policy(
+    ticker: &str,
+    field: Option<&str>,
+    server_url: &str,
+) -> Result<SwapEvidencePolicy, crate::swap_evidence::SwapEvidenceNodeNotInList> {
+    swap_evidence_policy_from(ticker, field, &[server_url.to_owned()])
 }
 
 pub struct SiaCoinBuilder<'a> {
@@ -55,6 +75,7 @@ pub struct SiaCoinBuilder<'a> {
     key_pair: SiaKeypair,
     derivation_method: DerivationMethod<Address, SiaHDWallet>,
     request: &'a SiaCoinActivationRequest,
+    swap_evidence: SwapEvidencePolicy,
 }
 
 impl<'a> SiaCoinBuilder<'a> {
@@ -63,12 +84,14 @@ impl<'a> SiaCoinBuilder<'a> {
         key_pair: SiaKeypair,
         derivation_method: DerivationMethod<Address, SiaHDWallet>,
         request: &'a SiaCoinActivationRequest,
+        swap_evidence: SwapEvidencePolicy,
     ) -> Self {
         SiaCoinBuilder {
             conf,
             key_pair,
             derivation_method,
             request,
+            swap_evidence,
         }
     }
 
@@ -107,6 +130,7 @@ impl<'a> SiaCoinBuilder<'a> {
             history_sync_state: Mutex::new(history_sync_state).into(),
             required_confirmations: required_confirmations.into(),
             fee_address,
+            swap_evidence: self.swap_evidence,
         })
     }
 }
@@ -119,6 +143,30 @@ impl SiaCoin {
             PrivKeyPolicy::KeyPair(keypair) => Ok(keypair),
             _ => Err(SiaCoinMyKeypairError::PrivKeyPolicy),
         }
+    }
+}
+
+#[cfg(test)]
+mod swap_evidence_tests {
+    use super::*;
+
+    /// CRD ch.51 R100: one `server_url` is `Insufficient` without the field and `Trusted` with it.
+    #[test]
+    fn the_sia_policy_is_trusted_with_the_field_and_insufficient_without() {
+        let url = "https://walletd.example:9980/api?key=K";
+        assert_eq!(
+            sia_swap_evidence_policy("SC", None, url).unwrap(),
+            SwapEvidencePolicy::Insufficient { hosts: 1 }
+        );
+        assert_eq!(
+            sia_swap_evidence_policy("SC", Some("walletd.example:9980"), url).unwrap(),
+            SwapEvidencePolicy::Trusted { node: url.to_owned() }
+        );
+        let err = sia_swap_evidence_policy("SC", Some("other.example"), url).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "swap_evidence_node other.example is not in the node list of SC"
+        );
     }
 }
 

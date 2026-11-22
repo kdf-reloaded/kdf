@@ -74,6 +74,7 @@ fn eth_coin_for_test_with_netid_and_decimals(
 ) -> (MmArc, EthCoin) {
     let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes("TEST", urls), vec![]).unwrap();
     let web3_instances = vec![Web3Instance {
+        url: String::new(),
         web3: web3.clone(),
         is_parity: true,
     }];
@@ -110,6 +111,7 @@ pub(super) fn eth_coin_for_test_with_providers(
 
     let my_addr = key_pair.address();
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals,
         gas_station_url: None,
@@ -205,6 +207,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         EthCoinType::Tron | EthCoinType::Trc20 { .. } => panic!("TRON not used in this test helper"),
     };
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals: 18,
         gas_station_url: None,
@@ -218,6 +221,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         fallback_swap_contract: None,
         ticker,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -393,6 +397,7 @@ fn test_wait_for_payment_spend_timeout() {
 
     let my_addr = key_pair.address();
     let coin = EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type: EthCoinType::Eth,
         decimals: 18,
         gas_station_url: None,
@@ -406,6 +411,7 @@ fn test_wait_for_payment_spend_timeout() {
         fallback_swap_contract: None,
         ticker: "ETH".into(),
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -501,6 +507,7 @@ fn test_gas_station() {
 mod search_for_swap_tx_spend_scripted {
     use super::scripted_evm_node::spawn;
     use super::*;
+    use crate::CanRefundHtlc;
     use serde_json::{json, Value as Json};
 
     const SWAP_CONTRACT_ADDR: &str = "7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94";
@@ -576,6 +583,7 @@ mod search_for_swap_tx_spend_scripted {
         let swap_contract_address = Address::from_str(SWAP_CONTRACT_ADDR).unwrap();
         let my_addr = key_pair.address();
         let coin = EthCoin(Arc::new(EthCoinImpl {
+            swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
             coin_type,
             decimals: 18,
             gas_station_url: None,
@@ -589,6 +597,7 @@ mod search_for_swap_tx_spend_scripted {
             fallback_swap_contract: None,
             ticker: ticker.into(),
             web3_instances: vec![Web3Instance {
+                url: String::new(),
                 web3: web3.clone(),
                 is_parity: true,
             }],
@@ -702,6 +711,99 @@ mod search_for_swap_tx_spend_scripted {
             Address::from_str(SWAP_CONTRACT_ADDR).unwrap(),
             CURRENT_BLOCK - 100,
         ))
+    }
+
+    /// The `eth_getBlockByNumber` result of an empty block with the given timestamp.
+    fn rpc_block(timestamp: u64) -> Json {
+        json!({
+            "hash": format!("0x{}", "11".repeat(32)),
+            "parentHash": format!("0x{}", "22".repeat(32)),
+            "sha3Uncles": format!("0x{}", "33".repeat(32)),
+            "miner": format!("0x{}", "00".repeat(20)),
+            "stateRoot": format!("0x{}", "44".repeat(32)),
+            "transactionsRoot": format!("0x{}", "55".repeat(32)),
+            "receiptsRoot": format!("0x{}", "66".repeat(32)),
+            "logsBloom": format!("0x{}", "00".repeat(256)),
+            "difficulty": "0x0",
+            "number": "0x5b8d80",
+            "gasLimit": "0x1c9c380",
+            "gasUsed": "0x0",
+            "timestamp": format!("{:#x}", timestamp),
+            "extraData": "0x",
+            "mixHash": format!("0x{}", "77".repeat(32)),
+            "nonce": "0x0000000000000000",
+            "transactions": [],
+            "uncles": [],
+        })
+    }
+
+    /// What `can_refund_htlc` asks the scripted node, and what it answers. `tip` is the latest block's
+    /// timestamp, or `None` for a node error.
+    fn refund_gate(
+        coin_type: EthCoinType,
+        locktime: u64,
+        tip: Option<u64>,
+    ) -> (Result<CanRefundHtlc, String>, Vec<String>) {
+        use futures::compat::Future01CompatExt;
+        use std::sync::Mutex as StdMutex;
+
+        let asked = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let asked_in_node = asked.clone();
+        let node = spawn(move |method, params| {
+            asked_in_node.lock().unwrap().push(format!("{method} {params}"));
+            match (method, tip) {
+                ("eth_getBlockByNumber", Some(ts)) => rpc_block(ts),
+                ("eth_getBlockByNumber", None) => json!({"__rpc_error": {"code": -32000, "message": "node down"}}),
+                (other, _) => panic!("unscripted method {other}"),
+            }
+        });
+        let (_ctx, coin) = coin(&node.url, coin_type);
+        let answer = block_on(coin.can_refund_htlc(locktime).compat());
+        let asked = asked.lock().unwrap().clone();
+        (answer, asked)
+    }
+
+    #[test]
+    fn refund_gate_before_the_lock_time_asks_no_node_and_waits() {
+        let locktime = now_ms() / 1000 + 1000;
+        let (answer, asked) = refund_gate(EthCoinType::Eth, locktime, Some(locktime + 10));
+        assert!(asked.is_empty(), "{asked:?}");
+        assert!(matches!(answer, Ok(CanRefundHtlc::HaveToWait(w)) if (1000..=1002).contains(&w)));
+    }
+
+    #[test]
+    fn refund_gate_after_the_lock_time_reads_the_latest_block() {
+        let locktime = now_ms() / 1000 - 7200;
+
+        let (answer, asked) = refund_gate(EthCoinType::Eth, locktime, Some(locktime + 1));
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].starts_with("eth_getBlockByNumber") && asked[0].contains("latest"),
+            "{asked:?}"
+        );
+        assert!(matches!(answer, Ok(CanRefundHtlc::CanRefundNow)));
+
+        let (answer, _) = refund_gate(EthCoinType::Eth, locktime, Some(locktime));
+        assert!(matches!(answer, Ok(CanRefundHtlc::HaveToWait(1))));
+
+        let (answer, _) = refund_gate(EthCoinType::Eth, locktime, Some(locktime - 5000));
+        assert!(matches!(answer, Ok(CanRefundHtlc::HaveToWait(60))));
+    }
+
+    #[test]
+    fn refund_gate_answers_a_node_error_with_an_error() {
+        let locktime = now_ms() / 1000 - 7200;
+        let (answer, asked) = refund_gate(EthCoinType::Eth, locktime, None);
+        assert!(!asked.is_empty());
+        assert!(answer.is_err());
+    }
+
+    #[test]
+    fn refund_gate_of_the_tron_family_asks_no_node() {
+        let locktime = now_ms() / 1000 - 7200;
+        let (answer, asked) = refund_gate(EthCoinType::Tron, locktime, Some(locktime - 5000));
+        assert!(asked.is_empty(), "{asked:?}");
+        assert!(matches!(answer, Ok(CanRefundHtlc::CanRefundNow)));
     }
 
     #[test]
@@ -2863,6 +2965,7 @@ fn test_message_hash() {
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         ticker: "ETH".into(),
         coin_type: EthCoinType::Eth,
         my_address: my_addr,
@@ -2871,6 +2974,7 @@ fn test_message_hash() {
         swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
         fallback_swap_contract: None,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -2920,6 +3024,7 @@ fn test_sign_verify_message() {
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         ticker: "ETH".into(),
         coin_type: EthCoinType::Eth,
         my_address: my_addr,
@@ -2928,6 +3033,7 @@ fn test_sign_verify_message() {
         swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
         fallback_swap_contract: None,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -3117,6 +3223,7 @@ pub(super) fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoi
     .to_string();
 
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals: 18,
         gas_station_url: None,
@@ -3137,6 +3244,7 @@ pub(super) fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoi
         fallback_swap_contract: None,
         ticker,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -3761,6 +3869,7 @@ mod swap_send_path_wire_form {
         let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
         let my_address = public_to_address(&key_pair.public());
         let coin = EthCoin(Arc::new(EthCoinImpl {
+            swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
             coin_type: EthCoinType::Erc20 {
                 platform: "MATIC".to_owned(),
                 token_addr,
@@ -3777,6 +3886,7 @@ mod swap_send_path_wire_form {
             fallback_swap_contract: None,
             ticker: "USDC-PLG20".to_owned(),
             web3_instances: vec![Web3Instance {
+                url: String::new(),
                 web3: web3.clone(),
                 is_parity: true,
             }],
@@ -4300,6 +4410,7 @@ mod scripted_node_ports {
         let instances: Vec<Web3Instance> = [behind.url.clone(), ahead.url.clone(), dead_url]
             .into_iter()
             .map(|url| Web3Instance {
+                url: String::new(),
                 web3: crate::eth::alloy_compat::build_provider(
                     crate::node_url::listed_nodes("TEST", vec![url]),
                     vec![],

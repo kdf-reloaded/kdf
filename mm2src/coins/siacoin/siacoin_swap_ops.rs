@@ -1131,6 +1131,7 @@ mod already_sent_query_tests {
             required_confirmations: AtomicU64::new(1).into(),
             fee_address: address.clone(),
             derivation_method: Arc::new(DerivationMethod::Iguana(address)),
+            swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         }
     }
 

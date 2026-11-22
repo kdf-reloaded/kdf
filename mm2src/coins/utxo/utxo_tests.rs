@@ -230,6 +230,7 @@ pub(crate) fn utxo_coin_fields_for_test(
         spent_record_is_shared: false,
         tx_hash_algo: TxHashAlgo::DSHA256,
         check_utxo_maturity: false,
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
     }
 }
 

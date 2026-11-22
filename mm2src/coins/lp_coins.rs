@@ -258,6 +258,8 @@ pub use solana::{solana_coin_from_conf_and_params, solana_coin_with_node_order, 
                  SolanaFeeDetails};
 
 pub mod siacoin;
+pub mod swap_evidence;
+pub use swap_evidence::{SwapEvidenceNodeNotInList, SwapEvidencePolicy};
 pub mod tendermint;
 #[cfg(target_arch = "wasm32")] pub mod tx_history_db;
 pub mod tx_history_streaming;

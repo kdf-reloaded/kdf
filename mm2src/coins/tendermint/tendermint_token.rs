@@ -523,6 +523,13 @@ impl MarketCoinOps for TendermintToken {
 impl MmCoin for TendermintToken {
     fn is_asset_chain(&self) -> bool { false }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(
+            crate::swap_evidence::SwapFamily::Tendermint,
+            &self.platform_coin.stored_swap_evidence_policy(),
+        )
+    }
+
     /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
     /// current beta), whatever the coins-config entry says; otherwise the entry decides. A token of a chain whose
     /// account prefix selects no HTLC dialect is wallet-only in either case (CRD ch.18 R18.11.23), and so is a

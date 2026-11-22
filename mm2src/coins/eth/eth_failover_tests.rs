@@ -23,6 +23,7 @@ fn instance(url: &str, handler: impl Fn(&Call) -> Reply + Send + Sync + 'static)
     let (provider, sender) = stub_provider(&[url], DIRECT_BOUND_S, handler);
     (
         Web3Instance {
+            url: String::new(),
             web3: provider,
             is_parity: false,
         },
@@ -138,6 +139,7 @@ fn t35_34_a_failing_node_of_the_nonce_gathering_is_named_with_ticker_and_list_po
             }
         });
         instances.push(Web3Instance {
+            url: String::new(),
             web3: provider_from_transport(transport),
             is_parity: false,
         });
@@ -241,6 +243,7 @@ fn t35_31_no_node_answering_the_nonce_is_six_rounds_then_failure() {
             Reply::Fail("connection refused".to_owned())
         });
         nodes.push(Web3Instance {
+            url: String::new(),
             web3: provider_from_transport(transport),
             is_parity: false,
         });

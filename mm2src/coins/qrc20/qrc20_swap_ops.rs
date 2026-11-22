@@ -1,6 +1,7 @@
 // qrc20_swap_ops — SwapOps and WatcherOps trait implementations.
 
 use super::*;
+use crate::CanRefundHtlc;
 
 #[async_trait]
 impl SwapOps for Qrc20Coin {
@@ -276,6 +277,16 @@ impl SwapOps for Qrc20Coin {
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
         self.extract_secret_impl(secret_hash, spend_tx)
+    }
+
+    /// The gate reads the QTUM chain's median time past (CRD ch.51 §51.6E R88).
+    fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        Box::new(
+            utxo_common::can_refund_htlc(self, locktime)
+                .boxed()
+                .map_err(|e| ERRL!("{}", e))
+                .compat(),
+        )
     }
 
     fn negotiate_swap_contract_addr(
