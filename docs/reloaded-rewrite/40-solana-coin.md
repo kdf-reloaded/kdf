@@ -2211,10 +2211,11 @@ first creates it (idempotently; the taker pays its rent, once per mint for the
 whole network). The fee transaction also carries one instruction of the public
 Memo program whose data is the swap's uuid in its text form. The fee is valid
 when the transaction read from the node by its signature (as R40.6D.9) is final
-and successful, its fee payer and the transfer's source are the taker's key, it
-moves at least the expected amount to that destination, its memo is this swap's
-uuid, and its block height is not below the taker coin's block height recorded
-at the swap's start.
+and successful, its fee payer is the taker's key, the transfer's source is that
+key (SOL) or a token account that key owns and signs for (SPL), it moves at
+least the expected amount to that destination, its memo is this swap's uuid, and
+its block height is not below the taker coin's block height recorded at the
+swap's start.
 
 **R40.6D.14 (trade fees and admission).** The fee answers are in SOL with its
 full decimals: for the sender, the payment's transaction fee plus the rents it
