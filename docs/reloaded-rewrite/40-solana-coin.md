@@ -2170,8 +2170,8 @@ transaction's wire bytes. The receiving side takes the transaction's first
 signature from those bytes and reads the transaction from the node by that
 signature (`getTransaction`, `finalized`); only the node's answer is validated,
 and the payment is valid only when the node's wire bytes equal the bytes the
-peer sent, so every later step reads verified bytes. The payment is valid when
-that transaction is final (R40.6D.8) and has an instruction whose program is the
+peer sent, so every later step reads verified bytes; it is also valid only when
+that transaction is final (R40.6D.8), has an instruction whose program is the
 configured program, top-level or inner, that is the payment instruction for this
 coin with exactly the agreed secret hash, lock time, amount, sender, receiver
 and (SPL) mint, and when the payment account derived from those terms is owned
@@ -2192,20 +2192,23 @@ remaining seconds until that time reaches the lock, and "refund now" after. A
 failed read answers "wait"; the local clock alone never opens the gate.
 
 **R40.6D.12 (spend search and secret).** The signatures of the payment address
-(`getSignaturesForAddress`, `finalized`) are read newest first, the listing to
-its first empty page and without a page limit, and each transaction once
-(`getTransaction` of §40.6C). Only listed signatures whose slot lies between the
-last slot at which the payment account was seen at `finalized` and the first
-slot at which it is gone are read, and the listing ends at the payment's own
-signature. An instruction counts only when its program is the configured program
-and its `payment` account is this payment address, top-level or inner, in a
-successful transaction. A claim instruction gives the secret, the 32 bytes after
-the instruction's discriminator, accepted only when its SHA-256 equals the
-agreed hash. The payment is answered "spent" (claimed) or "refunded" only when
-such an instruction is found and the payment account is also gone at
-`finalized`. A failed transaction is neither. A failed read is undetermined,
-never "not spent" or "not sent". The account's absence alone does not mean "not
-paid" (§40.6B.7).
+(`getSignaturesForAddress`, `finalized`) are read newest first; the walk ends at
+the payment's own signature, or at the first empty page if that comes first, and
+no page limit applies. Each transaction is read once (`getTransaction` of
+§40.6C), and only listed signatures whose slot lies between a lower and an upper
+bound are read: the lower bound is the last slot at which this node saw the
+payment account at `finalized`, or the payment transaction's own slot when this
+node has no such reading; the upper bound is the first slot at which this node
+found the account gone, or none while it has not. The search is thus never
+narrower than from the payment to the account's disappearance. An instruction
+counts only when its program is the configured program and its `payment` account
+is this payment address, top-level or inner, in a successful transaction. A
+claim instruction gives the secret, the 32 bytes after the instruction's
+discriminator, accepted only when its SHA-256 equals the agreed hash. The
+payment is answered "spent" (claimed) or "refunded" only when such an
+instruction is found and the payment account is also gone at `finalized`. A
+failed transaction is neither. A failed read is undetermined, never "not spent"
+or "not sent". The account's absence alone does not mean "not paid" (§40.6B.7).
 
 **R40.6D.13 (dex fee).** Only the standard form is sent; no burn form exists for
 these coins. The fee goes to the Solana address whose 32 bytes are the network's
