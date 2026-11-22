@@ -478,17 +478,6 @@ legacy JSON file, a browser object store, or the native `my_swaps.events_json`
 column after import; the role tag, event tag, order, and payload JSON contract
 remain the same.
 
-> **Status note (2026-11-22, Reloaded-original; informative).** On native
-> builds the replace of a legacy JSON record is atomic and durable: the new
-> record is written to a uniquely named `*.tmp` file in the same folder,
-> synced to disk and renamed over the record, and the folder is then synced
-> (Unix). If only the folder sync fails, for example on a mount that cannot
-> sync a folder, the save succeeds with a warning, because the record is
-> already replaced. On Windows a rename refused because another process holds
-> the file is retried briefly. A left-over `*.tmp` file is never read as a
-> record. The saved order records use the same write. Browser builds save each
-> record in one object-store transaction. Detail: PR #480.
-
 R44.8A.7 Replay shall apply saved events in array order to reconstruct the
 role-specific swap state. The first event is expected to be `Started`; if the
 first event is absent or is not a start event, replay cannot reconstruct coin
@@ -753,6 +742,20 @@ with a reference build, the following hold.
 > reference's behavior; it is not a divergence. This repository's start-up
 > behavior for a ledger above state `15` was not examined in this round.
 
+> **Reloaded status update (2026-11-22, Reloaded-original; informative).**
+> With PR #480 the native build writes a saved swap, its statistics copy and a
+> saved order through a temporary file in the same directory, named `<file
+> name>.<process id>.<counter>.tmp` (extension `tmp`, R44.9A.13 item 1), and
+> renames it over the record. Beyond the reference (R44.9A.12) it forces the
+> temporary file to stable storage before the rename and, on Unix, the
+> directory after it; if only the directory sync fails, the save succeeds with
+> a warning, because the record is already replaced. On Windows a rename
+> refused because another process holds the file is retried briefly. The
+> temporary name is unique per write, so two writers of one record never share
+> it; a leftover from an interrupted write is therefore not overwritten by a
+> later save, and both implementations' directory reads ignore it (R44.9A.11).
+> Browser builds save each record in one object-store transaction.
+
 ### 44.9A.5 Tests
 
 T44.9A.1 *Lock content form.* After RELOADED takes a swap lock and after each
@@ -873,3 +876,7 @@ section, the highest ledger value is still `15` (R44.9.5).
   shingles); the repository's clean-room gate tool was not applicable because
   the additions embed no code blocks. *Measure:* 0.00, on the
   discretionary-expression basis.
+- *Clean-side addition of 2026-11-22 (PR #480):* the Reloaded status update
+  under R44.9A.13. It is Reloaded-original, rests only on this repository's own
+  write code and the cleared text of §44.9A, and changes no sentence of the
+  chapter.

@@ -1069,8 +1069,8 @@ the previous version used. The safe way:
   either its previous or its new complete content. Where a folder cannot be synced (some network mounts), the save
   still succeeds and logs a warning. On Windows a replace refused because another program, such as a virus scanner,
   holds the new file is retried briefly. A temporary `*.tmp` file left by a crash is ignored. Browser builds already
-  saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3 and ch.44 R44.8A.6
-  (status note).
+  saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3,
+  ch.44 R44.8A.6 and §44.9A (status update).
 
 ### Tests
 
