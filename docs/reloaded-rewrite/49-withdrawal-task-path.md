@@ -505,6 +505,14 @@ several tickers is not yet settled). The tests are the
 the Trezor policy, `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens`
 (T49.31).
 
+*Status note (2026-11-22), three open points of the platform-ticker maps
+(Spec Reader round 0.5.0-21; passed the KDF Dirty Gate with §49.2.2).* The
+reference answers to three points this subsection left open are recorded in
+§49.2.2 below: the shape of `page_balance` and `total_balance` (R49.35), the
+used-address rule and the listed entries of the scan that runs at
+activation (R49.36), and what remains recorded when the balance query of a
+newly generated address fails (R49.37). No sentence above was changed.
+
 > **Code-quality finding (informative; this repository).** The Trezor
 > emulator test that stands for T49.9 builds the ERC-20 coin directly with
 > an HD derivation instead of activating it on a Trezor platform. It
@@ -548,6 +556,212 @@ one activated ERC-20 token:
   is queried for balance or nonce, and `account_balance` afterwards still
   lists three addresses.
 - Without `from`, both routes send from the enabled address.
+
+### 49.2.2 EVM HD: balance totals, the scan at activation, and a new address whose balance query fails (reference behavior)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-22, measure 0.03**
+> (chapter 01 R40; attestation in the Provenance Footer).
+> This subsection was written by the dirty-side specification author on
+> 2026-11-22 (Spec Reader round 0.5.0-21) under the two-team procedure of
+> chapter 01 §1.4A, from the rows `v2.6.0-beta`, `v3.0.0-beta` and
+> `main (as of 2026-10-07)` of chapter 02 §2.15A, and from this
+> repository's own tree. The source tree of the third row equals that of
+> `v3.0.0-beta`. Every reference statement below holds **identically at all
+> three rows** unless it names a row. It edits no sentence of R49.32 --
+> R49.34, which it completes.
+
+R49.35. *The page and account totals are per-ticker maps (reference
+contract).* On an HD-activated EVM platform the totals have the same JSON
+type as the `balance` of one address: an object keyed by ticker whose
+values are BalanceInfo `{spendable, unspendable}` (chapter 35 R35.1.3).
+Neither is ever a bare `{spendable, unspendable}` object.
+
+1. *`account_balance`.* The result carries `account_index` (integer),
+   `derivation_path` (string), `addresses` (array of `{address,
+   derivation_path, chain, balance}`), `page_balance`, `limit`, `skipped`,
+   `total`, `total_pages` and `paging_options`. `page_balance` is the map
+   described above. For the platform ticker it holds one key per ticker of
+   R49.32 item 1, each the sum over the addresses **of the returned page**,
+   not of the whole account. For a token ticker it holds that token's key
+   alone. A ticker whose sum is zero is still present with zero values. A
+   page that lists no address (a page past the known range) answers
+   `addresses: []` and `page_balance: {}`.
+2. *`task::account_balance::init`.* The completed result is
+   `{account_index, derivation_path, total_balance, addresses}`.
+   `total_balance` is the same map, summed over every known address of the
+   account's external chain. An account with no known address answers
+   `total_balance: {}`.
+3. *Activation report.* The `total_balance` of each account in the HD
+   report of chapter 35 R35.1.3(b) is formed the same way from the entries
+   that report lists. An entry whose map is empty (R49.36 item 4) adds
+   nothing, so a ticker is present in a total exactly when at least one
+   listed address carries it.
+4. *Not specific to EVM.* The map type belongs to the answer shared by the
+   HD families: the reference's UTXO and QTUM coins answer `page_balance`
+   and `total_balance` as a map with their own ticker as the only key.
+
+R49.36. *The address scan at activation (reference contract).* This rule
+covers `enable_eth_with_tokens` and `task::enable_eth::init` for a platform
+whose result has the HD shape. Both run the same scan.
+
+1. *When it runs.* With `scan_policy: do_not_scan` no account is scanned.
+   With `scan_if_new_wallet` (the default) the scan runs only when the
+   wallet's storage holds no account at the account index that
+   `path_to_address` names; that account is then created and scanned. With
+   `scan` it runs in that case too, and otherwise over every stored account
+   at each activation.
+2. *Tokens that take part.* The ERC-20 tokens named in the same request
+   (`erc20_tokens_requests`) are registered with the platform before the
+   report is built. They therefore take part in the used-address test and
+   appear in every queried map of the report.
+3. *Used-address rule.* The rule is R49.32 item 3 unchanged: a non-zero
+   nonce, a non-zero platform balance, or a non-zero balance of any of
+   those tokens. An address that holds only a token balance **is** counted
+   as used and is found by the activation scan.
+4. *What the report lists, per account, in this order.* First every
+   already known address, each with the full map of R49.32 item 1. Then
+   the scan's entries by rising index: each unused address that lies
+   between the previously known range and a used address is listed with an
+   **empty** map (`{}`), and each used address with the full map. Unused
+   addresses after the last used one are not listed and do not become
+   known. Last, the addresses generated to reach the required minimum
+   count, which is the larger of `min_addresses_number` and, for the
+   account `path_to_address` names, that path's address index plus one.
+   Those generated addresses are queried, so each carries the full map
+   with zero values, not `{}`.
+5. *Reach.* A used address is found when at most `gap_limit` unused
+   addresses in a row precede it; the scan ends at the first longer run.
+6. *What is recorded.* When the scan completes, the account's known count
+   becomes the index of the last used address plus one. The intervening
+   entries of item 4 are known from then on. A later `account_balance`
+   queries them like any other address and shows the full map with zero
+   values. The empty map appears only in the answer of the call that ran
+   the scan.
+7. *A failed query.* If any node query of the scan or of the report fails,
+   the activation fails as a whole with `Transport` (chapter 35 R35.1.6,
+   the balance-read row of its table). The known count is written only when a scan completes,
+   so an interrupted scan records no address. An address generated for
+   the minimum count is recorded when it is generated, before its query.
+   A newly created account is stored before its scan starts. After a
+   first activation that failed during the scan, the storage therefore
+   holds that account with no known address, and a following activation
+   under `scan_if_new_wallet` no longer scans it; `scan`, or
+   `task::scan_for_new_addresses::init`, then finds its used addresses.
+
+R49.37. *A new address whose balance query fails (reference contract).*
+
+1. *Order of the steps in `get_new_address`.* The account is resolved
+   first (`UnknownAccount`). Then the gap check runs, which may ask the
+   node whether known addresses are used; a failure there ends the request
+   before any address exists. Then the next address is derived and the
+   raised known count is written to the wallet's storage and to the loaded
+   wallet. Only after that is the address's balance queried: the platform
+   coin and every activated token (R49.32 item 1).
+2. *No rollback.* If that balance query fails, for the platform coin or
+   for any one token, the request fails and returns no partial map, and
+   **the raised count stays**. The reference has no step that withdraws
+   the address. The address is known from then on: `account_balance` lists
+   it, a withdraw accepts it as `from` (R49.34 item 3), and it is still
+   known after a restart. The failed answer does not name the address. A
+   repeated call derives the address after it.
+3. *What the caller sees.* The error of `get_new_address` with
+   `error_type` `Transport` and a string in `error_data`, HTTP 500, when
+   the node was unreachable, the connection failed, the answer could not
+   be decoded, or the node answered with a JSON-RPC error. Any other
+   failure of the query answers `Internal`, HTTP 500. The method's error
+   set also has `RpcInvalidResponse` (HTTP 500); no EVM node failure was
+   seen to produce it. One boundary differs between the rows: a request
+   that timed out inside the daemon answers `Internal` at `v2.6.0-beta`
+   and `Transport` at `v3.0.0-beta`. Which node conditions the daemon
+   classes as such a timeout was not established in this round.
+4. *Task form.* `task::get_new_address::init` first requires a hardware
+   context. Without one the task ends in an `Error` status whose `details`
+   carry `HwContextNotInitialized`, before any address is derived, and the
+   known count is unchanged. With one, the device is asked to confirm the
+   derived address before anything is recorded; a refusal or a device
+   failure records nothing. After the confirmation the count is raised and
+   the balance is queried, and a failure of that query behaves as items 2
+   and 3 describe, the error sitting in `details` of the `Error` status.
+   The task therefore completes only where a hardware context exists,
+   which qualifies R49.32's opening sentence for this one method. Chapter
+   05 R54 binds this repository to choose by the coin's key policy
+   instead.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort while reading the order of R49.37 item 1).** A balance query that
+> fails after the count was raised leaves a known address the caller was
+> never told about. Each retry adds one more, and the run of unused
+> addresses this builds up can later make the gap check refuse further
+> addresses (`EmptyAddressesLimitReached`). Proposed change for this
+> repository: either query the balance of the derived address before the
+> count is recorded, or keep the count and answer the address with the
+> error so the caller can use it. Either choice departs from the reference
+> and would be a recorded divergence.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort while reading R49.36 items 1 and 7 side by side).** Under the
+> default `scan_policy`, a first activation that fails while scanning
+> leaves a stored account that later activations treat as an existing
+> wallet and do not scan. Used addresses beyond the minimum count then
+> stay unlisted until the caller asks for a scan explicitly. Proposed
+> change for this repository: treat a stored account that has no known
+> address as new for the purpose of `scan_if_new_wallet`, or mark an
+> account as scanned only once a scan has completed.
+
+> **Reloaded status (this repository, 2026-11-22; not corpus-sourced).**
+> (a) `account_balance` answers `page_balance` as a single
+> `{spendable, unspendable}` of the requested ticker where R49.35 item 1
+> has a map; the member belongs to the shared answer, so this holds for
+> every HD family. `task::account_balance::init` answers `total_balance`
+> as a map that always holds the requested coin's ticker, also for an
+> account without addresses (chapter 38 R38.8.5), where R49.35 item 2 has
+> `{}`. (b) For the scan, the open points of the status note of 2026-11-20
+> in §49.2.1 stand: by R49.36 items 3 and 4 the reference counts a
+> token-only address as used at activation and lists the intervening
+> entries with `{}`. (c) `get_new_address` records the raised count and
+> then queries the balance, with no rollback, as R49.37 item 2 describes.
+> This repository has no `task::get_new_address::init` (chapter 21, the
+> Reloaded note after R21.10B.4).
+
+T49.33. *(Reloaded-original; R49.35.)* Against a mocked EVM node, under a
+software global-HD login, activate a platform with one ERC-20 token and
+three known addresses in account `0`, each holding both assets. Then:
+- `account_balance` with `limit: 2` answers a `page_balance` object with
+  exactly the two ticker keys, each the sum over the two listed addresses;
+  the second page sums the third address alone.
+- A page past the known range answers `addresses: []` and
+  `page_balance: {}`.
+- `task::account_balance::init` answers `total_balance` with the two
+  ticker keys summed over all three addresses.
+- Asked for the token ticker, both methods answer a total with the token's
+  key alone.
+
+T49.34. *(Reloaded-original; R49.36.)* Against a mocked EVM node, under a
+software global-HD login with empty wallet storage, activate a platform
+with one ERC-20 token where only address `2` of account `0` is used: nonce
+`0`, platform balance `0`, a non-zero token balance. With the default
+`scan_policy`:
+- The report lists addresses `0`, `1` and `2`. Address `2` carries both
+  tickers. Addresses `0` and `1`, which the scan passed over as unused,
+  carry `{}`.
+- `total_balance` carries both tickers.
+- `account_balance` afterwards counts three addresses and shows both
+  tickers, with zero values, for the unused ones.
+- With `do_not_scan` on fresh storage the report lists address `0` only.
+- When a token balance query fails during the scan, the activation answers
+  `Transport` and no address was recorded by it.
+Repeat the first assertion through `task::enable_eth::init`.
+
+T49.35. *(Reloaded-original; R49.37.)* Against a mocked EVM node, under a
+software global-HD login with one known address in account `0` and one
+activated ERC-20 token, make the token's balance query fail for the next
+address. `get_new_address` answers HTTP 500 with `error_type` `Transport`
+and no `new_address`. Afterwards `account_balance` reports `total: 2`, and
+a second `get_new_address`, with the node healthy again, answers the
+address at index `2`. The same holds when the platform balance query is
+the one that fails. If this repository adopts one of the changes of the
+code-quality finding above, this test is rewritten to that decision and
+the divergence is recorded here.
 
 ### 49.2A Cosmos-family fee descriptors (gated text; passed the KDF Dirty Gate on 2026-11-08)
 
@@ -1344,3 +1558,42 @@ addresses.
   HD).* Reloaded-original, clean side: it records the balance maps of an EVM
   platform ticker as built; no forbidden-class input. No cleared sentence was
   edited.
+- *Scoped addition (2026-11-22, Spec Reader round 0.5.0-21) -- §49.2.2
+  (R49.35 -- R49.37, the two code-quality findings, the Reloaded status
+  note, T49.33 -- T49.35) and the status note of 2026-11-22 in §49.2.1.*
+  **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at
+  the rows `v2.6.0-beta`, `v3.0.0-beta` and `main (as of 2026-10-07)` of
+  chapter 02 §2.15A, consulted **only** to establish, for an EVM platform
+  under an HD wallet: the JSON type of the page and account balance totals
+  of `account_balance` and `task::account_balance::init`; when the address
+  scan at activation runs, which tokens take part in it, what an address
+  must show to count as used, which entries its report lists and with
+  which balance member, and what it records; and, for `get_new_address`
+  and `task::get_new_address::init`, the order of recording and balance
+  query, what stays recorded when the query fails, and which error
+  discriminants and HTTP statuses the caller receives. Behavior and
+  dictated request and response members and error discriminants only; no
+  private identifier, function body, helper decomposition, error, log,
+  comment or test text was reproduced. The Reloaded status note and T49.33
+  -- T49.35 rest on this repository's own tree and are Reloaded-original.
+  No row was added to chapter 02 §2.15A: all three states read already
+  have rows. The pointers of the same date in chapter 35 (after R35.1.3)
+  and chapter 05 (after R54) travel with this item.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings, in a single pass; the chapter 02 §2.15A rows were verified.
+  *Extent:* the HD wallet subsystem as §49.2.1 -- §49.2.2 of this chapter,
+  chapter 35 R35.1.3 and R35.1.6 and chapter 05 R54 scope it -- the
+  account-balance and new-address commands and their task forms, the
+  activation balance report and its address scan, the EVM used-address test,
+  the recording of the address count, the hardware address confirmation, and
+  the mapping of EVM node failures to balance-error discriminants -- at the
+  row `v3.0.0-beta` (about twelve source files read) and the row `v2.6.0-beta`
+  (through the difference between the rows, plus its differing error mapping);
+  the row `main (as of 2026-10-07)` was compared commit to commit and is
+  identical in this subsystem; on the candidate side, the 261 added lines.
+  *Method:* reading plus mechanical per-token occurrence counts (29 tokens) at
+  both release rows, with a forced-versus-free test; no word-shingle
+  comparison was run, and the repository's clean-room gate tool was not
+  applicable because the additions embed no code blocks. *Measure:* 0.03, on
+  the discretionary-expression basis.
