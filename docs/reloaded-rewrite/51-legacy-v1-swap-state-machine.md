@@ -1471,10 +1471,13 @@ payment transaction. The two rows are identical.
 > refundable when that timestamp is past the lock time; otherwise the answer
 > is to wait for the difference plus one second, at most 3600 seconds. A
 > failed read is an error, which the refund stages of R18 and R31 retry. The
-> Tron-VM form of the EVM family (R92 item 3), Tendermint, Sia and the
-> shielded coin keep the rules R88 records. The manual recovery and the
-> clock check before a refund are unchanged. No message and no transaction a
-> peer validates changes, which §51.6E permits.
+> Tron-VM form of the EVM family, which R92 item 3 leaves outside §51.6E,
+> keeps its current rule; Tendermint, Sia and the shielded coin keep the
+> rules R88 records. Reloaded's manual recovery does not ask this answer: it
+> has its own gate (the local clock past the lock time plus 3700 seconds,
+> and for the shielded coin the chain's median time past), which is
+> unchanged, as is the clock check before a refund. No message and no
+> transaction a peer validates changes, which §51.6E permits.
 
 ## 51.7 Bound Message Contract
 
