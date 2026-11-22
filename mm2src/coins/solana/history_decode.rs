@@ -398,9 +398,48 @@ impl ParsedTx {
         Ok(self.sol_change(index)? != 0 || self.fee_payer()? == me)
     }
 
-    /// Whether the transaction is a row of the token (R40.6C.8; a failed transaction changes no token balance).
+    /// Whether a token transfer of the token's mint has a source or a destination held by `me` (a send to self
+    /// included, whose balance change is 0).
+    fn moves_token_of(&self, me: &Pubkey, token: &TokenSpec) -> Result<bool, DecodeError> {
+        for effect in &self.effects {
+            let Effect::TokenTransfer {
+                source,
+                destination,
+                mint,
+                ..
+            } = effect
+            else {
+                continue;
+            };
+            let moved_mint = match mint {
+                Some(index) => self.accounts.get(*index).copied(),
+                None => self
+                    .mint_of_account(*source)
+                    .or_else(|| self.mint_of_account(*destination)),
+            };
+            if moved_mint != Some(token.mint) {
+                continue;
+            }
+            let (Some(source_holder), Some(destination_holder)) =
+                (self.holder_of(*source), self.holder_of(*destination))
+            else {
+                return Err(DecodeError::new("a token transfer names an account outside the list"));
+            };
+            if source_holder == *me || destination_holder == *me {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether the transaction is a row of the token (R40.6C.8): the wallet's amount of the mint changes, or a token
+    /// transfer of the mint has the wallet as source or destination holder. A failed transaction has no effects read
+    /// and changes no token balance, so it is no row (R40.6C.10).
     fn is_token_row(&self, me: &Pubkey, token: &TokenSpec) -> Result<bool, DecodeError> {
-        Ok(!self.failed && self.token_change(me, &token.mint)? != 0)
+        if self.failed {
+            return Ok(false);
+        }
+        Ok(self.token_change(me, &token.mint)? != 0 || self.moves_token_of(me, token)?)
     }
 
     /// Whether any list gets a row from this transaction: the caller reads the block height of the slot only then.

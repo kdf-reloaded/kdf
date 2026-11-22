@@ -1356,5 +1356,80 @@
    "slot": 524838634,
    "transactionIndex": 20
   }
- ]
+ ],
+ "hand_built": {
+  "_note": "HAND-BUILT, not captured: the captured SPL send 4XP43b8a... with the destination account of its TransferChecked instruction changed to the source account (the wallet's own token account) and the token balances of the peer's account removed, so the wallet's token balance is unchanged. The first signature is kept (not valid for the edited message; the decoder compares text only). Used by T40.6C.5 (send to self).",
+  "spl_self_send": {
+   "blockTime": 1795313390,
+   "meta": {
+    "computeUnitsConsumed": 105,
+    "costUnits": 1759,
+    "err": null,
+    "fee": 5000,
+    "innerInstructions": [],
+    "loadedAddresses": {
+     "readonly": [],
+     "writable": []
+    },
+    "logMessages": [
+     "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]",
+     "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 105 of 200000 compute units",
+     "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success"
+    ],
+    "postBalances": [
+     9797486560,
+     1488440,
+     1488440,
+     20508277856,
+     1066800
+    ],
+    "postTokenBalances": [
+     {
+      "accountIndex": 2,
+      "mint": "HYTTzUoh6pUZCSGv1Bdo2tWmm6jHtPBtpj7XJfyUjAdn",
+      "owner": "Do7RKwFqtSJmUVCMvtyVjF27dSwinSAEUcnpednUtYQ8",
+      "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "uiTokenAmount": {
+       "amount": "998500000",
+       "decimals": 6,
+       "uiAmount": 998.5,
+       "uiAmountString": "998.5"
+      }
+     }
+    ],
+    "preBalances": [
+     9797491560,
+     1488440,
+     1488440,
+     20508277856,
+     1066800
+    ],
+    "preTokenBalances": [
+     {
+      "accountIndex": 2,
+      "mint": "HYTTzUoh6pUZCSGv1Bdo2tWmm6jHtPBtpj7XJfyUjAdn",
+      "owner": "Do7RKwFqtSJmUVCMvtyVjF27dSwinSAEUcnpednUtYQ8",
+      "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "uiTokenAmount": {
+       "amount": "998500000",
+       "decimals": 6,
+       "uiAmount": 998.5,
+       "uiAmountString": "998.5"
+      }
+     }
+    ],
+    "rewards": [],
+    "status": {
+     "Ok": null
+    }
+   },
+   "slot": 524917118,
+   "transaction": [
+    "AbA/7vEys9r7VpymdJIwqMI4SjlBOSKS+8LjjSZRn4ILoFpkwdupJT6Xn94vcOf3DjxnVTtaGaFjzjtT/2wNEwwBAAIFvhw4AxhAw/I6mJtPfNLUAxuA8FUkYBzZKl4z0W8H+uFIMwxKczF6WFMEO5GPj+6e+/EGXkytQovhc7vo2tzFdUsZ5N2zfc9BuJB+Wk9H8xpPUMPMyZRBHkCvdCWDVUezBt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKn1yeueRJMAgrrMtVVrzVRRqFymQF4yLUL2+P7XkFju2SvLxzLYaZ3/uQuisjo99krG4a7V6JyiwCJujq+ki9XxAQMEAgQCAAoMYOMWAAAAAAAG",
+    "base64"
+   ],
+   "transactionIndex": 17,
+   "version": "legacy"
+  }
+ }
 }

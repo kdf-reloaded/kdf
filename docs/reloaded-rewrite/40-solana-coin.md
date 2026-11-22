@@ -1996,17 +1996,19 @@ or when the platform address is its fee payer. Its members:
 **R40.6C.8 (SPL rows).** A transaction is a row of a served token when the token
 amount of the watched accounts of that token changes (`meta.postTokenBalances`
 minus `meta.preTokenBalances`, entries of the token's mint whose owner is the
-platform address; an account absent on one side counts 0 there). Its members
-follow R40.6C.7 in the token's own units and decimals, with token transfers of
-the mint in place of transfers, and the owner of a token account (from the token
-balance entries) in place of the account when the entry names one. A token
-balance entry without an owner is not the wallet's. For a row without a token
-transfer of the mint, `total_amount` is the change without sign, with no fee
-subtracted (the fee is SOL), `from` the fee payer and `to` the platform address.
-`fee_details` is the SOL fee of R40.6C.7, so the fee is never part of the
-token's `spent_by_me`. `transaction_type` is `TokenTransfer` with the token's
-id. One transaction is at most one row in each list. A send of the token to self
-is received and spent with a change of 0, as its withdraw answer says.
+platform address; an account absent on one side counts 0 there), or when it has
+a token transfer of the mint whose source or destination is held by the platform
+address (a successful transaction only, R40.6C.10). Its members follow R40.6C.7
+in the token's own units and decimals, with token transfers of the mint in place
+of transfers, and the owner of a token account (from the token balance entries)
+in place of the account when the entry names one. A token balance entry without
+an owner is not the wallet's. For a row without a token transfer of the mint,
+`total_amount` is the change without sign, with no fee subtracted (the fee is
+SOL), `from` the fee payer and `to` the platform address. `fee_details` is the
+SOL fee of R40.6C.7, so the fee is never part of the token's `spent_by_me`.
+`transaction_type` is `TokenTransfer` with the token's id. One transaction is at
+most one row in each list. A send of the token to self is such a row: received
+and spent with a change of 0, as its withdraw answer says.
 
 **R40.6C.9 (passes and states).** A pass runs at the start and then 60 seconds
 after the end of the previous one. `sync_status` follows chapter 21 R21.10C.10:
@@ -2049,7 +2051,8 @@ receiver's token account (rent in `fee_details`, `FeeForTokenTx`), a failed
 transaction (fee only), and a version-0 transaction with loaded addresses; the
 identity of R40.6C.7 on every row.
 T40.6C.5 SPL rows: a send, a receive (the receiver's token account created in
-the same transaction), and the absence of a token row for the failed one.
+the same transaction), a send to self (a row with a change of 0, the figures of
+its withdraw answer), and the absence of a token row for the failed one.
 T40.6C.6 A transaction listed by the platform address and a token account is
 read once and is one row in each list it changes; a restart adds no duplicate.
 T40.6C.7 An undecodable transaction and a block without height are logged and

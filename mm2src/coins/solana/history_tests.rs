@@ -72,6 +72,17 @@ fn answer_of(signature: &str) -> ConfirmedTransaction {
     serde_json::from_value(fixtures()["transactions"][signature].clone()).expect("a getTransaction answer")
 }
 
+/// The rows of a getTransaction answer `answer` (a JSON value) with the signature `signature`, for the wallet.
+fn rows_of_value(answer: Json, signature: &str, tokens: &[TokenSpec]) -> Vec<(String, TransactionDetails)> {
+    let answer: ConfirmedTransaction = serde_json::from_value(answer).expect("a getTransaction answer");
+    let parsed = parse_transaction(&answer, signature).expect("the transaction decodes");
+    let me = Pubkey::from_str(WALLET).expect("a key");
+    let height = fixtures()["blocks"][answer.slot.to_string()]["blockHeight"]
+        .as_u64()
+        .expect("a block height");
+    parsed.rows(&me, "SOL", tokens, height).expect("the rows build")
+}
+
 /// The rows of the fixture transaction `signature` for `me`, with the block height of its slot.
 fn rows_of(signature: &str, me: &str, tokens: &[TokenSpec]) -> Vec<(String, TransactionDetails)> {
     let answer = answer_of(signature);
@@ -306,6 +317,52 @@ fn t40_6c_5_an_spl_send_is_a_token_row_without_the_fee() {
         matches!(&row.transaction_type, TransactionType::TokenTransfer(id) if id.0.len() == 32),
         "a token transfer with the token's id"
     );
+}
+
+/// A send of the token to the wallet itself: a token row with a change of 0 and the figures of the withdraw answer
+/// (R40.6C.8). The transaction is HAND-BUILT (fixture member `hand_built`): the captured SPL send with its
+/// destination changed to the wallet's own token account. Its SOL row is the fee only.
+#[test]
+fn t40_6c_5_an_spl_send_to_self_is_a_token_row_with_a_change_of_zero() {
+    let answer = fixtures()["hand_built"]["spl_self_send"].clone();
+    let rows = rows_of_value(answer, TX_SPL_SEND, &[token_spec()]);
+    assert!(rows.len() == 2, "a SOL row and a token row");
+    let row = &rows
+        .iter()
+        .find(|(ticker, _)| ticker == TOKEN_TICKER)
+        .expect("a token row")
+        .1;
+    assert_identity(row);
+    assert!(row.my_balance_change == dec("0"), "a change of 0");
+    assert!(
+        row.received_by_me == dec("1.5") && row.spent_by_me == dec("1.5") && row.total_amount == dec("1.5"),
+        "received, spent and total are the amount"
+    );
+    assert!(
+        row.from == vec![WALLET.to_owned()] && row.to == vec![WALLET.to_owned()],
+        "from and to are the wallet"
+    );
+    assert!(
+        matches!(&row.transaction_type, TransactionType::TokenTransfer(id) if id.0.len() == 32),
+        "a token transfer with the token's id"
+    );
+    assert!(fee_of(row).fee_amount == dec("0.000005"), "the SOL fee");
+    let sol = &rows.iter().find(|(ticker, _)| ticker == "SOL").expect("a SOL row").1;
+    assert_identity(sol);
+    assert!(
+        sol.my_balance_change == dec("-0.000005") && sol.received_by_me == dec("0"),
+        "the SOL row is the fee only"
+    );
+}
+
+/// A failed transaction that carries a token transfer instruction of the mint gives no token row (R40.6C.10). The
+/// answer is the hand-built self send with `meta.err` set (altered answer).
+#[test]
+fn t40_6c_5_a_failed_transaction_with_a_token_transfer_gives_no_token_row() {
+    let mut answer = fixtures()["hand_built"]["spl_self_send"].clone();
+    answer["meta"]["err"] = json!({ "InstructionError": [0, "InsufficientFunds"] });
+    let rows = rows_of_value(answer, TX_SPL_SEND, &[token_spec()]);
+    assert!(rows.iter().all(|(ticker, _)| ticker == "SOL"), "no token row");
 }
 
 #[test]
