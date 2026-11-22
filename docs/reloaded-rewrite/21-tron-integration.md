@@ -1427,6 +1427,19 @@ availability note). The read-only views (`orderbook`, `best_orders`,
 unchanged, and so are `max_taker_vol`, `max_maker_vol` and the legacy
 `get_trade_fee`, which do not ask whether a coin is wallet-only.
 
+*Status note (2026-11-22), a saved TRON order is kept, not cancelled
+(clean-side, not corpus-sourced).* From this date an order saved earlier
+that names a coin whose coins-config protocol is `TRX` or `TRC20` is no
+longer cancelled at startup. It is kept, in memory and in the storage,
+so `my_orders` lists it and `cancel_order` removes it, but it is never
+announced and never matched, and one log line names it. The rule, which
+is the same for every coin that cannot trade, is in the status note of
+2026-11-22 at [Chapter 60](60-trading-floors-and-refusal-contract.md)
+R60.6.5. Where the status notes of 2026-11-20 in this chapter (the one
+before §21.0, the one above, and the one at R21.B3) say that such an
+order is cancelled at startup, read them with this note. Nothing else in
+them changes.
+
 *Status note (2026-11-22), EVM-family methods called on a TRON coin (Spec
 Reader round 0.5.0-22; passed the KDF Dirty Gate).* What the reference answers
 when `get_raw_transaction`, `sign_raw_transaction`, the legacy `get_trade_fee`,
@@ -2966,3 +2979,9 @@ V3. The address encoding, protobuf transaction/contract formats,
   T21.10B.22 (cleared 2026-11-22) for the comparison, and this
   repository's own code. *Forbidden corpus:* not consulted for this
   note. No cleared sentence was edited.
+- *Status note added 2026-11-22 (clean-side, Reloaded-original) -- a
+  saved TRON order is kept, at R21.10B.9.* *Inputs:* the maintainer's
+  decision of 2026-11-22 on stored orders of untradable coins, the
+  status note of that date at chapter 60 R60.6.5, and this repository's
+  own code. *Forbidden corpus:* not consulted for this note. No cleared
+  sentence was edited.

@@ -7807,12 +7807,12 @@ fn test_stale_pubkeys_keeps_real_per_order_state_until_order_cancelled() {
     assert_eq!(pubkeys, vec![order_pubkey]);
 }
 
-// ---- Saved orders with a Tendermint or TRON coin are cancelled at startup while the family's swaps are off ----
+// ---- Saved orders of a coin that cannot trade are kept, but never announced or matched (CRD ch.60 R60.6.5) ----
 
 #[cfg(not(target_arch = "wasm32"))]
 mod tendermint_saved_orders {
     use super::*;
-    use crate::mm2::lp_ordermatch::ordermatch_trading::swaps_off_order_cancel_message;
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum};
 
     fn conf() -> Json {
         json::json!([
@@ -7877,77 +7877,6 @@ mod tendermint_saved_orders {
         }
     }
 
-    #[test]
-    fn saved_orders_with_a_tendermint_coin_are_cancelled_at_startup() {
-        let dbdir = std::env::temp_dir().join(format!("kdf-tendermint-saved-orders-{}", Uuid::new_v4()));
-        let ctx = MmCtxBuilder::new()
-            .with_conf(json::json!({ "coins": conf(), "dbdir": dbdir.to_str().unwrap() }))
-            .into_mm_arc();
-        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
-        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
-
-        let tendermint_base = maker("IRIS", "DOC");
-        let tendermint_token_rel = maker("DOC", "IRIS-ATOM");
-        let plain = maker("DOC", "MARTY");
-        let tendermint_taker = taker("MARTY", "IRIS");
-        let plain_taker = taker("DOC", "MARTY");
-        for order in [&tendermint_base, &tendermint_token_rel, &plain] {
-            block_on(save_my_new_maker_order(ctx.clone(), order)).unwrap();
-        }
-        for order in [&tendermint_taker, &plain_taker] {
-            block_on(save_my_new_taker_order(ctx.clone(), order)).unwrap();
-        }
-
-        let coins = block_on(orders_kick_start(&ctx)).unwrap();
-
-        // The coins needed for the kick-start come from the kept orders alone.
-        assert_eq!(
-            coins,
-            ["DOC", "MARTY"].iter().map(|c| c.to_string()).collect::<HashSet<_>>()
-        );
-        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
-        let loaded = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
-        assert_eq!(loaded.keys().copied().collect::<Vec<_>>(), vec![plain.uuid]);
-        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
-        assert_eq!(taker_orders.keys().copied().collect::<Vec<_>>(), vec![
-            plain_taker.request.uuid
-        ]);
-
-        // Nothing is left in the storage: only the kept orders are saved.
-        let storage = MyOrdersStorage::new(ctx.clone());
-        let saved: Vec<_> = block_on(storage.load_active_maker_orders())
-            .unwrap()
-            .into_iter()
-            .map(|o| o.uuid)
-            .collect();
-        assert_eq!(saved, vec![plain.uuid]);
-        let saved: Vec<_> = block_on(storage.load_active_taker_orders())
-            .unwrap()
-            .into_iter()
-            .map(|o| o.request.uuid)
-            .collect();
-        assert_eq!(saved, vec![plain_taker.request.uuid]);
-
-        // The log line names the order and the pair; a kept order produces none.
-        assert_eq!(
-            swaps_off_order_cancel_message(&ctx, "maker", &tendermint_base.uuid, "IRIS", "DOC").unwrap(),
-            format!(
-                "Cancelled saved maker order {} (IRIS/DOC): Tendermint swaps are not available in this build",
-                tendermint_base.uuid
-            )
-        );
-        assert_eq!(
-            swaps_off_order_cancel_message(&ctx, "maker", &tendermint_token_rel.uuid, "DOC", "IRIS-ATOM").unwrap(),
-            format!(
-                "Cancelled saved maker order {} (DOC/IRIS-ATOM): Tendermint swaps are not available in this build",
-                tendermint_token_rel.uuid
-            )
-        );
-        assert!(swaps_off_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
-
-        std::fs::remove_dir_all(&dbdir).ok();
-    }
-
     /// CRD ch.21 R-D1, R21.B3: the acceptance check that `process_taker_request` and `process_maker_reserved` run
     /// before a match (`declining_coin_ticker`) declines a pair with a real TRX or TRC20 coin on either side, and
     /// names that coin, whatever protocol information the counterparty sent. A pair without a TRON coin passes.
@@ -7991,87 +7920,765 @@ mod tendermint_saved_orders {
         }
     }
 
-    /// CRD ch.21 R-D1: a saved maker or taker order that names a TRX or TRC20 coin (by the coins-config protocol,
-    /// on either side, whatever `wallet_only` says there) is cancelled at startup while TRON swaps are switched
-    /// off; an unrelated order is kept.
-    #[test]
-    fn saved_orders_with_a_tron_coin_are_cancelled_at_startup() {
-        const { assert!(!coins::TRON_SWAPS_AVAILABLE) };
-        let dbdir = std::env::temp_dir().join(format!("kdf-tron-saved-orders-{}", Uuid::new_v4()));
+    /// The coins configuration of the tests of saved orders: the two plain coins and the Tendermint pair of
+    /// [`conf`], a TRX and a TRC20 entry, a Lightning coin, the Solana platform coin, one token in each of the two
+    /// token forms, and a coin flagged wallet-only. `GHOST` has no entry. The startup reads the entries for their
+    /// `protocol.type` and `wallet_only` members only.
+    fn conf_with_untradable_families() -> Json {
         let mut coins_conf = conf();
         coins_conf.as_array_mut().unwrap().extend([
             json::json!({"coin":"TRX","mm2":1,"wallet_only":false,
                 "protocol":{"type":"TRX","protocol_data":{"network":"Mainnet"}}}),
             json::json!({"coin":"USDT-TRC20","mm2":1,"decimals":6,"protocol":{"type":"TRC20","protocol_data":{
                 "platform":"TRX","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}}),
+            json::json!({"coin":"DOC-lightning","mm2":1,"decimals":11,"protocol":{"type":"LIGHTNING","protocol_data":{
+                "platform":"DOC","network":"testnet","confirmations":{"inbound":{"default":3},"outbound":{"default":3}}}}}),
+            json::json!({"coin":"SOL","mm2":1,"protocol":{"type":"SOLANA","protocol_data":{}}}),
+            json::json!({"coin":"USDC-SOL","mm2":1,"protocol":{"type":"SOLANATOKEN","protocol_data":{
+                "platform":"SOL","decimals":6,"mint_address":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "program_id":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}}),
+            json::json!({"coin":"USDC-SPL","mm2":1,"protocol":{"type":"SPLTOKEN","protocol_data":{
+                "platform":"SOL","token_contract_address":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "decimals":6}}}),
+            json::json!({"coin":"WONLY","asset":"WONLY","mm2":1,"wallet_only":true,"protocol":{"type":"UTXO"}}),
         ]);
+        coins_conf
+    }
+
+    /// A node whose storage holds saved orders. The P2P channel records what the node publishes.
+    struct Restart {
+        ctx: MmArc,
+        p2p_rx: mpsc::Receiver<AdexBehaviourCmd>,
+        dbdir: std::path::PathBuf,
+    }
+
+    impl Restart {
+        fn new(coins_conf: Json) -> Restart {
+            let dbdir = std::env::temp_dir().join(format!("kdf-untradable-saved-orders-{}", Uuid::new_v4()));
+            let ctx = MmCtxBuilder::new()
+                .with_conf(json::json!({ "coins": coins_conf, "dbdir": dbdir.to_str().unwrap() }))
+                .with_secp256k1_key_pair(key_pair_from_seed("untradable saved orders").unwrap())
+                .into_mm_arc();
+            std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+            std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+            let (tx, p2p_rx) = mpsc::channel(100);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            Restart { ctx, p2p_rx, dbdir }
+        }
+
+        fn save(&self, makers: &[&MakerOrder], takers: &[&TakerOrder]) {
+            for order in makers {
+                block_on(save_my_new_maker_order(self.ctx.clone(), order)).unwrap();
+            }
+            for order in takers {
+                block_on(save_my_new_taker_order(self.ctx.clone(), order)).unwrap();
+            }
+        }
+
+        fn octx(&self) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(&self.ctx).unwrap() }
+
+        fn activate(&self, tickers: &[&str]) {
+            let coins_ctx = CoinsContext::from_ctx(&self.ctx).unwrap();
+            for ticker in tickers {
+                block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+            }
+        }
+
+        /// The ordermatch messages published since the last call.
+        fn published(&mut self) -> Vec<new_protocol::OrdermatchMessage> {
+            let mut out = Vec::new();
+            while let Ok(cmd) = self.p2p_rx.try_recv() {
+                if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                    if let Ok((message, ..)) = decode_signed::<new_protocol::OrdermatchMessage>(&msg) {
+                        out.push(message);
+                    }
+                }
+            }
+            out
+        }
+
+        fn maker_uuids(&self) -> HashSet<Uuid> {
+            let uuids = self
+                .octx()
+                .maker_orders_ctx
+                .lock()
+                .clone_orders()
+                .keys()
+                .copied()
+                .collect();
+            uuids
+        }
+
+        fn taker_uuids(&self) -> HashSet<Uuid> {
+            let uuids = block_on(self.octx().my_taker_orders.lock()).keys().copied().collect();
+            uuids
+        }
+
+        fn stored_maker_uuids(&self) -> HashSet<Uuid> {
+            let stored = block_on(MyOrdersStorage::new(self.ctx.clone()).load_active_maker_orders()).unwrap();
+            stored.into_iter().map(|order| order.uuid).collect()
+        }
+
+        fn stored_taker_uuids(&self) -> HashSet<Uuid> {
+            let stored = block_on(MyOrdersStorage::new(self.ctx.clone()).load_active_taker_orders()).unwrap();
+            stored.into_iter().map(|order| order.request.uuid).collect()
+        }
+
+        fn lines(&self) -> Vec<String> { self.octx().untradable_order_lines() }
+
+        /// The number of lines logged for the order.
+        fn lines_of(&self, uuid: &Uuid) -> usize {
+            let uuid = uuid.to_string();
+            self.lines().iter().filter(|line| line.contains(&uuid)).count()
+        }
+    }
+
+    impl Drop for Restart {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+    }
+
+    /// The created-order announcements among the published messages, by order.
+    fn announced(published: &[new_protocol::OrdermatchMessage]) -> Vec<Uuid> {
+        published
+            .iter()
+            .filter_map(|message| match message {
+                new_protocol::OrdermatchMessage::MakerOrderCreated(created) => Some(Uuid::from(created.uuid)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn count_of(
+        published: &[new_protocol::OrdermatchMessage],
+        kind: fn(&new_protocol::OrdermatchMessage) -> bool,
+    ) -> usize {
+        published.iter().filter(|message| kind(message)).count()
+    }
+
+    fn is_reserved(message: &new_protocol::OrdermatchMessage) -> bool {
+        matches!(message, new_protocol::OrdermatchMessage::MakerReserved(_))
+    }
+
+    fn is_connect(message: &new_protocol::OrdermatchMessage) -> bool {
+        matches!(message, new_protocol::OrdermatchMessage::TakerConnect(_))
+    }
+
+    /// A maker order as `setprice` leaves it: the confirmation settings are set, so it can be announced.
+    fn announceable(base: &str, rel: &str) -> MakerOrder {
+        MakerOrder {
+            conf_settings: Some(OrderConfirmationsSettings::default()),
+            min_base_vol: 1.into(),
+            ..maker(base, rel)
+        }
+    }
+
+    /// A reservation that matches the taker order.
+    fn reservation_for(taker: &TakerOrder) -> MakerReserved {
+        MakerReserved {
+            base: taker.request.base.clone(),
+            rel: taker.request.rel.clone(),
+            base_amount: 10.into(),
+            rel_amount: 10.into(),
+            sender_pubkey: H256Json::from([7u8; 32]),
+            dest_pub_key: H256Json::default(),
+            maker_order_uuid: Uuid::new_v4(),
+            taker_order_uuid: taker.request.uuid,
+            conf_settings: None,
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    /// A request that matches the maker order.
+    fn request_for(order: &MakerOrder) -> TakerRequest { taker(&order.base, &order.rel).request }
+
+    /// The balance and fee answers the maintenance pass and the balance handler read from a test coin. Every
+    /// balance read is recorded by ticker.
+    fn mock_balance(spendable: &'static str) -> Arc<Mutex<Vec<String>>> {
+        use coins::{CoinBalance, TradeFee};
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let log = reads.clone();
+        TestCoin::my_balance.mock_safe(move |coin| {
+            log.lock().unwrap().push(coin.ticker().to_owned());
+            let balance = CoinBalance::new(spendable.parse().unwrap());
+            MockResult::Return(Box::new(futures01::future::ok(balance)))
+        });
+        TestCoin::get_sender_trade_fee.mock_safe(|coin, _value, _stage| {
+            let fee = TradeFee {
+                coin: coin.ticker().to_owned(),
+                amount: MmNumber::from("0.1"),
+                paid_from_trading_vol: false,
+            };
+            MockResult::Return(Box::pin(async move { Ok(fee) }))
+        });
+        TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(0.into()));
+        reads
+    }
+
+    /// The coins configuration alone names the reason: the family, or "wallet-only" for a flagged entry and for a
+    /// coin without an entry; the Tendermint and TRON answers follow their switches as built. A plain coin gets none.
+    #[test]
+    fn the_coins_configuration_names_the_reason_a_coin_cannot_trade() {
+        const { assert!(!coins::TENDERMINT_SWAPS_AVAILABLE) };
+        const { assert!(!coins::TRON_SWAPS_AVAILABLE) };
         let ctx = MmCtxBuilder::new()
-            .with_conf(json::json!({ "coins": coins_conf, "dbdir": dbdir.to_str().unwrap() }))
+            .with_conf(json::json!({ "coins": conf_with_untradable_families() }))
             .into_mm_arc();
-        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
-        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+        for (ticker, reason) in [
+            ("DOC", None),
+            ("MARTY", None),
+            ("DOC-lightning", Some("Lightning")),
+            ("SOL", Some("Solana")),
+            ("USDC-SOL", Some("Solana")),
+            ("USDC-SPL", Some("Solana")),
+            ("IRIS", Some("Tendermint")),
+            ("IRIS-ATOM", Some("Tendermint")),
+            ("TRX", Some("TRON")),
+            ("USDT-TRC20", Some("TRON")),
+            ("WONLY", Some("wallet-only")),
+            ("GHOST", Some("wallet-only, it has no coins-file entry")),
+        ] {
+            assert_eq!(untradable_reason_by_conf(&ctx, ticker), reason, "{ticker}");
+        }
+        // The pair names its first untradable coin.
+        assert_eq!(untradable_pair_by_conf(&ctx, "DOC", "MARTY"), None);
+        assert_eq!(
+            untradable_pair_by_conf(&ctx, "DOC", "SOL"),
+            Some(("SOL".to_owned(), "Solana"))
+        );
+        assert_eq!(
+            untradable_pair_by_conf(&ctx, "TRX", "SOL"),
+            Some(("TRX".to_owned(), "TRON"))
+        );
+        let uuid = Uuid::new_v4();
+        assert_eq!(
+            untradable_order_line("Maker", &uuid, "DOC", "SOL", "SOL", "Solana"),
+            format!(
+                "Maker order {uuid} (DOC/SOL) is kept but will not be announced or matched: SOL cannot be traded in \
+                 this build (Solana). It can still be cancelled"
+            )
+        );
+    }
 
-        let tron_base = maker("TRX", "DOC");
-        let trc20_rel = maker("DOC", "USDT-TRC20");
+    /// Saves the given orders of untradable pairs next to a plain maker and a plain taker order, runs the
+    /// kick-start and checks the decided rule (CRD ch.60 R60.6.5): every order is restored to memory and left in
+    /// the storage, `my_orders` lists it, nothing is published, each untradable order is marked and logged once
+    /// with `reason`, the plain orders are not, and the coins the kick-start needs are those of every restored order.
+    fn kick_start_keeps(makers: &[&MakerOrder], takers: &[&TakerOrder], reason: &str) -> Restart {
+        let mut node = Restart::new(conf_with_untradable_families());
         let plain = maker("DOC", "MARTY");
-        let tron_taker = taker("MARTY", "TRX");
-        let trc20_taker = taker("USDT-TRC20", "DOC");
-        let plain_taker = taker("DOC", "MARTY");
-        for order in [&tron_base, &trc20_rel, &plain] {
-            block_on(save_my_new_maker_order(ctx.clone(), order)).unwrap();
-        }
-        for order in [&tron_taker, &trc20_taker, &plain_taker] {
-            block_on(save_my_new_taker_order(ctx.clone(), order)).unwrap();
-        }
+        let plain_taker = taker("MARTY", "DOC");
+        node.save(makers, takers);
+        node.save(&[&plain], &[&plain_taker]);
 
-        let coins = block_on(orders_kick_start(&ctx)).unwrap();
+        let coins = block_on(orders_kick_start(&node.ctx)).unwrap();
 
-        // The coins needed for the kick-start come from the kept orders alone.
-        assert_eq!(
-            coins,
-            ["DOC", "MARTY"].iter().map(|c| c.to_string()).collect::<HashSet<_>>()
-        );
-        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
-        let loaded = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
-        assert_eq!(loaded.keys().copied().collect::<Vec<_>>(), vec![plain.uuid]);
-        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
-        assert_eq!(taker_orders.keys().copied().collect::<Vec<_>>(), vec![
-            plain_taker.request.uuid
-        ]);
-
-        // Only the kept orders are left in the storage.
-        let storage = MyOrdersStorage::new(ctx.clone());
-        let saved: Vec<_> = block_on(storage.load_active_maker_orders())
-            .unwrap()
-            .into_iter()
-            .map(|o| o.uuid)
+        // The coins of a kept order are listed like those of any other restored order.
+        let expected_coins: HashSet<String> = makers
+            .iter()
+            .flat_map(|o| [&o.base, &o.rel])
+            .chain(takers.iter().flat_map(|o| [&o.request.base, &o.request.rel]))
+            .cloned()
+            .chain(["DOC".to_owned(), "MARTY".to_owned()])
             .collect();
-        assert_eq!(saved, vec![plain.uuid]);
-        let saved: Vec<_> = block_on(storage.load_active_taker_orders())
-            .unwrap()
-            .into_iter()
+        assert_eq!(coins, expected_coins);
+        let all_makers: HashSet<Uuid> = makers.iter().map(|o| o.uuid).chain([plain.uuid]).collect();
+        let all_takers: HashSet<Uuid> = takers
+            .iter()
             .map(|o| o.request.uuid)
+            .chain([plain_taker.request.uuid])
             .collect();
-        assert_eq!(saved, vec![plain_taker.request.uuid]);
+        assert_eq!(node.maker_uuids(), all_makers);
+        assert_eq!(node.taker_uuids(), all_takers);
+        assert_eq!(node.stored_maker_uuids(), all_makers);
+        assert_eq!(node.stored_taker_uuids(), all_takers);
+        let listed = block_on(my_orders_core(node.ctx.clone(), MyOrdersRequest {})).unwrap();
+        assert_eq!(listed.maker_orders.keys().copied().collect::<HashSet<_>>(), all_makers);
+        assert_eq!(listed.taker_orders.keys().copied().collect::<HashSet<_>>(), all_takers);
+        // Neither a maker order is announced nor a taker order sent again as a request.
+        assert_eq!(node.published().len(), 0);
 
-        // The log line names the order, the pair and the family; a kept order produces none.
-        assert_eq!(
-            swaps_off_order_cancel_message(&ctx, "maker", &tron_base.uuid, "TRX", "DOC").unwrap(),
-            format!(
-                "Cancelled saved maker order {} (TRX/DOC): TRON swaps are not available in this build",
-                tron_base.uuid
-            )
+        let octx = node.octx();
+        let untradable = makers.iter().map(|o| ("Maker", o.uuid, &o.base, &o.rel)).chain(
+            takers
+                .iter()
+                .map(|o| ("Taker", o.request.uuid, &o.request.base, &o.request.rel)),
         );
-        assert_eq!(
-            swaps_off_order_cancel_message(&ctx, "taker", &trc20_taker.request.uuid, "USDT-TRC20", "DOC").unwrap(),
-            format!(
-                "Cancelled saved taker order {} (USDT-TRC20/DOC): TRON swaps are not available in this build",
-                trc20_taker.request.uuid
-            )
-        );
-        assert!(swaps_off_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
+        for (kind, uuid, base, rel) in untradable {
+            assert!(octx.is_kept_untradable(&uuid), "{base}/{rel}");
+            let lines: Vec<String> = node
+                .lines()
+                .into_iter()
+                .filter(|line| line.contains(&uuid.to_string()))
+                .collect();
+            assert_eq!(lines.len(), 1, "{base}/{rel}: {lines:?}");
+            let line = &lines[0];
+            assert!(
+                line.starts_with(&format!("{kind} order {uuid} ({base}/{rel}) is kept")),
+                "{line}"
+            );
+            assert!(line.contains(&format!("({reason})")), "{line}");
+        }
+        for uuid in [plain.uuid, plain_taker.request.uuid] {
+            assert!(!octx.is_kept_untradable(&uuid));
+            assert_eq!(node.lines_of(&uuid), 0);
+        }
+        assert_eq!(node.lines().len(), makers.len() + takers.len());
+        // The plain order started the watch of its base coin; an untradable order starts none.
+        let maker_orders = octx.maker_orders_ctx.lock();
+        assert!(maker_orders.has_balance_watch("DOC"));
+        for order in makers.iter().filter(|o| o.base != "DOC") {
+            assert!(!maker_orders.has_balance_watch(&order.base), "{}", order.base);
+        }
+        drop(maker_orders);
+        node
+    }
 
-        std::fs::remove_dir_all(&dbdir).ok();
+    /// A saved order that names a Lightning coin on either side is kept at startup.
+    #[test]
+    fn saved_orders_with_a_lightning_coin_are_kept_at_startup() {
+        kick_start_keeps(
+            &[&maker("DOC-lightning", "MARTY"), &maker("MARTY", "DOC-lightning")],
+            &[&taker("DOC-lightning", "MARTY"), &taker("MARTY", "DOC-lightning")],
+            "Lightning",
+        );
+    }
+
+    /// A saved order that names the Solana platform coin or a token of either configuration form, on either side,
+    /// is kept at startup.
+    #[test]
+    fn saved_orders_with_a_solana_coin_are_kept_at_startup() {
+        kick_start_keeps(
+            &[
+                &maker("SOL", "DOC"),
+                &maker("DOC", "SOL"),
+                &maker("USDC-SOL", "DOC"),
+                &maker("DOC", "USDC-SPL"),
+            ],
+            &[
+                &taker("MARTY", "SOL"),
+                &taker("DOC", "USDC-SOL"),
+                &taker("USDC-SPL", "DOC"),
+            ],
+            "Solana",
+        );
+    }
+
+    /// A saved order that names a coin flagged wallet-only in the coins file, on either side, is kept at startup.
+    #[test]
+    fn saved_orders_with_a_wallet_only_coin_are_kept_at_startup() {
+        kick_start_keeps(
+            &[&maker("WONLY", "DOC"), &maker("DOC", "WONLY")],
+            &[&taker("WONLY", "MARTY"), &taker("MARTY", "WONLY")],
+            "wallet-only",
+        );
+    }
+
+    /// A saved order that names a coin without a coins-file entry is kept at startup.
+    #[test]
+    fn saved_orders_with_a_coin_without_an_entry_are_kept_at_startup() {
+        kick_start_keeps(
+            &[&maker("GHOST", "DOC"), &maker("DOC", "GHOST")],
+            &[&taker("MARTY", "GHOST")],
+            "wallet-only, it has no coins-file entry",
+        );
+    }
+
+    /// A saved order that names a Tendermint platform coin or token, on either side, is kept at startup while
+    /// Tendermint swaps are switched off. It used to be cancelled.
+    #[test]
+    fn saved_orders_with_a_tendermint_coin_are_kept_at_startup() {
+        const { assert!(!coins::TENDERMINT_SWAPS_AVAILABLE) };
+        kick_start_keeps(
+            &[&maker("IRIS", "DOC"), &maker("DOC", "IRIS-ATOM")],
+            &[&taker("MARTY", "IRIS"), &taker("IRIS-ATOM", "DOC")],
+            "Tendermint",
+        );
+    }
+
+    /// A saved order that names a TRX or TRC20 coin, on either side and whatever `wallet_only` says in its entry, is
+    /// kept at startup while TRON swaps are switched off. It used to be cancelled.
+    #[test]
+    fn saved_orders_with_a_tron_coin_are_kept_at_startup() {
+        const { assert!(!coins::TRON_SWAPS_AVAILABLE) };
+        kick_start_keeps(
+            &[&maker("TRX", "DOC"), &maker("DOC", "USDT-TRC20")],
+            &[&taker("MARTY", "TRX"), &taker("USDT-TRC20", "DOC")],
+            "TRON",
+        );
+    }
+
+    /// `cancel_order` removes a kept order, maker or taker, from memory and from the storage.
+    #[test]
+    fn cancel_order_removes_a_kept_order() {
+        let kept_maker = maker("DOC", "SOL");
+        let kept_taker = taker("MARTY", "SOL");
+        let node = kick_start_keeps(&[&kept_maker], &[&kept_taker], "Solana");
+
+        for uuid in [kept_maker.uuid, kept_taker.request.uuid] {
+            let response = block_on(cancel_order(node.ctx.clone(), CancelOrderReq { uuid })).unwrap();
+            assert_eq!(response.result, "success");
+        }
+
+        assert!(!node.maker_uuids().contains(&kept_maker.uuid));
+        assert!(!node.taker_uuids().contains(&kept_taker.request.uuid));
+        assert!(!node.stored_maker_uuids().contains(&kept_maker.uuid));
+        assert!(!node.stored_taker_uuids().contains(&kept_taker.request.uuid));
+        // The plain orders are untouched.
+        assert_eq!(node.maker_uuids().len(), 1);
+        assert_eq!(node.taker_uuids().len(), 1);
+    }
+
+    /// The coins of the tests that run the check on active coins: three plain entries and one flagged
+    /// wallet-only. A test coin answers the wallet-only question from its entry, as most coins do.
+    fn conf_with_a_wallet_only_test_coin() -> Json {
+        json::json!([{ "coin": "BASE" }, { "coin": "REL" }, { "coin": "OTHER" }, { "coin": "WONLY", "wallet_only": true }])
+    }
+
+    const TEST_COINS: [&str; 4] = ["BASE", "REL", "OTHER", "WONLY"];
+
+    fn add_maker(node: &Restart, order: &MakerOrder) {
+        node.octx()
+            .maker_orders_ctx
+            .lock()
+            .add_order(order, Arc::new(AsyncMutex::new(order.clone())));
+    }
+
+    fn add_taker(node: &Restart, order: &TakerOrder) {
+        block_on(node.octx().my_taker_orders.lock()).insert(order.request.uuid, order.clone());
+    }
+
+    /// Never announced, the check on the active coins: the periodic maintenance runs the check of order creation
+    /// on the coins of an own order that is absent from the order book. An order with a wallet-only coin on either
+    /// side is not announced, costs no balance read, is not cancelled, and is logged once however many passes run;
+    /// the plain order of the same pass is announced.
+    #[test]
+    fn the_maintenance_pass_does_not_announce_an_order_of_an_untradable_pair() {
+        let reads = mock_balance("20");
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        node.activate(&TEST_COINS);
+        let wallet_only_rel = announceable("OTHER", "WONLY");
+        let wallet_only_base = announceable("WONLY", "REL");
+        let plain = announceable("BASE", "REL");
+        for order in [&wallet_only_rel, &wallet_only_base, &plain] {
+            add_maker(&node, order);
+        }
+        let octx = node.octx();
+
+        block_on(reconcile_missing_own_maker_orders(&node.ctx, &octx));
+
+        assert_eq!(announced(&node.published()), vec![plain.uuid]);
+        assert_eq!(*reads.lock().unwrap(), vec!["BASE".to_owned()]);
+        assert!(octx.orderbook.lock().order_set.contains_key(&plain.uuid));
+        for order in [&wallet_only_rel, &wallet_only_base] {
+            assert!(!octx.orderbook.lock().order_set.contains_key(&order.uuid));
+            assert!(node.maker_uuids().contains(&order.uuid), "the order is kept");
+            assert_eq!(node.lines_of(&order.uuid), 1);
+        }
+        assert_eq!(node.lines_of(&plain.uuid), 0);
+        let line = node
+            .lines()
+            .into_iter()
+            .find(|l| l.contains(&wallet_only_rel.uuid.to_string()))
+            .unwrap();
+        assert!(
+            line.contains("(OTHER/WONLY)") && line.contains("WONLY cannot be traded"),
+            "{line}"
+        );
+        assert!(line.contains("(wallet-only)"), "{line}");
+
+        // Further passes: nothing is published, nothing is read, and no line is added.
+        for _ in 0..3 {
+            block_on(reconcile_missing_own_maker_orders(&node.ctx, &octx));
+        }
+        assert_eq!(node.published().len(), 0);
+        assert_eq!(*reads.lock().unwrap(), vec!["BASE".to_owned()]);
+        assert_eq!(node.lines().len(), 2);
+    }
+
+    /// Never announced, the order the startup marked: once its coins are active the maintenance pass still does
+    /// not announce it, reads no balance for it and adds no line to the one the startup logged.
+    #[test]
+    fn the_maintenance_pass_does_not_announce_an_order_kept_at_startup() {
+        let reads = mock_balance("20");
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        let kept = announceable("BASE", "WONLY");
+        let plain = announceable("BASE", "REL");
+        node.save(&[&kept, &plain], &[]);
+        block_on(orders_kick_start(&node.ctx)).unwrap();
+        assert_eq!(node.lines_of(&kept.uuid), 1);
+        node.activate(&TEST_COINS);
+        let octx = node.octx();
+
+        for _ in 0..2 {
+            block_on(reconcile_missing_own_maker_orders(&node.ctx, &octx));
+        }
+
+        assert_eq!(announced(&node.published()), vec![plain.uuid]);
+        assert_eq!(*reads.lock().unwrap(), vec!["BASE".to_owned()]);
+        assert!(!octx.orderbook.lock().order_set.contains_key(&kept.uuid));
+        assert!(node.maker_uuids().contains(&kept.uuid));
+        assert!(node.stored_maker_uuids().contains(&kept.uuid));
+        assert_eq!(node.lines().len(), 1);
+    }
+
+    /// No balance-driven change: a balance that no longer covers the minimum volume cancels the plain order of the
+    /// coin, while the order kept at startup is neither resized nor cancelled, by the balance handler and by the
+    /// volume check of the maintenance loop, and nothing about it is published.
+    #[test]
+    fn a_balance_change_neither_resizes_nor_cancels_a_kept_order() {
+        a_balance_change_leaves_the_untradable_orders(true);
+    }
+
+    /// The same for an order the startup did not mark, which is untradable only by the check on its active coins
+    /// (its rel coin is wallet-only): no resize, no cancel, nothing published, and one line per order.
+    #[test]
+    fn a_balance_change_neither_resizes_nor_cancels_an_order_untradable_by_the_live_check() {
+        a_balance_change_leaves_the_untradable_orders(false);
+    }
+
+    fn a_balance_change_leaves_the_untradable_orders(marked_at_startup: bool) {
+        mock_balance("0.5");
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        node.activate(&TEST_COINS);
+        let cancelled = Arc::new(Mutex::new(Vec::<Uuid>::new()));
+        let cancelled_log = cancelled.clone();
+        delete_my_maker_order.mock_safe(move |_, order, _| {
+            cancelled_log.lock().unwrap().push(order.uuid);
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        let octx = node.octx();
+        let kept = announceable("BASE", "WONLY");
+        // Its available volume is below its minimum, which the volume check of the loop cancels a plain order for.
+        let kept_too_small = MakerOrder {
+            min_base_vol: 20.into(),
+            ..announceable("BASE", "WONLY")
+        };
+        let plain = announceable("BASE", "REL");
+        for order in [&kept, &kept_too_small, &plain] {
+            add_maker(&node, order);
+        }
+        for order in [&kept, &kept_too_small] {
+            if marked_at_startup {
+                assert!(octx.keep_untradable_saved_order(&node.ctx, "Maker", &order.uuid, &order.base, &order.rel));
+            }
+            assert_eq!(octx.is_kept_untradable(&order.uuid), marked_at_startup);
+        }
+
+        // The balance 0.5 supports the volume 0.4, below the minimum volume 1 of the three orders.
+        let handler = BalanceUpdateOrdermatchHandler::new(node.ctx.clone());
+        let coin = MmCoinEnum::Test(TestCoin::new("BASE"));
+        block_on(handler.balance_updated(&coin, &"0.5".parse().unwrap()));
+        block_on(check_balance_for_maker_orders(node.ctx.clone(), &octx));
+
+        assert_eq!(*cancelled.lock().unwrap(), vec![plain.uuid]);
+        assert_eq!(node.maker_uuids(), HashSet::from([kept.uuid, kept_too_small.uuid]));
+        for order in [&kept, &kept_too_small] {
+            let order_mutex = octx.maker_orders_ctx.lock().get_order(&order.uuid).unwrap();
+            assert_eq!(block_on(order_mutex.lock()).max_base_vol, order.max_base_vol);
+            assert_eq!(node.lines_of(&order.uuid), 1);
+        }
+        // The only message is the cancellation of the plain order.
+        let published = node.published();
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert!(
+            matches!(&published[0], new_protocol::OrdermatchMessage::MakerOrderCancelled(c) if c.uuid == plain.uuid.into()),
+            "{:?}",
+            published[0]
+        );
+    }
+
+    /// Never matched, the check on the active coins (the shape of CRD T39.11.5A.6): a taker request that matches
+    /// an own maker order of an untradable pair gets no reservation and starts no swap; the order is kept and
+    /// logged once however many requests come. A request for the plain order is reserved.
+    #[test]
+    fn a_taker_request_for_an_order_of_an_untradable_pair_gets_no_reservation() {
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        node.activate(&TEST_COINS);
+        lp_connect_start_bob.mock_safe(|_, _, _| panic!("no swap starts from a request alone"));
+        let wallet_only_rel = announceable("BASE", "WONLY");
+        let wallet_only_base = announceable("WONLY", "REL");
+        let plain = announceable("BASE", "REL");
+        for order in [&wallet_only_rel, &wallet_only_base, &plain] {
+            add_maker(&node, order);
+        }
+        let matches_of = |node: &Restart, uuid: &Uuid| {
+            let order_mutex = node.octx().maker_orders_ctx.lock().get_order(uuid).unwrap();
+            let matches = block_on(order_mutex.lock()).matches.len();
+            matches
+        };
+
+        for order in [&wallet_only_rel, &wallet_only_base] {
+            for _ in 0..2 {
+                let request = request_for(order);
+                assert!(matches!(
+                    order.match_with_request(&request),
+                    OrderMatchResult::Matched(_)
+                ));
+                block_on(process_taker_request(node.ctx.clone(), H256Json::default(), request));
+            }
+            assert_eq!(node.published().len(), 0, "{}/{}", order.base, order.rel);
+            assert_eq!(matches_of(&node, &order.uuid), 0);
+            assert_eq!(node.lines_of(&order.uuid), 1);
+        }
+        assert_eq!(crate::mm2::lp_swap::running_swaps_num(&node.ctx), 0);
+
+        block_on(process_taker_request(
+            node.ctx.clone(),
+            H256Json::default(),
+            request_for(&plain),
+        ));
+        assert_eq!(count_of(&node.published(), is_reserved), 1);
+        assert_eq!(matches_of(&node, &plain.uuid), 1);
+        assert_eq!(node.lines().len(), 2);
+        assert_eq!(node.maker_uuids().len(), 3, "no order is cancelled");
+    }
+
+    /// Never matched, the order the startup marked: a taker request that names it gets no reservation once its
+    /// coins are active, and a connect message for a match it was saved with starts no swap.
+    #[test]
+    fn a_maker_order_kept_at_startup_is_not_matched() {
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        lp_connect_start_bob.mock_safe(|_, _, _| panic!("no swap starts from a kept order"));
+        let mut kept = announceable("BASE", "WONLY");
+        let request = request_for(&kept);
+        let reserved = MakerReserved {
+            sender_pubkey: H256Json::default(),
+            dest_pub_key: request.sender_pubkey,
+            maker_order_uuid: kept.uuid,
+            ..reservation_for(&taker("BASE", "WONLY"))
+        };
+        kept.matches.insert(request.uuid, MakerMatch {
+            request: request.clone(),
+            reserved,
+            connect: None,
+            connected: None,
+            last_updated: now_ms(),
+        });
+        node.save(&[&kept], &[]);
+        block_on(orders_kick_start(&node.ctx)).unwrap();
+        node.activate(&TEST_COINS);
+
+        let connect = TakerConnect {
+            sender_pubkey: request.sender_pubkey,
+            dest_pub_key: H256Json::default(),
+            taker_order_uuid: request.uuid,
+            maker_order_uuid: kept.uuid,
+        };
+        block_on(process_taker_connect(node.ctx.clone(), request.sender_pubkey, connect));
+        block_on(process_taker_request(
+            node.ctx.clone(),
+            H256Json::default(),
+            request_for(&kept),
+        ));
+
+        assert_eq!(node.published().len(), 0);
+        let order_mutex = node.octx().maker_orders_ctx.lock().get_order(&kept.uuid).unwrap();
+        let order = block_on(order_mutex.lock()).clone();
+        assert_eq!(order.matches.len(), 1, "the saved match got no new one next to it");
+        assert!(order.matches[&request.uuid].connected.is_none());
+        assert!(order.started_swaps.is_empty());
+        assert_eq!(crate::mm2::lp_swap::running_swaps_num(&node.ctx), 0);
+        assert_eq!(node.lines_of(&kept.uuid), 1);
+    }
+
+    /// A stored taker order of an untradable pair is kept and takes no part in a match: a maker's reservation for
+    /// it gets no connect message and is not collected, with the coins inactive and with them active.
+    #[test]
+    fn a_taker_order_kept_at_startup_is_not_matched() {
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        let kept = taker("BASE", "WONLY");
+        node.save(&[], &[&kept]);
+        block_on(orders_kick_start(&node.ctx)).unwrap();
+        // The kick-start sends the order to nobody.
+        assert_eq!(node.published().len(), 0);
+        let octx = node.octx();
+
+        for activate in [false, true] {
+            if activate {
+                node.activate(&TEST_COINS);
+            }
+            let reserved = reservation_for(&kept);
+            assert_eq!(kept.match_reserved(&reserved), MatchReservedResult::Matched);
+            block_on(process_maker_reserved(node.ctx.clone(), H256Json::default(), reserved));
+
+            assert_eq!(node.published().len(), 0);
+            assert!(block_on(octx.pending_maker_reserved.lock()).is_empty());
+            let orders = block_on(octx.my_taker_orders.lock());
+            assert!(orders[&kept.request.uuid].matches.is_empty());
+        }
+        assert!(node.stored_taker_uuids().contains(&kept.request.uuid));
+        assert_eq!(node.lines_of(&kept.request.uuid), 1);
+    }
+
+    /// Never matched, the check on the active coins, taker side: a reservation for an own taker order of an
+    /// untradable pair gets no connect message, the reservations collected for it are dropped, and the order is
+    /// logged once. A reservation for the plain taker order is connected.
+    #[test]
+    fn a_reservation_for_a_taker_order_of_an_untradable_pair_gets_no_connect() {
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        node.activate(&TEST_COINS);
+        let untradable = taker("BASE", "WONLY");
+        let plain = taker("BASE", "REL");
+        add_taker(&node, &untradable);
+        add_taker(&node, &plain);
+        let octx = node.octx();
+
+        for _ in 0..2 {
+            let reserved = reservation_for(&untradable);
+            assert_eq!(untradable.match_reserved(&reserved), MatchReservedResult::Matched);
+            block_on(process_maker_reserved(node.ctx.clone(), H256Json::default(), reserved));
+        }
+        assert_eq!(node.published().len(), 0);
+        assert!(block_on(octx.pending_maker_reserved.lock()).is_empty());
+        assert!(block_on(octx.my_taker_orders.lock())[&untradable.request.uuid]
+            .matches
+            .is_empty());
+        assert_eq!(node.lines_of(&untradable.request.uuid), 1);
+        assert!(node.lines()[0].starts_with(&format!("Taker order {}", untradable.request.uuid)));
+
+        block_on(process_maker_reserved(
+            node.ctx.clone(),
+            H256Json::default(),
+            reservation_for(&plain),
+        ));
+        assert_eq!(count_of(&node.published(), is_connect), 1);
+        assert_eq!(
+            block_on(octx.my_taker_orders.lock())[&plain.request.uuid].matches.len(),
+            1
+        );
+        assert_eq!(node.lines().len(), 1);
+    }
+
+    /// A good-till-cancelled taker order that times out becomes a maker order, as before; the maker order of an
+    /// untradable pair is not announced, the plain one is.
+    #[test]
+    fn a_timed_out_taker_order_of_an_untradable_pair_is_not_announced_as_a_maker_order() {
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        node.activate(&TEST_COINS);
+        delete_my_taker_order.mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+        let timed_out = |base: &str, rel: &str| {
+            let mut order = taker(base, rel);
+            order.request.conf_settings = Some(OrderConfirmationsSettings::default());
+            order.created_at = now_ms() - 60_000;
+            order
+        };
+        let untradable = timed_out("BASE", "WONLY");
+        let plain = timed_out("BASE", "REL");
+        add_taker(&node, &untradable);
+        add_taker(&node, &plain);
+        let octx = node.octx();
+
+        block_on(handle_timed_out_taker_orders(node.ctx.clone(), &octx));
+
+        assert_eq!(
+            node.maker_uuids(),
+            HashSet::from([untradable.request.uuid, plain.request.uuid])
+        );
+        assert_eq!(announced(&node.published()), vec![plain.request.uuid]);
+        assert_eq!(node.lines_of(&untradable.request.uuid), 1);
+        assert_eq!(node.lines().len(), 1);
     }
 }
 
@@ -8097,6 +8704,7 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
         sync_log: Default::default(),
         pending_maker_reserved: Default::default(),
         maker_outbox: Default::default(),
+        untradable_orders: Default::default(),
         orderbook_tickers: Default::default(),
         original_tickers: Default::default(),
     };
