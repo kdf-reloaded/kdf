@@ -23,6 +23,8 @@ pub mod withdraw;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod history_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod node_client_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod rpc_refusal_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod test_node;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod wallet_path_tests;

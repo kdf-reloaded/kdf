@@ -30,6 +30,7 @@ pub(crate) fn complete_tx(unsigned: TransactionInputSigner, signed_inputs: Vec<T
         sapling_v5: unsigned.sapling_v5,
         orchard: unsigned.orchard,
         opaque: None,
+        extra_payload: None,
     }
 }
 

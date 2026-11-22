@@ -1880,6 +1880,60 @@ fn tx_details_prev_output_index_out_of_range_is_an_error() {
     );
 }
 
+/// CRD ch.38 T38.6.10.3: the history row of a Dash-layout special transaction carries the chain's txid as its
+/// hash and internal id (the payload is part of the hashed bytes). The row is built by `tx_details_by_hash` from
+/// the bytes the backend serves.
+#[test]
+fn special_transaction_history_row_carries_the_chain_txid() {
+    let fixtures = [
+        (
+            include_str!("../../kdf_chain/src/test_data/dash_2576221_type5_cbtx.hex"),
+            "82efdfbb4adb79d9c590cd83c316acb8c40d51c975a519733ff2d420d469e7ed",
+        ),
+        (
+            include_str!("../../kdf_chain/src/test_data/dash_2576170_type9_assetunlock.hex"),
+            "0bfefcc1c944d1a0c885a1de834d7587c4069d944b6b28e9c2e16b80a07a3cc4",
+        ),
+    ];
+    for (hex_text, txid) in fixtures {
+        let raw = BytesJson::from(hex::decode(hex_text.trim()).unwrap());
+        NativeClient::get_verbose_transaction.mock_safe(move |_coin, _txid| {
+            let verbose = RpcTransaction {
+                hex: raw.clone(),
+                txid: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                hash: None,
+                size: Default::default(),
+                vsize: Default::default(),
+                version: 3,
+                locktime: 0,
+                vin: vec![],
+                vout: vec![],
+                blockhash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                confirmations: 1,
+                rawconfirmations: None,
+                time: 1,
+                blocktime: 1,
+                height: Some(101),
+            };
+            MockResult::Return(Box::new(futures01::future::ok(verbose)))
+        });
+        let client = NativeClient(Arc::new(NativeClientImpl::default()));
+        let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+            UtxoRpcClientEnum::Native(client),
+            None,
+            false,
+        ));
+        let mut input_transactions = HistoryUtxoTxMap::default();
+        let details = block_on(coin.tx_details_by_hash(&[0u8; 32], &mut input_transactions)).unwrap();
+        assert_eq!(
+            details.internal_id,
+            BytesJson::from(hex::decode(txid).unwrap()),
+            "{txid}"
+        );
+        assert_eq!(details.tx_hash, txid);
+    }
+}
+
 #[test]
 fn kmd_rewards_prev_output_index_out_of_range_is_an_error() {
     let (spending_tx, mut input_transactions) = spend_of_a_missing_output();
@@ -15466,5 +15520,257 @@ mod zip317_fee_tests {
             .unwrap()
             .unwrap();
         assert_eq!(safe, MmNumber::from("0.00011"));
+    }
+}
+
+/// A found spend of a swap payment output is classified by the input that spends that output, never by the
+/// transaction's first input (swap-chain-reading plan, step 1).
+mod swap_spend_by_consumed_input_tests {
+    use super::*;
+    use crate::utxo::rpc_clients::SpentOutputInfo;
+    use crate::utxo::utxo_common::{found_swap_spend, payment_script, PaymentOutputs};
+    use crate::FoundSwapTxSpend;
+    use chain::TransactionOutput;
+    use rpc::v1::types::Bytes as BytesJson;
+    use script::{Builder, Opcode, Script};
+    use serialization::serialize;
+
+    const TIME_LOCK: u32 = 1_700_000_000;
+    const SECRET_HASH: [u8; 20] = [0x33; 20];
+
+    fn first_pub() -> keys::Public { *key_pair_from_seed("swap spend first").unwrap().public() }
+    fn second_pub() -> keys::Public { *key_pair_from_seed("swap spend second").unwrap().public() }
+
+    fn redeem_script() -> Script { payment_script(TIME_LOCK, &SECRET_HASH, &first_pub(), &second_pub()) }
+
+    fn payment_script_pubkey() -> Vec<u8> {
+        Builder::build_p2sh(&dhash160(&redeem_script()).into())
+            .to_bytes()
+            .take()
+    }
+
+    fn payment_tx() -> UtxoTx {
+        let mut tx = UtxoTx::default();
+        tx.outputs.push(TransactionOutput {
+            value: 100_000,
+            script_pubkey: payment_script_pubkey().into(),
+        });
+        tx
+    }
+
+    fn dummy_sig() -> Vec<u8> { vec![0x30; 71] }
+
+    /// The script_sig of the secret path: signature, secret, OP_0, redeem script.
+    fn claim_script_sig() -> Script {
+        Builder::default()
+            .push_data(&dummy_sig())
+            .push_data(&[0x44; 32])
+            .push_opcode(Opcode::OP_0)
+            .push_data(&redeem_script())
+            .into_script()
+    }
+
+    /// The script_sig of the timelock path: signature, OP_1, redeem script.
+    fn refund_script_sig() -> Script {
+        Builder::default()
+            .push_data(&dummy_sig())
+            .push_opcode(Opcode::OP_1)
+            .push_data(&redeem_script())
+            .into_script()
+    }
+
+    /// An input that has nothing to do with the swap: signature and public key.
+    fn unrelated_script_sig() -> Script {
+        Builder::default()
+            .push_data(&dummy_sig())
+            .push_data(&first_pub())
+            .into_script()
+    }
+
+    fn input(prev_hash: H256, prev_index: u32, script_sig: Script) -> TransactionInput {
+        TransactionInput {
+            previous_output: OutPoint {
+                hash: prev_hash,
+                index: prev_index,
+            },
+            script_sig: script_sig.to_bytes(),
+            sequence: 0xffff_fffe,
+            script_witness: vec![],
+        }
+    }
+
+    /// A spend with two inputs; the one at `swap_at` (0 or 1) spends the payment output 0 and carries
+    /// `swap_sig`, the other is unrelated and carries `other_sig`.
+    fn spend_tx(payment: &UtxoTx, swap_at: usize, swap_sig: Script, other_sig: Script) -> UtxoTx {
+        let swap_input = input(payment.hash(), 0, swap_sig);
+        let other_input = input(H256::from([0x77; 32]), 3, other_sig);
+        let mut tx = UtxoTx::default();
+        tx.inputs = if swap_at == 0 {
+            vec![swap_input, other_input]
+        } else {
+            vec![other_input, swap_input]
+        };
+        tx.outputs.push(TransactionOutput {
+            value: 90_000,
+            script_pubkey: vec![0x51].into(),
+        });
+        tx
+    }
+
+    fn info(tx: UtxoTx, input_index: usize) -> SpentOutputInfo {
+        SpentOutputInfo {
+            spending_tx: tx,
+            input_index,
+            spent_in_block: BlockHashOrHeight::Height(10),
+        }
+    }
+
+    fn kind_of(found: &FoundSwapTxSpend) -> &'static str {
+        match found {
+            FoundSwapTxSpend::Spent(_) => "spent",
+            FoundSwapTxSpend::Refunded(_) => "refunded",
+        }
+    }
+
+    #[test]
+    fn claim_in_second_input_is_spent() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "spent");
+    }
+
+    #[test]
+    fn refund_in_second_input_is_refunded() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, refund_script_sig(), unrelated_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "refunded");
+    }
+
+    /// Input 0 is shaped like the refund path while the swap input, the second one, is a claim: the input
+    /// that spends the payment output decides, so the result is "spent".
+    #[test]
+    fn first_input_shaped_like_the_other_branch_does_not_decide() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), refund_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "spent");
+
+        let tx = spend_tx(&payment, 1, refund_script_sig(), claim_script_sig());
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
+        assert_eq!(kind_of(&found), "refunded");
+    }
+
+    /// Input 0 has no swap instruction at all; the result comes from the input that spends the payment output.
+    #[test]
+    fn first_input_without_swap_instruction_is_not_an_error() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        assert!(found_swap_spend(info(tx.clone(), 0), TxHashAlgo::DSHA256).is_err());
+        assert_eq!(
+            kind_of(&found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap()),
+            "spent"
+        );
+    }
+
+    #[test]
+    fn swap_input_without_swap_instruction_is_an_error_naming_the_input() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, unrelated_script_sig(), claim_script_sig());
+        let err = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap_err();
+        assert!(err.contains("input 1"), "{}", err);
+    }
+
+    #[test]
+    fn input_index_out_of_range_is_an_error() {
+        let payment = payment_tx();
+        let tx = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let err = found_swap_spend(info(tx, 2), TxHashAlgo::DSHA256).unwrap_err();
+        assert!(err.contains("no input 2"), "{}", err);
+    }
+
+    /// The search of `search_for_swap_output_spend_of` through the native client, whose spend producer reports
+    /// the index of the input that consumes the requested output.
+    fn search_through_native_client(spend: &UtxoTx, payment: &UtxoTx) -> Result<Option<FoundSwapTxSpend>, String> {
+        const LIST_SINCE_BLOCK_JSON: &str = r#"{"transactions":[{"account":"","address":"RT9MpMyucqXiX8bZLimXBnrrn2ofmdGNKd","category":"receive","amount":0.5,"vout":2,"rawconfirmations":1617,"confirmations":1617,"blockhash":"000000000c33a387d73180220a5a8f2fe6081bad9bdfc0dba5a9985abcee8294","blockindex":7,"blocktime":1607957613,"expiryheight":0,"txid":"45e4900a2b330800a356a74ce2a97370596ad3a25e689e3ed5c36e421d12bbf7","walletconflicts":[],"time":1607957175,"timereceived":1607957175,"vjoinsplit":[],"size":567}],"lastblock":"06082d363f78174fd13b126994210d3c3ad9d073ee3983ad59fe8b76e6e3e071"}"#;
+        NativeClientImpl::get_block_hash.mock_safe(|_, _| {
+            let blockhash: H256Json = hex::decode("000000000c33a387d73180220a5a8f2fe6081bad9bdfc0dba5a9985abcee8294")
+                .unwrap()
+                .as_slice()
+                .into();
+            MockResult::Return(Box::new(futures01::future::ok(blockhash)))
+        });
+        NativeClientImpl::list_since_block.mock_safe(|_, _| {
+            let res: ListSinceBlockRes = json::from_str(LIST_SINCE_BLOCK_JSON).unwrap();
+            MockResult::Return(Box::new(futures01::future::ok(res)))
+        });
+        let spend_bytes: BytesJson = serialize(spend).take().into();
+        NativeClientImpl::get_raw_transaction_bytes
+            .mock_safe(move |_, _| MockResult::Return(Box::new(futures01::future::ok(spend_bytes.clone()))));
+
+        let coin = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        block_on(utxo_common::search_for_swap_output_spend_of(
+            &coin,
+            TIME_LOCK,
+            &first_pub(),
+            &second_pub(),
+            &SECRET_HASH,
+            PaymentOutputs {
+                tx_hash: payment.hash(),
+                output0_script_pubkey: payment.outputs[0].script_pubkey.clone(),
+                spent_script_pubkey: payment.outputs[0].script_pubkey.clone(),
+            },
+            0,
+            0,
+        ))
+    }
+
+    #[test]
+    fn search_finds_claim_in_second_input() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap().unwrap();
+        assert_eq!(kind_of(&found), "spent");
+    }
+
+    #[test]
+    fn search_finds_refund_in_second_input() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, refund_script_sig(), unrelated_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap().unwrap();
+        assert_eq!(kind_of(&found), "refunded");
+    }
+
+    #[test]
+    fn search_is_not_misled_by_a_first_input_of_the_other_branch() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, claim_script_sig(), refund_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap().unwrap();
+        assert_eq!(kind_of(&found), "spent");
+    }
+
+    /// The native producer reports the index of the input that consumes the requested outpoint.
+    #[test]
+    fn native_find_output_spend_reports_the_consuming_input_index() {
+        let payment = payment_tx();
+        let spend = spend_tx(&payment, 1, claim_script_sig(), unrelated_script_sig());
+        let found = search_through_native_client(&spend, &payment).unwrap();
+        assert!(found.is_some());
+        let client = native_client_for_test();
+        let info = block_on(
+            client
+                .find_output_spend(
+                    payment.hash(),
+                    &payment.outputs[0].script_pubkey,
+                    0,
+                    BlockHashOrHeight::Height(0),
+                )
+                .compat(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(info.input_index, 1);
+        assert_eq!(info.spending_tx.inputs[1].previous_output.hash, payment.hash());
     }
 }

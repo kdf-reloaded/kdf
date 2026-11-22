@@ -725,6 +725,12 @@ the previous version used. The safe way:
   raw-transaction signing request used to sign such a transaction anyway, and Radiant rejected it. It now
   answers with a signing error that names the output index and the case. Withdrawals and swaps never build
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
+- **The log tells when QTUM and its QRC20 tokens open, share and close a set of Electrum connections.** One INFO
+  line is written when a set is created (naming the instance that created it), one each time another instance
+  reuses it, and one when the last instance lets go of it and it closes. Each line names the platform (for example
+  `QTUM`) and the servers as `host:port` only, without the protocol or any user name, password, path or query of a
+  server entry. No line is written per request or on a timer. Detail: PR #476; CRD ch.38 status note of
+  2026-11-22 after D38.6.4Q.1.
 
 #### ZEC
 
@@ -800,6 +806,11 @@ the previous version used. The safe way:
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
+- **An operation that a Lightning coin does not support answers an error instead of stopping the process.** The swap
+  operations, the trade-fee estimates, the waits for a confirmation or a spend and the transaction decoding of a
+  Lightning coin aborted the node when they were reached; each now answers an error. Orders and trade previews with
+  a Lightning coin were already refused. The public key of a Lightning coin, which `get_private_keys` reads, is its
+  node id. Detail: PR #479.
 
 #### WalletConnect
 
@@ -902,6 +913,13 @@ the previous version used. The safe way:
   the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
 
 #### Transaction history
+
+- **DASH and Kerrigan history rows of special transactions carry the chain's transaction id.** A DASH coinbase
+  payout, a masternode provider transaction, a Platform withdrawal (asset unlock) or a Kerrigan Sapling transaction
+  carries an extra payload after its lock time. The node ignored that payload, so it computed an identifier the chain
+  does not know and showed it as the history row's `tx_hash` and `internal_id`. The payload is now read and kept,
+  and the identifier is the chain's. A special transaction whose payload is cut short is refused as malformed instead
+  of being read without it. Ordinary transactions are unchanged. Detail: PR #474; CRD ch.38 R38.6.10.5.
 
 - **The history of a UTXO coin says which transactions it skipped.** A transaction the node cannot read is left out of
   the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
@@ -1059,6 +1077,15 @@ the previous version used. The safe way:
   node built that transaction itself, so it cannot be a coinbase output, and the check no longer
   fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
   after R38.5B.4.
+- **A disabled QTUM or QRC20 instance no longer comes back into the subscriptions of the shared Electrum connections,
+  and a subscription lost on a reconnect is placed again when it is asked for.** Two cases left the shared set of
+  connections of QTUM and its tokens with a wrong record of its subscriptions. A subscription request that was still
+  waiting for its answer when its instance was disabled, or one sent later by a balance stream of the disabled
+  instance, recorded that instance again, and its subscription was then placed again after every reconnect. And when
+  a subscription could not be placed again over a new connection, it still counted as placed, so a later request for
+  it sent nothing. Now a disabled instance records nothing, and a subscription is skipped only while it is placed
+  over the current connection. One instance sends at most one request per subscription at a time. Detail: PR #473;
+  CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
 
 #### TRON coins
 
@@ -1067,8 +1094,29 @@ the previous version used. The safe way:
   TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
   form that is not its own. Detail: PR #455; CRD ch.21 R-WP6.
 
+- **Methods that work only for EVM coins now answer "not supported" for a TRON coin at once.** A TRX or TRC20
+  coin has no EVM node, yet seven methods asked its TRON nodes in the EVM format and failed with an error
+  that looked like a node outage. Each now refuses a TRON coin with a typed error before any request to a
+  node: `get_raw_transaction` and `sign_raw_transaction` with `NotImplemented` (HTTP 501, and
+  `sign_raw_transaction` no longer waits for a nonce first), `get_eth_estimated_fee_per_gas` with
+  `CoinNotSupported` (HTTP 501), `stream::fee_estimator::enable` with `NotSupportedFor` (HTTP 501, no streamer
+  is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
+  (HTTP 400), the legacy `get_trade_fee` with the text "TRON trade fee is not supported", and `trade_preimage`
+  with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
+  supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
+
+#### Legacy swaps
+
+- **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
+  refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
+  that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
+  CRD ch.51, status note of 2026-11-22 after R31a.
+
 ### Tests
 
+- **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
+  network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
+  Detail: PR #479.
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
   runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
   because the locked test library was far older than the locked `wasm-bindgen`. The test library is
@@ -1149,6 +1197,11 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
+  lines for a shared QTUM Electrum client, in PR #476.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
+  shared QTUM Electrum client after a disable or a failed placement, in PR #473.
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
   confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
   PR #461; step 3, the lab row, is listed there.
