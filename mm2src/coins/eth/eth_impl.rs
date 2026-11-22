@@ -532,6 +532,14 @@ pub async fn get_raw_transaction_impl(coin: EthCoin, req: RawTransactionRequest)
     use crate::eth::alloy_compat::assert_send_future;
     use alloy::providers::Provider;
 
+    // A TRX or TRC20 coin is refused before any node request (CRD ch.21 D7): its alloy provider is a placeholder
+    // over TRON nodes, which do not serve EVM JSON-RPC.
+    if coin.is_tron_family() {
+        return MmError::err(RawTransactionError::NotImplemented {
+            coin: coin.ticker.clone(),
+        });
+    }
+
     let tx = match req.tx_hash.strip_prefix("0x") {
         Some(tx) => tx,
         None => &req.tx_hash,
@@ -1130,6 +1138,14 @@ pub(crate) async fn withdraw_impl_with_progress(
 }
 
 pub async fn sign_raw_eth_tx_impl(coin: EthCoin, args: SignRawTransactionRequest) -> RawTransactionResult {
+    // A TRX or TRC20 coin is refused before the nonce is asked for (CRD ch.21 D7): the request describes an EVM
+    // transaction, and the coin has no EVM node to read a nonce from.
+    if coin.is_tron_family() {
+        return MmError::err(RawTransactionError::NotImplemented {
+            coin: coin.ticker.clone(),
+        });
+    }
+
     let eth_args = match &args.tx {
         SignRawTransactionEnum::ETH(params) => params,
         _ => return MmError::err(RawTransactionError::InvalidParam("ETH type expected".to_string())),

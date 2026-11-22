@@ -694,8 +694,9 @@ the previous version used. The safe way:
   signature, a SOL and an SPL transfer, and the token-account address under both token programs. The
   old `ed25519-dalek` 1.0.1 library leaves the dependency tree, so the dependency policy no longer
   ignores RUSTSEC-2022-0093.
-  RUSTSEC-2024-0344 stays ignored: `curve25519-dalek` 3.2.0 still comes in through the peer-to-peer
-  library's encryption layer, not through Solana. Solana stays switched off in this build.
+  RUSTSEC-2024-0344 is not cleared by this change: `curve25519-dalek` 3.2.0 also came in through the
+  peer-to-peer library's encryption layer, which PR #470 moves to the new library line. Solana stays
+  switched off in this build.
   Detail: PR #465.
 
 #### UTXO coins and Electrum
@@ -730,6 +731,17 @@ the previous version used. The safe way:
     because the other side of such a swap checks it against that figure.
 
   Detail: PR #431; CRD ch.39 R39.11.4V.10 status note.
+
+#### Transport, TLS and dependencies
+
+- **The peer-to-peer encryption no longer uses the old curve25519 library with the timing advisory.** The
+  encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
+  (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
+  (`x25519-dalek` 2, `curve25519-dalek` 4). The handshake itself is unchanged, byte for byte, and nodes running
+  older versions connect as before. With the Solana libraries already moved off it, the old library is now out
+  of the build, and the dependency policy no longer ignores RUSTSEC-2024-0344. Detail: PR #470; CRD ch.28 OQ2
+  status note of 2026-11-22;
+  `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
 
 ### Fixed
 
@@ -860,6 +872,13 @@ the previous version used. The safe way:
   the old rule. Detail: PR #378; CRD ch.38 R38.6.4o item 4.
 
 #### Transaction history
+
+- **DASH and Kerrigan history rows of special transactions carry the chain's transaction id.** A DASH coinbase
+  payout, a masternode provider transaction, a Platform withdrawal (asset unlock) or a Kerrigan Sapling transaction
+  carries an extra payload after its lock time. The node ignored that payload, so it computed an identifier the chain
+  does not know and showed it as the history row's `tx_hash` and `internal_id`. The payload is now read and kept,
+  and the identifier is the chain's. A special transaction whose payload is cut short is refused as malformed instead
+  of being read without it. Ordinary transactions are unchanged. Detail: PR #474; CRD ch.38 R38.6.10.5.
 
 - **The history of a UTXO coin says which transactions it skipped.** A transaction the node cannot read is left out of
   the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
@@ -1025,6 +1044,17 @@ the previous version used. The safe way:
   TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
   form that is not its own. Detail: PR #455; CRD ch.21 R-WP6.
 
+- **Methods that work only for EVM coins now answer "not supported" for a TRON coin at once.** A TRX or TRC20
+  coin has no EVM node, yet seven methods asked its TRON nodes in the EVM format and failed with an error
+  that looked like a node outage. Each now refuses a TRON coin with a typed error before any request to a
+  node: `get_raw_transaction` and `sign_raw_transaction` with `NotImplemented` (HTTP 501, and
+  `sign_raw_transaction` no longer waits for a nonce first), `get_eth_estimated_fee_per_gas` with
+  `CoinNotSupported` (HTTP 501), `stream::fee_estimator::enable` with `NotSupportedFor` (HTTP 501, no streamer
+  is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
+  (HTTP 400), the legacy `get_trade_fee` with the text "TRON trade fee is not supported", and `trade_preimage`
+  with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
+  supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
+
 ### Tests
 
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
@@ -1145,7 +1175,8 @@ the previous version used. The safe way:
   last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — done: the Solana crates moved to the 3.x
   line (package S5 of `solana-support`, PR #465); RUSTSEC-2022-0093 is cleared, and RUSTSEC-2024-0344
-  moves to the libp2p modernization task (it comes in through the peer-to-peer library).
+  moves to the libp2p modernization task (it comes in through the peer-to-peer library); PR #470 clears
+  it by vendoring the Noise crate.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,

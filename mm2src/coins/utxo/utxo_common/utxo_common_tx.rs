@@ -572,6 +572,7 @@ pub async fn p2sh_spending_tx<T: UtxoCommonOps>(
         sapling_v5: unsigned.sapling_v5,
         orchard: unsigned.orchard,
         opaque: None,
+        extra_payload: None,
     })
 }
 

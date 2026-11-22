@@ -47,6 +47,10 @@
 > parity with their predecessors; the licensing of the Apache-2.0-only Solana
 > crates stays an open question.
 
+*2026-11-22: RUSTSEC-2024-0344 is cleared by PR #470, which vendors the libp2p
+Noise crate on `x25519-dalek` 2 / `curve25519-dalek` 4; `cargo tree -i
+curve25519-dalek@3.2.0` is empty and the advisory leaves `deny.toml`.*
+
 ## Goal
 
 Clear `RUSTSEC-2022-0093` (ed25519-dalek 1.x double-public-key signing

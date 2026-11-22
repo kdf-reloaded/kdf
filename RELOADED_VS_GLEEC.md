@@ -902,6 +902,25 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   `gasfree_address` of the reports and the gasless withdraw are available, and
   that withdraw returns a signed authorization the node does not hand to the
   provider (CRD ch.63 §63.3.1 to §63.3.6, §63.8A).
+- **A TRON coin answers "not supported" for the EVM-only methods.**
+  `get_raw_transaction`, `sign_raw_transaction`,
+  `get_eth_estimated_fee_per_gas`, `stream::fee_estimator::enable`,
+  `get_token_info` for an `ERC20` protocol on a TRON platform, the legacy
+  `get_trade_fee` and `trade_preimage` with a TRON coin on the receiving side
+  have no TRON implementation. Reloaded refuses a TRX or TRC20 coin in each of
+  them with a typed "not supported" error before any request to a node; an
+  EVM coin is unchanged. GLEEC KDF fails five of these methods for a TRON
+  coin as well, without a node request: `trade_preimage` with the same
+  error, the legacy `get_trade_fee` with the same legacy error body and
+  another text, the other three with other error types (for example
+  `Transport`, HTTP 502, from `get_raw_transaction`). With a gas-fee
+  provider it answers
+  `get_eth_estimated_fee_per_gas` with Ethereum's fees under the TRON ticker;
+  it also accepts `stream::fee_estimator::enable`, and the stream then
+  reports errors or Ethereum's fees. Not answering another chain's fees for a
+  TRON coin, and not starting a stream that can only report errors, are
+  deliberate. The answers are local and no peer sees them, so no switch
+  exists (CRD ch.21 §21.11 D7, R21.10B.14 to R21.10B.21).
 - **A Tendermint activation refuses a hardware key policy.** A request that names the `Trezor` `priv_key_policy`
   fails before any node is contacted, with a `PlatformCoinCreationError` (HTTP 500) that says the hardware key policy
   is not supported for Tendermint coins and to activate with the local key; GLEEC KDF ignores the member and activates
