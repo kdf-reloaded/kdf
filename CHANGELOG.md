@@ -764,6 +764,11 @@ the previous version used. The safe way:
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
+- **An operation that a Lightning coin does not support answers an error instead of stopping the process.** The swap
+  operations, the trade-fee estimates, the waits for a confirmation or a spend and the transaction decoding of a
+  Lightning coin aborted the node when they were reached; each now answers an error. Orders and trade previews with
+  a Lightning coin were already refused. The public key of a Lightning coin, which `get_private_keys` reads, is its
+  node id.
 
 #### WalletConnect
 
