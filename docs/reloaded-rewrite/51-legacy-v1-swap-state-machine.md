@@ -1795,7 +1795,9 @@ answer.
 3. *Undetermined.* When the nodes disagree, or fewer than two answer (with the
    field set: when the named node does not answer; no other node and no single
    other answer is taken in its place), the read is undetermined. The step
-   waits, and it MUST NOT refund or claim on an undetermined read.
+   waits, and it MUST NOT refund or claim on an undetermined read. A claim that
+   rests only on a secret proven by its hash (the last sentence of R100's head)
+   needs no agreeing read, and an undetermined read does not hold it back.
 4. *Admission.* A coin whose node list has fewer than two nodes and which has
    no `swap_evidence_node` does not start a swap: an order with it is refused
    at placement and at the swap start, with a reason that names
@@ -3605,7 +3607,7 @@ reference rows alike.
   field `swap_evidence_node`. It is Reloaded-original, records only the
   maintainer's decisions of 2026-11-22, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
-- *Clean-side addition of 2026-11-22, a second one:* R100 items 6 to 9 and
+- *Clean-side addition of 2026-11-22, a third one:* R100 items 6 to 9 and
   T43, the maintainer's refinements of 2026-11-22 (the operator's own daemon,
   two hosts, no outvoting, swaps already running). Reloaded-original; no
   reference input and no forbidden-class input; no sentence of the chapter is
