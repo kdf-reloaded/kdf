@@ -2196,9 +2196,8 @@ the mint, the claim transaction first creates it (idempotently; the receiver
 pays its rent). A claim is sent only while the payment account is present at
 `finalized` (as R40.6D.16 requires), only after the node's simulation of the
 transaction succeeds, and only while the cluster time (R40.6D.11) is at least
-300 seconds before the lock time, because the data of a claim that fails on
-chain still shows the secret. The sender refunds with `sender_refund_*` once the
-refund gate (R40.6D.11) is open.
+300 seconds before the lock time. The sender refunds with `sender_refund_*` once
+the refund gate (R40.6D.11) is open.
 
 **R40.6D.11 (refund gate).** The time compared with the lock is the cluster's:
 the block time of the latest `finalized` slot. The gate answers "wait" with the
