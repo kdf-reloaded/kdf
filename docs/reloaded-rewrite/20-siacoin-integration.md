@@ -334,6 +334,15 @@ against the expected secret hash.
 **R-S7 (payment lookup).** Answer "has my payment been sent" by
 querying walletd for the relevant address event(s).
 
+> **Pointer (2026-11-22).** [Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> §39.11.5A, R39.11.5A.8, records what the reference answers here at the rows
+> `v2.6.0-beta` and `v3.0.0-beta`: a failed events request is answered as "not
+> sent", an empty list likewise, and otherwise the first event decides.
+> D39.11.5A.1 there asks whether this project classifies the failed request as
+> undetermined instead, as R-S8 already requires for the spend search. The
+> pointer is a Spec Reader addition and passed the KDF Dirty Gate with that
+> subsection on 2026-11-22.
+
 **R-S8 (swap-spend search).** The swap-spend search operations MUST
 distinguish three outcomes, not two: a payment spent via the revealed
 secret, a payment refunded via the timelock, and a payment that is

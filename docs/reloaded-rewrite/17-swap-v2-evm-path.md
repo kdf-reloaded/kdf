@@ -546,6 +546,17 @@ blocks. It also never reached its deadline, so a taker could neither learn the
 secret nor reach its refund path. Whether the reference bounds these queries
 has not been established.
 
+> **Pointer (2026-11-22).** For the payment-sent search and the one-shot spend
+> and refund search this is now established:
+> [Chapter 39](39-zcash---z_coin-shielded-coin.md) §39.11.5A, R39.11.5A.5,
+> records the reference's request sizing, and that a refused range is an error
+> answer there, with no narrowing. R39.11.5A.2 to R39.11.5A.6 record the whole
+> V1 already-sent query of the reference: the order of its reads, the block the
+> contract state is read at, and its answers when the state and the events
+> disagree. The reference's wait for a payment's spend is still not established.
+> The pointer changes no rule of this section. It is a Spec Reader addition and
+> passed the KDF Dirty Gate with that subsection on 2026-11-22.
+
 ---
 
 ## 17.9 NFT variant
