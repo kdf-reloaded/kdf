@@ -3889,6 +3889,203 @@ fn t38_6_4q_1_a_request_without_an_answer_blocks_the_same_owner_only_until_its_b
     });
 }
 
+/// P8 F1, script hashes. A subscription of owner A is remembered but its placement over the current session failed (the
+/// pool's pass). A request R of `requester` (A itself, or a new owner B with A remaining) is in flight when the pass
+/// comes round again and leaves the key to it; R then fails. R's failure asks for a pass, which places the key over the
+/// current session without a new request of any owner.
+async fn failed_request_after_a_skipping_pass_script_hash(new_owner: bool) {
+    let env = family_env();
+    let server = family_stub().await;
+    let qtum = init_qtum(&env, &[&server]).await;
+    let token = init_token_named(&env, TICKER, &[&server], false).await;
+    wait_until("the session", 10., || server.open_connections() == 1).await;
+    let client = electrum_client_of(&token);
+    let owner_a = token.utxo.electrum_owner;
+    let owner_b = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+    let requester = if new_owner { owner_b } else { owner_a };
+
+    client.subscribe_scripthash(owner_a, "a6a1".to_owned()).await.unwrap();
+    assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+    // The reconnect: the placement over the new session fails.
+    server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+    reconnect_all(&server).await;
+    wait_until("the failing placement", 10., || {
+        server.requests(SCRIPTHASH_SUBSCRIBE) == 2
+    })
+    .await;
+
+    // R is in flight (and will fail with the error answer decided now) while the pool's repeat comes round.
+    server.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::from_millis(2_500));
+    let request = client.subscribe_scripthash(requester, "a6a1".to_owned());
+    let watcher = async {
+        wait_until("R to be sent", 10., || server.requests(SCRIPTHASH_SUBSCRIBE) == 3).await;
+        // A pass comes round while R is in flight: it skips the key (and marks the skip) and sends nothing.
+        assert!(client.resubscribe_watched_scripthashes().await);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+        server.clear_error(SCRIPTHASH_SUBSCRIBE);
+        // The pool's own repeat runs while R is in flight and sends nothing either.
+        Timer::sleep(1.6).await;
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+    };
+    let (outcome, ()) = futures::join!(request, watcher);
+    assert!(outcome.is_err());
+    // R's failure asks for a pass; it places the key (the owners that remain remember it).
+    wait_until("the placement asked for by the failure", 15., || {
+        server.requests(SCRIPTHASH_SUBSCRIBE) == 4
+    })
+    .await;
+    Timer::sleep(3.).await;
+    assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 4, "placed once, nothing repeats");
+    assert_eq!(
+        client.script_hash_owners("a6a1"),
+        Some(std::collections::HashSet::from([owner_a]))
+    );
+    // It is placed over the current session: a request of its owner sends nothing.
+    client.subscribe_scripthash(owner_a, "a6a1".to_owned()).await.unwrap();
+    assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 4);
+    drop((qtum, token));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_the_remembered_owner_after_a_skipping_pass_asks_for_the_script_hash_placement() {
+    block_on(failed_request_after_a_skipping_pass_script_hash(false));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_a_new_owner_after_a_skipping_pass_asks_for_the_script_hash_placement() {
+    block_on(failed_request_after_a_skipping_pass_script_hash(true));
+}
+
+/// P8 F1, contract events: the same two shapes. The pool's pass has gone by (once for the session) before R is sent, so
+/// the test asks for a pass itself while R is in flight, and that pass skips the subscription. After R's failure one
+/// more pass is asked for. When `pass_succeeds` it places the subscription; when the server still refuses it, it is not repeated.
+async fn failed_request_after_a_skipping_pass_contract_event(new_owner: bool, pass_succeeds: bool) {
+    let env = family_env();
+    let server = family_stub().await;
+    let qtum = init_qtum(&env, &[&server]).await;
+    let token = init_token_named(&env, TICKER, &[&server], false).await;
+    wait_until("the session", 10., || server.open_connections() == 1).await;
+    let client = electrum_client_of(&token);
+    let owner_a = token.utxo.electrum_owner;
+    let owner_b = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+    let requester = if new_owner { owner_b } else { owner_a };
+    let (address, contract) = event_arguments(&token);
+    let subscribe = |owner| {
+        client
+            .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+            .compat()
+    };
+
+    subscribe(owner_a).await.unwrap();
+    assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+    // The reconnect: the one placement over the new session fails.
+    server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+    reconnect_all(&server).await;
+    wait_until("the failing placement", 10., || server.requests(EVENT_SUBSCRIBE) == 2).await;
+    Timer::sleep(1.).await;
+
+    // R is in flight and will fail with the error answer decided now.
+    server.set_reply_delay(EVENT_SUBSCRIBE, Duration::from_millis(1_500));
+    let request = subscribe(requester);
+    let watcher = async {
+        wait_until("R to be sent", 10., || server.requests(EVENT_SUBSCRIBE) == 3).await;
+        // A pass is asked for while R is in flight: it skips the subscription (and marks the skip), sending nothing.
+        client.resubscribe_watched_contract_events().await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+        if pass_succeeds {
+            server.clear_error(EVENT_SUBSCRIBE);
+        }
+    };
+    let (outcome, ()) = futures::join!(request, watcher);
+    assert!(outcome.is_err());
+    // R's failure asks for the pass: one placement, over the current session, by no owner's request.
+    wait_until("the placement asked for by the failure", 15., || {
+        server.requests(EVENT_SUBSCRIBE) == 4
+    })
+    .await;
+    Timer::sleep(3.).await;
+    assert_eq!(server.requests(EVENT_SUBSCRIBE), 4, "asked once, not repeated");
+    assert_eq!(client.contract_event_subscriptions(), 1);
+    if pass_succeeds {
+        server.set_reply_delay(EVENT_SUBSCRIBE, Duration::ZERO);
+        subscribe(owner_a).await.unwrap();
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 4, "placed over this session");
+    }
+    drop((qtum, token));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_the_remembered_owner_after_a_skipping_pass_asks_for_the_contract_event_placement() {
+    block_on(failed_request_after_a_skipping_pass_contract_event(false, true));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_a_new_owner_after_a_skipping_pass_asks_for_the_contract_event_placement() {
+    block_on(failed_request_after_a_skipping_pass_contract_event(true, true));
+}
+
+#[test]
+fn t38_6_4q_1_the_pass_a_failed_request_asked_for_is_not_repeated_when_the_contract_event_is_refused_again() {
+    block_on(failed_request_after_a_skipping_pass_contract_event(false, false));
+}
+
+/// P8 F1, narrowed: a refused request of the remembered owner asks for no pass when no pass skipped the key. The
+/// subscription is unplaced after a manual failed re-placement (which the pool does not repeat), and the owner's
+/// request is refused too: the stub sees no placement beyond the two requests.
+#[test]
+fn t38_6_4q_1_a_refused_script_hash_request_asks_for_no_pass_when_no_pass_skipped_it() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let client = qtum_client_of(&qtum);
+        let owner = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+        // The session has settled: no pass of the pool is pending that could place the key by itself.
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        Timer::sleep(2.).await;
+        client.subscribe_scripthash(owner, "b5b2".to_owned()).await.unwrap();
+        server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+        assert!(!client.resubscribe_watched_scripthashes().await);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        // The owner is refused too.
+        assert!(client.subscribe_scripthash(owner, "b5b2".to_owned()).await.is_err());
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3, "no pass was asked for");
+        assert!(client.script_hash_owners("b5b2").is_some());
+    });
+}
+
+#[test]
+fn t38_6_4q_1_a_refused_contract_event_request_asks_for_no_pass_when_no_pass_skipped_it() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        let subscribe = || {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+        // The session has settled: no pass of the pool is pending.
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        Timer::sleep(2.).await;
+        subscribe().await.unwrap();
+        server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+        client.resubscribe_watched_contract_events().await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        assert!(subscribe().await.is_err());
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3, "no pass was asked for");
+        assert_eq!(client.contract_event_subscriptions(), 1);
+        drop(token);
+    });
+}
+
 // ---- CRD ch.38 §38.5C (D38.5C.1 and D38.5C.2 status notes): rows the listing no longer holds, changed heights ----
 
 /// One stored transfer row of the transaction `hash_byte`.

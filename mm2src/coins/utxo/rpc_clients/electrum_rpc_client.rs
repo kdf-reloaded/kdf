@@ -535,6 +535,11 @@ struct WatchedSubscription {
     /// the session ended meanwhile. A request that waits on from an older session does not keep the pass from placing
     /// the subscription over a newer one.
     in_flight: Vec<(u64, ElectrumOwner)>,
+    /// The session epoch in which a re-placement pass skipped this subscription because a request was in flight. A
+    /// request of that session that then fails asks for a pass once and clears the mark; a failed request without a
+    /// skipped pass asks for none (a refused subscription is asked at most once for each session, D38.6.4Q.3 status
+    /// note, item 2).
+    skipped_in: Option<u64>,
 }
 
 /// Settles a subscription request when it ends, whether it was answered or its future was dropped before the answer
@@ -1274,7 +1279,10 @@ impl ElectrumClient {
     /// bound by the pool's request timeout, 20 s, and the call by the call budget, 60 s unless the caller gave a
     /// shorter one; it then settles as a failed placement), or until its future is dropped (a caller that gives up
     /// drops its request, which settles the same way). A retired owner (`forget_owner`: a stale handle of a removed
-    /// instance) sends and remembers nothing. In these cases the answer is `Ok(())`.
+    /// instance) sends and remembers nothing. In these cases the answer is `Ok(())`. A re-placement pass leaves a
+    /// subscription to a request of this kind that is in flight in the current session; a request that fails asks
+    /// for a pass when a pass skipped the subscription for it and the subscription stays remembered and is not placed
+    /// in the current session; a failed request without a skipped pass asks for none.
     pub async fn subscribe_scripthash(&self, owner: ElectrumOwner, script_hash: String) -> Result<(), String> {
         let epoch = self.pool.session_epoch();
         // The owner is remembered before the request is sent, so that a removal that runs while the request is in
@@ -1299,26 +1307,42 @@ impl ElectrumClient {
         };
         let mut guard = SettleOnDrop {
             settle: |ok: bool| {
-                let mut watched = self.lock_watched_script_hashes();
-                if let Some(entry) = watched.get_mut(&script_hash) {
-                    entry.in_flight.retain(|sent| *sent != (epoch, owner));
-                }
-                if ok {
-                    // An answer for an owner that was removed meanwhile adds nothing back.
-                    if !self.is_retired(owner) {
-                        let entry = watched.entry(script_hash.clone()).or_default();
-                        entry.owners.insert(owner);
-                        entry.placed_in = Some(epoch);
-                    }
-                } else if added {
-                    // A failed (or abandoned) first placement is not remembered; an owner that was remembered before
-                    // stays.
+                let ask_for_pass = {
+                    let mut watched = self.lock_watched_script_hashes();
                     if let Some(entry) = watched.get_mut(&script_hash) {
-                        entry.owners.remove(&owner);
-                        if entry.owners.is_empty() {
-                            watched.remove(&script_hash);
+                        entry.in_flight.retain(|sent| *sent != (epoch, owner));
+                    }
+                    if ok {
+                        // An answer for an owner that was removed meanwhile adds nothing back. A late answer of an
+                        // older session never moves the mark back.
+                        if !self.is_retired(owner) {
+                            let entry = watched.entry(script_hash.clone()).or_default();
+                            entry.owners.insert(owner);
+                            entry.placed_in = Some(entry.placed_in.map_or(epoch, |placed| placed.max(epoch)));
+                        }
+                    } else if added {
+                        // A failed (or abandoned) first placement is not remembered; an owner that was remembered
+                        // before stays.
+                        if let Some(entry) = watched.get_mut(&script_hash) {
+                            entry.owners.remove(&owner);
+                            if entry.owners.is_empty() {
+                                watched.remove(&script_hash);
+                            }
                         }
                     }
+                    // A re-placement pass skipped the subscription while this request was in flight and left it to it:
+                    // if it stays remembered and is not placed in this session, ask for a pass, once for that skip.
+                    let current = self.pool.session_epoch();
+                    !ok && watched.get_mut(&script_hash).is_some_and(|entry| {
+                        let skipped = entry.skipped_in == Some(current);
+                        if skipped {
+                            entry.skipped_in = None;
+                        }
+                        skipped && entry.placed_in != Some(current)
+                    })
+                };
+                if ask_for_pass {
+                    self.pool.request_resubscribe();
                 }
             },
             ok: false,
@@ -1340,13 +1364,24 @@ impl ElectrumClient {
     /// Place every remembered subscription again over a maintained connection (R38.6.4h). Failures are
     /// logged and skipped so one unusable server cannot stall the rest; `false` tells that some
     /// subscription could not be placed and the attempt is to be repeated.
+    ///
+    /// A subscription that has a request of `subscribe_scripthash` in flight in the current session is left to that
+    /// request and counts as neither placed nor failed here: no repeat is asked for it, because a request that fails
+    /// asks for a pass itself (a skipped key would otherwise make the pool repeat the pass every second for as long
+    /// as the request hangs).
     pub async fn resubscribe_watched_scripthashes(&self) -> bool {
         let epoch = self.pool.session_epoch();
         let hashes: Vec<String> = self
             .lock_watched_script_hashes()
-            .iter()
-            .filter(|(_, watched)| !watched.in_flight.iter().any(|(sent, _)| *sent == epoch))
-            .map(|(hash, _)| hash.clone())
+            .iter_mut()
+            .filter_map(|(hash, watched)| {
+                if watched.in_flight.iter().any(|(sent, _)| *sent == epoch) {
+                    watched.skipped_in = Some(epoch);
+                    None
+                } else {
+                    Some(hash.clone())
+                }
+            })
             .collect();
         let mut all_placed = true;
         for script_hash in hashes {
@@ -1433,7 +1468,10 @@ impl ElectrumClient {
     /// request that gets no answer blocks its (owner, key) only until it is answered, until it fails at the end of its
     /// call's time budget (a request over a connection is bound by the pool's request timeout, 20 s, and the call by
     /// the call budget, 60 s unless the caller gave a shorter one; it then settles as a failed placement), or until
-    /// its future is dropped (a caller that gives up drops its request, which settles the same way).
+    /// its future is dropped (a caller that gives up drops its request, which settles the same way). A
+    /// re-placement pass leaves a subscription to a request of this kind that is in flight in the current session; a
+    /// request that fails asks for a pass when a pass skipped the subscription for it and the subscription stays
+    /// remembered and is not placed in the current session; a failed request without a skipped pass asks for none. The pass does not ask again on failure (D38.6.4Q.3 status note, item 2).
     pub async fn subscribe_contract_event(
         &self,
         owner: ElectrumOwner,
@@ -1466,6 +1504,7 @@ impl ElectrumClient {
                         owners: HashSet::from([owner]),
                         placed_in: None,
                         in_flight: vec![(epoch, owner)],
+                        skipped_in: None,
                     }));
                     true
                 },
@@ -1473,28 +1512,48 @@ impl ElectrumClient {
         };
         let mut guard = SettleOnDrop {
             settle: |ok: bool| {
-                let mut watched = self.lock_watched_contract_events();
-                let position = watched.iter().position(|(known, _)| known == &entry);
-                if let Some(i) = position {
-                    watched[i].1.in_flight.retain(|sent| *sent != (epoch, owner));
-                }
-                if ok {
-                    // An answer for an owner that was removed meanwhile adds nothing back.
-                    if !self.is_retired(owner) {
-                        let i = position.unwrap_or_else(|| {
-                            watched.push((entry.clone(), WatchedSubscription::default()));
-                            watched.len() - 1
-                        });
-                        watched[i].1.owners.insert(owner);
-                        watched[i].1.placed_in = Some(epoch);
+                let ask_for_pass = {
+                    let mut watched = self.lock_watched_contract_events();
+                    let position = watched.iter().position(|(known, _)| known == &entry);
+                    if let Some(i) = position {
+                        watched[i].1.in_flight.retain(|sent| *sent != (epoch, owner));
                     }
-                } else if let (true, Some(i)) = (added, position) {
-                    // A failed (or abandoned) first placement is not remembered; an owner that was remembered before
-                    // stays.
-                    watched[i].1.owners.remove(&owner);
-                    if watched[i].1.owners.is_empty() {
-                        watched.remove(i);
+                    if ok {
+                        // An answer for an owner that was removed meanwhile adds nothing back. A late answer of an
+                        // older session never moves the mark back.
+                        if !self.is_retired(owner) {
+                            let i = position.unwrap_or_else(|| {
+                                watched.push((entry.clone(), WatchedSubscription::default()));
+                                watched.len() - 1
+                            });
+                            watched[i].1.owners.insert(owner);
+                            let placed = watched[i].1.placed_in;
+                            watched[i].1.placed_in = Some(placed.map_or(epoch, |placed| placed.max(epoch)));
+                        }
+                    } else if let (true, Some(i)) = (added, position) {
+                        // A failed (or abandoned) first placement is not remembered; an owner that was remembered
+                        // before stays.
+                        watched[i].1.owners.remove(&owner);
+                        if watched[i].1.owners.is_empty() {
+                            watched.remove(i);
+                        }
                     }
+                    // A re-placement pass skipped the subscription while this request was in flight and left it to it:
+                    // if it stays remembered and is not placed in this session, ask for a pass, once for that skip.
+                    let current = self.pool.session_epoch();
+                    !ok && watched
+                        .iter_mut()
+                        .find(|(known, _)| known == &entry)
+                        .is_some_and(|(_, watched)| {
+                            let skipped = watched.skipped_in == Some(current);
+                            if skipped {
+                                watched.skipped_in = None;
+                            }
+                            skipped && watched.placed_in != Some(current)
+                        })
+                };
+                if ask_for_pass {
+                    self.pool.request_contract_resubscribe();
                 }
             },
             ok: false,
@@ -1516,14 +1575,24 @@ impl ElectrumClient {
     /// Places every remembered contract-event subscription again, once, over a maintained connection (D38.6.4Q.3
     /// status note, items 1 and 2). An error answer, a refusal or a failure is logged and not repeated: the pool asks
     /// for this once for each newly maintained session, and nothing here retries or fails anything else. A failed
-    /// placement clears the entry's mark, so that the next request of an owner for it is sent again.
+    /// placement clears the entry's mark, so that the next request of an owner for it is sent again. A subscription
+    /// that has a request of `subscribe_contract_event` in flight in the current session is left to that request,
+    /// which asks for one pass when it fails and the subscription stays remembered and unplaced (the skip is marked
+    /// on the entry, and a failed request without a skip asks for none); that pass, like every other, does not ask
+    /// again.
     pub async fn resubscribe_watched_contract_events(&self) {
         let current = self.pool.session_epoch();
         let events: Vec<[Json; 3]> = self
             .lock_watched_contract_events()
-            .iter()
-            .filter(|(_, watched)| !watched.in_flight.iter().any(|(sent, _)| *sent == current))
-            .map(|(entry, _)| entry.clone())
+            .iter_mut()
+            .filter_map(|(entry, watched)| {
+                if watched.in_flight.iter().any(|(sent, _)| *sent == current) {
+                    watched.skipped_in = Some(current);
+                    None
+                } else {
+                    Some(entry.clone())
+                }
+            })
             .collect();
         for entry in events {
             let epoch = self.pool.session_epoch();
