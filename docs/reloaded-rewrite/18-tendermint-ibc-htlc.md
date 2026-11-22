@@ -1245,7 +1245,7 @@ The module refunds an expired HTLC itself; there is no refund message
   transaction (body, auth info, signatures).
 
 > **Reloaded status note (2026-11-22, Reloaded-original; informative; PR
-> #NNN).** The spend search of R18.11.16 and the claim polling of
+> #493).** The spend search of R18.11.16 and the claim polling of
 > R18.11.19 share one lookup. It runs the same transaction search,
 > ascending, 100 results per page, up to 10 pages, and takes the oldest
 > result whose result code is 0 and one of whose messages has the claim
