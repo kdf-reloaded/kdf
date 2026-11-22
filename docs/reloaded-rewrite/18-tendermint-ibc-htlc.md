@@ -1247,13 +1247,14 @@ The module refunds an expired HTLC itself; there is no refund message
 > **Reloaded status note (2026-11-22, Reloaded-original; informative; PR
 > #493).** The spend search of R18.11.16 and the claim polling of
 > R18.11.19 share one lookup. It runs the same transaction search,
-> ascending, 100 results per page, up to 10 pages, and takes the oldest
-> result whose result code is 0 and one of whose messages has the claim
-> message type of the coin's dialect and the id of this HTLC (compared
-> without regard to letter case). Other results are skipped. When none
-> passes, the search answers that the claim was not found and the polling
-> continues until its deadline. Chapter 51 R91 records that the reference
-> takes the first result. No message or transaction a peer sees changes.
+> ascending, 100 results per page, until the results are exhausted or 10
+> pages have been read, and takes the oldest result whose result code is 0
+> and one of whose messages has the claim message type of the coin's
+> dialect and the id of this HTLC (compared without regard to letter
+> case). Other results are skipped. When none passes, the search answers
+> that the claim was not found and the polling continues until its
+> deadline. Chapter 51 R91 records that the reference takes the first
+> result. No message or transaction a peer sees changes.
 
 ### 18.11.6 Dex-fee transaction, its validation, and "my payment sent"
 

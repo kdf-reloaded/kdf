@@ -1469,6 +1469,62 @@ fn tm_flow_claim_search_pages_through_the_results() {
     }
 }
 
+/// Scripts a node that serves at most `served` results per page of `all`, with the given `total_count`; a page
+/// past the end is empty.
+fn script_paged_node(fx: &Fixture, chain: Chain, id: &str, all: Vec<(Vec<u8>, u32)>, served: usize, total: &str) {
+    let htlc_id = id.to_owned();
+    let total = total.to_owned();
+    fx.node.answer(move |method, params| match method {
+        "abci_query" if params["path"] == chain.query_path() => Some(htlc_answer(chain, &htlc_id, STATE_COMPLETED)),
+        "tx_search" => {
+            let page = params["page"]
+                .as_str()
+                .and_then(|p| p.parse::<usize>().ok())
+                .or_else(|| params["page"].as_u64().map(|p| p as usize))
+                .unwrap_or(1);
+            let start = ((page - 1) * served).min(all.len());
+            let end = (start + served).min(all.len());
+            let mut reply = search_reply(&all[start..end]);
+            reply["total_count"] = json!(total);
+            Some(reply)
+        },
+        _ => None,
+    });
+}
+
+#[test]
+fn tm_flow_claim_search_counts_what_it_received_when_the_node_serves_smaller_pages() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let good = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "page two");
+        let mut all: Vec<(Vec<u8>, u32)> = (0..44).map(|_| (failed.clone(), 5)).collect();
+        all.push((good, 0));
+        script_paged_node(&fx, chain, &id, all, 30, "45");
+
+        let found = search_my(&fx, &payment).expect("the search succeeds");
+        assert_eq!(spend_memo(found), "page two");
+        assert_eq!(fx.node.requests("tx_search").len(), 2);
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_stops_at_the_page_cap() {
+    // The fixture does not capture logs, so the warning text is not asserted.
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let all: Vec<(Vec<u8>, u32)> = (0..2000).map(|_| (failed.clone(), 5)).collect();
+        script_paged_node(&fx, chain, &id, all, 100, "5000");
+
+        let err = search_my(&fx, &payment).expect_err("no successful claim within the cap");
+        assert!(err.contains("ClaimHtlcTxNotFound"), "unexpected error: {err}");
+        assert_eq!(fx.node.requests("tx_search").len(), 10);
+    }
+}
+
 #[test]
 fn tm_flow_wait_for_tx_spend_keeps_polling_past_a_failed_claim() {
     // The first round only holds a failed claim, the second the successful one (the node answers by the number

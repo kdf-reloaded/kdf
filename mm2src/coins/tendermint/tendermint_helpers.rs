@@ -818,8 +818,9 @@ impl TendermintCoin {
     /// Finds the oldest successful claim of the HTLC `htlc_id` (CRD ch.18 R18.11.16 and R18.11.19, ch.51 R91).
     ///
     /// The transactions are searched by the event `claim_htlc.id='<id>'`, oldest first, `CLAIM_SEARCH_PER_PAGE`
-    /// results per page, up to `CLAIM_SEARCH_MAX_PAGES` pages (a `warn!` naming the HTLC id is logged when the cap
-    /// is hit with results left). A result is the claim only when its result code is 0 and one of its messages
+    /// results asked per page. The results are read until they are exhausted (an empty page, or as many received
+    /// as `total_count`, whatever page size the node serves) or `CLAIM_SEARCH_MAX_PAGES` pages are read (a `warn!`
+    /// naming the HTLC id is logged when the cap is hit with results left). A result is the claim only when its result code is 0 and one of its messages
     /// (every message is examined, not only the first) has the claim type URL of this coin's dialect, decodes as a
     /// claim message and carries the id of this HTLC. The type URL is checked before the value is decoded, because
     /// the protobuf decoding of another message's value can succeed loosely. The id is the upper-case hex of the
@@ -840,6 +841,7 @@ impl TendermintCoin {
         let query = format!("claim_htlc.id='{htlc_id}'");
         let rpc_client = self.rpc_client().await?;
 
+        let mut received: u64 = 0;
         for page in 1..=CLAIM_SEARCH_MAX_PAGES {
             let response = rpc_client
                 .perform(TxSearchRequest {
@@ -872,8 +874,9 @@ impl TendermintCoin {
                 }
             }
 
-            let seen = u64::from(page) * u64::from(CLAIM_SEARCH_PER_PAGE);
-            if response.txs.is_empty() || seen >= u64::from(response.total_count) {
+            // Count what was received, not what was asked: a node may serve fewer results per page.
+            received += response.txs.len() as u64;
+            if response.txs.is_empty() || received >= u64::from(response.total_count) {
                 return Ok(None);
             }
         }
