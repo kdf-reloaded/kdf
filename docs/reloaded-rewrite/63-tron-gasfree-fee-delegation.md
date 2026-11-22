@@ -1976,8 +1976,11 @@ T14. **Nile end-to-end (lab row; deferred with D63.6).** A
     *Status note (2026-11-22).* Settlement tracking exists on the task route
     (the status note after D63.9). An ignored test that signs, submits and
     follows one transfer on Nile, with the credentials and the key taken from
-    the environment, is in `coins/eth/tron/gasfree/live_tests.rs`; the lab row
-    itself and the browser-target smoke test stay open.
+    the environment, is in `coins/eth/tron/gasfree/live_tests.rs`. The lab row
+    passed on 2026-11-22 through `task::withdraw::init` on the Nile test
+    network: the three phases in order, the final result with `trace_id` and
+    `tx_hash`, and the transfer settled on chain. The browser-target smoke test
+    stays open.
 
 T17. **Controller check (R29) (Reloaded-original, 2026-11-19).** A
     match is confirmed and reused for 10 minutes; after that, or after a
@@ -2010,9 +2013,9 @@ D63.6. **Submission and settlement tracking.** Wire the signed
     Submission and settlement tracking exist on the task route only
     (`task::withdraw::init` and `task::withdraw::status`), as the status note
     after D63.9 (§63.8B) records. The direct `withdraw` method stays
-    sign-only. What stays deferred: a lab row of T14 on the Nile test network
-    with settlement tracking, and any use of the signed authorization of the
-    direct method by another RPC.
+    sign-only. What stays deferred: any use of the signed authorization of the
+    direct method by another RPC. (The lab row of T14 on the Nile test network
+    passed on 2026-11-22; see the status note after T14.)
 
 D63.7. **Return path for tokens held at the custody address
     (Reloaded-only deferral).** What is deferred is a way for the

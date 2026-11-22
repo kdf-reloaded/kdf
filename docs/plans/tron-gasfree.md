@@ -127,7 +127,8 @@ new PRs, and the branch stays until the second PR below has landed.
 >   then sign, ask the user to confirm, and send; the user must confirm before
 >   the signed deadline.
 > - **Not planned now:** a check on mainnet.
-> - **Open:** the lab row on the Nile test network (ch.63 T14).
+> - **Done (2026-11-22):** the lab row on the Nile test network (ch.63 T14),
+>   through the task form of `withdraw`.
 
 ## Blocker: the derived custody address is knowingly wrong
 
