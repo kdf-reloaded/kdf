@@ -1065,12 +1065,12 @@ the previous version used. The safe way:
 - **A crash or power loss while a swap or order record is being saved no longer damages it.** The saved record of a
   legacy swap, its statistics copy and the saved record of an order were rewritten in place, so a crash in the middle
   of a save could leave an empty or cut-off file, and the swap could not be resumed from it. Each save now writes a
-  new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the record holds
-  either its previous or its new complete content. Where a folder cannot be synced (some network mounts), the save
-  still succeeds and logs a warning. On Windows a replace refused because another program, such as a virus scanner,
-  holds the new file is retried briefly. A temporary `*.tmp` file left by a crash is ignored. Browser builds already
-  saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3,
-  ch.44 R44.8A.6 and §44.9A (status update).
+  new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the record
+  holds either its previous or its new complete content. Where a folder cannot be synced (some network mounts), the
+  save still succeeds and logs a warning. On Windows a replace refused because another program, such as a virus
+  scanner, holds the new file is retried briefly. A temporary `*.tmp` file left by a crash is ignored. Browser builds
+  already saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3, ch.44
+  R44.8A.6 and §44.9A (status update).
 - **A swap run whose swap lock was taken over now stops.** Each swap is run by one runner, which holds a lock file
   and refreshes it every 30 seconds. A runner that stalled for more than 40 seconds while another runner took the
   lock over kept running and refreshing, so two runners could work on one swap, and the first one deleted the
