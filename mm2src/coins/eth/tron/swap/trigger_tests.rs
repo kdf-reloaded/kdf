@@ -4,10 +4,11 @@
 use super::contract_abi::{decode_payments_output, encode_call, encode_payments_query, PaymentRecord, PaymentState,
                           TronSwapCall};
 use super::ids_tests::{addr, secret_hash, ID, LOCK_TIME};
-use super::trigger::{dry_run_energy, send_trigger};
+use super::trigger::{dry_run_energy, send_trigger, SWAP_HEAD_TIME_TOLERANCE_SECS};
 use super::tx::TronSwapTx;
 use super::TronSwapError;
 use crate::eth::tron::api::TronApiError;
+use crate::eth::tron::fee::TronFeeError;
 use crate::eth::tron::test_node::{Reply, StubNode};
 use crate::eth::tron::wallet_path_tests::{trx_coin, NOW_BLOCK_BODY};
 use crate::eth::tron::TronAddress;
@@ -17,8 +18,6 @@ use serde_json::{json, Value as Json};
 
 /// The address of the test key (the secret key 1), which signs for the test coin.
 const SENDER_WIRE_HEX: &str = "417e5f4552091a69125d5dfcb7b8c2659029395bdf";
-/// The time of the stub's head block, in milliseconds.
-const BLOCK_TIME_MS: i64 = 1_700_000_000_000;
 const CALL_VALUE: i64 = 5_000_000;
 const FEE_LIMIT_SUN: u64 = 30_000_000;
 
@@ -44,11 +43,22 @@ fn txid_of_broadcast(body: &str) -> String {
     )
 }
 
-/// A node with the head block of [`NOW_BLOCK_BODY`] whose `broadcasthex` answers what `broadcast` makes of the
-/// request body.
-fn node(broadcast: impl Fn(&str) -> String + Send + Sync + 'static) -> StubNode {
+/// The local time, in milliseconds.
+fn local_ms() -> i64 { common::now_ms() as i64 }
+
+/// A node with the head block of [`NOW_BLOCK_BODY`] at the local time, whose `broadcasthex` answers what
+/// `broadcast` makes of the request body.
+fn node(broadcast: impl Fn(&str) -> String + Send + Sync + 'static) -> StubNode { node_at(local_ms(), broadcast) }
+
+/// As [`node`], with the head block's time `head_ms`.
+fn node_at(head_ms: i64, broadcast: impl Fn(&str) -> String + Send + Sync + 'static) -> StubNode {
+    let head = NOW_BLOCK_BODY.replace("\"timestamp\":1700000000000", &format!("\"timestamp\":{head_ms}"));
+    assert_ne!(
+        head, NOW_BLOCK_BODY,
+        "the head block body carries the timestamp that is replaced"
+    );
     StubNode::start(move |path, body| match path {
-        "/wallet/getnowblock" => Reply::ok(NOW_BLOCK_BODY),
+        "/wallet/getnowblock" => Reply::ok(&head),
         "/wallet/broadcasthex" => Reply::ok(&broadcast(body)),
         other => Reply::status(404, &format!("unexpected endpoint {other}")),
     })
@@ -58,7 +68,10 @@ fn node(broadcast: impl Fn(&str) -> String + Send + Sync + 'static) -> StubNode 
 /// given, on the reference block of the head, signed for the coin's address.
 #[test]
 fn the_broadcast_carries_the_call_as_given() {
-    let node = node(|body| json!({ "result": true, "txid": txid_of_broadcast(body) }).to_string());
+    let head_ms = local_ms();
+    let node = node_at(head_ms, |body| {
+        json!({ "result": true, "txid": txid_of_broadcast(body) }).to_string()
+    });
     let (_ctx, coin) = block_on(trx_coin(&node.url()));
 
     let tx = block_on(send_trigger(
@@ -89,8 +102,8 @@ fn the_broadcast_carries_the_call_as_given() {
     // the number and bytes 8 to 16 of the id.
     assert_eq!(raw.ref_block_bytes, vec![0xd7, 0x89]);
     assert_eq!(raw.ref_block_hash, hex::decode("abcdef0123456789").unwrap());
-    assert_eq!(raw.expiration, BLOCK_TIME_MS + 60_000);
-    assert!(raw.timestamp > BLOCK_TIME_MS);
+    assert_eq!(raw.expiration, head_ms + 60_000);
+    assert!(raw.timestamp >= head_ms);
     assert_eq!(sent.signature().len(), 65);
 }
 
@@ -163,6 +176,45 @@ fn a_failed_head_block_read_is_a_node_error_without_a_broadcast() {
     assert!(node.bodies_for("/wallet/broadcasthex").is_empty());
 }
 
+/// The expiry counts from the head block's time, which one node states, so the local clock bounds it: a head block
+/// more than the tolerance away from the local time, either way, is refused before anything is signed or
+/// broadcast; one inside the tolerance is built on.
+#[test]
+fn a_head_block_time_outside_the_tolerance_is_refused_without_a_broadcast() {
+    let tolerance_ms = SWAP_HEAD_TIME_TOLERANCE_SECS as i64 * 1000;
+    assert_eq!(tolerance_ms, 30_000);
+    let send_at = |offset_ms: i64| {
+        let node = node_at(local_ms() + offset_ms, |_| r#"{"result":true}"#.to_owned());
+        let (_ctx, coin) = block_on(trx_coin(&node.url()));
+        let result = block_on(send_trigger(
+            &coin,
+            &swap_contract(),
+            payment_data(),
+            CALL_VALUE,
+            FEE_LIMIT_SUN,
+        ));
+        (result, node.bodies_for("/wallet/broadcasthex").len())
+    };
+
+    // 45 seconds ahead of the local clock, and 45 seconds behind it.
+    for offset_ms in [45_000, -45_000] {
+        let (result, broadcasts) = send_at(offset_ms);
+        assert!(
+            matches!(result, Err(TronSwapError::HeadTimeOutOfTolerance { head_time_ms, local_time_ms })
+                if (head_time_ms - local_time_ms - offset_ms).abs() < 10_000),
+            "{offset_ms}"
+        );
+        assert_eq!(broadcasts, 0, "{offset_ms}");
+    }
+    // 15 seconds either way is accepted.
+    for offset_ms in [15_000, -15_000] {
+        let (result, broadcasts) = send_at(offset_ms);
+        let tx = result.unwrap_or_else(|e| panic!("{offset_ms}: {e}"));
+        assert_eq!(broadcasts, 1, "{offset_ms}");
+        assert!((tx.raw().expiration - tx.raw().timestamp - offset_ms - 60_000).abs() < 10_000);
+    }
+}
+
 /// The refusals that need no node: a negative call value, a `fee_limit` beyond the signed 64-bit field, a coin
 /// that is no TRON coin, and a coin without a local key.
 #[test]
@@ -179,7 +231,10 @@ fn the_local_refusals_come_before_any_request() {
         ))
     };
     assert!(matches!(send(-1, FEE_LIMIT_SUN), Err(TronSwapError::NegativeCallValue)));
-    assert!(matches!(send(0, u64::MAX), Err(TronSwapError::FeeLimit(_))));
+    assert!(matches!(
+        send(0, u64::MAX),
+        Err(TronSwapError::FeeLimit(TronFeeError::Overflow))
+    ));
     assert!(matches!(
         block_on(dry_run_energy(&coin, &swap_contract(), &payment_data(), -1)),
         Err(TronSwapError::NegativeCallValue)

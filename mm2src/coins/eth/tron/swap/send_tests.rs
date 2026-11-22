@@ -3,10 +3,11 @@
 //! layer run, only the node's answers are canned. The selectors are recomputed here from the dictated
 //! signatures.
 
-use super::fee_limit_stand_in::SWAP_FEE_LIMIT_MARGIN_PERCENT;
+use super::fee_limit::SWAP_FEE_LIMIT_MARGIN_PERCENT;
 use super::ids_tests::{digest, secret_hash, LOCK_TIME};
-use super::send::{payment_sent_from, TronSendError, TRC20_PAYMENT_ENERGY_ESTIMATE, TRC20_SPEND_ENERGY_ESTIMATE,
-                  TRX_PAYMENT_ENERGY_ESTIMATE, TRX_SPEND_ENERGY_ESTIMATE};
+use super::send::{payment_sent_from, TronSendError, TRC20_PAYMENT_ENERGY_ESTIMATE, TRC20_REFUND_ENERGY_ESTIMATE,
+                  TRC20_SPEND_ENERGY_ESTIMATE, TRX_PAYMENT_ENERGY_ESTIMATE, TRX_REFUND_ENERGY_ESTIMATE,
+                  TRX_SPEND_ENERGY_ESTIMATE};
 use super::tx::TronSwapTx;
 use super::TronSwapError;
 use crate::eth::addr_from_raw_pubkey;
@@ -56,6 +57,8 @@ fn approve_selector() -> String { selector("approve(address,uint256)") }
 fn allowance_selector() -> String { selector("allowance(address,address)") }
 fn transfer_selector() -> String { selector("transfer(address,uint256)") }
 fn payments_selector() -> String { selector("payments(bytes32)") }
+fn rate_selector() -> String { selector("basisPointsRate()") }
+fn maximum_selector() -> String { selector("maximumFee()") }
 
 fn sender() -> TronAddress { TronAddress::from_hex(SENDER_WIRE_HEX).unwrap() }
 
@@ -106,6 +109,12 @@ struct Chain {
     failing: Option<&'static str>,
     /// The rows of the account's transaction listing.
     listing: Vec<Json>,
+    /// How far the head block's time is from the local time of each request, in milliseconds.
+    head_offset_ms: i64,
+    /// What the token's `basisPointsRate()` returns; `None` for a token without the getter (the call reverts).
+    fee_rate: Option<u64>,
+    /// What the token's `maximumFee()` returns; `None` for a token without the getter.
+    fee_maximum: Option<u64>,
 }
 
 impl Chain {
@@ -120,6 +129,9 @@ impl Chain {
             token_units: 1_000_000_000,
             failing: None,
             listing: Vec::new(),
+            head_offset_ms: 0,
+            fee_rate: None,
+            fee_maximum: None,
         }
     }
 
@@ -135,7 +147,13 @@ impl Chain {
             }
             let request: Json = serde_json::from_str(body).unwrap_or(Json::Null);
             match path {
-                "/wallet/getnowblock" => Reply::ok(NOW_BLOCK_BODY),
+                "/wallet/getnowblock" => {
+                    let head_ms = common::now_ms() as i64 + self.head_offset_ms;
+                    let stamp = format!("\"timestamp\":{head_ms}");
+                    let head = NOW_BLOCK_BODY.replace("\"timestamp\":1700000000000", &stamp);
+                    assert_ne!(head, NOW_BLOCK_BODY, "the body carries the timestamp that is replaced");
+                    Reply::ok(&head)
+                },
                 "/wallet/getchainparameters" => Reply::ok(PARAMETERS),
                 "/wallet/getaccountresource" => Reply::ok(self.resources),
                 "/wallet/getaccount" => Reply::ok(r#"{"balance":50000000,"create_time":1700000000000}"#),
@@ -172,7 +190,20 @@ impl Chain {
             return Reply::ok(&json!({ "constant_result": [uint_word(self.token_units)] }).to_string());
         };
         let called = &data[..8];
-        let answer = if called == allowance_selector() {
+        let reverted = json!({
+            "result": { "result": true, "message": "REVERT opcode executed" },
+            "energy_used": 500,
+            "constant_result": [""],
+        });
+        let setting = |value: Option<u64>| match value {
+            Some(value) => json!({ "result": { "result": true }, "constant_result": [uint_word(value)] }),
+            None => reverted.clone(),
+        };
+        let answer = if called == rate_selector() {
+            setting(self.fee_rate)
+        } else if called == maximum_selector() {
+            setting(self.fee_maximum)
+        } else if called == allowance_selector() {
             let allowance = format!("{:064x}", *self.allowance.lock().unwrap());
             json!({ "result": { "result": true }, "constant_result": [allowance] })
         } else if called == payments_selector() {
@@ -205,11 +236,19 @@ fn broadcasts(node: &StubNode) -> Vec<TronSwapTx> {
         .collect()
 }
 
-/// The selectors (hex) of the calls the node was asked to dry-run or read in the call-data form, in order.
-fn constant_calls(node: &StubNode) -> Vec<String> {
+/// The selectors (hex) of every call the node was asked to dry-run or read in the call-data form, in order.
+fn all_constant_calls(node: &StubNode) -> Vec<String> {
     node.bodies_for("/wallet/triggerconstantcontract")
         .iter()
         .filter_map(|body| body["data"].as_str().map(|data| data[..8].to_owned()))
+        .collect()
+}
+
+/// [`all_constant_calls`] without the reads of the token's transfer-fee setting, which have their own tests.
+fn constant_calls(node: &StubNode) -> Vec<String> {
+    all_constant_calls(node)
+        .into_iter()
+        .filter(|called| *called != rate_selector() && *called != maximum_selector())
         .collect()
 }
 
@@ -352,9 +391,17 @@ fn a_token_payment_with_a_sufficient_allowance_sends_no_approval() {
     assert_eq!(tx.raw().fee_limit, swap_fee_limit());
     // The allowance was asked of the token for the coin's address and the selected contract.
     let reads = node.bodies_for("/wallet/triggerconstantcontract");
-    assert_eq!(reads[0]["contract_address"], json!(token().to_base58()));
+    let read = reads
+        .iter()
+        .find(|body| {
+            body["data"]
+                .as_str()
+                .is_some_and(|data| data.starts_with(&allowance_selector()))
+        })
+        .expect("the allowance was read");
+    assert_eq!(read["contract_address"], json!(token().to_base58()));
     assert_eq!(
-        reads[0]["data"],
+        read["data"],
         json!(format!(
             "{}{}{}",
             allowance_selector(),
@@ -510,6 +557,32 @@ fn a_refused_broadcast_keeps_the_signed_payment() {
     assert_eq!(kept.trigger().unwrap().call_value, 5_000_000);
 }
 
+/// R21.11C.7: a head block whose time is more than 30 seconds from the local time refuses the payment and the
+/// DEX fee, of TRX and of a token. Nothing is broadcast, and the error is a plain one that keeps no transaction.
+#[test]
+fn a_stale_head_refuses_the_send_without_a_broadcast() {
+    for head_offset_ms in [-45_000, 45_000] {
+        let mut chain = Chain::new().with_allowance(5_000_000);
+        chain.head_offset_ms = head_offset_ms;
+        let node = chain.start();
+        for coin in [block_on(trx_coin(&node.url())).1, block_on(trc20_coin(&node.url())).1] {
+            for error in [
+                send_maker_payment(&coin, &secret_hash(), "5").unwrap_err(),
+                send_taker_fee(&coin, &standard_fee("0.5")).unwrap_err(),
+            ] {
+                assert!(matches!(error, TransactionErr::Plain(_)), "{head_offset_ms}");
+                assert!(error.get_tx().is_none());
+                assert!(
+                    error.get_plain_text_format().contains("too far from the local time"),
+                    "{}",
+                    error.get_plain_text_format()
+                );
+            }
+        }
+        assert!(broadcasts(&node).is_empty(), "{head_offset_ms}");
+    }
+}
+
 /// A TRX amount beyond the protocol's signed 64-bit field is a typed error before any node is asked.
 #[test]
 fn an_amount_beyond_the_field_is_refused() {
@@ -522,6 +595,127 @@ fn an_amount_beyond_the_field_is_refused() {
         error.get_plain_text_format()
     );
     assert!(node.requests().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Token transfer fee (maintainer decision of 2026-11-22)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The sender and the receiver figure of a token coin bound to a swap contract, on `chain`.
+fn token_start_figures(chain: Chain) -> (StubNode, [Result<TradeFee, TradePreimageError>; 2]) {
+    let node = chain.with_allowance(5_000_000).start();
+    let (_ctx, coin) = bound_coin(&node.url(), true);
+    let stage = FeeApproxStage::StartSwap;
+    let sender = block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(dec("5")), stage.clone()));
+    let receiver = block_on(coin.get_receiver_trade_fee(stage).compat());
+    (node, [
+        sender.map_err(|e| e.into_inner()),
+        receiver.map_err(|e| e.into_inner()),
+    ])
+}
+
+/// A token whose transfer fee is zero is swapped: its rate is zero, or its maximum is zero, or it has no such
+/// setting at all (the getter reverts). The setting is read from the token with two constant calls, and the
+/// maximum only when the rate is not zero.
+#[test]
+fn a_token_without_a_transfer_fee_is_allowed() {
+    for (fee_rate, fee_maximum, reads) in [
+        (Some(0), Some(7), vec![rate_selector()]),
+        (Some(10), Some(0), vec![rate_selector(), maximum_selector()]),
+        (None, None, vec![rate_selector()]),
+    ] {
+        let mut chain = Chain::new().with_allowance(7_000_000);
+        chain.fee_rate = fee_rate;
+        chain.fee_maximum = fee_maximum;
+        let node = chain.clone().start();
+        let (_ctx, coin) = block_on(trc20_coin(&node.url()));
+        tron_tx(send_maker_payment(&coin, &secret_hash(), "7").expect("a payment"));
+        // The setting is read first, from the token, as plain constant calls.
+        let calls = node.bodies_for("/wallet/triggerconstantcontract");
+        assert_eq!(all_constant_calls(&node)[..reads.len()], reads[..], "{fee_rate:?}");
+        assert_eq!(calls[0]["contract_address"], json!(token().to_base58()));
+        assert_eq!(calls[0]["data"], json!(rate_selector()));
+        assert_eq!(calls[0]["call_value"], json!(0));
+
+        let (_node, figures) = token_start_figures(chain);
+        for figure in figures {
+            assert!(figure.is_ok(), "{fee_rate:?} {fee_maximum:?}: {figure:?}");
+        }
+    }
+}
+
+/// A token with a rate and a maximum that are both not zero is refused: when a swap starts, by both fee figures,
+/// and before the payment, with no approval sent. A rate without a readable maximum is refused the same way.
+#[test]
+fn a_token_with_a_transfer_fee_is_refused_at_the_start_and_before_the_payment() {
+    for fee_maximum in [Some(5_000_000), None] {
+        let mut chain = Chain::new();
+        chain.fee_rate = Some(10);
+        chain.fee_maximum = fee_maximum;
+
+        let node = chain.clone().start();
+        let (_ctx, coin) = block_on(trc20_coin(&node.url()));
+        let error = send_maker_payment(&coin, &secret_hash(), "7").unwrap_err();
+        assert!(matches!(error, TransactionErr::Plain(_)));
+        let text = error.get_plain_text_format();
+        assert!(
+            text.contains("the token takes a fee on a transfer (rate 10 basis points"),
+            "{text}"
+        );
+        assert!(broadcasts(&node).is_empty(), "no approval and no payment");
+        assert_eq!(all_constant_calls(&node), vec![rate_selector(), maximum_selector()]);
+
+        let (node, figures) = token_start_figures(chain);
+        for figure in figures {
+            let error = figure.unwrap_err();
+            assert!(
+                matches!(&error, TradePreimageError::InternalError(text) if text.contains("takes a fee on a transfer")),
+                "{error}"
+            );
+        }
+        assert!(constant_calls(&node).is_empty(), "nothing else was asked");
+    }
+}
+
+/// A failed read of the setting, or an answer that is not one word, is a typed error and never "no fee".
+#[test]
+fn a_failed_transfer_fee_read_is_an_error() {
+    let mut failing = Chain::new().with_allowance(7_000_000);
+    failing.failing = Some("/wallet/triggerconstantcontract");
+    let node = failing.clone().start();
+    let (_ctx, coin) = block_on(trc20_coin(&node.url()));
+    let error = send_maker_payment(&coin, &secret_hash(), "7").unwrap_err();
+    assert!(error.get_plain_text_format().contains("TRON node request failed"));
+    assert!(broadcasts(&node).is_empty());
+    let (_node, figures) = token_start_figures(failing);
+    for figure in figures {
+        let error = figure.unwrap_err();
+        assert!(matches!(error, TradePreimageError::Transport(_)), "{error}");
+    }
+
+    // Two bytes where a 32-byte word belongs.
+    let node = StubNode::start(|path, _| match path {
+        "/wallet/triggerconstantcontract" => Reply::ok(r#"{"result":{"result":true},"constant_result":["0a0b"]}"#),
+        other => Reply::status(404, &format!("unexpected endpoint {other}")),
+    });
+    let (_ctx, coin) = block_on(trc20_coin(&node.url()));
+    let error = block_on(super::send::ensure_no_token_transfer_fee(&coin, &token())).unwrap_err();
+    assert!(matches!(error, TronSendError::Swap(TronSwapError::Node(_))), "{error}");
+}
+
+/// A TRX leg has no token: its payment and its fee figures make no read of a transfer-fee setting.
+#[test]
+fn a_trx_leg_reads_no_transfer_fee_setting() {
+    let node = Chain::new().start();
+    let (_ctx, coin) = bound_coin(&node.url(), false);
+    descriptors(&coin, "5");
+    tron_tx(send_maker_payment(&coin, &secret_hash(), "5").expect("a payment"));
+    let calls = all_constant_calls(&node);
+    assert!(!calls.is_empty());
+    assert!(
+        !calls.contains(&rate_selector()) && !calls.contains(&maximum_selector()),
+        "{calls:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -559,7 +753,7 @@ fn a_trx_dex_fee_is_a_transfer_to_the_fee_address() {
 }
 
 /// D21.B9: the DEX fee of a token is a `transfer(address,uint256)` call of the token, with the `fee_limit` of a
-/// token transfer (the dry-run cost plus 20 %).
+/// swap call.
 #[test]
 fn a_token_dex_fee_is_a_transfer_call_of_the_token() {
     let node = Chain::new().start();
@@ -580,7 +774,7 @@ fn a_token_dex_fee_is_a_transfer_call_of_the_token() {
             uint_word(500_000)
         )
     );
-    assert_eq!(tx.raw().fee_limit, (ENERGY * 420 * 120 / 100) as i64);
+    assert_eq!(tx.raw().fee_limit, swap_fee_limit());
 }
 
 /// A swap that owes no DEX fee sends nothing, and the burn form is a typed error: neither asks a node.
@@ -807,18 +1001,18 @@ fn energy_fee(energy: u64) -> MmNumber { MmNumber::from(BigDecimal::new((energy 
 /// CRD ch.51 R93, T39 at the coin: every fee figure of a TRX coin and of a token names TRX and is not paid from
 /// the traded volume. With bandwidth covered, the figures are the energy of the step at the energy price: the
 /// dry run for the payment and for the token's DEX-fee transfer, the fixed estimates for the spend and for the
-/// legacy figure, and nothing for a TRX transfer.
+/// legacy figure, and nothing for a TRX transfer. The payment figure includes the fixed estimate of the refund.
 #[test]
 fn every_fee_descriptor_names_trx_and_is_not_paid_from_the_volume() {
     for (is_token, expected) in [
         (false, [
-            ENERGY,
+            ENERGY + TRX_REFUND_ENERGY_ESTIMATE,
             TRX_SPEND_ENERGY_ESTIMATE,
             0,
             TRX_PAYMENT_ENERGY_ESTIMATE,
         ]),
         (true, [
-            ENERGY,
+            ENERGY + TRC20_REFUND_ENERGY_ESTIMATE,
             TRC20_SPEND_ENERGY_ESTIMATE,
             ENERGY,
             TRC20_PAYMENT_ENERGY_ESTIMATE,
@@ -870,10 +1064,11 @@ fn bandwidth_is_added_when_no_quota_covers_it() {
     let node = chain.start();
     let (_ctx, coin) = bound_coin(&node.url(), false);
     let [sender_fee, _, dex_fee_send, _] = descriptors(&coin, "5");
-    let bandwidth_part = sender_fee.amount.to_decimal() - energy_fee(ENERGY).to_decimal();
-    // An `ethPayment` transaction is a few hundred bytes: between 0.2 and 1 TRX at 1000 SUN per byte.
+    let energy_part = energy_fee(ENERGY + TRX_REFUND_ENERGY_ESTIMATE).to_decimal();
+    let bandwidth_part = sender_fee.amount.to_decimal() - energy_part;
+    // The payment and the refund are a few hundred bytes each: between 0.4 and 2 TRX at 1000 SUN per byte.
     assert!(
-        bandwidth_part > dec("0.2") && bandwidth_part < dec("1"),
+        bandwidth_part > dec("0.4") && bandwidth_part < dec("2"),
         "{bandwidth_part}"
     );
     assert!(dex_fee_send.amount.to_decimal() > dec("0.1"));
@@ -881,7 +1076,7 @@ fn bandwidth_is_added_when_no_quota_covers_it() {
 
 /// The mirror of CRD ch.57 R57.5.3b: the approval is part of the payment fee only when the allowance is below
 /// the volume, with the approval of zero when the allowance is not zero. The payment itself cannot be simulated
-/// then and is priced with its fixed estimate.
+/// then and is priced with its fixed estimate. The refund is part of the figure in every case.
 #[test]
 fn the_approval_is_part_of_the_payment_fee_only_when_the_allowance_is_short() {
     let sender_fee = |allowance: u64| {
@@ -893,15 +1088,16 @@ fn the_approval_is_part_of_the_payment_fee_only_when_the_allowance_is_short() {
     };
 
     let (enough, calls) = sender_fee(5_000_000);
-    assert_eq!(enough, energy_fee(ENERGY));
+    let refund = TRC20_REFUND_ENERGY_ESTIMATE;
+    assert_eq!(enough, energy_fee(ENERGY + refund));
     assert_eq!(calls, vec![allowance_selector(), erc20_payment_selector()]);
 
     let (none, calls) = sender_fee(0);
-    assert_eq!(none, energy_fee(ENERGY + TRC20_PAYMENT_ENERGY_ESTIMATE));
+    assert_eq!(none, energy_fee(ENERGY + TRC20_PAYMENT_ENERGY_ESTIMATE + refund));
     assert_eq!(calls, vec![allowance_selector(), approve_selector()]);
 
     let (short, calls) = sender_fee(4_999_999);
-    assert_eq!(short, energy_fee(2 * ENERGY + TRC20_PAYMENT_ENERGY_ESTIMATE));
+    assert_eq!(short, energy_fee(2 * ENERGY + TRC20_PAYMENT_ENERGY_ESTIMATE + refund));
     assert_eq!(calls, vec![
         allowance_selector(),
         approve_selector(),
@@ -919,7 +1115,10 @@ fn a_refused_payment_dry_run_is_priced_with_the_fixed_estimate() {
     let (_ctx, coin) = bound_coin(&node.url(), false);
     let stage = FeeApproxStage::TradePreimage;
     let fee = block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(dec("5")), stage)).expect("a fee");
-    assert_eq!(fee.amount, energy_fee(TRX_PAYMENT_ENERGY_ESTIMATE));
+    assert_eq!(
+        fee.amount,
+        energy_fee(TRX_PAYMENT_ENERGY_ESTIMATE + TRX_REFUND_ENERGY_ESTIMATE)
+    );
 }
 
 /// CRD ch.51 R95, T40 at the coin: the figures of a token name TRX, not the token, so the caller's check of

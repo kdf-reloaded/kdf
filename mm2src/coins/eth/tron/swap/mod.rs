@@ -4,6 +4,7 @@
 //! - [`ids`]: the swap id, the payment hash the contract stores, and the 32-byte rule of the secret hash.
 //! - [`contract_abi`]: the contract's call, read and event surface, and the token approval calls.
 //! - [`tx`]: [`TronSwapTx`], the transaction type a swap record keeps for a TRON leg.
+//! - [`fee_limit`]: the `fee_limit` of a swap contract call.
 //! - [`trigger`]: building, signing and broadcasting a contract call, and its energy dry run.
 //! - [`send`]: the sending side of a swap: the payment with its approval, the DEX fee, the own-payment question
 //!   and the fee figures.
@@ -13,10 +14,11 @@
 //! - The secret hash of a TRON leg is `SHA-256(secret)`, 32 bytes, and is passed to the contract as it is: no
 //!   function of this module narrows it (CRD ch.21 R21.B6, ch.51 R72A).
 //! - No error of this module carries a secret, and no error stands for "not spent" or "unspent".
-//! - Nothing here decides a fee: the caller of [`trigger::send_trigger`] gives the `fee_limit`.
+//! - [`trigger::send_trigger`] decides no fee: its caller gives the `fee_limit`, which [`fee_limit`] works out
+//!   from the dry run.
 
 pub mod contract_abi;
-pub(crate) mod fee_limit_stand_in;
+pub mod fee_limit;
 pub mod ids;
 pub(crate) mod send;
 pub mod trigger;
@@ -26,6 +28,8 @@ pub mod tx;
 mod activation_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod contract_abi_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fee_limit_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod ids_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod send_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod trigger_tests;
@@ -34,11 +38,13 @@ mod contract_abi_tests;
 pub use contract_abi::{decode_allowance, decode_call, decode_event, decode_payments_output, encode_allowance_query,
                        encode_approve, encode_call, encode_payments_query, PaymentRecord, PaymentState, TronSwapCall,
                        TronSwapEvent};
+pub use fee_limit::{swap_call_fee_limit, swap_fee_limit_sun, SWAP_FEE_LIMIT_MARGIN_PERCENT};
 pub use ids::{require_32_byte_hash, tron_payment_hash, tron_swap_id};
-pub use trigger::{dry_run_energy, send_trigger};
+pub use trigger::{dry_run_energy, send_trigger, SWAP_HEAD_TIME_TOLERANCE_SECS};
 pub use tx::{call_of, TronSwapTx, TronTrigger};
 
 use super::api::TronApiError;
+use super::fee::TronFeeError;
 use super::sign::TronSignError;
 use crate::eth::abi::AbiError;
 use std::fmt;
@@ -70,8 +76,16 @@ pub enum TronSwapError {
     },
     /// The data asked for is not yet at the depth the step needs.
     NotYetFinal,
-    /// A `fee_limit` that cannot be used.
-    FeeLimit(String),
+    /// A `fee_limit` that cannot be used or cannot be worked out: the energy cost is above the maximum, a figure
+    /// is beyond the 64-bit range, or a chain price is not usable.
+    FeeLimit(TronFeeError),
+    /// The head block a node reported has a time too far from the local time to build a transaction on.
+    HeadTimeOutOfTolerance {
+        /// The head block's time, in milliseconds.
+        head_time_ms: i64,
+        /// The local time, in milliseconds.
+        local_time_ms: i64,
+    },
     /// A log entry whose first topic is not an event of the swap contract.
     UnknownEvent,
     /// A value of a transaction or of the contract's state differs from the one the swap expects.
@@ -125,6 +139,13 @@ impl fmt::Display for TronSwapError {
             TronSwapError::Reverted { result } => write!(f, "the contract call did not succeed: {result}"),
             TronSwapError::NotYetFinal => write!(f, "the data is not yet at the required depth"),
             TronSwapError::FeeLimit(reason) => write!(f, "unusable fee_limit: {reason}"),
+            TronSwapError::HeadTimeOutOfTolerance {
+                head_time_ms,
+                local_time_ms,
+            } => write!(
+                f,
+                "the head block's time {head_time_ms} ms is too far from the local time {local_time_ms} ms"
+            ),
             TronSwapError::UnknownEvent => write!(f, "the log entry is not an event of the swap contract"),
             TronSwapError::Mismatch { field } => write!(f, "{field} differs from the value the swap expects"),
             TronSwapError::TooEarly { chain_time, lock_time } => {

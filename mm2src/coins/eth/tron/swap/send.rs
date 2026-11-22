@@ -11,19 +11,21 @@
 //! - The transaction a payment returns, in a result or in a broadcast error, is the payment call, never an
 //!   approval.
 //! - The own-payment question never answers "not sent" from a failed read.
+//! - A token that takes a fee on a transfer is refused when a swap starts and before its payment; a failed read
+//!   of that setting never counts as "no fee".
 //! - Every fee figure is an amount of TRX and is never taken from the traded volume.
 
 use super::contract_abi::{decode_allowance, decode_payments_output, encode_allowance_query, encode_approve,
                           encode_call, encode_payments_query, PaymentState, TronSwapCall};
-use super::fee_limit_stand_in::swap_call_fee_limit;
+use super::fee_limit::swap_call_fee_limit;
 use super::ids::{require_32_byte_hash, tron_swap_id};
-use super::trigger::{dry_run_energy, send_trigger};
+use super::trigger::{dry_run_energy, send_trigger, SWAP_HEAD_TIME_TOLERANCE_SECS};
 use super::tx::{call_of, TronSwapTx};
 use super::TronSwapError;
 use crate::eth::tron::api::{AccountListing, TronApiClient, TronApiError};
 use crate::eth::tron::balance::trc20_balance_units;
 use crate::eth::tron::fee::{estimate_trc20_transfer_fee, estimate_trx_transfer_fee, transaction_bandwidth,
-                            trc20_fee_limit_sun, TronAccountResources, TronChainPrices, TronFeeError, TronFeeEstimate,
+                            TronAccountResources, TronChainPrices, TronFeeError, TronFeeEstimate,
                             TRC20_FEE_LIMIT_MAX_SUN};
 use crate::eth::tron::history::signed_transaction_bytes;
 use crate::eth::tron::proto::{TaposBlockData, TransactionRaw, DEFAULT_EXPIRATION_SEC};
@@ -36,6 +38,7 @@ use bigdecimal::BigDecimal;
 use common::executor::Timer;
 use common::now_ms;
 use ethereum_types::U256;
+use kdf_crypto::keccak256;
 use mm2_err_handle::prelude::*;
 use serde_json::Value as Json;
 use std::fmt;
@@ -54,6 +57,14 @@ pub(crate) const TRX_SPEND_ENERGY_ESTIMATE: u64 = 65_000;
 /// As [`TRX_SPEND_ENERGY_ESTIMATE`] for the spend of a token payment.
 pub(crate) const TRC20_SPEND_ENERGY_ESTIMATE: u64 = 150_000;
 
+/// The energy a `senderRefund` call of a native payment is estimated to use. A Reloaded estimate: the default gas
+/// limit of the refund call of the EVM V1 swap contract (CRD ch.57 R57.5.2), read as energy units. It is part of
+/// the fee to send a payment, so that the sender keeps the TRX to take the payment back, and never prices a
+/// `fee_limit`.
+pub(crate) const TRX_REFUND_ENERGY_ESTIMATE: u64 = 100_000;
+/// As [`TRX_REFUND_ENERGY_ESTIMATE`] for the refund of a token payment.
+pub(crate) const TRC20_REFUND_ENERGY_ESTIMATE: u64 = 150_000;
+
 /// The pause between two reads of an approval's receipt, in seconds.
 const RECEIPT_POLL_SEC: f64 = if cfg!(test) { 0.02 } else { 3. };
 /// The most reads of an approval's receipt: with the pause, ten minutes.
@@ -71,9 +82,15 @@ pub(crate) enum TronSendError {
     Swap(TronSwapError),
     /// An amount that does not convert to the units of the coin or does not fit the protocol's field.
     Amount(String),
-    /// The `fee_limit` of the token transfer that pays the DEX fee cannot be set: its energy costs more than the
-    /// highest limit. Nothing is signed.
-    FeeLimit(TronFeeError),
+    /// The token takes a fee on a transfer: its rate is not zero and its maximum is not zero, or it has a rate and
+    /// no readable maximum. The swap contract accepts a payment only when the receiver's balance grows by the
+    /// whole amount, so such a token is not swapped.
+    TokenTransferFeeNotZero {
+        /// `basisPointsRate()` of the token.
+        rate: U256,
+        /// `maximumFee()` of the token; `None` when the token has no such getter.
+        maximum: Option<U256>,
+    },
     /// A DEX-fee form the TRON family does not send.
     DexFee(&'static str),
     /// A token approval that failed. Its transaction is not kept: it is not the payment.
@@ -87,7 +104,17 @@ impl fmt::Display for TronSendError {
         match self {
             TronSendError::Swap(e) => write!(f, "{e}"),
             TronSendError::Amount(reason) => write!(f, "unusable amount: {reason}"),
-            TronSendError::FeeLimit(e) => write!(f, "unusable fee_limit: {e}"),
+            TronSendError::TokenTransferFeeNotZero { rate, maximum } => {
+                write!(
+                    f,
+                    "the token takes a fee on a transfer (rate {rate} basis points, maximum "
+                )?;
+                match maximum {
+                    Some(maximum) => write!(f, "{maximum}")?,
+                    None => write!(f, "not readable")?,
+                }
+                write!(f, "): it cannot be swapped")
+            },
             TronSendError::DexFee(reason) => write!(f, "no DEX-fee transaction is sent: {reason}"),
             TronSendError::Approve(reason) => write!(f, "the token approval failed: {reason}"),
             TronSendError::Undetermined(reason) => {
@@ -139,6 +166,77 @@ fn sun_of(units: U256) -> Result<i64, TronSendError> {
         ));
     }
     Ok(units.low_u64() as i64)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Token transfer fee
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The value of the token's parameterless `uint256` getter with the canonical signature `signature`, read by a
+/// constant call; `None` when the token has no such getter (the call reverts, or returns no data).
+async fn read_token_setting(
+    api: &TronApiClient,
+    owner: &TronAddress,
+    token: &TronAddress,
+    signature: &str,
+) -> Result<Option<U256>, TronSwapError> {
+    let hash = keccak256(signature.as_bytes());
+    let selector = &hash.as_slice()[..4];
+    let answer = match api.trigger_constant_dry_run_data(owner, token, selector, 0).await {
+        Ok(answer) => answer,
+        Err(TronApiError::ContractRevert(_)) => return Ok(None),
+        Err(other) => return Err(TronSwapError::Node(other)),
+    };
+    let unusable = |reason: &str| TronSwapError::Node(TronApiError::InvalidResponse(format!("{signature}: {reason}")));
+    let results = answer
+        .constant_result
+        .ok_or_else(|| unusable("the answer carries no constant result"))?;
+    let word = match results.first() {
+        Some(word) if !word.is_empty() => hex::decode(word).map_err(|_| unusable("the result is not hex"))?,
+        _ => return Ok(None),
+    };
+    if word.len() != 32 {
+        return Err(unusable("the result is not one 32-byte word"));
+    }
+    Ok(Some(U256::from_big_endian(&word)))
+}
+
+/// Refuses a token that takes a fee on a transfer (maintainer decision of 2026-11-22). The swap contract checks
+/// that the receiver's balance grew by exactly the amount, so a payment in such a token could be locked with no
+/// way to claim or refund it.
+///
+/// The token's setting is read with two constant calls, `basisPointsRate()` and `maximumFee()`; nothing is
+/// broadcast. The fee of a transfer is `min(amount * rate / 10000, maximum)`, so it is zero when either value
+/// is zero. A token without the rate getter has no such setting and passes.
+///
+/// # Errors
+///
+/// [`TronSendError::TokenTransferFeeNotZero`] when the rate is not zero and the maximum is not zero or cannot
+/// be read from the token; [`TronSendError::Swap`] with [`TronSwapError::Node`] when a read fails or its answer
+/// is not usable. A failed read never counts as a fee of zero.
+pub(crate) async fn ensure_no_token_transfer_fee(coin: &EthCoin, token: &TronAddress) -> Result<(), TronSendError> {
+    let api = tron_api(coin)?;
+    let owner = my_address(coin);
+    let rate = match read_token_setting(api, &owner, token, "basisPointsRate()").await? {
+        Some(rate) if !rate.is_zero() => rate,
+        _ => return Ok(()),
+    };
+    match read_token_setting(api, &owner, token, "maximumFee()").await? {
+        Some(maximum) if maximum.is_zero() => Ok(()),
+        maximum => Err(TronSendError::TokenTransferFeeNotZero { rate, maximum }),
+    }
+}
+
+/// [`ensure_no_token_transfer_fee`] for a fee figure of the coin; a TRX coin is not read.
+async fn ensure_swappable_token(coin: &EthCoin) -> MmResult<(), TradePreimageError> {
+    let EthCoinType::Trc20 { token_addr, .. } = &coin.coin_type else {
+        return Ok(());
+    };
+    let token = TronAddress::from_evm_address(*token_addr);
+    ensure_no_token_transfer_fee(coin, &token).await.map_to_mm(|e| match e {
+        TronSendError::Swap(e) => preimage_error(e),
+        other => TradePreimageError::InternalError(other.to_string()),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -263,7 +361,8 @@ async fn wait_for_success(coin: &EthCoin, tx: &TronSwapTx) -> Result<(), TronSwa
 /// [`TronSwapError::Reverted`] for a reverting dry run, with [`TronSwapError::FeeLimit`] for an energy cost above
 /// the highest `fee_limit` (nothing is signed in these cases), with [`TronSwapError::Broadcast`] and the signed
 /// payment when its broadcast did not end with an acceptance, and with the other errors of the shared layer;
-/// [`TronSendError::Amount`]; [`TronSendError::Approve`] when an approval could not be sent or did not succeed,
+/// [`TronSendError::Amount`]; [`TronSendError::TokenTransferFeeNotZero`] for a token that takes a fee on a
+/// transfer, before any approval; [`TronSendError::Approve`] when an approval could not be sent or did not succeed,
 /// in which case no payment is sent.
 pub(crate) async fn send_payment(
     coin: &EthCoin,
@@ -289,6 +388,7 @@ pub(crate) async fn send_payment(
         },
         EthCoinType::Trc20 { token_addr, .. } => {
             let token = TronAddress::from_evm_address(*token_addr);
+            ensure_no_token_transfer_fee(coin, &token).await?;
             let allowance = read_allowance(coin, &token, contract).await?;
             if allowance < units {
                 // D21.B6: some tokens refuse a change from one non-zero allowance to another.
@@ -324,24 +424,24 @@ async fn send_trx_transfer(coin: &EthCoin, to: &TronAddress, amount_sun: i64) ->
     let api = tron_api(coin)?;
     let block = api.get_now_block().await.map_err(TronSwapError::Node)?;
     let tapos = block.to_tapos().map_err(TronSwapError::Node)?;
-    let expiration_ms = block
-        .block_header
-        .raw_data
-        .timestamp
+    let head_time_ms = block.block_header.raw_data.timestamp;
+    let local_time_ms = now_ms() as i64;
+    // The expiry counts from the head block's time, so the local clock bounds it, as for a contract call
+    // (R21.11C.7).
+    if head_time_ms.abs_diff(local_time_ms) > SWAP_HEAD_TIME_TOLERANCE_SECS * 1000 {
+        return Err(TronSwapError::HeadTimeOutOfTolerance {
+            head_time_ms,
+            local_time_ms,
+        });
+    }
+    let expiration_ms = head_time_ms
         .checked_add(DEFAULT_EXPIRATION_SEC as i64 * 1000)
         .ok_or_else(|| {
             TronSwapError::Node(TronApiError::InvalidResponse(
                 "the head block's time leaves no room for an expiry".to_owned(),
             ))
         })?;
-    let raw = build_trx_transfer(
-        &my_address(coin),
-        to,
-        amount_sun,
-        &tapos,
-        now_ms() as i64,
-        expiration_ms,
-    );
+    let raw = build_trx_transfer(&my_address(coin), to, amount_sun, &tapos, local_time_ms, expiration_ms);
     let tx = {
         let secret = coin.signer.local_secret().ok_or(TronSwapError::NoLocalKey)?;
         let (_, signature) = sign_transaction_raw(secret, &raw).map_err(TronSwapError::Signing)?;
@@ -370,13 +470,12 @@ async fn send_trx_transfer(coin: &EthCoin, to: &TronAddress, amount_sun: i64) ->
 }
 
 /// Sends the DEX fee `dex_fee` of a swap to `fee_address` (CRD ch.21 D21.B9): a TRX `TransferContract`, or a
-/// TRC20 `transfer` whose `fee_limit` follows the rule of a token transfer (D21.10B.1). Nothing is burned.
+/// TRC20 `transfer` call with the `fee_limit` of a swap call (R21.11C.7). Nothing is burned.
 ///
 /// # Errors
 ///
 /// [`TronSendError::DexFee`] without any node request for [`DexFee::NoFee`] (no fee is due, so there is no
 /// transaction) and for [`DexFee::WithBurn`] (the TRON family has no burn share); [`TronSendError::Amount`];
-/// [`TronSendError::FeeLimit`] when the energy of the token transfer costs more than the highest `fee_limit`;
 /// [`TronSendError::Swap`] as for [`send_payment`].
 pub(crate) async fn send_dex_fee(
     coin: &EthCoin,
@@ -394,10 +493,7 @@ pub(crate) async fn send_dex_fee(
         EthCoinType::Trc20 { token_addr, .. } => {
             let token = TronAddress::from_evm_address(*token_addr);
             let data = abi_encode_trc20_transfer(fee_address, units);
-            let energy = dry_run_energy(coin, &token, &data, 0).await?;
-            let prices = read_prices(tron_api(coin)?).await?;
-            let fee_limit_sun = trc20_fee_limit_sun(&prices, energy).map_err(TronSendError::FeeLimit)?;
-            Ok(send_trigger(coin, &token, data, 0, fee_limit_sun).await?)
+            Ok(send_call(coin, &token, data, 0).await?)
         },
         EthCoinType::Eth | EthCoinType::Erc20 { .. } => Err(TronSwapError::NotTronCoin.into()),
     }
@@ -646,7 +742,9 @@ fn payment_energy_estimate(coin: &EthCoin) -> u64 {
 }
 
 /// The fee to send the payment of `amount` (CRD ch.51 R93, ch.21 D21.B5): the energy of the payment's dry run
-/// and the bandwidth of its transaction, priced after the resources of the coin's address.
+/// and the bandwidth of its transaction, priced after the resources of the coin's address. The fee of the
+/// refund is part of it, at the fixed energy estimate of its kind and the bandwidth of its transaction, as the
+/// EVM family reserves the refund call with the payment: a sender must be able to take the payment back.
 ///
 /// For a token whose allowance is below `amount`, the energy and the bandwidth of the approval are added, and
 /// those of the approval of zero when the allowance is not zero (the mirror of CRD ch.57 R57.5.3b). A payment
@@ -656,10 +754,11 @@ fn payment_energy_estimate(coin: &EthCoin) -> u64 {
 /// # Errors
 ///
 /// [`TradePreimageError::Transport`] when a node read fails or the dry run of an approval is refused;
-/// [`TradePreimageError::InternalError`] for a coin without a swap contract and for a figure that does not
-/// convert.
+/// [`TradePreimageError::InternalError`] for a coin without a swap contract, for a token that takes a fee on a
+/// transfer ([`ensure_no_token_transfer_fee`]) and for a figure that does not convert.
 pub(crate) async fn sender_trade_fee(coin: &EthCoin, amount: &BigDecimal) -> MmResult<TradeFee, TradePreimageError> {
     let contract = own_swap_contract(coin)?;
+    ensure_swappable_token(coin).await?;
     let units = wei_from_big_decimal(amount, coin.decimals).mm_err(TradePreimageError::from)?;
     let (payment, call_value) = sample_payment(coin, units)?;
     let mut energy = 0u64;
@@ -697,7 +796,30 @@ pub(crate) async fn sender_trade_fee(coin: &EthCoin, amount: &BigDecimal) -> MmR
     } else {
         payment_energy_estimate(coin)
     };
-    calls_fee(coin, energy.saturating_add(payment_energy), bandwidth).await
+    let (refund, refund_energy) = sample_refund(coin).map_to_mm(preimage_error)?;
+    let bandwidth = bandwidth.saturating_add(call_bandwidth(coin, &contract, refund, 0));
+    let energy = energy.saturating_add(payment_energy).saturating_add(refund_energy);
+    calls_fee(coin, energy, bandwidth).await
+}
+
+/// A `senderRefund` call of the coin with stand-in values of the size of the real ones, for the size of its
+/// transaction, and the fixed energy estimate of its kind.
+fn sample_refund(coin: &EthCoin) -> Result<(Vec<u8>, u64), TronSwapError> {
+    let (token, energy) = match &coin.coin_type {
+        EthCoinType::Trc20 { token_addr, .. } => (
+            Some(TronAddress::from_evm_address(*token_addr)),
+            TRC20_REFUND_ENERGY_ESTIMATE,
+        ),
+        _ => (None, TRX_REFUND_ENERGY_ESTIMATE),
+    };
+    let data = encode_call(&TronSwapCall::SenderRefund {
+        id: [0x5a; 32],
+        amount: U256::MAX,
+        secret_hash: [0x5a; 32],
+        token,
+        receiver: my_address(coin),
+    })?;
+    Ok((data, energy))
 }
 
 /// The legacy trade-fee figure of the coin: the fee of a payment at the fixed energy estimate of its kind. No
@@ -721,6 +843,7 @@ pub(crate) async fn flat_trade_fee(coin: &EthCoin) -> MmResult<TradeFee, TradePr
 /// As [`sender_trade_fee`].
 pub(crate) async fn receiver_trade_fee(coin: &EthCoin) -> MmResult<TradeFee, TradePreimageError> {
     let contract = own_swap_contract(coin)?;
+    ensure_swappable_token(coin).await?;
     let (token, energy) = match &coin.coin_type {
         EthCoinType::Trc20 { token_addr, .. } => (
             Some(TronAddress::from_evm_address(*token_addr)),

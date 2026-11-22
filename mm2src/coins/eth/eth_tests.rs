@@ -3266,9 +3266,10 @@ fn tron_v1_sender_trade_fee_returns_error_without_network() {
     let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Tron);
     let err = block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox))
         .unwrap_err();
-    assert!(
-        matches!(err.into_inner(), TradePreimageError::InternalError(msg) if msg.contains("not a TRON coin with a node client"))
-    );
+    assert!(matches!(
+        err.into_inner(),
+        TradePreimageError::InternalError(msg) if msg.contains("not a TRON coin with a node client")
+    ));
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
