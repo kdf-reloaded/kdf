@@ -1,8 +1,10 @@
 // utxo_common_swap — HTLC/swap operations, payment scripts, validation
 
 use super::*;
+use crate::utxo::rpc_clients::SpentOutputInfo;
 use crate::utxo::zip317::{self, Zip317Bytes};
 use crate::{SpendSafeAmountError, SwapKeyDisagreement};
+use chain::TxHashAlgo;
 use kdf_crypto::ripemd160;
 use primitives::hash::H160;
 
@@ -1016,19 +1018,17 @@ pub async fn search_for_swap_tx_spend_my_on_every_server(
         },
     };
     let tx_hash_algo = coin.tx_hash_algo;
+    let ticker = coin.conf.ticker.clone();
     client
         .find_output_spend_on_every_server(
             payment.tx_hash,
             &payment.spent_script_pubkey,
             output_index,
             move |spent_output_info| {
-                let mut tx = spent_output_info.spending_tx;
-                tx.tx_hash_algo = tx_hash_algo;
-                let script: Script = tx.inputs.first()?.script_sig.clone().into();
-                match classify_swap_spend(&script)? {
-                    SwapSpendKind::Spent => Some(FoundSwapTxSpend::Spent(tx.into())),
-                    SwapSpendKind::Refunded => Some(FoundSwapTxSpend::Refunded(tx.into())),
-                }
+                // The every-server look counts a spend that cannot be classified as "not found at this server".
+                found_swap_spend(spent_output_info, tx_hash_algo)
+                    .map_err(|e| debug!("{}: spend at one server not classified: {}", ticker, e))
+                    .ok()
             },
         )
         .await
@@ -1320,6 +1320,35 @@ pub(crate) fn ensure_payment_pays_htlc(
     Ok(())
 }
 
+/// Classifies a found spend of a swap payment output as a claim or a refund by the script of the input that
+/// spends that output (`input_index`). An index outside the inputs is an error.
+pub(crate) fn found_swap_spend(
+    spent_output_info: SpentOutputInfo,
+    tx_hash_algo: TxHashAlgo,
+) -> Result<FoundSwapTxSpend, String> {
+    let input_index = spent_output_info.input_index;
+    let mut tx = spent_output_info.spending_tx;
+    tx.tx_hash_algo = tx_hash_algo;
+    let input = tx.inputs.get(input_index).ok_or_else(|| {
+        ERRL!(
+            "The spending tx {:?} has no input {} (it has {} inputs)",
+            tx.hash(),
+            input_index,
+            tx.inputs.len()
+        )
+    })?;
+    let script: Script = input.script_sig.clone().into();
+    match classify_swap_spend(&script) {
+        Some(SwapSpendKind::Spent) => Ok(FoundSwapTxSpend::Spent(tx.into())),
+        Some(SwapSpendKind::Refunded) => Ok(FoundSwapTxSpend::Refunded(tx.into())),
+        None => ERR!(
+            "Couldn't find required instruction in script_sig of input {} of tx {:?}",
+            input_index,
+            tx
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn search_for_swap_output_spend_of(
     coin: &UtxoCoinFields,
@@ -1351,19 +1380,7 @@ pub(crate) async fn search_for_swap_output_spend_of(
             .await
     );
     match spend {
-        Some(spent_output_info) => {
-            let mut tx = spent_output_info.spending_tx;
-            tx.tx_hash_algo = coin.tx_hash_algo;
-            let script: Script = tx.inputs[0].script_sig.clone().into();
-            match classify_swap_spend(&script) {
-                Some(SwapSpendKind::Spent) => Ok(Some(FoundSwapTxSpend::Spent(tx.into()))),
-                Some(SwapSpendKind::Refunded) => Ok(Some(FoundSwapTxSpend::Refunded(tx.into()))),
-                None => ERR!(
-                    "Couldn't find required instruction in script_sig of input 0 of tx {:?}",
-                    tx
-                ),
-            }
-        },
+        Some(spent_output_info) => found_swap_spend(spent_output_info, coin.tx_hash_algo).map(Some),
         None => Ok(None),
     }
 }
@@ -2175,10 +2192,14 @@ where
     };
     let mut spend_tx = spent.spending_tx;
     spend_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
-    let input = spend_tx
-        .inputs
-        .get(DEFAULT_SWAP_VOUT)
-        .ok_or_else(|| SearchForFundingSpendErr::FailedToProcessSpendTx("spend tx has no inputs".to_string()))?;
+    let input = spend_tx.inputs.get(spent.input_index).ok_or_else(|| {
+        SearchForFundingSpendErr::FailedToProcessSpendTx(format!(
+            "The spending tx {:?} has no input {} (it has {} inputs)",
+            spend_tx.hash(),
+            spent.input_index,
+            spend_tx.inputs.len()
+        ))
+    })?;
     let branch = classify_funding_spend_script_sig(&input.script_sig);
     let res = match branch {
         FundingSpendBranchTag::Timelock => FundingTxSpend::RefundedTimelock(spend_tx),

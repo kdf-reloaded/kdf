@@ -1069,6 +1069,13 @@ the previous version used. The safe way:
   with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
   supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
 
+#### Legacy swaps
+
+- **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
+  refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
+  that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
+  CRD ch.51, status note of 2026-11-22 after R31a.
+
 ### Tests
 
 - **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
@@ -1154,6 +1161,7 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
