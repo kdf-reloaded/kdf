@@ -13,8 +13,8 @@ use std::sync::Arc;
 /// consumption. The first one that parses with exact consumption wins.
 pub(crate) const FALLBACK_CASCADE: [CoinVariant; 2] = [CoinVariant::Riecoin, CoinVariant::KawpowAuxpowMixed];
 
-/// The value of a coin's `protocol.chain_variant` key (CRD ch.37 R37.5.1): the closed set of eight
-/// header families. The eight spellings live in [`ChainVariant::name`] and nowhere else.
+/// The value of a coin's `protocol.chain_variant` key (CRD ch.37 R37.5.1, R37.5.11): the closed set of
+/// nine header families. The nine spellings live in [`ChainVariant::name`] and nowhere else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChainVariant {
     Btc,
@@ -25,10 +25,13 @@ pub enum ChainVariant {
     Morty,
     Rvn,
     Pivx,
+    /// Kerrigan, whose header layout follows the mining algorithm of each header (CRD ch.37 R37.5.11).
+    /// Opt-in: the structural fallback of R37.5.9e never reads this layout.
+    Krgn,
 }
 
 impl ChainVariant {
-    pub const ALL: [ChainVariant; 8] = [
+    pub const ALL: [ChainVariant; 9] = [
         ChainVariant::Btc,
         ChainVariant::Qtum,
         ChainVariant::Lbc,
@@ -37,6 +40,7 @@ impl ChainVariant {
         ChainVariant::Morty,
         ChainVariant::Rvn,
         ChainVariant::Pivx,
+        ChainVariant::Krgn,
     ];
 
     /// The `chain_variant` spelling of this family, as coin files carry it.
@@ -50,6 +54,7 @@ impl ChainVariant {
             ChainVariant::Morty => "MORTY",
             ChainVariant::Rvn => "RVN",
             ChainVariant::Pivx => "PIVX",
+            ChainVariant::Krgn => "KRGN",
         }
     }
 
@@ -61,8 +66,8 @@ impl ChainVariant {
 
     /// The reader this family selects.
     ///
-    /// `"QTUM"`, `"LBC"` and `"PIVX"` have dedicated readers (R37.5.3, R37.5.5). The exclusivity and
-    /// thresholded rules of the remaining families (`"BTC"` reading standard-80 only,
+    /// `"QTUM"`, `"LBC"`, `"PIVX"` and `"KRGN"` have dedicated readers (R37.5.3, R37.5.5, R37.5.11). The
+    /// exclusivity and thresholded rules of the remaining families (`"BTC"` reading standard-80 only,
     /// `"PPC"` suppressing the Equihash reading of version-4 headers, `"RICK"`/`"MORTY"` reading
     /// Equihash for every version) are plan step H4 and are not implemented: those families read the
     /// standard reader, which keeps the version-signalled recognition of R37.5.4 (for `"RVN"` that
@@ -72,6 +77,7 @@ impl ChainVariant {
             ChainVariant::Qtum => CoinVariant::Qtum,
             ChainVariant::Lbc => CoinVariant::Lbc,
             ChainVariant::Pivx => CoinVariant::Pivx,
+            ChainVariant::Krgn => CoinVariant::Kerrigan,
             ChainVariant::Btc | ChainVariant::Ppc | ChainVariant::Rick | ChainVariant::Morty | ChainVariant::Rvn => {
                 CoinVariant::Standard
             },
@@ -120,7 +126,11 @@ impl HeaderLayoutFallback {
         let name = match layout {
             CoinVariant::Riecoin => "riecoin",
             CoinVariant::KawpowAuxpowMixed => "kawpow_auxpow_mixed",
-            CoinVariant::Standard | CoinVariant::Qtum | CoinVariant::Lbc | CoinVariant::Pivx => return,
+            CoinVariant::Standard
+            | CoinVariant::Qtum
+            | CoinVariant::Lbc
+            | CoinVariant::Pivx
+            | CoinVariant::Kerrigan => return,
         };
         common::log::info!(
             "{}: the standard header layout did not fit the served headers; read them with the '{}' layout \
@@ -152,6 +162,7 @@ fn layout_name(layout: CoinVariant) -> &'static str {
         CoinVariant::Qtum => "qtum",
         CoinVariant::Lbc => "lbc",
         CoinVariant::Pivx => "pivx",
+        CoinVariant::Kerrigan => "kerrigan",
     }
 }
 

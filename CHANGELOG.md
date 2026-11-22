@@ -82,7 +82,9 @@ or undo, and every change that needs a step from you.
   activated.
   - *What to do:* to remove the platform and its tokens, send `"force_disable": true`.
   - *Versioned form:* the `mmrpc: "2.0"` `disable_coin` does not change. It neither makes a platform passive nor
-    reads `force_disable`: it removes the platform, and its tokens stay registered.
+    reads `force_disable`: it removes the platform, and its tokens stay registered and active, but the platform no
+    longer collects their history; it does so again once the platform is activated again with `tx_history` and the
+    token named in the request.
   - *Activating it again:* `enable_eth_with_tokens` and the other platform-with-tokens methods activate a passive
     platform again (see "Added" below); the legacy `enable` and `electrum` still refuse it as already activated.
     Disabling a coin now ends its background work (see "Changed" below).
@@ -110,6 +112,13 @@ or undo, and every change that needs a step from you.
   confirm its absence. This can happen to a transaction of a chain branch that was later abandoned. A transaction the
   servers now report at another height shows that height and its block's time.
   - *What you see:* an existing history can lose rows or show changed heights. Nothing needs to be done.
+- **A Kerrigan (KRGN) coin entry needs `"chain_variant": "KRGN"` in its `protocol` object.** Without it, the
+  coin's Electrum headers cannot be read, so its median block time is almost always unknown, and claims and refunds
+  of a KRGN swap fail, as they did before this release. With the value, the headers are read and claims and refunds
+  follow the same lock-time rule as those of any UTXO coin. A KRGN entry with
+  `"chain_variant": "KRGN"` and `enable_spv_proof` or `spv_conf` is refused at activation; remove those keys.
+  - *What you see:* a KRGN entry without the value still activates, but its claims and refunds keep failing.
+  - Detail: PR #468; CRD ch.37 status note of 2026-11-18.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -679,6 +688,16 @@ the previous version used. The safe way:
   takes its decimals from `protocol_data` only. Solana stays switched off in this build. Detail:
   PR #371; CRD ch.40 §40.3A, R40.6B.2.
 
+- **Solana libraries moved to their 3.x line.** The Solana and SPL token libraries the coin is built on
+  moved from the 2.x line to the 3.x line (`spl-token` 9). Addresses, signatures and the bytes of the
+  transfers the coin builds are unchanged: fixed test vectors check a single-key and an HD key, a
+  signature, a SOL and an SPL transfer, and the token-account address under both token programs. The
+  old `ed25519-dalek` 1.0.1 library leaves the dependency tree, so the dependency policy no longer
+  ignores RUSTSEC-2022-0093.
+  RUSTSEC-2024-0344 stays ignored: `curve25519-dalek` 3.2.0 still comes in through the peer-to-peer
+  library's encryption layer, not through Solana. Solana stays switched off in this build.
+  Detail: PR #465.
+
 #### UTXO coins and Electrum
 
 - **Signing a Radiant (RXD) transaction with a malformed output script now fails with an error.** Radiant's
@@ -710,6 +729,17 @@ the previous version used. The safe way:
 
 #### EVM, BCH, Sia and Lightning coins
 
+- **The HD address methods of an EVM platform list its tokens.** `get_new_address`, `account_balance`,
+  `task::account_balance::init` and `task::scan_for_new_addresses::init` asked for the platform coin now answer, per
+  address, the platform and every ERC-20 token activated on it at that moment, including tokens with a zero balance;
+  the total of `task::account_balance::init` sums each. They showed the platform coin only. If one balance cannot be
+  read, the request fails instead of returning a partial list; `get_new_address` still keeps the new address, as it
+  already did when the platform balance could not be read. Asked for a token, they still answer that token only.
+  Detail: PR #463; CRD ch.49 R49.32.
+- **A scan for new addresses of an EVM platform finds token-only addresses.** An address counts as used when its
+  transaction count, its platform balance or the balance of any activated token is not zero, so an address that only
+  received a token is found. The unused addresses between the known range and a newly found address are listed with
+  an empty balance map. The scan made during activation is unchanged. Detail: PR #463; CRD ch.49 R49.32.
 - **A quick disable and re-enable no longer leaves the old history loop running, and a failed legacy activation no
   longer removes another activation's coin.** The history loops (UTXO family, EVM, Sia) now end when the registered coin
   of their ticker is another instance, not only when the ticker is unregistered, so the loop of the removed coin ends at
@@ -869,6 +899,16 @@ the previous version used. The safe way:
   transaction of another coin family. It now refuses the transaction with an error message. In the
   same way, a payment event that a node reports without a transaction hash is an error, not an abort.
   Detail: PR #452.
+
+#### Kerrigan (KRGN)
+
+- **KRGN swaps can claim and refund over Electrum.** Kerrigan headers are 80, 124, 543 or 1487 bytes long,
+  depending on the mining algorithm, and two of the four layouts carry the block time 32 bytes later than the
+  standard header. The node could not read them, so the median block time a claim or refund needs was almost
+  always unknown, and KRGN claims and refunds failed with an error, including refunds through
+  `recover_funds_of_swap`. With `"chain_variant": "KRGN"` in the coin's entry, each header is now read by its
+  algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #468; CRD ch.37
+  §37.5.11.
 
 #### Siacoin
 
@@ -1106,12 +1146,13 @@ the previous version used. The safe way:
   activate shielded coins (ARRR) in the browser build — the wallet database on the SQLite route, one
   parameter source for both targets, the gRPC-web transport, Worker hosting of wallet and prover, swaps
   last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
-- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — parked: the upstream `ed25519-dalek`
-  pin is gone on the Solana 3.x crates; the move is package S5 of `solana-support`, in this cycle.
+- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — done: the Solana crates moved to the 3.x
+  line (package S5 of `solana-support`, PR #465); RUSTSEC-2022-0093 is cleared, and RUSTSEC-2024-0344
+  moves to the libp2p modernization task (it comes in through the peer-to-peer library).
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
-  S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
+  S5 in PR #465, S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
   withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
@@ -1152,6 +1193,14 @@ the previous version used. The safe way:
 - **The TRON transaction history needs a TronGrid API key.** Without a keyed TronGrid node, or without
   `tx_history: true` in the activation request, `my_tx_history` answers as for a coin without a history. Detail:
   CRD ch.21 §21.10C.
+- **TRON on public TronGrid without an API key can be refused with HTTP 429.** In a mainnet withdrawal test with
+  the keyless public TronGrid endpoint, some requests were answered with HTTP 429 (too many requests). KDF counts
+  such an answer as a failed node and asks the next node of the list; when every node refuses, the method returns
+  the error (for example a transport error from `withdraw`, or "TRON broadcast failed" from
+  `send_raw_transaction`) and does not wait and try again. In the test, a broadcast refused this way sent nothing,
+  and repeating the request later succeeded. For regular use, set a TronGrid API key (`tron_api_key`) or use your
+  own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: PR #467;
+  CRD ch.21 §21.9.
 
 ## [0.4.1-beta.1] — 2026-11-21
 

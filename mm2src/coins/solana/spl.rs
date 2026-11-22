@@ -26,8 +26,8 @@ use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
-use spl_associated_token_account_client::address::get_associated_token_address_with_program_id;
-use spl_associated_token_account_client::instruction::create_associated_token_account_idempotent;
+use spl_associated_token_account_interface::address::get_associated_token_address_with_program_id;
+use spl_associated_token_account_interface::instruction::create_associated_token_account_idempotent;
 use std::{fmt::{Debug, Formatter, Result as FmtResult},
           sync::Arc};
 

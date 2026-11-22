@@ -470,6 +470,41 @@ paragraph). Still open from item (a): the platform ticker's maps carry the
 platform ticker only, its scan rule is unchanged, and the intervening unused
 entries of a scan carry a zero entry.
 
+*Status note (2026-11-21), balance maps of a platform ticker (as built).* The
+open half of item (a) of the Reloaded status above is closed for the methods
+that exist in this repository; `task::get_new_address::init`, which R49.32 also
+names, is not present here, so that task form stays open. For an EVM
+platform ticker, `get_new_address`, `account_balance`,
+`task::account_balance::init` and `task::scan_for_new_addresses::init` now
+answer, at every address whose balance is queried, the platform ticker and
+every ERC-20 token registered on the platform at call time, zero balances
+included (R49.32 item 1); a token removed by `disable_coin` is no longer
+registered and no longer appears. The totals of `task::account_balance::init`
+sum each ticker over the listed addresses. If the balance query of the platform
+or of any one token fails, the request fails with no partial map.
+`get_new_address` stores the new address (the known count rises by one) before
+any balance is asked, so when a balance query fails the request fails and the
+address stays known; that was already so for a failing platform balance, and it
+is now more likely because each token's balance is asked as well. In the scan
+answer, the unused addresses between the end of the known range and a newly
+found used address carry an empty map (item 2), and an
+address is used when its nonce is non-zero, its platform balance is non-zero,
+or the balance of a token registered when the scan starts is non-zero (item 3).
+The activation of the platform is unchanged: its report is built as before
+(R35.1.3(b)), each token's balance is asked once per address, and its scan
+keeps the nonce and platform-balance rule, so an address that holds only a
+token is not found by the activation-time scan. An ERC-20 ticker keeps the
+token-only answers of the note above and asks no other token's balance. A TRON
+platform and a TRC20 ticker keep their answers. The `page_balance` of
+`account_balance` is a single `{spendable, unspendable}` balance in this
+repository's answer and stays the sum of the platform ticker over the listed
+addresses; R49.32 item 1 says the page total sums each ticker, which a single
+balance cannot carry (open: the shape of `page_balance` for a page with
+several tickers is not yet settled). The tests are the
+`evm_hd_p2_*` tests of `mm2src/coins_activation/src/evm_hd_p2_tests.rs` and, for
+the Trezor policy, `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens`
+(T49.31).
+
 > **Code-quality finding (informative; this repository).** The Trezor
 > emulator test that stands for T49.9 builds the ERC-20 coin directly with
 > an HD derivation instead of activating it on a Trezor platform. It
@@ -1305,3 +1340,7 @@ addresses.
   §63.8B for the KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-21,
   measure 0.02, no findings**, as recorded for §63.8B in chapter 63's
   provenance footer.
+- *Status note added 2026-11-21 (after the note on the ERC-20 `from` under
+  HD).* Reloaded-original, clean side: it records the balance maps of an EVM
+  platform ticker as built; no forbidden-class input. No cleared sentence was
+  edited.

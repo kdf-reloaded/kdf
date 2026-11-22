@@ -42,3 +42,19 @@ a length-prefixed block signature.
 | `runes_2953197_x11_qtum_tip.hex` | 2953197..2953207 | 11 x 246 (2706 bytes) |
 | `runes_500000_x11_qtum.hex` | 500000..500010 | 11 x 251 (2761 bytes) |
 
+
+## Kerrigan (KRGN) fixtures (fetched 2026-11-18 and 2026-11-22)
+
+Real Kerrigan chain data, fetched on 2026-11-18 from a public Kerrigan Electrum server
+(ElectrumX 1.19.0, protocol 1.4, tip 188838) with
+`blockchain.block.headers(188818, 11)` and `blockchain.block.header(height)`. The four mining
+algorithms use four layouts (CRD ch.37 R37.5.11); the algorithm is bits 8 to 11 of the version.
+
+| File | Chain heights | Algorithm and size |
+|---|---|---|
+| `krgn_188818_mixed_sizes.hex` | 188818..188828 | 11 headers, 8492 bytes: Equihash(200,9) x4 (1487 each), Equihash(192,7) x4 (543 each), KawPoW x3 (124 each); sizes in order 1487, 1487, 543, 543, 543, 124, 124, 1487, 1487, 543, 124 |
+| `krgn_191181_window11.hex` | 191181..191191 | 11 headers, 7085 bytes: X11 x1 (80), KawPoW x3 (124 each), Equihash(192,7) x4 (543 each), Equihash(200,9) x3 (1487 each); sizes in order 124, 124, 1487, 80, 543, 543, 543, 124, 543, 1487, 1487. All four sizes in one `blockchain.block.headers(191181, 11)` answer of a public Kerrigan Electrum server on 2026-11-22 |
+| `krgn_188629_lone_x11.hex` | 188629 | X11, 80 bytes |
+| `krgn_188823_lone_kawpow.hex` | 188823 | KawPoW, 124 bytes |
+| `krgn_188818_lone_equihash_200_9.hex` | 188818 | Equihash(200,9), 1487 bytes |
+| `krgn_188820_lone_equihash_192_7.hex` | 188820 | Equihash(192,7), 543 bytes |
