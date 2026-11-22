@@ -233,6 +233,19 @@ pub(crate) enum TransferState {
     Failed,
 }
 
+impl TransferState {
+    /// The state as the provider writes it (§63.4.7).
+    pub(crate) fn wire_name(self) -> &'static str {
+        match self {
+            TransferState::Waiting => "WAITING",
+            TransferState::InProgress => "INPROGRESS",
+            TransferState::Confirming => "CONFIRMING",
+            TransferState::Succeed => "SUCCEED",
+            TransferState::Failed => "FAILED",
+        }
+    }
+}
+
 /// The on-chain state of a transfer's transaction (§63.4.7). A value outside the set fails the decoding (R12).
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) enum TransactionState {
@@ -251,6 +264,11 @@ pub(crate) enum TransactionState {
 /// A transaction hash as the provider writes it: 64 hex digits without `0x` (§63.4.7).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransactionHash(pub [u8; 32]);
+
+impl TransactionHash {
+    /// The hash as 64 lower-case hex digits without `0x`: the form the `tx_hash` of a native TRON withdraw has.
+    pub(crate) fn to_hex(self) -> String { hex::encode(self.0) }
+}
 
 impl fmt::Debug for TransactionHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "TransactionHash({})", hex::encode(self.0)) }

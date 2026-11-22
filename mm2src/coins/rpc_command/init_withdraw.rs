@@ -121,6 +121,23 @@ pub enum WithdrawInProgressStatus {
     FetchingGaslessQuote,
     /// The gasless rail signs the off-chain authorization (CRD ch.63 §63.3.6).
     SigningGaslessAuthorization,
+    /// The gasless rail hands the signed authorization to the provider (CRD ch.63 §63.3.6, R33). Task route only.
+    SubmittingGaslessAuthorization,
+    /// The provider took the authorization and has not sent its transaction yet (CRD ch.63 R33, D63.9).
+    WaitingForGaslessProvider {
+        /// The provider's id of the transfer.
+        trace_id: String,
+        /// The provider's `state` of the transfer, as the provider writes it.
+        provider_state: String,
+    },
+    /// The provider's transaction is awaited on chain (CRD ch.63 R33, D63.9).
+    WaitingForGaslessSettlement {
+        /// The provider's id of the transfer.
+        trace_id: String,
+        /// The hash of the provider's transaction, in the form of a TRON `tx_hash`. Always present on the wire:
+        /// `null` while the provider names no transaction.
+        tx_hash: Option<String>,
+    },
 }
 
 pub async fn withdraw_user_action(

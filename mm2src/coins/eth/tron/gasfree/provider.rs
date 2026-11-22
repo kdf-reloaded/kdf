@@ -2,37 +2,39 @@
 //!
 //! A request goes to `<base>/<network segment>/api/v1/<operation>`, where `<base>` is the configured scheme and
 //! host (R13). It carries the two authentication headers of §63.4.2 and is bounded as a whole by the per-call
-//! timeout (R20). Only the two read calls exist: the submit and trace calls are deferred with the submission flow
-//! (D63.6), their payloads are in [`super::provider_payloads`].
+//! timeout (R20). The payloads are in [`super::provider_payloads`].
 //!
 //! # Invariants
 //!
+//! - Every call is one request: nothing here repeats a request after a failed connection, a timeout or any answer
+//!   (§63.8B R31).
 //! - The credentials go into the request headers and nowhere else: no `Debug` rendering and no error of this
 //!   module carries them (R9).
 //! - Provider text that reaches an error is collapsed and bounded first (R10).
 
 use super::super::{Network, TronAddress};
+use super::authorization::PERMIT_VERSION;
 use super::failure::{sanitize_provider_text, GasFreeError};
 use super::networks::gasfree_network;
-use super::provider_payloads::{ProviderAccount, SupportedToken, SupportedTokenList};
+use super::provider_payloads::{ProviderAccount, SubmitRequest, SupportedToken, SupportedTokenList, TransferRecord};
 use common::now_ms;
 use hmac::{Hmac, Mac};
 use http::header::{HeaderName, AUTHORIZATION};
 use http::{HeaderMap, HeaderValue};
 use mm2_err_handle::prelude::MmError;
-use mm2_net::transport::{slurp_url_with_headers_bounded, SlurpError};
+use mm2_net::transport::{slurp_post_json_with_headers_bounded, slurp_url_with_headers_bounded, SlurpError};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value as Json;
 use sha2_010::Sha256;
 use std::fmt;
 use url::Url;
+use uuid::Uuid;
 
 /// The per-call timeout of a provider request when the activation gives none, in milliseconds (R20).
 pub(crate) const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
 
-/// The settlement poll interval when the activation gives none, in milliseconds (R20). Nothing polls yet: the
-/// value takes effect with the submission flow (D63.6).
+/// The settlement poll interval when the activation gives none, in milliseconds (R20).
 pub(crate) const DEFAULT_STATUS_POLL_INTERVAL_MS: u64 = 3_000;
 
 /// The prefix every operation path shares, after the network segment (§63.4.1).
@@ -186,6 +188,62 @@ impl GasFreeProvider {
     pub(crate) async fn supported_tokens(&self) -> Result<Vec<SupportedToken>, GasFreeError> {
         let list: SupportedTokenList = self.get("config/token/all").await?;
         Ok(list.tokens)
+    }
+
+    /// Submits a signed authorization (§63.4.6) and returns the provider's record of the transfer (§63.4.7). One
+    /// request, never repeated (§63.8B R31).
+    ///
+    /// # Errors
+    ///
+    /// The [`GasFreeError`] of the failed exchange, see [`decode_answer`]; a 404 is [`GasFreeError::Rejected`]
+    /// here. [`GasFreeError::Internal`], with no request made, for a body that cannot be written or whose
+    /// `version` is not 1 (R5).
+    pub(crate) async fn submit(&self, request: &SubmitRequest) -> Result<TransferRecord, GasFreeError> {
+        // The text of a serialization error is not repeated: the body holds the signature (R9).
+        let body = serde_json::to_value(request)
+            .map_err(|_| GasFreeError::Internal("the submit payload cannot be written as JSON".to_owned()))?;
+        self.post_submit(&body).await
+    }
+
+    /// Sends `body` as the submit request, unless its `version` is not 1 (R5, §63.8B R31).
+    async fn post_submit(&self, body: &Json) -> Result<TransferRecord, GasFreeError> {
+        if body["version"].as_str() != Some(PERMIT_VERSION.to_string().as_str()) {
+            return Err(GasFreeError::Internal(
+                "the submit payload does not carry the authorization version 1".to_owned(),
+            ));
+        }
+        self.post("gasfree/submit", body.to_string()).await
+    }
+
+    /// The provider's record of the transfer with the trace id `trace_id` (§63.4.7). One request, never repeated
+    /// (§63.8B R31). The id goes into the request path as it is given.
+    ///
+    /// # Errors
+    ///
+    /// - [`GasFreeError::Internal`], with no request made, when `trace_id` does not read as a UUID.
+    /// - [`GasFreeError::TraceNotFound`] for a 404, as the HTTP status or as the envelope code (D63.9 item 5).
+    /// - Otherwise the [`GasFreeError`] of the failed exchange, see [`decode_answer`].
+    pub(crate) async fn trace(&self, trace_id: &str) -> Result<TransferRecord, GasFreeError> {
+        if Uuid::parse_str(trace_id).is_err() {
+            return Err(GasFreeError::Internal("the trace id is not a UUID".to_owned()));
+        }
+        match self.get(&format!("gasfree/{trace_id}")).await {
+            Err(GasFreeError::Rejected { status: 404, message }) => Err(GasFreeError::TraceNotFound(message)),
+            answer => answer,
+        }
+    }
+
+    /// One authenticated POST of the JSON text `body`, bounded by the per-call timeout, decoded as the `data` of a
+    /// success envelope.
+    async fn post<T: DeserializeOwned>(&self, operation: &str, body: String) -> Result<T, GasFreeError> {
+        let path = self.request_path(operation);
+        let url = format!("{}{}", self.base, path);
+        let headers = auth_headers(&self.credentials, "POST", &path, now_ms() / 1000)?;
+        let timeout_s = self.request_timeout_ms as f64 / 1000.;
+        let (status, _headers, body) = slurp_post_json_with_headers_bounded(&url, body, &headers, timeout_s)
+            .await
+            .map_err(transport_failure)?;
+        decode_answer(status.as_u16(), &body)
     }
 
     /// One authenticated GET, bounded by the per-call timeout, decoded as the `data` of a success envelope.
@@ -553,12 +611,20 @@ mod tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod loopback_tests {
     use super::super::super::test_node::{Reply, StubNode};
+    use super::super::authorization::{sign_permit, PermitTransfer, SignedPermit};
     use super::super::failure::{GaslessMember, RpcArm};
-    use super::super::test_vectors::{address, MESSAGES, USERS};
+    use super::super::test_vectors::{address, MESSAGES, MESSAGE_MAX_FEE, MESSAGE_SERVICE_PROVIDER, USERS};
     use super::*;
     use common::block_on;
     use ethereum_types::U256;
+    use mm2_eth::keys::Secret;
+    use std::io::Read;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    const TRACE_ID: &str = "6c3ff67e-0bf4-4c09-91ca-0c7c254b01a0";
+    const REQUEST_ID: &str = "3f2b8c1e-5d4a-4f6b-9c7d-8e9f0a1b2c3d";
 
     const API_KEY: &str = "key-0f3a9c";
     const API_SECRET: &str = "secret-7b1d4e";
@@ -699,5 +765,249 @@ mod loopback_tests {
             "the call did not end at its bound"
         );
         assert_no_credential(&format!("{error} {error:?}"));
+    }
+
+    /// The first message vector, signed by its user.
+    fn signed_first_message() -> SignedPermit {
+        let message = &MESSAGES[0];
+        let permit = PermitTransfer {
+            token: address(message.token),
+            service_provider: address(MESSAGE_SERVICE_PROVIDER),
+            user: address(message.user),
+            receiver: address(message.receiver),
+            value: U256::from(message.value),
+            max_fee: U256::from(MESSAGE_MAX_FEE),
+            deadline: message.deadline,
+            nonce: message.nonce,
+        };
+        let mut key = [0u8; 32];
+        key[31] = 1;
+        let secret = Secret::from_slice(&key).expect("a valid test key");
+        sign_permit(&Network::Nile, permit, &secret, message.deadline - 1).expect("the user signs")
+    }
+
+    fn submit_request() -> SubmitRequest {
+        SubmitRequest::new(signed_first_message(), Some(REQUEST_ID)).expect("a version 4 request id")
+    }
+
+    /// The success envelope with the provider's record of the first message vector in `state`.
+    fn transfer_envelope(state: &str) -> String {
+        serde_json::json!({
+            "code": 200,
+            "reason": null,
+            "message": "",
+            "data": {
+                "id": TRACE_ID,
+                "createdAt": "2024-09-13T06:07:12.000Z",
+                "updatedAt": "2024-09-13T06:07:13.000Z",
+                "expiredAt": "2024-09-13T06:12:12.000Z",
+                "maxFee": MESSAGE_MAX_FEE,
+                "signature": signed_first_message().sig_hex(),
+                "accountAddress": MESSAGES[0].user,
+                "gasFreeAddress": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
+                "providerAddress": MESSAGE_SERVICE_PROVIDER,
+                "targetAddress": MESSAGES[0].receiver,
+                "tokenAddress": MESSAGES[0].token,
+                "amount": MESSAGES[0].value,
+                "estimatedActivateFee": 1000000,
+                "estimatedTransferFee": 2000000,
+                "nonce": MESSAGES[0].nonce,
+                "version": 1,
+                "state": state
+            }
+        })
+        .to_string()
+    }
+
+    /// A loopback port that takes a connection, reads what arrives and closes it without an answer. Returns its
+    /// URL and the number of connections taken so far.
+    fn closing_port() -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let url = format!("http://{}", listener.local_addr().expect("a local address"));
+        let taken = Arc::new(AtomicUsize::new(0));
+        let counter = taken.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut chunk = [0u8; 4096];
+                let _ = stream.read(&mut chunk);
+            }
+        });
+        (url, taken)
+    }
+
+    /// ch.63 T18: a submit is one authenticated POST of the payload to the submit path.
+    #[test]
+    fn t18_submit_is_one_authenticated_post_of_the_payload() {
+        let body = transfer_envelope("WAITING");
+        let node = StubNode::start(move |_, _| Reply::ok(&body));
+        let request = submit_request();
+        let record = block_on(provider(&Network::Nile, &node, None).submit(&request)).expect("a transfer record");
+        assert_eq!(record.id, TRACE_ID);
+        assert_eq!(record.nonce, MESSAGES[0].nonce);
+
+        let path = "/nile/api/v1/gasfree/submit";
+        let requests = node.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, path);
+        let sent: Json = serde_json::from_str(&requests[0].1).expect("a JSON body");
+        let expected = serde_json::to_value(&request).expect("a document");
+        assert!(sent == expected, "the body is not the submit payload");
+        assert!(sent["requestId"] == REQUEST_ID && sent["version"] == "1");
+        assert!(node.header_values("content-type")[0]
+            .as_deref()
+            .is_some_and(|value| value.starts_with("application/json")));
+
+        // The signature is over the method POST, that path and the time of the request.
+        let timestamp = node.header_values("timestamp")[0].clone().expect("a Timestamp header");
+        let timestamp_s: u64 = timestamp.parse().expect("Unix seconds");
+        let credentials = ProviderCredentials::new(API_KEY.to_owned(), API_SECRET.to_owned());
+        let expected = authorization_value(&credentials, "POST", path, timestamp_s).expect("a value");
+        let sent = node.header_values("authorization")[0]
+            .clone()
+            .expect("an Authorization header");
+        assert!(sent == expected, "the Authorization header is not the signed value");
+    }
+
+    /// ch.63 T18: a trace is one authenticated GET of the trace path.
+    #[test]
+    fn t18_trace_is_one_authenticated_get_of_the_trace_path() {
+        let body = transfer_envelope("CONFIRMING");
+        let node = StubNode::start(move |_, _| Reply::ok(&body));
+        let record = block_on(provider(&Network::Nile, &node, None).trace(TRACE_ID)).expect("a transfer record");
+        assert_eq!(record.id, TRACE_ID);
+
+        let path = format!("/nile/api/v1/gasfree/{TRACE_ID}");
+        let requests = node.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, path);
+        assert!(requests[0].1.is_empty());
+        let timestamp = node.header_values("timestamp")[0].clone().expect("a Timestamp header");
+        let timestamp_s: u64 = timestamp.parse().expect("Unix seconds");
+        let credentials = ProviderCredentials::new(API_KEY.to_owned(), API_SECRET.to_owned());
+        let expected = authorization_value(&credentials, "GET", &path, timestamp_s).expect("a value");
+        let sent = node.header_values("authorization")[0]
+            .clone()
+            .expect("an Authorization header");
+        assert!(sent == expected, "the Authorization header is not the signed value");
+    }
+
+    /// ch.63 T18, R31: a 5xx answer, a timeout and a failed connection are followed by no further request, for a
+    /// submit and for a trace.
+    #[test]
+    fn t18_a_failed_submit_or_trace_is_not_repeated() {
+        let request = submit_request();
+
+        let failing = StubNode::start(|_, _| Reply::status(503, r#"{"code":503,"message":"maintenance"}"#));
+        let client = provider(&Network::Nile, &failing, None);
+        let error = block_on(client.submit(&request)).err().expect("a provider failure");
+        assert!(matches!(error, GasFreeError::ProviderFailed { status: 503, .. }));
+        assert_no_credential(&format!("{error} {error:?}"));
+        let error = block_on(client.trace(TRACE_ID)).err().expect("a provider failure");
+        assert!(matches!(error, GasFreeError::ProviderFailed { status: 503, .. }));
+
+        let slow = StubNode::start(|_, _| {
+            std::thread::sleep(Duration::from_millis(1_500));
+            Reply::ok("{}")
+        });
+        let client = provider(&Network::Nile, &slow, Some(300));
+        let error = block_on(client.submit(&request)).err().expect("a timeout");
+        assert!(matches!(error, GasFreeError::Timeout(_)));
+        let error = block_on(client.trace(TRACE_ID)).err().expect("a timeout");
+        assert!(matches!(error, GasFreeError::Timeout(_)));
+
+        let (url, taken) = closing_port();
+        let credentials = ProviderCredentials::new(API_KEY.to_owned(), API_SECRET.to_owned());
+        let client = GasFreeProvider::new(&Network::Nile, &url, credentials, None).expect("a host-only URL");
+        let error = block_on(client.submit(&request)).err().expect("a failed connection");
+        assert!(matches!(error, GasFreeError::Transport(_)));
+        assert_eq!(error.rpc_arm(), RpcArm::Transport);
+        assert_no_credential(&format!("{error} {error:?}"));
+        let error = block_on(client.trace(TRACE_ID)).err().expect("a failed connection");
+        assert!(matches!(error, GasFreeError::Transport(_)));
+
+        // Time for a repeated request to arrive, if one were made.
+        std::thread::sleep(Duration::from_millis(1_700));
+        assert_eq!(failing.requests().len(), 2, "a request was repeated after a 5xx answer");
+        assert_eq!(slow.requests().len(), 2, "a request was repeated after a timeout");
+        assert_eq!(
+            taken.load(Ordering::SeqCst),
+            2,
+            "a request was repeated after a failed connection"
+        );
+    }
+
+    /// ch.63 T18, R31: a submit payload with another version than 1 and a trace id that is not a UUID are refused
+    /// with no request made.
+    #[test]
+    fn t18_the_pre_send_refusals_make_no_request() {
+        let node = StubNode::start(|_, _| Reply::ok(&transfer_envelope("WAITING")));
+        let client = provider(&Network::Nile, &node, None);
+
+        let mut body = serde_json::to_value(submit_request()).expect("a document");
+        for version in [
+            serde_json::json!("2"),
+            serde_json::json!("0"),
+            serde_json::json!(1),
+            Json::Null,
+        ] {
+            body["version"] = version;
+            let error = block_on(client.post_submit(&body)).err().expect("a refusal");
+            assert!(matches!(error, GasFreeError::Internal(_)));
+            assert_eq!(error.rpc_arm(), RpcArm::InternalError);
+        }
+
+        for trace_id in [
+            "",
+            "not-a-uuid",
+            "6c3ff67e-0bf4-4c09-91ca",
+            "../address/x",
+            "6c3ff67e?x=1",
+        ] {
+            let error = block_on(client.trace(trace_id)).err().expect("a refusal");
+            assert!(matches!(error, GasFreeError::Internal(_)));
+            assert_eq!(error.rpc_arm(), RpcArm::InternalError);
+        }
+        assert!(node.requests().is_empty(), "a refused request reached the provider");
+    }
+
+    /// ch.63 T20: a 404 of the trace request, as the HTTP status and as the envelope code, is the unknown trace
+    /// id; a 404 of the submit request is a refusal like every other 4xx.
+    #[test]
+    fn t20_a_404_is_the_unknown_trace_for_the_trace_request_only() {
+        let request = submit_request();
+        for (status, body) in [
+            (404u16, "Not Found".to_owned()),
+            (
+                404,
+                r#"{"code":404,"reason":"NotFound","message":"no such transfer"}"#.to_owned(),
+            ),
+            (
+                200,
+                r#"{"code":404,"reason":"NotFound","message":"no such transfer"}"#.to_owned(),
+            ),
+        ] {
+            let node = StubNode::start(move |_, _| Reply::status(status, &body));
+            let client = provider(&Network::Nile, &node, None);
+
+            let error = block_on(client.trace(TRACE_ID)).err().expect("an unknown trace");
+            assert!(matches!(error, GasFreeError::TraceNotFound(_)));
+            assert_eq!(error.rpc_arm(), RpcArm::Gasless(GaslessMember::TraceNotFound));
+            assert_eq!(GaslessMember::TraceNotFound.http_status(), 404);
+
+            let error = block_on(client.submit(&request)).err().expect("a refusal");
+            assert!(matches!(error, GasFreeError::Rejected { status: 404, .. }));
+            assert_eq!(error.rpc_arm(), RpcArm::Gasless(GaslessMember::ProviderRejected));
+            assert_eq!(GaslessMember::ProviderRejected.http_status(), 502);
+            assert_eq!(node.requests().len(), 2);
+        }
+
+        // Another 4xx of the trace request stays a refusal.
+        let node = StubNode::start(|_, _| Reply::status(400, r#"{"code":400,"message":"bad id"}"#));
+        let error = block_on(provider(&Network::Nile, &node, None).trace(TRACE_ID))
+            .err()
+            .expect("a refusal");
+        assert!(matches!(error, GasFreeError::Rejected { status: 400, .. }));
     }
 }

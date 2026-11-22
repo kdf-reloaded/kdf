@@ -22,6 +22,13 @@
 > D55.5). Work package 2 (switching activation on) is done with this; swap
 > participation (work package 5) and the reachable GasFree rail stay open.
 
+> **GasFree rail reachable (2026-11-22).** The box above says that the
+> reachable GasFree rail stays open. The rail is reachable since 2026-11-20 as
+> a sign-only withdraw, and since 2026-11-22 the task form of the withdraw
+> submits a gasless transfer to the provider and follows it until it settles
+> (plan [`tron-gasfree`](./tron-gasfree.md); CRD ch.63 D63.9 and its status
+> note).
+
 > **Saved orders are kept (2026-11-22).** A saved order that names a TRON coin
 > is no longer cancelled at startup. It is kept, so `my_orders` lists it and
 > `cancel_order` removes it, but it is never announced or matched, and one log

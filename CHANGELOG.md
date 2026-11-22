@@ -321,9 +321,10 @@ the previous version used. The safe way:
   declines to match, an order with a TRON coin saved earlier is kept at startup but not announced or matched, and an
   unfinished saved swap that names a TRON coin is not resumed at startup (its record is kept). For a TRON entry that
   does not say `"wallet_only": true`, GLEEC KDF refuses the order at a later check; the answer has the same form, so
-  no setting exists for this. Gasless TRC20 transfers through GasFree are signed but not submitted yet: a GasFree
-  provider can be configured, the GasFree address is shown and a gasless withdraw returns a signed authorization
-  (items below). Detail: PR #451; CRD
+  no setting exists for this. Gasless TRC20 transfers through GasFree work through the task form of `withdraw`: a
+  GasFree provider can be configured, the GasFree address is shown, the task form submits a gasless transfer to the
+  provider and follows it until it settles, and the direct `withdraw` returns a signed authorization (items below).
+  Detail: PR #451; CRD
   ch.21 D6, R-D1, R21.10B.9, R21.B3 and their status notes of 2026-11-20; ch.55 D55.5.
 - **The TRON node client gives each node a time limit and fails over when a node answers badly.** A node
   that does not answer within 10 seconds is skipped, and so is a node that answers with an error status
@@ -426,10 +427,10 @@ the previous version used. The safe way:
   as GLEEC KDF does. GLEEC KDF has no TRON history and ignores `tx_history` for TRON. The key is never logged or
   shown. In a browser build only the legacy method answers, and the keyed history has not been checked in a browser.
   Detail: PR #440; CRD ch.21 §21.10C.
-- **Support code for gasless TRC20 transfers through GasFree was added; no transfer is submitted with it yet.** The
+- **Support code for gasless TRC20 transfers through GasFree was added.** The
   code derives a user's GasFree custody address and checks it against the GasFree contract, prepares and signs a
   transfer authorization, and reads account and fee data from a GasFree provider. The two items below use it: the
-  address part in the reports, and the rest in the sign-only gasless withdraw. Detail: PR #433; CRD ch.63 §63.4 to
+  address part in the reports, and the rest in the gasless withdraw. Detail: PR #433; CRD ch.63 §63.4 to
   §63.7, R29.
 - **A GasFree provider can be configured when TRON is activated, and the balance answers show the GasFree deposit
   address.** The platform activation takes a `tron_gasless_provider` object (the provider's URL as scheme and host,
@@ -439,23 +440,42 @@ the previous version used. The safe way:
   the HD address methods show `gasfree_address` next to each address: the address to send a token to before it can be
   moved without TRX. The address is checked against the GasFree contract first and is left out if the contract
   disagrees. The API key and secret are never logged or shown. Both can be used now that TRON is switched on: the
-  provider is configured and the GasFree address is reported. **A gasless transfer is signed but not submitted yet**
-  (the next item), so this build alone cannot move a token that sits on the GasFree address. Detail: PR #441; CRD
+  provider is configured and the GasFree address is reported. A token that sits on the GasFree address is moved with
+  a gasless withdraw in its task form (the next item). The provider object's `status_poll_interval_ms` (3000 by
+  default) is the time between two questions to the provider about a submitted transfer. Detail: PR #441; CRD
   ch.63 §63.3.1 to §63.3.3, R18, R29.
-- **A TRC20 token can be withdrawn without TRX through a GasFree provider; the result is a signed authorization that
-  is not submitted yet.** The withdraw request takes `fee_method` (`native`, `gasless` or `auto`) and a `gasless`
-  object (`max_fee`, `deadline_seconds`, `fallback_to_native`). With `gasless`, the fee is paid in the token from the
-  GasFree address, and the answer holds the signed authorization and the fee in the token instead of a
-  transaction: it has no `tx_hex` and no `tx_hash`. With `auto`, the ordinary TRX-paid transfer is tried first and
+- **A TRC20 token can be withdrawn without TRX through a GasFree provider: the task form of `withdraw` submits the
+  transfer and follows it until it settles; the direct `withdraw` only signs it.** The withdraw request takes
+  `fee_method` (`native`, `gasless` or `auto`) and a `gasless` object (`max_fee`, `deadline_seconds`,
+  `fallback_to_native`). With `gasless`, the fee is paid in the token from the GasFree address.
+  *The task form* (`task::withdraw::init`, then `task::withdraw::status`) signs the authorization, hands it to the
+  provider and asks the provider about the transfer every `status_poll_interval_ms` until it is settled. So KDF can
+  now move a token that sits on the GasFree address. While the task runs, its status shows
+  `SubmittingGaslessAuthorization`, then `WaitingForGaslessProvider` (an object with the provider's `trace_id` and
+  `provider_state`) and `WaitingForGaslessSettlement` (an object with `trace_id` and `tx_hash`, which is `null`
+  until the provider names its transaction). The final answer holds the signed authorization, the fee in the token
+  with the provider's `trace_id`, and `tx_hash`, the hash of the provider's transaction; it has no `tx_hex`. The
+  submission is sent once and never repeated. If the submission gets no usable answer (a timeout, a broken
+  connection, a provider error, or an answer that does not match what was signed), the provider may still have
+  accepted the transfer: the error text then says so and asks you to check the GasFree address balance and its
+  history before trying again, because a second withdraw would be a second transfer, and a warning in the log names
+  the coin, the addresses, the amount and the request id. The task ends with an error when the authorization has expired before
+  it could be sent (`QuoteExpired`; nothing is sent), when the provider's answer does not match what was signed
+  (`InvalidProviderResponse`), when the provider reports the transfer as failed (`ProviderRejected`) or does not
+  know its trace id (`TraceNotFound`), and when the transfer has not settled 120 seconds after the authorization's
+  deadline (`Transport`; the outcome is then unknown). Every error after the submission names the trace id, so the
+  transfer can be looked up at the provider. `task::withdraw::cancel` before the submission stops it; after the
+  submission it only stops the waiting, and the transfer may still complete.
+  *The direct `withdraw`* only signs: its answer holds the signed authorization and the fee in the token instead of
+  a transaction, with no `tx_hex`, no `tx_hash` and a `trace_id` of `null`, and nothing is sent to the provider.
+  With `auto`, the ordinary TRX-paid transfer is tried first and
   the gasless one only when it cannot be funded. Other coins refuse `gasless` and `auto`. On every coin, a request
   that carries a `gasless` object without `fee_method` `gasless` or `auto` is now refused (`InvalidFeePolicy`, HTTP
   400); until now an unknown `gasless` member was ignored. The new `MM2.json` setting
   `tron_gasfree_guard_allows_fallback` (default `false`) decides whether a withdraw with `fallback_to_native` may use
   the TRX-paid transfer when the GasFree contract check refuses. This can be used now that TRON is switched on.
-  **It only signs: KDF does not hand the signed authorization to the provider, and no RPC does it yet**, so a token
-  on the GasFree address moves only if you submit the signed authorization to the provider yourself. The way to move
-  tokens back from the GasFree address is a gasless withdraw to your own address; until KDF submits, that too gives
-  only a signed authorization. Detail: PR #445; CRD ch.63 §63.3.4 to §63.3.6, §63.8, §63.8A, R29;
+  The way to move tokens back from the GasFree address is a gasless withdraw to your own address, through the task
+  form. Detail: PR #445; CRD ch.63 §63.3.4 to §63.3.6, §63.8, §63.8A, §63.8B (D63.9 and its status note), R29;
   RELOADED_VS_GLEEC.md.
 
 #### Tendermint (Cosmos) coins
@@ -1276,12 +1296,15 @@ the previous version used. The safe way:
   The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
   The transaction history (work package 4) is built with a TronGrid API key, still switched off (PR #440).
   On 2026-11-20 TRON was switched on as a wallet-only coin family; swaps stay off.
-  The plan now also says a saved TRON order is kept at startup, not cancelled.
+  The plan now also says a saved TRON order is kept at startup, not cancelled, and that the GasFree rail is
+  reachable.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
   controller; the support modules are built; the activation binding and the `gasfree_address` fields in the reports
   are built and can be used, as TRON is switched on; the gasless withdraw is built as sign-only on 2026-11-20 and
-  can be used too: it returns a signed authorization that is not submitted; submission and settlement remain.
+  can be used too; on 2026-11-22 the task form of the withdraw gained submission to the provider and settlement
+  tracking, while the direct withdraw stays sign-only. A later step may let the broadcast call take the signed
+  authorization.
 - [`zec-v5-transactions`](docs/plans/zec-v5-transactions.md) — in progress (0.5.0): route (A) decided 2026-11-17;
   the version-5 format and digests in the shared parser (PR #397) and the ZEC wiring (PR #404); the history report of
   unreadable transactions (PR #415); ZEC fees under ZIP 317 (Z10, PR #431); the coins entry follows. Z1–Z8 done.
@@ -1293,12 +1316,13 @@ the previous version used. The safe way:
   `start_swap` refuse a TRON coin with the "… is wallet only" answer. This replaces the item of 0.4.0-beta.1 that
   says TRON cannot be activated. More in [`tron-support`](docs/plans/tron-support.md) and
   [`tron-swap-support`](docs/plans/tron-swap-support.md). Detail: PR #451; CRD ch.21 R-D1, R21.B3.
-- **Gasless TRC20 transfers through GasFree are signed but not submitted.** A GasFree provider can be configured,
-  the GasFree address (`gasfree_address`) is shown, and a withdrawal with `fee_method` `gasless` returns a signed
-  authorization instead of a transaction. KDF does not hand it to the provider and no RPC does it yet, so this
-  build alone cannot move a token that sits on the GasFree address: you would have to submit the signed
-  authorization to the provider yourself. That also holds for moving tokens back with a gasless withdrawal to your
-  own address. A TRC20 withdrawal without `fee_method` pays its fee in TRX. More in
+- **Only the task form of `withdraw` submits a gasless TRC20 transfer through GasFree.** `task::withdraw::init`
+  with `fee_method` `gasless` signs the transfer, hands it to the provider and follows it until it settles. The
+  direct `withdraw` with `fee_method` `gasless` returns a signed authorization instead of a transaction and sends
+  nothing: no RPC takes that authorization afterwards, so to move a token from the GasFree address, or back to your
+  own address, use the task form. KDF keeps no record of a submitted transfer: if the node stops, the task is
+  cancelled or the wait runs out, the transfer may still complete, and the provider's `trace_id` from the status or
+  the error text is the way to look it up. A TRC20 withdrawal without `fee_method` pays its fee in TRX. More in
   [`tron-gasfree`](docs/plans/tron-gasfree.md).
 - **The TRON transaction history needs a TronGrid API key.** Without a keyed TronGrid node, or without
   `tx_history: true` in the activation request, `my_tx_history` answers as for a coin without a history. Detail:
