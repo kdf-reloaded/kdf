@@ -770,7 +770,7 @@ with a reference build, the following hold.
 > fails if the name exists, so no reader sees an empty lock (on a file system
 > without hard links the earlier create-then-write is used, and a new lock is
 > empty for a moment); a refresh and a take-over write through a temporary
-> file and a rename (gap 1 of the code- quality finding). The runner keeps the
+> file and a rename (gap 1 of the code-quality finding). The runner keeps the
 > value it wrote last in memory; before each refresh it reads the file, and a
 > missing file, a different value, content that is not text, or refreshing
 > that has failed for longer than 40 seconds makes the lock lost: the run is
