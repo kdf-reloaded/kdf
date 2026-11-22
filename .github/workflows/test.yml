@@ -327,6 +327,11 @@ jobs:
         shell: bash
         run: cargo check --target wasm32-unknown-unknown -p coins_activation
 
+      # Compiles the crate's test code for wasm32.
+      - name: cargo check --tests -p coins_activation (wasm32)
+        shell: bash
+        run: cargo check --tests --target wasm32-unknown-unknown -p coins_activation
+
       - name: cargo check -p mm2_db (wasm32)
         shell: bash
         run: cargo check --target wasm32-unknown-unknown -p mm2_db
