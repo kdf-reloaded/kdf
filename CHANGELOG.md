@@ -1353,8 +1353,9 @@ the previous version used. The safe way:
   recovery. Only test code and docs changed. Detail: PR #464; CRD ch.51, status notes of 2026-11-21 after
   R82 and R83, T35.
 - **The test code of the coin activation compiles for wasm32, and CI checks it.** The task-framework tests of the
-  standalone-coin family are built only for native targets, like the test helpers they use, and the wasm32 CI
-  job also compiles the test code of the activation crate. Only test code and CI changed. Detail: PR #511.
+  standalone-coin family are built only for native targets, like the test helpers they use. A new CI job,
+  `wasm32-test-check`, compiles the test code of `coins_activation`, `coins` and `mm2_main` for wasm32 and is part
+  of the required `tests-passed` check. Only test code and CI changed. Detail: PR #511.
 
 ### Plans touched
 
