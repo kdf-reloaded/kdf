@@ -1198,30 +1198,32 @@ mod tests {
         }
     }
 
-    /// Solana is postponed for this beta: the legacy `enable` and `electrum` refuse every coin of the family with
-    /// the "not available in this build" text and register nothing. The node keeps running. (TRON is switched on:
-    /// `tron_activation_tests` has its legacy routes.)
+    /// The legacy `enable` and `electrum` reject every coin of the Solana family as a coin that needs an mmrpc 2.0
+    /// activation (CRD ch.55 R55.4.7), with the text that names the method to use, not with the "not available in
+    /// this build" refusal of the switched-off beta. They register nothing and the node keeps running.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn legacy_enable_and_electrum_refuse_solana_coins() {
-        use coins::SOLANA_NOT_AVAILABLE;
+    fn legacy_enable_and_electrum_reject_solana_coins_as_needing_mmrpc2() {
         use crypto::CryptoCtx;
 
+        const PLATFORM_TEXT: &str =
+            "Solana protocol is not supported by lp_coininit - use enable_solana_with_tokens instead";
+        const TOKEN_TEXT: &str = "SplToken protocol is not supported by lp_coininit - use enable_spl instead";
         let coins = vec![
-            ("SOL", json!({ "type": "SOLANA" }), SOLANA_NOT_AVAILABLE),
+            ("SOL", json!({ "type": "SOLANA" }), PLATFORM_TEXT),
             (
                 "USDC-SOL",
                 json!({ "type": "SPLTOKEN", "protocol_data": {
                     "platform": "SOL",
                     "token_contract_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                     "decimals": 6 } }),
-                SOLANA_NOT_AVAILABLE,
+                TOKEN_TEXT,
             ),
-            // The reference configuration forms (CRD ch.40 R40.1.2, R40.1.3) are refused the same way.
+            // The reference configuration forms (CRD ch.40 R40.1.2, R40.1.3) are rejected the same way.
             (
                 "SOL-REF",
                 json!({ "type": "SOLANA", "protocol_data": {} }),
-                SOLANA_NOT_AVAILABLE,
+                PLATFORM_TEXT,
             ),
             (
                 "USDC-SOL-REF",
@@ -1230,7 +1232,7 @@ mod tests {
                     "decimals": 6,
                     "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                     "program_id": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" } }),
-                SOLANA_NOT_AVAILABLE,
+                TOKEN_TEXT,
             ),
         ];
         let conf_coins: Vec<Json> = coins
@@ -1242,7 +1244,7 @@ mod tests {
         let ctx = MmCtxBuilder::new()
             .with_conf(json!({ "coins": conf_coins }))
             .into_mm_arc();
-        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy solana refusal test passphrase").unwrap();
+        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy solana rejection test passphrase").unwrap();
 
         for (ticker, _, message) in &coins {
             let request = |method: &str| {
@@ -1251,8 +1253,10 @@ mod tests {
             };
             let err = block_on(enable(ctx.clone(), request("enable"))).unwrap_err();
             assert!(err.ends_with(message), "enable {ticker}: {err}");
+            assert!(!err.contains("not available in this build"), "enable {ticker}: {err}");
             let err = block_on(electrum(ctx.clone(), request("electrum"))).unwrap_err();
             assert!(err.ends_with(message), "electrum {ticker}: {err}");
+            assert!(!err.contains("not available in this build"), "electrum {ticker}: {err}");
             assert!(
                 block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
                 "{ticker} registered"
