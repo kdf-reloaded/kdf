@@ -168,6 +168,16 @@ proceeds, the lock MUST be refreshed on a thirty-second interval, i.e.
 strictly more often than its time-to-live, so that a live runner never
 appears expired.
 
+> **Pointer (2026-11-22; passed the KDF Dirty Gate with its target).**
+> The on-disk form of the persistence that R2 through R5 rely on, where a
+> data directory is shared with a reference build, is bound by
+> [Chapter 44](44-database-persistence-and-migrations.md) §44.9A: the lock
+> file of R5 (its name, place, content form, and what the reference does with
+> content it does not recognize) in R44.9A.6 through R44.9A.9, the saved-swap
+> files behind the event log of R2 and R3 in R44.9A.10 through R44.9A.12, and
+> the rules for RELOADED in R44.9A.13. This pointer changes no rule of this
+> chapter.
+
 **R6.** *Two entry modes.* The runner MUST support starting a fresh swap
 at `STAGE-START` and resuming a persisted swap from its event log. On
 resume, if the log's last event yields no next stage, the swap is
@@ -2755,3 +2765,9 @@ reference rows alike.
   *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-11-07, measure
   0.00, no findings; the pointer was judged with its target, whose clearance
   is recorded in chapter 09's provenance footer of the same date.
+- *Pointer added 2026-11-22 -- the note under R5 naming chapter 44 §44.9A.*
+  Written by the KDF Spec Reader in round 0.5.0-24. It carries no reference
+  content of its own beyond naming what its target binds; the reference
+  facts are in chapter 44 §44.9A, whose provenance footer records the rows
+  read. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.00, no findings**, as
+  recorded for §44.9A in chapter 44's provenance footer.
