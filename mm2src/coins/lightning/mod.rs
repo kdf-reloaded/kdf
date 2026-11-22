@@ -31,10 +31,11 @@ pub(crate) use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, UtxoTxB
 pub(crate) use crate::utxo::{sat_from_big_decimal, BlockchainNetwork, FeePolicy, GetUtxoListOps, UtxoTxGenerationOps};
 pub(crate) use crate::{BalanceFut, CoinBalance, DexFee, FeeApproxStage, FoundSwapTxSpend, HistorySyncState,
                        MarketCoinOps, MmCoin, NegotiateSwapContractAddrErr, RawTransactionFut, RawTransactionRequest,
-                       SignatureError, SignatureResult, SwapOps, TradeFee, TradePreimageFut, TradePreimageResult,
-                       TradePreimageValue, TransactionEnum, TransactionFut, UnexpectedDerivationMethod,
-                       UtxoStandardCoin, ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput,
-                       VerificationError, VerificationResult, WatcherOps, WithdrawError, WithdrawFut, WithdrawRequest};
+                       SignatureError, SignatureResult, SwapOps, TradeFee, TradePreimageError, TradePreimageFut,
+                       TradePreimageResult, TradePreimageValue, TransactionEnum, TransactionErr, TransactionFut,
+                       UnexpectedDerivationMethod, UtxoStandardCoin, ValidateAddressResult, ValidateFeeArgs,
+                       ValidatePaymentInput, VerificationError, VerificationResult, WatcherOps, WithdrawError,
+                       WithdrawFut, WithdrawRequest};
 pub(crate) use async_trait::async_trait;
 pub(crate) use bigdecimal::BigDecimal;
 pub(crate) use bitcoin::hashes::Hash;
@@ -103,6 +104,7 @@ pub(crate) use std::sync::{Arc, Mutex};
 mod lightning_helpers;
 mod lightning_market_ops;
 mod lightning_mm_coin;
+#[cfg(test)] mod lightning_no_abort_tests;
 mod lightning_rpcs;
 mod lightning_swap_ops;
 mod lightning_types;

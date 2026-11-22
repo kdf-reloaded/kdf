@@ -6,7 +6,8 @@ impl MarketCoinOps for LightningCoin {
 
     fn my_address(&self) -> Result<String, String> { Ok(self.my_node_id()) }
 
-    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
+    /// The node id, which is the public key of the node's key (`display_priv_key` shows that key) and the address.
+    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { Ok(self.my_node_id()) }
 
     fn sign_message_hash(&self, message: &str) -> Option<[u8; 32]> {
         let mut _message_prefix = self.conf.sign_message_prefix.clone()?;
@@ -85,7 +86,7 @@ impl MarketCoinOps for LightningCoin {
         _wait_until: u64,
         _check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        unimplemented!()
+        Box::new(futures01::future::err(swaps_unsupported(&self.conf.ticker)))
     }
 
     // Todo: Implement this when implementing swaps for lightning as it's is used mainly for swaps
@@ -96,11 +97,18 @@ impl MarketCoinOps for LightningCoin {
         _from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        unimplemented!()
+        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
+            &self.conf.ticker,
+        ))))
     }
 
     // Todo: Implement this when implementing swaps for lightning as it's is used mainly for swaps
-    fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> { unimplemented!() }
+    fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> {
+        Err(format!(
+            "Transaction decoding is not supported for {}",
+            self.conf.ticker
+        ))
+    }
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> { Box::new(futures01::future::ok(0)) }
 
