@@ -3090,7 +3090,7 @@ fn test_wei_to_gwei_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
+pub(super) fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
     // Fixed key material only to source a stable address + public key for the
     // Trezor signer fixture; no secret is stored on the coin (CRD R50.1).
     let key_pair = KeyPair::from_secret_slice(

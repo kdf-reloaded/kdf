@@ -505,6 +505,11 @@ the previous version used. The safe way:
   be used now that TRON is switched on. The way to move tokens back from the GasFree address is a gasless withdraw to
   your own address, through the task form. Detail: PRs #445, #495; CRD ch.63 §63.3.4 to §63.3.6, §63.8, §63.8A,
   §63.8B (D63.9 and its status note), R29; RELOADED_VS_GLEEC.md.
+- **The warning about `swap_contract_address` at a legacy TRON activation has a new text.** A TRON coin is still
+  wallet-only and still ignores the swap contracts of an `enable` or `electrum` request. The log line now reads
+  "swap_contract_address is ignored, the coin is wallet-only". Nothing else changes for a user: the groundwork for
+  TRON swaps added here (the contract interface, the transaction form and the contract binding at activation) is not
+  used by any order or swap while TRON swaps are off. Detail: PR #N; CRD ch.21 §21.11C, R21.B2.
 
 #### Tendermint (Cosmos) coins
 

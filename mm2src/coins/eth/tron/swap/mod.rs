@@ -1,0 +1,155 @@
+//! TRON V1 swap interop: what a client of the public Tron-VM V1 swap contract has to exchange with it (CRD ch.21
+//! §21.11B.2, §21.11C).
+//!
+//! - [`ids`]: the swap id, the payment hash the contract stores, and the 32-byte rule of the secret hash.
+//! - [`contract_abi`]: the contract's call, read and event surface, and the token approval calls.
+//! - [`tx`]: [`TronSwapTx`], the transaction type a swap record keeps for a TRON leg.
+//! - [`trigger`]: building, signing and broadcasting a contract call, and its energy dry run.
+//!
+//! # Invariants
+//!
+//! - The secret hash of a TRON leg is `SHA-256(secret)`, 32 bytes, and is passed to the contract as it is: no
+//!   function of this module narrows it (CRD ch.21 R21.B6, ch.51 R72A).
+//! - No error of this module carries a secret, and no error stands for "not spent" or "unspent".
+//! - Nothing here decides a fee: the caller of [`trigger::send_trigger`] gives the `fee_limit`.
+
+pub mod contract_abi;
+pub mod ids;
+pub mod trigger;
+pub mod tx;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod activation_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod contract_abi_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod ids_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod trigger_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod tx_tests;
+
+pub use contract_abi::{decode_allowance, decode_call, decode_event, decode_payments_output, encode_allowance_query,
+                       encode_approve, encode_call, encode_payments_query, PaymentRecord, PaymentState, TronSwapCall,
+                       TronSwapEvent};
+pub use ids::{require_32_byte_hash, tron_payment_hash, tron_swap_id};
+pub use trigger::{dry_run_energy, send_trigger};
+pub use tx::{call_of, TronSwapTx, TronTrigger};
+
+use super::api::TronApiError;
+use super::sign::TronSignError;
+use crate::eth::abi::AbiError;
+use std::fmt;
+
+/// Why a TRON swap interop step failed.
+///
+/// The messages name the fact and no coin, and never a secret. A caller maps each kind to the error type of the
+/// swap operation it serves.
+#[derive(Debug)]
+pub enum TronSwapError {
+    /// A node request failed, or its answer was not usable.
+    Node(TronApiError),
+    /// Two nodes gave different answers to the same question.
+    NodesDisagree,
+    /// Call data, return data or a log entry does not fit the contract's ABI.
+    Abi(AbiError),
+    /// The call data does not start with the selector of a swap-contract method.
+    WrongSelector,
+    /// A secret hash that is not 32 bytes (CRD ch.21 R21.B6).
+    HashWidth {
+        /// The width given, in bytes.
+        got: usize,
+    },
+    /// A contract call that did not succeed: the execution result of its receipt, or the revert reason of its
+    /// dry run.
+    Reverted {
+        /// The result or reason, as the node names it.
+        result: String,
+    },
+    /// The data asked for is not yet at the depth the step needs.
+    NotYetFinal,
+    /// A `fee_limit` that cannot be used.
+    FeeLimit(String),
+    /// A log entry whose first topic is not an event of the swap contract.
+    UnknownEvent,
+    /// A value of a transaction or of the contract's state differs from the one the swap expects.
+    Mismatch {
+        /// The name of the value.
+        field: &'static str,
+    },
+    /// The chain time has not reached the lock time.
+    TooEarly {
+        /// The chain time, in seconds.
+        chain_time: u64,
+        /// The lock time, in seconds.
+        lock_time: u64,
+    },
+    /// The contract reports a payment state outside 0 to 3.
+    UnknownPaymentState(u64),
+    /// Bytes that are not a signed TRON transaction of the form a swap exchanges.
+    Transaction(String),
+    /// The transaction is not one smart-contract call.
+    NotAContractCall,
+    /// A call value below zero.
+    NegativeCallValue,
+    /// The coin has no local private key (a hardware or an external wallet signs for it).
+    NoLocalKey,
+    /// The coin is not a TRX or TRC20 coin with a TRON node client.
+    NotTronCoin,
+    /// The transaction could not be signed.
+    Signing(TronSignError),
+    /// The signed transaction was built and its broadcast did not end with the node's acceptance. A node that did
+    /// not answer may still have taken it, so the transaction is kept.
+    Broadcast {
+        /// The signed transaction.
+        tx: Box<TronSwapTx>,
+        /// Why the broadcast did not end with an acceptance.
+        error: TronApiError,
+    },
+}
+
+impl fmt::Display for TronSwapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TronSwapError::Node(e) => write!(f, "TRON node request failed: {e}"),
+            TronSwapError::NodesDisagree => write!(f, "TRON nodes disagree"),
+            TronSwapError::Abi(e) => write!(f, "TRON swap contract data does not fit its ABI: {e}"),
+            TronSwapError::WrongSelector => {
+                write!(f, "the call data is not a call of the expected swap contract method")
+            },
+            TronSwapError::HashWidth { got } => {
+                write!(f, "a TRON swap needs a 32-byte secret hash, got {got} bytes")
+            },
+            TronSwapError::Reverted { result } => write!(f, "the contract call did not succeed: {result}"),
+            TronSwapError::NotYetFinal => write!(f, "the data is not yet at the required depth"),
+            TronSwapError::FeeLimit(reason) => write!(f, "unusable fee_limit: {reason}"),
+            TronSwapError::UnknownEvent => write!(f, "the log entry is not an event of the swap contract"),
+            TronSwapError::Mismatch { field } => write!(f, "{field} differs from the value the swap expects"),
+            TronSwapError::TooEarly { chain_time, lock_time } => {
+                write!(
+                    f,
+                    "the chain time {chain_time} has not reached the lock time {lock_time}"
+                )
+            },
+            TronSwapError::UnknownPaymentState(state) => {
+                write!(f, "the swap contract reports the unknown payment state {state}")
+            },
+            TronSwapError::Transaction(reason) => write!(f, "not a usable signed TRON transaction: {reason}"),
+            TronSwapError::NotAContractCall => write!(f, "the transaction is not one smart-contract call"),
+            TronSwapError::NegativeCallValue => write!(f, "the call value is below zero"),
+            TronSwapError::NoLocalKey => write!(f, "the coin has no local private key to sign a TRON transaction with"),
+            TronSwapError::NotTronCoin => write!(f, "the coin is not a TRON coin with a node client"),
+            TronSwapError::Signing(e) => write!(f, "TRON signing failed: {e}"),
+            TronSwapError::Broadcast { tx, error } => {
+                write!(
+                    f,
+                    "the broadcast of the TRON transaction {:x} failed: {error}",
+                    tx.txid()
+                )
+            },
+        }
+    }
+}
+
+impl std::error::Error for TronSwapError {}
+
+impl From<AbiError> for TronSwapError {
+    fn from(e: AbiError) -> Self { TronSwapError::Abi(e) }
+}

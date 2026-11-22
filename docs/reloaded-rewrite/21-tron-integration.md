@@ -2410,6 +2410,14 @@ introduced. The address MUST be accepted in either form of R-AD1
 (base58check or hex) and normalized to the 20-byte payload; the form
 operators are told to write is D21.B7.
 
+*Status note (2026-11-22), R21.B2 as built.* The binding is built on both
+activation routes, the mmrpc 2.0 route and the legacy `enable` /
+`electrum` route (§21.11C R21.11C.8). It is made only for a coin that can
+trade. A wallet-only coin accepts and ignores the two members, and while
+`TRON_SWAPS_AVAILABLE` is `false` every TRON coin is wallet-only, so no
+TRON coin carries a binding in this state and the last sentence of the
+status note at R21.B3 still describes what a user sees.
+
 **R21.B3 (a wallet-only TRON coin never reaches a swap operation).**
 R-D1 continues to hold for a TRON coin activated with `wallet_only:
 true` or without a swap-contract binding; the refusal MUST remain typed
@@ -2491,6 +2499,12 @@ only when a counterparty release appears.
 **D21.B4 -- Hash arm and swap id.** With (a) of D21.B2: 32-byte SHA-256,
 chapter 51 R72 amended per R21.B6, swap id over the 32-byte secret hash.
 With (b): decided with the contract.
+
+*Status note (2026-11-22), D21.B4 as built.* The swap id of a TRON leg is
+`SHA-256( little-endian uint32(lockTime) ‖ secretHash )` over the 32-byte
+secret hash, and a secret hash of another width is refused
+(§21.11C R21.11C.1, R21.11C.2). The helpers exist; no swap operation
+calls them yet.
 
 **D21.B5 -- Fee handling.** Native payment as a smart-contract trigger
 carrying the amount as call value (a plain transfer does not reach a
@@ -2630,6 +2644,131 @@ authored from the tabled states and the public sources named in
   No other state of the historical record was read for this section.
 - *Clearance:* **passed the KDF Dirty Gate on 2026-11-08**, measure 0.01
   (chapter 01 R37-R41); the attestation is in the scoped record of §21.13.
+
+## 21.11C TRON V1 swap interop as built (Reloaded-original, added 2026-11-22)
+
+Reloaded-original rules for the part of a TRON V1 swap that every swap
+operation shares: the identifiers, the contract's call and event surface,
+the transaction type a swap record keeps, the sending of a contract call,
+and the swap-contract binding at activation. They rest on the cleared
+text of §21.11B.2, R21.B2, R21.B6, D21.B4 and D21.B7, on chapter 51 R72A
+and R72B, on the public TRON transaction format (§21.6) and node API
+(§21.9), and on this repository's own code. Nothing here was taken from
+the reference: it has no TRON swap client (F21.B1).
+
+This section builds no swap operation. Payment, validation, spend,
+refund, spend search and the fee figures are later changes; until they
+land `TRON_SWAPS_AVAILABLE` stays `false`, R21.B3 holds as its status
+note says, and nothing of this section is reachable from an order or a
+swap.
+
+**R21.11C.1 (the secret hash is 32 bytes and is never narrowed).** Every
+TRON swap helper takes the secret hash as the 32-byte `SHA-256(secret)`
+of §21.11B.2 and passes it to the contract unchanged (R21.B6, chapter 51
+R72A). A secret hash of any other width, the 20 bytes of the default
+selection included, MUST be refused with a typed error before anything is
+built. No TRON helper applies the EVM family's RIPEMD-160 derivation.
+
+**R21.11C.2 (swap id).** The swap id is
+`SHA-256( little-endian uint32(lockTime) ‖ secretHash )` over the 32-byte
+secret hash: the EVM family's derivation on the value the swap
+negotiated (D21.B4).
+
+**R21.11C.3 (payment hash).** The payment hash a client compares with
+the `paymentHash` of `payments(id)` is SHA-256 over 124 bytes: the
+20-byte payloads of the receiver and of the sender, the 32-byte secret
+hash, the 20-byte payload of the token (twenty zero bytes for TRX), and
+the amount as a 32-byte big-endian word.
+
+**R21.11C.4 (calls and reads).** The four lifecycle calls are encoded
+and decoded with the signatures of §21.11B.2, addresses as their 20-byte
+payloads. The TRX amount of `ethPayment` is the call value of the
+transaction and not an argument. A decoder picks the method by the
+4-byte selector alone; call data that starts with no lifecycle selector
+is refused typed, and arguments that do not decode as the selected
+method are a typed error, never another method's call. The return data
+of `payments(id)` decodes to the payment hash, the lock time and the
+state; a state outside 0 to 3 is a typed error and never one of the four
+states. The token calls a TRC20 payment needs, `approve(address,uint256)`
+and `allowance(address,address)`, are those of the token standard.
+
+**R21.11C.5 (events).** The three events are read from a log entry of a
+transaction's receipt: the signature topic, then the parameters in the
+entry's data, in the order §21.11B.2 lists them. An entry whose first
+topic is none of the three is refused typed. Which entry belongs to the
+swap contract, and whether a secret read from `ReceiverSpent` hashes to
+the swap's secret hash, is checked by the operation that uses the event.
+
+**R21.11C.6 (the transaction of a swap record).** A TRON leg's
+transaction in a swap record and in a swap message is the signed
+protobuf `Transaction` of §21.6: the raw body and one 65-byte signature.
+Its bytes are that protobuf encoding, the form `broadcasthex` takes, and
+its hash is the transaction id, the SHA-256 of the raw body's bytes. A
+TRON coin decodes exchanged transaction bytes into this type. Bytes
+without a raw body, with no signature or more than one, with a signature
+of another length, or whose raw body does not re-encode to the bytes
+received, are refused typed: the id of such a transaction could not be
+kept. The contract call of a transaction is read from its single
+`TriggerSmartContract` (caller, contract, call value, call data); a
+transaction of any other kind, a TRX transfer included, is a typed
+"not a contract call".
+
+**R21.11C.7 (sending a contract call).** A contract call is sent as a
+`TriggerSmartContract` with the call value and the `fee_limit` its
+caller gives, on the reference block of the current head, with an expiry
+60 seconds after the head block's time. It is signed with the key of
+the coin's enabled address and broadcast through the coin's node list
+under the rules of §21.9. No fee policy lives at this level. A coin
+without a local private key is refused before any node is asked. Once
+the transaction is signed, a failed broadcast (no node took the request,
+a node answered `result: false`, or an accepting node named another
+transaction id) returns the signed transaction with the error, because a
+node that did not answer may still have taken it. The energy of a call
+is read by the dry run of §21.9 in its call-data form, with the call
+value; a reverting dry run is a typed error with the node's reason, and
+an answer without a positive energy figure is a node error. No figure
+stands in for a missing one.
+
+**R21.11C.8 (activation binding as built).** R21.B2 is built on both
+activation routes. For a coin that can trade, `swap_contract_address` is
+required and non-zero and `fallback_swap_contract`, when given, is
+non-zero; both are accepted in the forms of D21.B7 on the legacy route
+as well, and bound as 20-byte payloads. A TRC20 token built on a
+platform shares the platform's binding. A wallet-only coin accepts and
+ignores the members and carries no binding; its legacy activation logs
+one warning when the request names `swap_contract_address`. While
+`TRON_SWAPS_AVAILABLE` is `false` every TRON coin is wallet-only, so the
+only visible change of this section is the text of that warning. On the
+mmrpc 2.0 route the validation of F21.B3 reads the coin configuration
+alone and is unchanged.
+
+**Observed on the public network (chapter 01 R6).** Two points of this
+section rest on a public-network observation of the Nile testnet on
+2026-11-22, made against the contract of F21.B5 (hex wire form
+`41bfec12aa6f266fc0010df10b9e5a9d49149a5c4e`):
+
+- *The contract query of a full node* names the contract
+  `EtomicSwapTron` and lists the ABI of §21.11B.2, the `payments` output
+  `(bytes32 paymentHash, uint64 lockTime, uint8 state)` included. The
+  events `PaymentSent(id)`, `ReceiverSpent(id, secret)` and
+  `SenderRefunded(id)` have no indexed parameter, so every parameter is
+  in the entry's data (R21.11C.5). The same answer gives
+  `consume_user_resource_percent` as 100: the caller of the contract pays
+  all the energy of a call, and the contract's deployer none.
+- *The call-data form of the constant-contract call* (R21.11C.7): a
+  request with `owner_address`, `contract_address` and `data` set to the
+  selector `0716326d` followed by 32 zero bytes, which is `payments` of
+  the zero id, answers a true result, an `energy_used` of 643 and one
+  `constant_result` of 96 zero bytes, the record of a payment that does
+  not exist (state 0). Adding `call_value` 0 gives the same answer.
+
+**Tests.** The identifiers, the call, read and event surface (the
+selectors and topics recomputed from the signatures of §21.11B.2), the
+transaction type and its way through the swap record's transaction
+value, the sending of a call and its dry run against a stub node, and
+the binding on the legacy route are tested in the TRON swap test modules
+of the coin crate; the binding on the mmrpc 2.0 route in the TRON
+activation tests of the activation crate.
 
 ## 21.12 Baseline Verifications
 
@@ -3005,3 +3144,14 @@ V3. The address encoding, protobuf transaction/contract formats,
   Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for
   §49.2.3 in chapter 49's provenance footer. No cleared sentence was
   edited.
+- *Clean-context addition (2026-11-22, forbidden corpus not consulted):*
+  §21.11C and the status notes of this date at R21.B2 and D21.B4 are
+  Reloaded-original. They rest on the cleared text of §21.11B.2, R21.B2,
+  R21.B6, D21.B4 and D21.B7, on chapter 51 R72A and R72B, on this
+  repository's own code, on the public TRON protobuf transaction format
+  (§21.6), on the public TRON full-node HTTP API (§21.9; the call-data
+  form of the constant-contract call is from the TRON Developer Hub's HTTP
+  reference, *TriggerConstantContract*) and on a public-network
+  observation of the Nile testnet on 2026-11-22 (chapter 01 R6: the
+  contract query and one constant-contract call, as §21.11C records). No
+  cleared sentence was edited.

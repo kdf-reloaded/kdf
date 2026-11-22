@@ -279,6 +279,18 @@ pub struct TriggerConstantContractRequest {
     pub visible: bool,
 }
 
+/// `/wallet/triggerconstantcontract` request in its call-data form: `data` is the whole ABI-encoded call, selector
+/// first, in hex, and `call_value` the TRX the simulated call carries, in SUN (TRON HTTP API reference,
+/// *TriggerConstantContract*: `data` may be given in place of `function_selector` and `parameter`).
+#[derive(Serialize)]
+pub struct TriggerConstantDataRequest {
+    pub owner_address: String,
+    pub contract_address: String,
+    pub data: String,
+    pub call_value: i64,
+    pub visible: bool,
+}
+
 /// `/wallet/triggerconstantcontract` response.
 #[derive(Debug, Deserialize)]
 pub struct TriggerConstantContractResponse {
@@ -487,6 +499,16 @@ fn check_dry_run_answer(answer: &TriggerConstantContractResponse) -> Result<(), 
     match dry_run_revert(answer) {
         Some(reason) => Err(TronApiError::ContractRevert(reason)),
         None => Ok(()),
+    }
+}
+
+/// The check of a contract read: a present, non-empty `constant_result` whose first entry is non-empty hex.
+fn check_read_answer(answer: &TriggerConstantContractResponse) -> Result<(), TronApiError> {
+    match answer.constant_result.as_ref().and_then(|results| results.first()) {
+        Some(first) if !first.is_empty() && hex::decode(first).is_ok() => Ok(()),
+        _ => Err(TronApiError::InvalidResponse(
+            "constant_result is absent, empty or not hex".to_owned(),
+        )),
     }
 }
 
@@ -845,17 +867,67 @@ impl TronApiClient {
             contract_address,
             function_selector,
             parameter_hex,
-            |answer| {
-                // A read needs a present, non-empty `constant_result` whose first entry is non-empty hex.
-                match answer.constant_result.as_ref().and_then(|results| results.first()) {
-                    Some(first) if !first.is_empty() && hex::decode(first).is_ok() => Ok(()),
-                    _ => Err(TronApiError::InvalidResponse(
-                        "constant_result is absent, empty or not hex".to_owned(),
-                    )),
-                }
-            },
+            check_read_answer,
         )
         .await
+    }
+
+    /// Like [`Self::trigger_constant_dry_run`] for a call given as its whole call data (`data`, selector first)
+    /// that carries `call_value_sun` SUN: the dry run of a contract call that is going to be sent with a call
+    /// value.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::trigger_constant_dry_run`].
+    pub async fn trigger_constant_dry_run_data(
+        &self,
+        owner_address: &TronAddress,
+        contract_address: &TronAddress,
+        data: &[u8],
+        call_value_sun: i64,
+    ) -> Result<TriggerConstantContractResponse, TronApiError> {
+        self.trigger_constant_data_checked(
+            owner_address,
+            contract_address,
+            data,
+            call_value_sun,
+            check_dry_run_answer,
+        )
+        .await
+    }
+
+    /// Like [`Self::trigger_constant_read`] for a read given as its whole call data (`data`, selector first).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::trigger_constant_read`].
+    pub async fn trigger_constant_read_data(
+        &self,
+        owner_address: &TronAddress,
+        contract_address: &TronAddress,
+        data: &[u8],
+    ) -> Result<TriggerConstantContractResponse, TronApiError> {
+        self.trigger_constant_data_checked(owner_address, contract_address, data, 0, check_read_answer)
+            .await
+    }
+
+    async fn trigger_constant_data_checked(
+        &self,
+        owner_address: &TronAddress,
+        contract_address: &TronAddress,
+        data: &[u8],
+        call_value_sun: i64,
+        validate: fn(&TriggerConstantContractResponse) -> Result<(), TronApiError>,
+    ) -> Result<TriggerConstantContractResponse, TronApiError> {
+        let req = TriggerConstantDataRequest {
+            owner_address: owner_address.to_base58(),
+            contract_address: contract_address.to_base58(),
+            data: hex::encode(data),
+            call_value: call_value_sun,
+            visible: true,
+        };
+        self.try_post_validated("/wallet/triggerconstantcontract", &req, validate)
+            .await
     }
 
     async fn trigger_constant_contract_checked(
