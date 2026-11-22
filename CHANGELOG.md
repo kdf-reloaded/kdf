@@ -293,7 +293,7 @@ the previous version used. The safe way:
   `enable_solana_with_tokens` and `experimental::enable_solana_with_assets` take an optional
   `swap_evidence_node`, one URL of the coin's node list, which a swap uses as its one trusted node for the
   reads before a refund or a secret step; a URL that is not in the list is refused. Solana and SPL tokens
-  still cannot be traded: the SOL side of the swap is built, and SPL and the switch-on follow. Detail: PR #N;
+  still cannot be traded: the SOL side of the swap is built, and SPL and the switch-on follow. Detail: PR #503;
   CRD ch.40 §40.6D.
 
 - **Solana and SPL tokens have a transaction history.** With `tx_history: true` at the platform's
