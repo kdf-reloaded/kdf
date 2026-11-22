@@ -1428,14 +1428,14 @@ unchanged, and so are `max_taker_vol`, `max_maker_vol` and the legacy
 `get_trade_fee`, which do not ask whether a coin is wallet-only.
 
 *Status note (2026-11-22), EVM-family methods called on a TRON coin (Spec
-Reader round 0.5.0-22; clearance pending).* What the reference answers when
-`get_raw_transaction`, `sign_raw_transaction`, the legacy `get_trade_fee`,
+Reader round 0.5.0-22; passed the KDF Dirty Gate).* What the reference answers
+when `get_raw_transaction`, `sign_raw_transaction`, the legacy `get_trade_fee`,
 `trade_preimage` for a coin that is not wallet-only,
 `get_eth_estimated_fee_per_gas`, `stream::fee_estimator::enable` and
-`get_token_info` are called for a TRX or TRC20 coin is stated in R21.10B.14
--- R21.10B.21, in the block "EVM-family methods called on a TRX or TRC20
-coin" at the end of this section. The sentences of R21.10B.9 and R21.10B.10
-are unchanged.
+`get_token_info` are called for a TRX or TRC20 coin is stated in R21.10B.14 --
+R21.10B.21, in the block "EVM-family methods called on a TRX or TRC20 coin" at
+the end of this section. The sentences of R21.10B.9 and R21.10B.10 are
+unchanged.
 
 **D21.10B.1** *TRC20 `fee_limit` policy.* The reference sets `fee_limit` to
 the dry-run energy times the energy price with no margin; Reloaded today
@@ -1670,16 +1670,16 @@ and `sell` against any active coin each answer the legacy error body and
 
 ### 21.10B-E EVM-family methods called on a TRX or TRC20 coin (added 2026-11-22)
 
-> **Clearance (chapter 01 R40) -- candidate awaiting the KDF Dirty Gate;
-> clearance pending.** This block was written on 2026-11-22 by the KDF Spec
-> Reader (Spec Reader round 0.5.0-22) under the two-team procedure of
-> chapter 01 §1.4A, from the reference lineage at the rows `v3.0.0-beta`,
-> `v2.6.0-beta`, `feat/tron-swap-support (as of 2026-04-23)` and
-> `feat/tron-gasfree (as of 2026-05-04)` of chapter 02 §2.15A (read
-> read-only; no untabled state was read) and this repository's own
-> chapters. It edits no sentence of §21.0 -- §21.11B. It describes the
-> reference; what Reloaded answers on these methods is for the lane's own
-> notes. Numbering: R21.10B.14 -- R21.10B.21, T21.10B.19 -- T21.10B.22.
+> **Clearance (chapter 01 R40) -- passed the KDF Dirty Gate on 2026-11-22,
+> measure 0.03 (attestation in §21.13).** This block was written on 2026-11-22
+> by the KDF Spec Reader (Spec Reader round 0.5.0-22) under the two-team
+> procedure of chapter 01 §1.4A, from the reference lineage at the rows
+> `v3.0.0-beta`, `v2.6.0-beta`, `feat/tron-swap-support (as of 2026-04-23)` and
+> `feat/tron-gasfree (as of 2026-05-04)` of chapter 02 §2.15A (read read-only;
+> no untabled state was read) and this repository's own chapters. It edits no
+> sentence of §21.0 -- §21.11B. It describes the reference; what Reloaded
+> answers on these methods is for the lane's own notes. Numbering: R21.10B.14
+> -- R21.10B.21, T21.10B.19 -- T21.10B.22.
 
 **R21.10B.14** *Common ground and reference states (completes R21.10B.1
 and the "Trade-fee and swap-fee methods" bullet of R21.10B.10).* At the
@@ -2817,8 +2817,8 @@ V3. The address encoding, protobuf transaction/contract formats,
   (R21.10B.14 -- R21.10B.21, the code-quality finding, the not-established
   paragraph, T21.10B.19 -- T21.10B.22) and the status note of 2026-11-22
   after R21.10B.9; no other text of this chapter was changed.* **KDF Dirty
-  Gate: clearance pending** (chapter 01 R40; a candidate until the gate
-  passes it, and the attestation is to be recorded here).
+  Gate: PASS on 2026-11-22, measure 0.03, no findings** (chapter 01 R40;
+  the attestation closes this item).
   *Inputs:* (1) the forbidden corpus at the rows `v3.0.0-beta`,
   `v2.6.0-beta`, `feat/tron-swap-support (as of 2026-04-23)` and
   `feat/tron-gasfree (as of 2026-05-04)` of chapter 02 §2.15A, read
@@ -2836,3 +2836,20 @@ V3. The address encoding, protobuf transaction/contract formats,
   for the cross-references. No row was added to chapter 02 §2.15A: every
   state read already had one. The remedy sketched in the code-quality
   finding and the four acceptance rows are Reloaded-original.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure
+  0.03, no findings, in a single pass; the chapter 02 §2.15A rows were
+  verified. *Extent:* the EVM coin family's handling of the seven public
+  methods (raw-transaction fetch, raw-transaction signing, legacy trade fee,
+  trade preimage, fee-per-gas estimate, fee-estimator stream, token info) as
+  applied to a TRON-family coin, with the node-client selection, the
+  gas-price and fee-estimate reads and the nonce read they depend on; the
+  row `v3.0.0-beta` read directly (six source files); the rows
+  `feat/tron-swap-support (as of 2026-04-23)`, `feat/tron-gasfree (as of
+  2026-05-04)` and `v2.6.0-beta` compared mechanically against it over the
+  same subsystem (13 files and directories), plus a search of the TRON
+  handling of `v2.6.0-beta`; on the candidate side, the 223 added lines
+  only. *Method:* reading plus mechanical comparison (state-to-state
+  difference statistics and token search) and a per-token forced-versus-free
+  test; the repository's clean-room gate tool was not run because the
+  additions embed no code blocks. *Measure:* 0.03, on the
+  discretionary-expression basis.
