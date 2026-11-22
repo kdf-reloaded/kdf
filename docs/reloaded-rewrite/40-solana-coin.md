@@ -1382,7 +1382,8 @@ program address is merely intended.
 > *Reloaded status (clean side, 2026-11-22):* public observation on 2026-11-22
 > (chapter 01 R6): mainnet still has no account at that address; the devnet
 > program's data account is 241,933 bytes and upgradeable, its authority a
-> single key. The program's crate manifest at commit `777539908b35` declares the
+> single key. At the state `satomic-swap fix/htlc-correctness (as of
+> 2026-10-28)` of chapter 02 §2.15A, the program's crate manifest declares the
 > MIT license; the repository has no license file.
 
 The branch is a program-side artifact. Its documents speak of a framework
@@ -2095,15 +2096,16 @@ offered for these coins, and they have no watcher support (the program has no
 third-party role).
 
 **R40.6D.1 (the program and its deployment).** The program is the public program
-of F40.6B.5 at the commit `777539908b35` of its repository (crate `satomic-swap`
-0.2.0; licensed MIT by its crate manifest; the repository has no license file).
-Its build is reproduced from that commit and compared with the devnet program of
-F40.6B.5 before any deployment. Reloaded deploys it once per cluster without an
-upgrade authority, so no one can change the program after deployment: on devnet
-with a lab key and faucet funds (the devnet lab runs on that deployment), on
-mainnet from the maintainer's wallet. The program address of each cluster is
-recorded in a dated status note of this section once deployed. By its own record
-the program is not audited; Reloaded's review of its source is not an audit.
+of F40.6B.5 at the state `satomic-swap fix/htlc-correctness (as of 2026-10-28)`
+of chapter 02 §2.15A (crate `satomic-swap` 0.2.0; licensed MIT by its crate
+manifest; the repository has no license file). Its build is reproduced from that
+commit and compared with the devnet program of F40.6B.5 before any deployment.
+Reloaded deploys it once per cluster without an upgrade authority, so no one can
+change the program after deployment: on devnet with a lab key and faucet funds
+(the devnet lab runs on that deployment), on mainnet from the maintainer's
+wallet. The program address of each cluster is recorded in a dated status note
+of this section once deployed. By its own record the program is not audited;
+Reloaded's review of its source is not an audit.
 
 **R40.6D.2 (configuration and tradability).** A platform entry of type `SOLANA`
 names its cluster's program in `protocol.protocol_data.swap_program_id`
