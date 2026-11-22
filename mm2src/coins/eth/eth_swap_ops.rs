@@ -329,6 +329,7 @@ impl SwapOps for EthCoin {
                 current_block = from_block;
             }
 
+            let search_from_block = from_block;
             let mut from_block = from_block;
 
             loop {
@@ -362,12 +363,30 @@ impl SwapOps for EthCoin {
                             try_s!(assert_send_future(provider.get_transaction_by_hash(event_hash)).await);
                         match transaction {
                             Some(t) => break Ok(Some(try_s!(signed_tx_from_alloy_tx(t)).into())),
-                            None => break Ok(None),
+                            // CRD ch.39 R39.11.5A.6, D39.11.5A.1 (a): an event without its transaction does
+                            // not show that no payment exists.
+                            None => {
+                                break ERR!(
+                                    "Undetermined whether the payment was sent: a payment event was found in \
+                                     block range {} to {}, but the node does not return its transaction {:#x}",
+                                    from_block,
+                                    to_block,
+                                    event_hash
+                                )
+                            },
                         }
                     },
                     None => {
                         if to_block >= current_block {
-                            break Ok(None);
+                            // CRD ch.39 R39.11.5A.4, D39.11.5A.1 (a): this point is reached only with a
+                            // contract state other than `Uninitialized` (checked above), so a search that
+                            // ends without the event contradicts the state.
+                            break ERR!(
+                                "Undetermined whether the payment was sent: the swap contract reports a \
+                                 payment for this swap, but no payment event was found in blocks {} to {}",
+                                search_from_block,
+                                current_block
+                            );
                         }
                         from_block = to_block + 1;
                     },

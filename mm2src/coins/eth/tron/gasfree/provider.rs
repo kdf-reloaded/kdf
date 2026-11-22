@@ -2,37 +2,39 @@
 //!
 //! A request goes to `<base>/<network segment>/api/v1/<operation>`, where `<base>` is the configured scheme and
 //! host (R13). It carries the two authentication headers of §63.4.2 and is bounded as a whole by the per-call
-//! timeout (R20). Only the two read calls exist: the submit and trace calls are deferred with the submission flow
-//! (D63.6), their payloads are in [`super::provider_payloads`].
+//! timeout (R20). The payloads are in [`super::provider_payloads`].
 //!
 //! # Invariants
 //!
+//! - Every call is one request: nothing here repeats a request after a failed connection, a timeout or any answer
+//!   (§63.8B R31).
 //! - The credentials go into the request headers and nowhere else: no `Debug` rendering and no error of this
 //!   module carries them (R9).
 //! - Provider text that reaches an error is collapsed and bounded first (R10).
 
 use super::super::{Network, TronAddress};
+use super::authorization::PERMIT_VERSION;
 use super::failure::{sanitize_provider_text, GasFreeError};
 use super::networks::gasfree_network;
-use super::provider_payloads::{ProviderAccount, SupportedToken, SupportedTokenList};
+use super::provider_payloads::{ProviderAccount, SubmitRequest, SupportedToken, SupportedTokenList, TransferRecord};
 use common::now_ms;
 use hmac::{Hmac, Mac};
 use http::header::{HeaderName, AUTHORIZATION};
 use http::{HeaderMap, HeaderValue};
 use mm2_err_handle::prelude::MmError;
-use mm2_net::transport::{slurp_url_with_headers_bounded, SlurpError};
+use mm2_net::transport::{slurp_post_json_with_headers_bounded, slurp_url_with_headers_bounded, SlurpError};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value as Json;
 use sha2_010::Sha256;
 use std::fmt;
 use url::Url;
+use uuid::Uuid;
 
 /// The per-call timeout of a provider request when the activation gives none, in milliseconds (R20).
 pub(crate) const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
 
-/// The settlement poll interval when the activation gives none, in milliseconds (R20). Nothing polls yet: the
-/// value takes effect with the submission flow (D63.6).
+/// The settlement poll interval when the activation gives none, in milliseconds (R20).
 pub(crate) const DEFAULT_STATUS_POLL_INTERVAL_MS: u64 = 3_000;
 
 /// The prefix every operation path shares, after the network segment (§63.4.1).
@@ -188,6 +190,62 @@ impl GasFreeProvider {
         Ok(list.tokens)
     }
 
+    /// Submits a signed authorization (§63.4.6) and returns the provider's record of the transfer (§63.4.7). One
+    /// request, never repeated (§63.8B R31).
+    ///
+    /// # Errors
+    ///
+    /// The [`GasFreeError`] of the failed exchange, see [`decode_answer`]; a 404 is [`GasFreeError::Rejected`]
+    /// here. [`GasFreeError::Internal`], with no request made, for a body that cannot be written or whose
+    /// `version` is not 1 (R5).
+    pub(crate) async fn submit(&self, request: &SubmitRequest) -> Result<TransferRecord, GasFreeError> {
+        // The text of a serialization error is not repeated: the body holds the signature (R9).
+        let body = serde_json::to_value(request)
+            .map_err(|_| GasFreeError::Internal("the submit payload cannot be written as JSON".to_owned()))?;
+        self.post_submit(&body).await
+    }
+
+    /// Sends `body` as the submit request, unless its `version` is not 1 (R5, §63.8B R31).
+    async fn post_submit(&self, body: &Json) -> Result<TransferRecord, GasFreeError> {
+        if body["version"].as_str() != Some(PERMIT_VERSION.to_string().as_str()) {
+            return Err(GasFreeError::Internal(
+                "the submit payload does not carry the authorization version 1".to_owned(),
+            ));
+        }
+        self.post("gasfree/submit", body.to_string()).await
+    }
+
+    /// The provider's record of the transfer with the trace id `trace_id` (§63.4.7). One request, never repeated
+    /// (§63.8B R31). The id goes into the request path as it is given.
+    ///
+    /// # Errors
+    ///
+    /// - [`GasFreeError::Internal`], with no request made, when `trace_id` does not read as a UUID.
+    /// - [`GasFreeError::TraceNotFound`] for a 404, as the HTTP status or as the envelope code (D63.9 item 5).
+    /// - Otherwise the [`GasFreeError`] of the failed exchange, see [`decode_answer`].
+    pub(crate) async fn trace(&self, trace_id: &str) -> Result<TransferRecord, GasFreeError> {
+        if Uuid::parse_str(trace_id).is_err() {
+            return Err(GasFreeError::Internal("the trace id is not a UUID".to_owned()));
+        }
+        match self.get(&format!("gasfree/{trace_id}")).await {
+            Err(GasFreeError::Rejected { status: 404, message }) => Err(GasFreeError::TraceNotFound(message)),
+            answer => answer,
+        }
+    }
+
+    /// One authenticated POST of the JSON text `body`, bounded by the per-call timeout, decoded as the `data` of a
+    /// success envelope.
+    async fn post<T: DeserializeOwned>(&self, operation: &str, body: String) -> Result<T, GasFreeError> {
+        let path = self.request_path(operation);
+        let url = format!("{}{}", self.base, path);
+        let headers = auth_headers(&self.credentials, "POST", &path, now_ms() / 1000)?;
+        let timeout_s = self.request_timeout_ms as f64 / 1000.;
+        let (status, _headers, body) = slurp_post_json_with_headers_bounded(&url, body, &headers, timeout_s)
+            .await
+            .map_err(transport_failure)?;
+        decode_answer(status.as_u16(), &body)
+    }
+
     /// One authenticated GET, bounded by the per-call timeout, decoded as the `data` of a success envelope.
     async fn get<T: DeserializeOwned>(&self, operation: &str) -> Result<T, GasFreeError> {
         let path = self.request_path(operation);
@@ -286,8 +344,109 @@ pub(crate) fn decode_answer<T: DeserializeOwned>(http_status: u16, body: &[u8]) 
     let data = envelope
         .data
         .ok_or_else(|| GasFreeError::InvalidResponse("a success envelope carries no data".to_owned()))?;
-    serde_json::from_value(data)
-        .map_err(|e| GasFreeError::InvalidResponse(sanitize_provider_text(&format!("the data does not decode: {e}"))))
+    decode_data(&data)
+}
+
+/// Decodes the `data` of a success envelope as `T`.
+///
+/// # Errors
+///
+/// [`GasFreeError::InvalidResponse`], whose text starts with the path of the member that does not decode, as
+/// `data.createdAt` or `data.assets[].decimal` (`data` alone for the value as a whole, and the object that lacks
+/// a member for a missing one). The decoding error follows; like every provider text it is collapsed and bounded
+/// (R10).
+fn decode_data<T: DeserializeOwned>(data: &Json) -> Result<T, GasFreeError> {
+    T::deserialize(data).map_err(|error| {
+        let path = failing_member::<T>(data).unwrap_or_else(|| "data".to_owned());
+        GasFreeError::InvalidResponse(sanitize_provider_text(&format!("{path}: {error}")))
+    })
+}
+
+/// The name of the member [`failing_member`] adds at the end of every object. It sorts after every name of the
+/// provider's payloads, and the payload types ignore a member they do not name.
+const LAST_MEMBER: &str = "~";
+
+/// `value` with [`LAST_MEMBER`] added to every object in it.
+fn with_last_members(value: &Json) -> Json {
+    match value {
+        Json::Object(object) => {
+            let mut marked: serde_json::Map<String, Json> = object
+                .iter()
+                .map(|(name, member)| (name.clone(), with_last_members(member)))
+                .collect();
+            marked.insert(LAST_MEMBER.to_owned(), Json::Null);
+            Json::Object(marked)
+        },
+        Json::Array(elements) => Json::Array(elements.iter().map(with_last_members).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The path of the member of `data` that does not decode as `T`, for the text of an error. `None` when it cannot
+/// be told.
+///
+/// The decoder of a JSON text reports the line where it fails, so `data` is written with one member per line and
+/// decoded again. A failure of the last member of an object would be reported at the end of the object, where a
+/// missing member is reported too; [`LAST_MEMBER`] keeps every real member from being the last one.
+fn failing_member<T: DeserializeOwned>(data: &Json) -> Option<String> {
+    let lines = serde_json::to_string_pretty(&with_last_members(data)).ok()?;
+    let error = serde_json::from_str::<T>(&lines).err()?;
+    Some(member_path(&lines, error.line()))
+}
+
+/// The path of the member that stands on line `line` (counted from 1) of `lines`, a JSON value written with one
+/// member per line and nested values indented: `data`, then the names from the outermost object inwards, with
+/// `[]` after the name of an array. Only names are taken from the text, never a value. A line without a member
+/// name ends a value and gives the path of that value.
+///
+/// The path is where the decoder of the JSON text stops. For a rule that is checked after a whole nested value
+/// was read, that is the end of that value, so the path names the value and not a member inside it.
+fn member_path(lines: &str, line: usize) -> String {
+    /// The member name a line starts with, and whether its value is an array.
+    /// A line is a member line when it starts with a JSON string that `: ` follows directly. The string ends at
+    /// its first quote that no backslash escapes, so a string element of an array is never taken for a name,
+    /// whatever it contains.
+    fn member(text: &str) -> Option<String> {
+        let rest = text.trim_start().strip_prefix('"')?;
+        let mut escaped = false;
+        let end = rest.char_indices().find_map(|(at, character)| match character {
+            _ if escaped => {
+                escaped = false;
+                None
+            },
+            '\\' => {
+                escaped = true;
+                None
+            },
+            '"' => Some(at),
+            _ => None,
+        })?;
+        let value = rest[end + 1..].strip_prefix(": ")?;
+        let array = if value.starts_with('[') { "[]" } else { "" };
+        Some(format!("{}{}", &rest[..end], array))
+    }
+    let indent = |text: &str| text.len() - text.trim_start().len();
+
+    let upto: Vec<&str> = lines.lines().take(line).collect();
+    let Some((last, above)) = upto.split_last() else {
+        return "data".to_owned();
+    };
+    let mut names = Vec::new();
+    // Walking upwards, the next line with less indentation opens the value the current line is in. The end of a
+    // value has the indentation of the line that opens it, so the walk starts above it.
+    let mut depth = indent(last) + 1;
+    let walked = if member(last).is_some() { upto.as_slice() } else { above };
+    for text in walked.iter().rev() {
+        if indent(text) < depth {
+            depth = indent(text);
+            if let Some(name) = member(text) {
+                names.push(name);
+            }
+        }
+    }
+    names.push("data".to_owned());
+    names.reverse();
+    names.join(".")
 }
 
 #[cfg(test)]
@@ -472,6 +631,109 @@ mod tests {
         assert!(matches!(error, GasFreeError::InvalidResponse(_)));
     }
 
+    /// §63.4.7, status note of 2026-11-22: a `data` that does not decode names the member, and no value of a
+    /// signature member.
+    #[test]
+    fn a_data_that_does_not_decode_names_the_member() {
+        use super::super::provider_payloads::{ProviderAccount, TransferRecord};
+        let sig = "ab".repeat(64);
+        let transfer = serde_json::json!({
+            "id": "6c3ff67e-0bf4-4c09-91ca-0c7c254b01a0",
+            "createdAt": 1_795_354_473_207u64,
+            "accountAddress": "TMVQGm1qAQYVdetCeGRRkTWYYrLXuHK2HC",
+            "gasFreeAddress": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
+            "providerAddress": "TDbJyQ6g1Lx9BAfEEeN5S5TMjjDRAVFCaA",
+            "targetAddress": "TDvSsdrNM5eeXNL3czpa6AxLDHZA9nwe9K",
+            "tokenAddress": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
+            "amount": 10000,
+            "nonce": 2,
+            "state": "WAITING",
+            "estimatedActivateFee": 0,
+            "estimatedTransferFee": 2000000
+        });
+        let failure = |data: &Json| {
+            let body = serde_json::json!({ "code": 200, "data": data }).to_string();
+            match decode_answer::<TransferRecord>(200, body.as_bytes()) {
+                Err(GasFreeError::InvalidResponse(text)) => text,
+                _ => panic!("the data must not decode"),
+            }
+        };
+        assert!(decode_data::<TransferRecord>(&transfer).is_ok());
+
+        let with = |member: &str, value: Json| {
+            let mut changed = transfer.clone();
+            changed[member] = value;
+            failure(&changed)
+        };
+        assert!(with("createdAt", serde_json::json!({ "at": 1 })).starts_with("data.createdAt: "));
+        assert!(with("nonce", serde_json::json!("-1")).starts_with("data.nonce: "));
+        assert!(with("amount", serde_json::json!(true)).starts_with("data.amount: "));
+        assert!(with("state", serde_json::json!("DONE")).starts_with("data.state: "));
+        assert!(with("txnHash", serde_json::json!("0x00")).starts_with("data.txnHash: "));
+        let text = with("signature", Json::String(sig.clone()));
+        assert!(text.starts_with("data.signature: "));
+        assert!(!text.contains(&sig), "the signature is repeated");
+        let text = with("signature", serde_json::json!([sig]));
+        assert!(text.starts_with("data.signature[]: ") && !text.contains(&sig));
+        // A missing member is named by the decoder; the path is the object that lacks it.
+        let mut without = transfer.clone();
+        without.as_object_mut().expect("an object").remove("state");
+        let text = failure(&without);
+        assert!(text.starts_with("data: ") && text.contains("state"));
+        assert!(failure(&serde_json::json!([1])).starts_with("data: "));
+        assert!(!with("nonce", serde_json::json!("-1")).contains(" at line "));
+
+        // A member of an array element.
+        let account = serde_json::json!({
+            "accountAddress": "TMVQGm1qAQYVdetCeGRRkTWYYrLXuHK2HC",
+            "gasFreeAddress": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
+            "active": true,
+            "nonce": 7,
+            "allowSubmit": true,
+            "assets": [{
+                "tokenAddress": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
+                "tokenSymbol": "USDT",
+                "activateFee": 1000000,
+                "transferFee": 2000000,
+                "decimal": "six",
+                "frozen": 0
+            }]
+        });
+        match decode_data::<ProviderAccount>(&account) {
+            Err(GasFreeError::InvalidResponse(text)) => assert!(text.starts_with("data.assets[].decimal: ")),
+            _ => panic!("the account record must not decode"),
+        }
+    }
+
+    /// A string element of an array is never read as a member name, also when it holds an escaped quote followed
+    /// by a colon and a space; a member name with an escaped quote is read whole.
+    #[test]
+    fn no_part_of_an_array_element_enters_the_member_path() {
+        #[derive(Debug, Deserialize)]
+        struct Listing {
+            #[allow(dead_code)]
+            items: Vec<u64>,
+        }
+        for element in ["leak\": value", "\": leak", "a\\\": leak", "leak\": [", "plain"] {
+            let data = serde_json::json!({ "items": [element, element], "other": 1 });
+            match decode_data::<Listing>(&data) {
+                Err(GasFreeError::InvalidResponse(text)) => {
+                    assert!(text.starts_with("data.items[]: "), "the path is not the array");
+                    let path = text.split(": ").next().unwrap_or_default();
+                    assert!(!path.contains("leak"), "a part of the value is in the path");
+                },
+                _ => panic!("the data must not decode"),
+            }
+            assert_eq!(failing_member::<Listing>(&data).as_deref(), Some("data.items[]"));
+        }
+
+        // The lines themselves.
+        let lines = "{\n  \"a\\\"b\": [\n    \"x\\\": y\",\n    1\n  ],\n  \"c\": 2\n}";
+        assert_eq!(member_path(lines, 3), "data.a\\\"b[]");
+        assert_eq!(member_path(lines, 6), "data.c");
+        assert_eq!(member_path(lines, 1), "data");
+    }
+
     /// ch.63 T4: a 200 HTTP answer with a non-200 envelope code is rejected, by the class of the code.
     #[test]
     fn a_status_like_envelope_code_takes_the_place_of_the_http_status() {
@@ -553,12 +815,20 @@ mod tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod loopback_tests {
     use super::super::super::test_node::{Reply, StubNode};
+    use super::super::authorization::{sign_permit, PermitTransfer, SignedPermit};
     use super::super::failure::{GaslessMember, RpcArm};
-    use super::super::test_vectors::{address, MESSAGES, USERS};
+    use super::super::test_vectors::{address, MESSAGES, MESSAGE_MAX_FEE, MESSAGE_SERVICE_PROVIDER, USERS};
     use super::*;
     use common::block_on;
     use ethereum_types::U256;
+    use mm2_eth::keys::Secret;
+    use std::io::Read;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    const TRACE_ID: &str = "6c3ff67e-0bf4-4c09-91ca-0c7c254b01a0";
+    const REQUEST_ID: &str = "3f2b8c1e-5d4a-4f6b-9c7d-8e9f0a1b2c3d";
 
     const API_KEY: &str = "key-0f3a9c";
     const API_SECRET: &str = "secret-7b1d4e";
@@ -699,5 +969,249 @@ mod loopback_tests {
             "the call did not end at its bound"
         );
         assert_no_credential(&format!("{error} {error:?}"));
+    }
+
+    /// The first message vector, signed by its user.
+    fn signed_first_message() -> SignedPermit {
+        let message = &MESSAGES[0];
+        let permit = PermitTransfer {
+            token: address(message.token),
+            service_provider: address(MESSAGE_SERVICE_PROVIDER),
+            user: address(message.user),
+            receiver: address(message.receiver),
+            value: U256::from(message.value),
+            max_fee: U256::from(MESSAGE_MAX_FEE),
+            deadline: message.deadline,
+            nonce: message.nonce,
+        };
+        let mut key = [0u8; 32];
+        key[31] = 1;
+        let secret = Secret::from_slice(&key).expect("a valid test key");
+        sign_permit(&Network::Nile, permit, &secret, message.deadline - 1).expect("the user signs")
+    }
+
+    fn submit_request() -> SubmitRequest {
+        SubmitRequest::new(signed_first_message(), Some(REQUEST_ID)).expect("a version 4 request id")
+    }
+
+    /// The success envelope with the provider's record of the first message vector in `state`.
+    fn transfer_envelope(state: &str) -> String {
+        serde_json::json!({
+            "code": 200,
+            "reason": null,
+            "message": "",
+            "data": {
+                "id": TRACE_ID,
+                "createdAt": "2024-09-13T06:07:12.000Z",
+                "updatedAt": "2024-09-13T06:07:13.000Z",
+                "expiredAt": "2024-09-13T06:12:12.000Z",
+                "maxFee": MESSAGE_MAX_FEE,
+                "signature": signed_first_message().sig_hex(),
+                "accountAddress": MESSAGES[0].user,
+                "gasFreeAddress": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
+                "providerAddress": MESSAGE_SERVICE_PROVIDER,
+                "targetAddress": MESSAGES[0].receiver,
+                "tokenAddress": MESSAGES[0].token,
+                "amount": MESSAGES[0].value,
+                "estimatedActivateFee": 1000000,
+                "estimatedTransferFee": 2000000,
+                "nonce": MESSAGES[0].nonce,
+                "version": 1,
+                "state": state
+            }
+        })
+        .to_string()
+    }
+
+    /// A loopback port that takes a connection, reads what arrives and closes it without an answer. Returns its
+    /// URL and the number of connections taken so far.
+    fn closing_port() -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let url = format!("http://{}", listener.local_addr().expect("a local address"));
+        let taken = Arc::new(AtomicUsize::new(0));
+        let counter = taken.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut chunk = [0u8; 4096];
+                let _ = stream.read(&mut chunk);
+            }
+        });
+        (url, taken)
+    }
+
+    /// ch.63 T18: a submit is one authenticated POST of the payload to the submit path.
+    #[test]
+    fn t18_submit_is_one_authenticated_post_of_the_payload() {
+        let body = transfer_envelope("WAITING");
+        let node = StubNode::start(move |_, _| Reply::ok(&body));
+        let request = submit_request();
+        let record = block_on(provider(&Network::Nile, &node, None).submit(&request)).expect("a transfer record");
+        assert_eq!(record.id, TRACE_ID);
+        assert_eq!(record.nonce, MESSAGES[0].nonce);
+
+        let path = "/nile/api/v1/gasfree/submit";
+        let requests = node.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, path);
+        let sent: Json = serde_json::from_str(&requests[0].1).expect("a JSON body");
+        let expected = serde_json::to_value(&request).expect("a document");
+        assert!(sent == expected, "the body is not the submit payload");
+        assert!(sent["requestId"] == REQUEST_ID && sent["version"] == "1");
+        assert!(node.header_values("content-type")[0]
+            .as_deref()
+            .is_some_and(|value| value.starts_with("application/json")));
+
+        // The signature is over the method POST, that path and the time of the request.
+        let timestamp = node.header_values("timestamp")[0].clone().expect("a Timestamp header");
+        let timestamp_s: u64 = timestamp.parse().expect("Unix seconds");
+        let credentials = ProviderCredentials::new(API_KEY.to_owned(), API_SECRET.to_owned());
+        let expected = authorization_value(&credentials, "POST", path, timestamp_s).expect("a value");
+        let sent = node.header_values("authorization")[0]
+            .clone()
+            .expect("an Authorization header");
+        assert!(sent == expected, "the Authorization header is not the signed value");
+    }
+
+    /// ch.63 T18: a trace is one authenticated GET of the trace path.
+    #[test]
+    fn t18_trace_is_one_authenticated_get_of_the_trace_path() {
+        let body = transfer_envelope("CONFIRMING");
+        let node = StubNode::start(move |_, _| Reply::ok(&body));
+        let record = block_on(provider(&Network::Nile, &node, None).trace(TRACE_ID)).expect("a transfer record");
+        assert_eq!(record.id, TRACE_ID);
+
+        let path = format!("/nile/api/v1/gasfree/{TRACE_ID}");
+        let requests = node.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, path);
+        assert!(requests[0].1.is_empty());
+        let timestamp = node.header_values("timestamp")[0].clone().expect("a Timestamp header");
+        let timestamp_s: u64 = timestamp.parse().expect("Unix seconds");
+        let credentials = ProviderCredentials::new(API_KEY.to_owned(), API_SECRET.to_owned());
+        let expected = authorization_value(&credentials, "GET", &path, timestamp_s).expect("a value");
+        let sent = node.header_values("authorization")[0]
+            .clone()
+            .expect("an Authorization header");
+        assert!(sent == expected, "the Authorization header is not the signed value");
+    }
+
+    /// ch.63 T18, R31: a 5xx answer, a timeout and a failed connection are followed by no further request, for a
+    /// submit and for a trace.
+    #[test]
+    fn t18_a_failed_submit_or_trace_is_not_repeated() {
+        let request = submit_request();
+
+        let failing = StubNode::start(|_, _| Reply::status(503, r#"{"code":503,"message":"maintenance"}"#));
+        let client = provider(&Network::Nile, &failing, None);
+        let error = block_on(client.submit(&request)).err().expect("a provider failure");
+        assert!(matches!(error, GasFreeError::ProviderFailed { status: 503, .. }));
+        assert_no_credential(&format!("{error} {error:?}"));
+        let error = block_on(client.trace(TRACE_ID)).err().expect("a provider failure");
+        assert!(matches!(error, GasFreeError::ProviderFailed { status: 503, .. }));
+
+        let slow = StubNode::start(|_, _| {
+            std::thread::sleep(Duration::from_millis(1_500));
+            Reply::ok("{}")
+        });
+        let client = provider(&Network::Nile, &slow, Some(300));
+        let error = block_on(client.submit(&request)).err().expect("a timeout");
+        assert!(matches!(error, GasFreeError::Timeout(_)));
+        let error = block_on(client.trace(TRACE_ID)).err().expect("a timeout");
+        assert!(matches!(error, GasFreeError::Timeout(_)));
+
+        let (url, taken) = closing_port();
+        let credentials = ProviderCredentials::new(API_KEY.to_owned(), API_SECRET.to_owned());
+        let client = GasFreeProvider::new(&Network::Nile, &url, credentials, None).expect("a host-only URL");
+        let error = block_on(client.submit(&request)).err().expect("a failed connection");
+        assert!(matches!(error, GasFreeError::Transport(_)));
+        assert_eq!(error.rpc_arm(), RpcArm::Transport);
+        assert_no_credential(&format!("{error} {error:?}"));
+        let error = block_on(client.trace(TRACE_ID)).err().expect("a failed connection");
+        assert!(matches!(error, GasFreeError::Transport(_)));
+
+        // Time for a repeated request to arrive, if one were made.
+        std::thread::sleep(Duration::from_millis(1_700));
+        assert_eq!(failing.requests().len(), 2, "a request was repeated after a 5xx answer");
+        assert_eq!(slow.requests().len(), 2, "a request was repeated after a timeout");
+        assert_eq!(
+            taken.load(Ordering::SeqCst),
+            2,
+            "a request was repeated after a failed connection"
+        );
+    }
+
+    /// ch.63 T18, R31: a submit payload with another version than 1 and a trace id that is not a UUID are refused
+    /// with no request made.
+    #[test]
+    fn t18_the_pre_send_refusals_make_no_request() {
+        let node = StubNode::start(|_, _| Reply::ok(&transfer_envelope("WAITING")));
+        let client = provider(&Network::Nile, &node, None);
+
+        let mut body = serde_json::to_value(submit_request()).expect("a document");
+        for version in [
+            serde_json::json!("2"),
+            serde_json::json!("0"),
+            serde_json::json!(1),
+            Json::Null,
+        ] {
+            body["version"] = version;
+            let error = block_on(client.post_submit(&body)).err().expect("a refusal");
+            assert!(matches!(error, GasFreeError::Internal(_)));
+            assert_eq!(error.rpc_arm(), RpcArm::InternalError);
+        }
+
+        for trace_id in [
+            "",
+            "not-a-uuid",
+            "6c3ff67e-0bf4-4c09-91ca",
+            "../address/x",
+            "6c3ff67e?x=1",
+        ] {
+            let error = block_on(client.trace(trace_id)).err().expect("a refusal");
+            assert!(matches!(error, GasFreeError::Internal(_)));
+            assert_eq!(error.rpc_arm(), RpcArm::InternalError);
+        }
+        assert!(node.requests().is_empty(), "a refused request reached the provider");
+    }
+
+    /// ch.63 T20: a 404 of the trace request, as the HTTP status and as the envelope code, is the unknown trace
+    /// id; a 404 of the submit request is a refusal like every other 4xx.
+    #[test]
+    fn t20_a_404_is_the_unknown_trace_for_the_trace_request_only() {
+        let request = submit_request();
+        for (status, body) in [
+            (404u16, "Not Found".to_owned()),
+            (
+                404,
+                r#"{"code":404,"reason":"NotFound","message":"no such transfer"}"#.to_owned(),
+            ),
+            (
+                200,
+                r#"{"code":404,"reason":"NotFound","message":"no such transfer"}"#.to_owned(),
+            ),
+        ] {
+            let node = StubNode::start(move |_, _| Reply::status(status, &body));
+            let client = provider(&Network::Nile, &node, None);
+
+            let error = block_on(client.trace(TRACE_ID)).err().expect("an unknown trace");
+            assert!(matches!(error, GasFreeError::TraceNotFound(_)));
+            assert_eq!(error.rpc_arm(), RpcArm::Gasless(GaslessMember::TraceNotFound));
+            assert_eq!(GaslessMember::TraceNotFound.http_status(), 404);
+
+            let error = block_on(client.submit(&request)).err().expect("a refusal");
+            assert!(matches!(error, GasFreeError::Rejected { status: 404, .. }));
+            assert_eq!(error.rpc_arm(), RpcArm::Gasless(GaslessMember::ProviderRejected));
+            assert_eq!(GaslessMember::ProviderRejected.http_status(), 502);
+            assert_eq!(node.requests().len(), 2);
+        }
+
+        // Another 4xx of the trace request stays a refusal.
+        let node = StubNode::start(|_, _| Reply::status(400, r#"{"code":400,"message":"bad id"}"#));
+        let error = block_on(provider(&Network::Nile, &node, None).trace(TRACE_ID))
+            .err()
+            .expect("a refusal");
+        assert!(matches!(error, GasFreeError::Rejected { status: 400, .. }));
     }
 }

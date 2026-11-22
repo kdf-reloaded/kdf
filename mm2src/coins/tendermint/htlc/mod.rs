@@ -54,6 +54,14 @@ impl HtlcType {
             Self::Iris => IRIS_PATH.to_owned(),
         }
     }
+
+    /// Returns the type URL of the claim message of this dialect.
+    pub(crate) fn claim_msg_type_url(&self) -> String {
+        match self {
+            Self::Nucleus => <NucleusClaimHtlcProto as prost::Name>::type_url(),
+            Self::Iris => <IrisClaimHtlcProto as prost::Name>::type_url(),
+        }
+    }
 }
 
 /// Custom Tendermint message types specific to certain Cosmos chains and may not be available on all chains.
@@ -197,6 +205,14 @@ impl ClaimHtlcMsg {
         match self {
             Self::Iris(inner) => &inner.secret,
             Self::Nucleus(inner) => &inner.secret,
+        }
+    }
+
+    /// Returns the inner field `id`, the id of the claimed HTLC.
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Iris(inner) => &inner.id,
+            Self::Nucleus(inner) => &inner.id,
         }
     }
 

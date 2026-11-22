@@ -534,6 +534,11 @@ transaction is never written to both by one activation.
 > of the two stores is not itself a wire-visible property and is not required
 > for parity.
 
+> *Reloaded status (clean side, 2026-11-22):* a Solana platform coin and its
+> SPL tokens with history enabled are also served by the mmrpc-2.0 method
+> from the per-ticker history list, as TRON coins are (chapter 40 §40.6C,
+> PR #494).
+
 R38.5A.8 **QRC20 token history.** The legacy `my_tx_history` method for a QRC20
 token is served from the token's own history collector and shall follow the
 same persisted order as R38.5A.1 and the same read-time rules as R38.5A.2, with
@@ -4853,6 +4858,13 @@ token's swap paths were read only for the set of methods they send
 > wall clock alone for QRC20 and SLP, the median time past for a standard
 > UTXO coin, BCH and the QTUM base coin. The rules of this chapter are
 > unchanged.
+
+> **Pointer (2026-11-22).** [Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> §39.11.5A, R39.11.5A.7, records the reference's QRC20 already-sent query:
+> the state call, the transfer-history and receipt reads, and its "not sent"
+> answer when the contract state says the payment exists but no matching
+> transaction is found. The pointer is a Spec Reader addition and passed the
+> KDF Dirty Gate with that subsection on 2026-11-22.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change

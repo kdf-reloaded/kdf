@@ -10,8 +10,9 @@
 //!   cargo test -p trezor --features trezor-emulator-tests --test emulator_eth \
 //!     -- --nocapture --test-threads=1
 //!
-//! If the emulator is unreachable the tests print a skip message and pass, so the
-//! suite stays green in CI environments without an emulator.
+//! When `TREZOR_EMULATOR_UDP` is set, an unreachable emulator makes the tests fail;
+//! when it is not set, the tests print a skip message and pass, so the suite stays
+//! green in environments without an emulator.
 
 #![cfg(all(not(target_arch = "wasm32"), feature = "trezor-emulator-tests"))]
 
@@ -57,6 +58,29 @@ fn emulator_reachable(addr: &str) -> bool {
     matches!(socket.recv(&mut buf), Ok(n) if &buf[..n] == b"PONGPONG")
 }
 
+/// Probes the emulator, retrying briefly so one lost datagram does not decide
+/// the result. When `TREZOR_EMULATOR_UDP` is set the emulator must be reachable
+/// (the test panics otherwise); when it is not set an unreachable emulator
+/// prints a skip line and the test returns early.
+fn emulator_available(test_name: &str) -> bool {
+    let addr = emulator_addr();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if emulator_reachable(&addr) {
+            return true;
+        }
+    }
+    if std::env::var_os("TREZOR_EMULATOR_UDP").is_some() {
+        panic!(
+            "{test_name}: emulator unreachable at {addr}; start it first, e.g. with `python3 mm2src/trezor/tests/emulator/emulator_control.py setup`"
+        );
+    }
+    println!("SKIP {test_name}: emulator unreachable at {addr}");
+    false
+}
+
 /// Start + wipe + seed the emulator with the SLIP-14 mnemonic (idempotent).
 fn emulator_setup() {
     let status = Command::new("python3")
@@ -95,9 +119,7 @@ impl Drop for ConfirmLoop {
 
 #[test]
 fn emulator_get_eth_address_slip14() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_get_eth_address_slip14: emulator unreachable at {addr}");
+    if !emulator_available("emulator_get_eth_address_slip14") {
         return;
     }
     emulator_setup();
@@ -128,9 +150,7 @@ fn emulator_get_eth_address_slip14() {
 
 #[test]
 fn emulator_sign_legacy_eth_tx_slip14() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_sign_legacy_eth_tx_slip14: emulator unreachable at {addr}");
+    if !emulator_available("emulator_sign_legacy_eth_tx_slip14") {
         return;
     }
     emulator_setup();

@@ -502,6 +502,15 @@ ordering is required by R7: a replayed stage must not refuse to continue
 a swap whose payment is already on chain merely because the send window
 has since closed.
 
+> **Reloaded status note (2026-11-22, Reloaded-original; informative).** R17
+> and R29 let a failed search end the swap. For a swap that the kick-start
+> resumes with the payment stage as its next stage, this project asks the
+> search again within a bound and then waits without sending, as the status
+> note of 2026-11-22 after T39.11.5A.1 in
+> [chapter 39](39-zcash---z_coin-shielded-coin.md) records. Every other swap
+> keeps R17 and R29 as written. The event sets and resume maps of R19 and R32
+> are unchanged. Detail: PR #489.
+
 **R30.** *Await spend.* `STAGE-AWAIT-TAKER-PAYMENT-SPEND` MUST
 repeatedly broadcast the taker payment message on a fifteen-second
 interval and, when the coin pair supports third-party watchers and both
@@ -3229,3 +3238,7 @@ reference rows alike.
   under R5 on a runner that lost its lock. It is Reloaded-original, rests only
   on this repository's own lock and kick-start code and the cleared text of
   R5 to R7 and chapter 44 §44.9A, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-22 (PR #489):* the Reloaded status note
+  after R29 on a swap resumed at its payment stage. It is Reloaded-original,
+  rests only on this repository's own swap code and the cleared text of R7,
+  R17 and R29, and changes no sentence of the chapter.

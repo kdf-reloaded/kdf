@@ -419,11 +419,12 @@ impl SiaCoin {
         );
         let htlc_address = spend_policy.address();
 
-        let events_result = self.client.get_address_events(htlc_address).await;
-        let events = match events_result {
-            Ok(events) => events,
-            Err(_) => return Ok(None),
-        };
+        // CRD ch.39 R39.11.5A.8, D39.11.5A.1 (a): a failed request is an undetermined answer, never "not sent".
+        let events = self
+            .client
+            .get_address_events(htlc_address)
+            .await
+            .map_err(|e| SiaCheckIfMyPaymentSentError::EventsRequest(sia_text(&e)))?;
 
         let event = match events.len() {
             0 => return Ok(None),
@@ -1086,6 +1087,87 @@ mod swap_field_tests {
         assert!(matches!(err, SiaCheckIfMyPaymentSentArgsError::WrongSecretHashLength {
             actual: 20
         }));
+    }
+}
+
+/// CRD ch.39 R39.11.5A.8, D39.11.5A.1 (a) (T39.11.5A.5): what the already-sent query answers for a failed and for
+/// an empty answer of the walletd's address-events request.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod already_sent_query_tests {
+    use super::*;
+    use crate::answer_stub::{http_response, serve};
+    use std::sync::atomic::AtomicUsize;
+
+    const TIP: &str = r#"{"height":10,"id":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    /// A coin of a walletd that answers the connection probe (the first request) with a consensus tip and every
+    /// later request with `reply`.
+    fn coin_after_ping(reply: Vec<u8>) -> SiaCoin {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let port = serve(move |_| {
+            if requests.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                http_response("200 OK", "application/json", TIP.as_bytes())
+            } else {
+                reply.clone()
+            }
+        });
+        let client_conf: SiaClientConf = serde_json::from_value(serde_json::json!({
+            "server_url": format!("http://127.0.0.1:{port}/"),
+            "password": "pw",
+            "timeout": 5,
+        }))
+        .unwrap();
+        let client = common::block_on(SiaClient::new(client_conf)).unwrap();
+        let key_pair = SiaKeypair::from_private_bytes(&[2u8; 32]).unwrap();
+        let address = key_pair.public().address();
+        SiaCoin {
+            conf: SiaCoinConf {
+                ticker: "SC".to_owned(),
+                required_confirmations: 1,
+            },
+            priv_key_policy: PrivKeyPolicy::KeyPair(key_pair).into(),
+            client: Arc::new(client),
+            history_sync_state: Mutex::new(HistorySyncState::NotEnabled).into(),
+            required_confirmations: AtomicU64::new(1).into(),
+            fee_address: address.clone(),
+            derivation_method: Arc::new(DerivationMethod::Iguana(address)),
+        }
+    }
+
+    /// The answer of the query as the swap gets it, through [`SwapOps::check_if_my_payment_sent`].
+    fn query(coin: &SiaCoin) -> Result<Option<TransactionEnum>, String> {
+        let other_pub = ed25519_pubkey_to_swap_field(&SiaKeypair::from_private_bytes(&[1u8; 32]).unwrap().public());
+        let my_pub = [0u8; SWAP_HTLC_PUBKEY_LEN];
+        let secret_hash = [7u8; 32];
+        common::block_on(
+            coin.check_if_my_payment_sent(1_787_000_000, &my_pub, &other_pub, &secret_hash, 0, &None)
+                .compat(),
+        )
+    }
+
+    #[test]
+    fn t39_11_5a_5_sia_failed_events_request_is_undetermined() {
+        let coin = coin_after_ping(http_response(
+            "500 Internal Server Error",
+            "text/plain",
+            b"database is locked\n",
+        ));
+        let err = query(&coin).unwrap_err();
+        assert!(err.contains("Undetermined whether the payment was sent"), "{err}");
+        assert!(
+            err.contains("the request for the events of the HTLC address failed"),
+            "{err}"
+        );
+        // The request failure is carried.
+        assert!(err.contains("500"), "{err}");
+        assert!(err.contains("database is locked"), "{err}");
+    }
+
+    /// R39.11.5A.8: an empty event list still answers "not sent".
+    #[test]
+    fn r39_11_5a_8_sia_empty_event_list_is_not_sent() {
+        let coin = coin_after_ping(http_response("200 OK", "application/json", b"[]"));
+        assert_eq!(query(&coin).unwrap(), None);
     }
 }
 
