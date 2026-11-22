@@ -109,11 +109,25 @@ specifications unless a reference question below changes them.
 | S7 | Compatibility methods `experimental::enable_solana_with_assets` and `experimental::enable_solana_token` over the same activation code, with the §40.2-§40.3 shapes, `getHealth` node selection and the §40.7 tests | done, PR #426 (WASM in PR #430) |
 | S8 | WASM routing for both surfaces; a build probe early in the cycle decides how it is built (for example a node client on the target-neutral HTTP layer) | done, PR #430 (on the 2.x crates; WASM re-checked on the 3.x crates in PR #465) |
 | S9 | Switch Solana back on (CRD ch. 40 D40.4): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable `docs/DISABLED_TESTS.md` group 6, retire the refusal tests and the beta notes in ch. 40, ch. 55, `RELOADED_VS_GLEEC.md`, `docs/GLEEC_COMPATIBILITY.md` and the README; devnet lab rows before it is marked ready | done, PR #475 (the constant and its refusal removed, so no route reads a switch; the four activation methods activate on native and browser builds; legacy `enable` / `electrum` answer the R55.4.7 rejection; group 6 re-enabled; refusal tests replaced by tests that the four methods reach the activation; Solana wallet-only, no orders, swaps or history) |
-| S10 | Transaction history for SOL and SPL, Reloaded's own design on the public JSON-RPC | in progress, PR #494 (design in CRD ch. 40 §40.6C; maintainer decisions of 2026-11-22: the whole history of each address, paced; a failed transaction whose fee was charged is a fee-only row; the coin's node pool, no new setting; every token account the wallet owns for the mint) |
-| S11 | Swap and market surface, after a statement of what a Solana swap payment is on chain and after the swap architecture decisions | waits |
+| S10 | Transaction history for SOL and SPL, Reloaded's own design on the public JSON-RPC | done, PR #494 (design in CRD ch. 40 §40.6C; maintainer decisions of 2026-11-22: the whole history of each address, paced; a failed transaction whose fee was charged is a fee-only row; the coin's node pool, no new setting; every token account the wallet owns for the mint) |
+| S11-D0 | Deployment of the public swap program for Reloaded (CRD ch. 40 R40.6D.1), operated by the maintainer: record the license (the crate manifest declares MIT at commit `777539908b35`; the repository has no license file); a clean review of the program source at that commit (a findings note, not an audit); a reproducible build of that commit compared with the devnet program's data; a deployment script in this lane; deployment from the maintainer's own wallet, without an upgrade authority, on devnet first when Reloaded's build differs from the devnet program, then on mainnet; each program address recorded in a dated status note of ch. 40 §40.6D and in the coins-file entries. Rent measured on 2026-11-22 for the devnet program's size: 1.22966988 SOL for the program data and 0.00083312 SOL for the program account, locked for good because the program cannot be closed, plus transaction fees; the deployment buffer needs about the same amount again for the duration of the deployment | planned |
+| S11a | CRD ch. 40 §40.6D: Solana and SPL in the legacy swap protocol, Reloaded's own design on the public program's recorded interface (maintainer decisions of 2026-11-22) | in progress, PR #N |
+| S11b | SOL legs: contract field, keys, payment, validation, claim and refund, refund gate, spend search and secret, dex fee, trade-fee answers (R40.6D.3 to R40.6D.14) | after S11a |
+| S11c | SPL legs: the same for tokens, with the vault, the receiver's token account and the SPL dex fee | after S11b |
+| S11d | Switch-on per coins entry that names a program (R40.6D.2), the SHA-256 pair rule (R40.6D.4), preimages and floors; devnet swaps between two Reloaded nodes (both roles, claim and refund, a restart mid-swap) before it is marked ready; a mainnet check with RIN once S11-D0 has deployed the program | after S11c |
 
 ## Open points
 
+- **Maintainer decisions (2026-11-22), swaps (S11):** the swap client targets
+  the public program of CRD ch. 40 F40.6B.5, and Reloaded deploys that
+  program itself on devnet and mainnet, immutable, after a license check, a
+  clean source review and a reproducible build matched to the devnet program;
+  the program address comes from the coins entry (S11-D0). The dex fee goes to
+  the Solana address of the network's ed25519 dex-fee key; an SPL fee creates
+  the fee owner's token account for a mint that has none, once; the minimum
+  trading volume stays 0.00777 for SOL and SPL; devnet swaps run before the
+  switch-on is marked ready, and a mainnet check with RIN follows the mainnet
+  deployment.
 - **Maintainer decisions (2026-11-15):** S1 to S8 all land before the
   switch-on, WASM included; the minimum transaction amount is set in S3
   (section "Trading floors"); the crate upgrade (S5) happens in this cycle,
