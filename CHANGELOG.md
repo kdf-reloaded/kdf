@@ -1049,6 +1049,16 @@ the previous version used. The safe way:
   with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
   supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
 
+#### Swap and order records
+
+- **A crash or power loss while a swap or order record is being saved no longer damages it.** The saved record of
+  a legacy swap, its statistics copy and the saved record of an order were rewritten in place, so a crash in the
+  middle of a save could leave an empty or cut-off file, and the swap could not be resumed from it. Each save now
+  writes a new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the
+  record holds either its previous or its new complete content. A temporary `*.tmp` file left by a crash is
+  ignored. Browser builds already saved each record in one storage transaction and do not change. Detail: CRD
+  ch.51 R3 and ch.44 R44.8A.6.
+
 ### Tests
 
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and

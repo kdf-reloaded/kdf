@@ -195,7 +195,9 @@ mod native_impl {
     use crate::mm2::lp_swap::{my_swap_file_path, my_swaps_dir};
     use mm2_io::fs::{read_dir_json, read_json, write_json, FsJsonError};
 
-    const USE_TMP_FILE: bool = false;
+    // Records are replaced atomically and durably: the event log is the only recovery record (ch.51 R3), and each
+    // event append replaces the saved record (ch.44 R44.8A.6).
+    const USE_TMP_FILE: bool = true;
 
     impl From<FsJsonError> for SavedSwapError {
         fn from(fs: FsJsonError) -> Self {
@@ -265,6 +267,8 @@ mod native_impl {
     }
 }
 
+/// Each save is one IndexedDB transaction (`replace_item_by_unique_index`, then `wait_for_complete`), which is
+/// atomic; its durability is the browser's default.
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
     use super::*;
@@ -349,6 +353,71 @@ mod wasm_impl {
             transaction.wait_for_complete().await.map_mm_err()?;
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_tests {
+    use super::*;
+    use crate::mm2::lp_swap::maker_swap::MakerSavedEvent;
+    use crate::mm2::lp_swap::{my_swap_file_path, my_swaps_dir};
+    use common::block_on;
+    use common::mm_number::MmNumber;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+
+    /// Saving a record twice (as the runner does after each appended event) replaces it atomically: both events
+    /// load back in order and no temp file is left in the swaps directory (ch.51 R3, ch.44 R44.8A.6).
+    #[test]
+    fn save_twice_keeps_events_in_order_and_leaves_no_tmp() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-saved-swap-{}", Uuid::new_v4()));
+        let ctx = MmCtxBuilder::default()
+            .with_conf(serde_json::json!({ "dbdir": dbdir.to_str().unwrap() }))
+            .into_mm_arc();
+        std::fs::create_dir_all(my_swaps_dir(&ctx)).unwrap();
+
+        let mut swap = MakerSavedSwap::new(&MmNumber::from("1"), &MmNumber::from("1"));
+        swap.uuid = Uuid::new_v4();
+        swap.events.truncate(1);
+        let mut saved = SavedSwap::from(swap);
+        block_on(saved.save_to_db(&ctx)).unwrap();
+
+        if let SavedSwap::Maker(maker) = &mut saved {
+            let timestamp = maker.events[0].timestamp + 1;
+            maker.events.push(MakerSavedEvent {
+                timestamp,
+                event: crate::mm2::lp_swap::maker_swap::MakerSwapEvent::Finished,
+            });
+        }
+        block_on(saved.save_to_db(&ctx)).unwrap();
+
+        let loaded = block_on(SavedSwap::load_my_swap_from_db(&ctx, *saved.uuid()))
+            .unwrap()
+            .expect("the record exists");
+        match loaded {
+            SavedSwap::Maker(m) => {
+                assert_eq!(m.events.len(), 2);
+                assert!(matches!(
+                    m.events[0].event,
+                    crate::mm2::lp_swap::maker_swap::MakerSwapEvent::Started(_)
+                ));
+                assert_eq!(
+                    m.events[1].event,
+                    crate::mm2::lp_swap::maker_swap::MakerSwapEvent::Finished
+                );
+            },
+            SavedSwap::Taker(_) => panic!("a maker record was saved"),
+        }
+
+        let names: Vec<_> = std::fs::read_dir(my_swaps_dir(&ctx))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![my_swap_file_path(&ctx, saved.uuid())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()]);
+        let _ = std::fs::remove_dir_all(&dbdir);
     }
 }
 
