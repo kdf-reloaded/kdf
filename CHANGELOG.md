@@ -1254,6 +1254,10 @@ the previous version used. The safe way:
   payment can be refunded from the chain: an SLP token by the median time past of BCH, a QRC20 token by that of
   QTUM, and an ETH or ERC20 coin by the timestamp of the latest block, once the node's own clock is past the lock
   time. Detail: PR #490; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
+- **A QRC20 swap's spend or refund is recognized only from its own successful contract call.** The search ties the
+  swap event to the contract call it belongs to, requires that call to the swap contract to have succeeded, and
+  looks for a refund in the history of the payment's sender, so a refund of the other side's payment is found too.
+  Detail: PR #496; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
 
 ### Tests
 
@@ -1356,7 +1360,7 @@ the previous version used. The safe way:
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
   the closing note names what no row covers, in PR #497.
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 1 in PR #481,
-  step 2 in PR #488, step 3 in PR #490.
+  step 2 in PR #488, step 3 in PR #490, step 4 in PR #496.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the

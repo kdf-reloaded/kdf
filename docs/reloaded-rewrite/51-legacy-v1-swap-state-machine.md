@@ -1523,6 +1523,20 @@ payment transaction. The two rows are identical.
 > is unchanged, as is the clock check before a refund. No message and no
 > transaction a peer validates changes, which §51.6E permits.
 
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-22).** Reloaded's QRC20 search and wait take a candidate
+> transaction as the spend (the refund) of the payment only when one of its
+> outputs is the `receiverSpend` (`senderRefund`) call of the swap to the swap
+> contract the payment used, and the receipt of that same output reports no
+> exception and holds the `ReceiverSpent` (`SenderRefunded`) event, with the
+> event signature as its only topic, emitted by that swap contract, its data
+> beginning with the swap id. A candidate that fails is skipped and the search
+> goes on. The refund candidates come from the history of the payment's
+> sender, whichever side the node is. The payment checks of R89 item 1, the
+> secret-hash check of the spend and the extraction of R89 item 6 are
+> unchanged. This is stricter than the reference record of R89, which §51.6E
+> permits; no message and no transaction a peer validates changes.
+
 ## 51.6F Reference Behavior of an EVM Token Leg: Fee Descriptors, Volume Limits, Swap-Contract Negotiation
 
 > **Status (2026-11-22; KDF Spec Reader, round 0.5.0-27).** Reference record,
@@ -3398,6 +3412,11 @@ reference rows alike.
   decision of 2026-11-22, the cleared §51.6E and this workspace's own refund
   gate code; no other reference input was consulted, the note makes no
   parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-22, a fourth one: the status note after §51.6E R92
+  on the QRC20 search is a Reloaded addition written in a clean session from
+  the maintainer's decision of 2026-11-22, the cleared §51.6E and this
+  workspace's own QRC20 search code; no other reference input was consulted,
+  the note makes no parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
