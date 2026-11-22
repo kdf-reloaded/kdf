@@ -107,7 +107,8 @@ impl common::HttpStatusCode for FeeEstimatorStreamingError {
 
 fn require_evm_coin(ticker: &str, coin: MmCoinEnum) -> Result<EthCoin, FeeEstimatorStreamingError> {
     match coin {
-        MmCoinEnum::EthCoin(coin) => Ok(coin),
+        // A TRX or TRC20 coin is an `EthCoin` without an EVM node, so it gets no streamer (CRD ch.21 D7).
+        MmCoinEnum::EthCoin(coin) if !coin.is_tron_family() => Ok(coin),
         _ => Err(FeeEstimatorStreamingError::NotSupportedFor(ticker.to_owned())),
     }
 }
@@ -207,7 +208,8 @@ pub async fn enable_fee_estimator(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use coins::{CoinsContext, TestCoin};
+    use coins::eth::tron::{tron_coin_from_conf_and_request, Network};
+    use coins::{CoinProtocol, CoinsContext, TestCoin};
     use common::HttpStatusCode;
     use mm2_core::mm_ctx::MmCtxBuilder;
     use mm2_event_stream::StreamerId;
@@ -330,5 +332,64 @@ mod tests {
         let streamer_id = StreamerId::FeeEstimation("DOC".to_owned());
         assert!(!ctx.event_stream_manager.is_active(&streamer_id));
         assert!(!ctx.event_stream_manager.client_subscribed_to(7, &streamer_id));
+    }
+
+    /// CRD ch.21 D7: a TRX or TRC20 coin is an `EthCoin`, but it has no EVM node, so it gets no fee-estimator
+    /// streamer and its node is not asked.
+    #[tokio::test]
+    async fn enable_fee_estimator_tron_coin_fails_before_subscription_and_node_request() {
+        // A loopback port that would queue a connection attempt: none must arrive.
+        let node = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        node.set_nonblocking(true).unwrap();
+        let urls = json!({ "urls": [format!("http://{}", node.local_addr().unwrap())] });
+        let mut key = [0u8; 32];
+        key[31] = 1;
+
+        let protocols = [
+            ("TRX", json!({}), CoinProtocol::TRX { network: Network::Nile }),
+            ("USDT-TRC20", json!({ "decimals": 6 }), CoinProtocol::TRC20 {
+                platform: "TRX".to_owned(),
+                contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned(),
+            }),
+        ];
+        for (ticker, conf, protocol) in protocols {
+            let ctx = MmCtxBuilder::default().into_mm_arc();
+            let coin = tron_coin_from_conf_and_request(&ctx, ticker, &conf, &urls, &key, protocol)
+                .await
+                .unwrap();
+            let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+            coins_ctx.add_coin(MmCoinEnum::EthCoin(coin)).await.unwrap();
+            let _handle = ctx.event_stream_manager.new_client(7);
+
+            let err = match enable_fee_estimator(ctx.clone(), EnableStreamingRequest {
+                client_id: 7,
+                inner: EnableFeeEstimatorRequest {
+                    coin: ticker.to_owned(),
+                    config: FeeEstimatorConfig {
+                        estimate_every: 15.0,
+                        estimator_type: FeeEstimatorType::Simple,
+                    },
+                },
+            })
+            .await
+            {
+                Ok(_) => panic!("TRON coin activation unexpectedly succeeded"),
+                Err(err) => err.into_inner(),
+            };
+
+            assert_eq!(err.status_code(), StatusCode::NOT_IMPLEMENTED);
+            assert!(matches!(
+                err,
+                FeeEstimatorStreamingError::NotSupportedFor(name) if name == ticker
+            ));
+            let streamer_id = StreamerId::FeeEstimation(ticker.to_owned());
+            assert!(!ctx.event_stream_manager.is_active(&streamer_id));
+            assert!(!ctx.event_stream_manager.client_subscribed_to(7, &streamer_id));
+        }
+
+        match node.accept() {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock),
+            Ok(_) => panic!("the TRON node was contacted"),
+        }
     }
 }

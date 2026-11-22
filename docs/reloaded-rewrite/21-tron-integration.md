@@ -1876,6 +1876,49 @@ a single flag.
   constant is set to `true` only together with a TRON swap
   implementation (§21.11B).
 
+- **D7 -- EVM-only RPC methods (Reloaded status note, 2026-11-22;
+  clean-side, not corpus-sourced).** A TRX or TRC20 coin is a member of
+  the EVM coin family, but its node list holds TRON nodes, and a TRON
+  node does not serve EVM JSON-RPC. Seven methods of the family have no
+  TRON implementation in Reloaded and reach, for an EVM coin, the
+  coin's EVM nodes or its gas API. Until this date a TRON coin took the
+  same path: the method failed only after the coin's TRON nodes had
+  been asked in the EVM form (`sign_raw_transaction`, which has no
+  node to ask for a TRON coin: only after its wait for a nonce had run
+  out), with an error that reads like a node outage. From this date
+  each of the seven refuses a TRX and a TRC20 coin with a typed "not
+  supported" answer, before any request to a node or to a gas API:
+
+  - `get_raw_transaction`: `NotImplemented` naming the coin, HTTP 501.
+  - `sign_raw_transaction`: `NotImplemented` naming the coin, HTTP 501.
+  - Legacy `get_trade_fee`: the legacy error body, with the text "TRON
+    trade fee is not supported".
+  - `trade_preimage` whose receiving side is a TRON coin:
+    `InternalError`, HTTP 500, with the text "TRON V1 receiver trade
+    fee is not supported", the same form in which the sending side was
+    already refused. The check of the coins-config `wallet_only` flag
+    in front of it is unchanged, so only a TRON entry without that flag
+    gets here.
+  - `get_eth_estimated_fee_per_gas`: `CoinNotSupported`, HTTP 501.
+  - `stream::fee_estimator::enable`: `NotSupportedFor` naming the coin,
+    HTTP 501; no streamer is started.
+  - `get_token_info` with an `ERC20` protocol whose platform is a TRX
+    or TRC20 coin: `UnsupportedTokenProtocol` naming the platform, HTTP
+    400, the answer a `TRC20` protocol already got.
+
+  An EVM coin is unchanged in all seven. The note of 2026-11-20 after
+  R21.10B.9 calls the legacy `get_trade_fee` and `trade_preimage`
+  unchanged; that holds for the wallet-only question it describes, and
+  the two refusals above are added to it from this date.
+
+  *Not established.* What the reference answers for these methods on a
+  TRON coin is not established. For the trade-fee methods R21.10B.10
+  records only that they have no TRON case and that its outcomes were
+  read, not executed; for the other five this chapter has no statement.
+  A follow-up reading is pending, and this item is restated when it is
+  done. Nothing here is a claim about the reference, and no
+  compatibility switch is offered before that reading.
+
 **R-D1 (gate invariant).** Because the coin activates with no
 swap-contract binding, no production code path may reach a
 Tron swap/NFT operation; the deferral sites exist to make the
@@ -2613,3 +2656,8 @@ V3. The address encoding, protobuf transaction/contract formats,
   note of chapter 18 for the form of the swap switch; and this
   repository's own code. *Forbidden corpus:* not consulted for these
   notes. No cleared sentence was edited.
+- *Status note added 2026-11-22 (clean-side, Reloaded-original) -- D7 of
+  §21.11, the EVM-only RPC methods a TRON coin refuses.* *Inputs:* the
+  cleared text of R21.10B.9 and R21.10B.10 above for what this chapter
+  already records, and this repository's own code. *Forbidden corpus:*
+  not consulted for this note. No cleared sentence was edited.

@@ -204,6 +204,10 @@ impl MmCoin for EthCoin {
     fn history_sync_status(&self) -> HistorySyncState { self.history_sync_state.lock().unwrap().clone() }
 
     fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
+        // A TRX or TRC20 coin has no EVM gas price to read (CRD ch.21 D7): refused before any node request.
+        if self.is_tron_family() {
+            return Box::new(futures01::future::err("TRON trade fee is not supported".to_string()));
+        }
         let coin = self.clone();
         Box::new(
             self.get_gas_price()
@@ -300,6 +304,14 @@ impl MmCoin for EthCoin {
     fn get_receiver_trade_fee(&self, stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
         let coin = self.clone();
         let fut = async move {
+            // As `get_sender_trade_fee`: a TRX or TRC20 coin is refused before the gas price is asked for (CRD
+            // ch.21 D7).
+            if coin.is_tron_family() {
+                return MmError::err(TradePreimageError::InternalError(
+                    "TRON V1 receiver trade fee is not supported".to_string(),
+                ));
+            }
+
             let gas_price = coin.get_gas_price().compat().await.mm_err(Into::into)?;
             let gas_price = increase_gas_price_by_stage(gas_price, &stage);
             let total_fee = gas_price
