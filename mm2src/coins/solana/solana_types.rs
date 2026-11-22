@@ -198,7 +198,7 @@ impl From<ed25519_dalek::SignatureError> for KeyPairCreationError {
     fn from(e: ed25519_dalek::SignatureError) -> Self { KeyPairCreationError::SignatureError(e) }
 }
 
-fn generate_keypair_from_slice(priv_key: &[u8]) -> Result<Keypair, MmError<KeyPairCreationError>> {
+pub(super) fn generate_keypair_from_slice(priv_key: &[u8]) -> Result<Keypair, MmError<KeyPairCreationError>> {
     let secret: [u8; 32] = priv_key
         .try_into()
         .map_to_mm(|_| KeyPairCreationError::KeyPairFromSeed("invalid ed25519 secret key length".to_string()))?;

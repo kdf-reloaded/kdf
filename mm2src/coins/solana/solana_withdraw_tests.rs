@@ -25,7 +25,7 @@ fn mint() -> Pubkey { Pubkey::new_from_array([9; 32]) }
 
 fn other_wallet() -> Pubkey { Pubkey::new_from_array([5; 32]) }
 
-fn ata_program() -> Pubkey { spl_associated_token_account_client::program::ID }
+fn ata_program() -> Pubkey { spl_associated_token_account_interface::program::ID }
 
 fn wallet_key() -> Keypair {
     crate::solana::solana_common_tests::generate_key_pair_from_iguana_seed(PASSPHRASE.to_string())
