@@ -2155,10 +2155,13 @@ fee is sent. The receiver is the counterparty's key. The payment account is the
 program-derived address of §40.6B.7; for SPL, the sender's token account is its
 associated token account for the mint under the token's program, and the vault
 is the payment address's associated token account. A Token-2022 mint is refused
-(D40.6B.4, until S6b). The sender pays the rent of the payment account and of
-the vault; the program returns both rents to the sender at settlement. The fee
-payer of every transaction this section names is the coin's key, and its only
-signer except where the program requires the counterparty.
+(D40.6B.4, until S6b). For an SPL leg, before the swap starts and again before
+the payment is sent, the node reads the token accounts involved that exist (its
+own, and the counterparty's associated token account for the mint) and refuses
+the swap when one of them is frozen. The sender pays the rent of the payment
+account and of the vault; the program returns both rents to the sender at
+settlement. The fee payer of every transaction this section names is the coin's
+key, and its only signer except where the program requires the counterparty.
 
 **R40.6D.7 (sending).** Every transaction is built with a recent block hash of
 the node and signed by the coin's key; a transaction not included before that
@@ -2265,10 +2268,11 @@ that does not answer (no other node is taken in its place); the node then waits.
 Solana coin. The program is unaudited (R40.6D.1). The counterparty of a Solana
 swap is a Reloaded node. A token whose mint has a freeze authority can have the
 vault or a party's token account frozen, which makes claim and refund fail; this
-is a risk of each such token. A swap stopped part-way follows the legacy
-machine's recovery like every other coin. Not set by this section: a
-compute-unit price for claims and refunds under load, and how long a claim or
-refund is retried.
+is a risk of each such token, which the coins file qualifies per token
+(`wallet_only`), and which the checks of R40.6D.6 and R40.6D.9 narrow but do not
+remove. A swap stopped part-way follows the legacy machine's recovery like every
+other coin. Not set by this section: a compute-unit price for claims and refunds
+under load, and how long a claim or refund is retried.
 
 ### 40.6D.1 Tests
 
@@ -2314,8 +2318,9 @@ T40.6D.13 Evidence: two agreeing nodes, a disagreement, one answer, and the
 named evidence node (R40.6D.16).
 T40.6D.14 Claim conditions: no claim is sent when the payment account is gone,
 when the simulation fails, or when the cluster time is less than 300 seconds
-before the lock time; an SPL vault that is frozen fails validation (R40.6D.9,
-R40.6D.10).
+before the lock time; an SPL vault that is frozen fails validation, and a frozen
+token account of either party refuses the swap at its start and before the
+payment (R40.6D.6, R40.6D.9, R40.6D.10).
 
 ## 40.7 Tests
 
