@@ -1352,6 +1352,9 @@ the previous version used. The safe way:
   also states why a recorded but lost claim is answered differently by the automatic refund and by the manual
   recovery. Only test code and docs changed. Detail: PR #464; CRD ch.51, status notes of 2026-11-21 after
   R82 and R83, T35.
+- **The test code of the coin activation compiles for wasm32, and CI checks it.** The task-framework tests of the
+  standalone-coin family are built only for native targets, like the test helpers they use, and the wasm32 CI
+  job also compiles the test code of the activation crate. Only test code and CI changed. Detail: PR #511.
 
 ### Plans touched
 
