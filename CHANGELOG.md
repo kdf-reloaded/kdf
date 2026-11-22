@@ -27,9 +27,9 @@ or undo, and every change that needs a step from you.
   - *What to do:* list a server on a second host in the activation request, or set the new activation field
     `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
     not answer, the step waits; no other node is asked in its place.
-  - *Coin families covered:* none yet. The rule is switched on family by family as each family's chain reads move
-    onto it, and this list grows with them.
-  - Detail: PR #508; CRD ch.51 §51.6G R100.
+  - *Coin families covered:* TRON (TRX, TRC20). The rule is switched on family by family as each family's chain
+    reads move onto it, and this list grows with them.
+  - Detail: PR #508; CRD ch.51 §51.6G R100. TRON: PR #NNN.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
   instead of running on a database layout it does not know. No released version of KDF Reloaded or GLEEC KDF records
@@ -532,6 +532,12 @@ the previous version used. The safe way:
   "swap_contract_address is ignored, the coin is wallet-only". Nothing else changes for a user: the groundwork for
   TRON swaps added here (the contract interface, the transaction form and the contract binding at activation) is not
   used by any order or swap while TRON swaps are off. Detail: PR #N; CRD ch.21 §21.11C, R21.B2.
+- **A TRON platform accepts `swap_evidence_node` at activation.** The field names one node of the request's own
+  node list to trust for swap evidence instead of the two-node agreement (see "Breaking changes and upgrade
+  notes"); a value that is not in the list refuses the activation with `SwapEvidenceNodeNotInList`. TRON swaps stay
+  off: the part of a TRON swap that reads the chain (checking the other side's payment and the DEX fee, this node's
+  claim and refund, the refund time, the search for a claim and its secret) is built and waits for the switch-on.
+  Detail: PR #NNN; CRD ch.21 §21.11D.
 
 #### Tendermint (Cosmos) coins
 

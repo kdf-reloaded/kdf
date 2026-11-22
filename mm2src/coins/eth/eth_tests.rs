@@ -3387,7 +3387,8 @@ fn tron_v1_wait_for_tx_spend_returns_error_without_decoding() {
         .wait_for_tx_spend(&[], 0, 0, &coin.swap_contract_address())
         .wait()
         .unwrap_err();
-    assert!(matches!(err, TransactionErr::Plain(msg) if msg.contains("TRON V1 swap spend watchers")));
+    // The TRON spend watch is `tron::swap::watch`'s: a coin without a node client answers a plain error.
+    assert!(matches!(err, TransactionErr::Plain(msg) if msg.contains("not a TRON coin")));
 }
 
 fn legacy_eip155_vector_bytes() -> Vec<u8> {

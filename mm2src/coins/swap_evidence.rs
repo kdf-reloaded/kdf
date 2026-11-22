@@ -68,7 +68,7 @@ pub const R100_ADOPTED: &[(SwapFamily, bool)] = &[
     (SwapFamily::Zcoin, false),
     (SwapFamily::Sia, false),
     (SwapFamily::Tendermint, false),
-    (SwapFamily::Tron, false),
+    (SwapFamily::Tron, true),
     (SwapFamily::Solana, false),
 ];
 
