@@ -195,6 +195,34 @@ fn a7_call_data_is_decoded_by_its_selector_only() {
     assert!(matches!(decode_call(&payment), Err(TronSwapError::Abi(_))));
 }
 
+/// What the decoder does with call data that is not in the canonical form (CRD ch.21 §21.11C R21.11C.4): bytes
+/// after the arguments and set high bits in an address word are accepted, and the address is its low 20
+/// bytes; set high bits in the `uint64` word are refused.
+#[test]
+fn non_canonical_call_data_is_decoded_as_pinned() {
+    let canonical = encode_call(&eth_payment()).unwrap();
+
+    // Trailing bytes after the four argument words.
+    let mut trailing = canonical.clone();
+    trailing.extend_from_slice(&[0xee; 7]);
+    assert_eq!(decode_call(&trailing).unwrap(), eth_payment());
+    let mut trailing_word = canonical.clone();
+    trailing_word.extend_from_slice(&[0xee; 32]);
+    assert_eq!(decode_call(&trailing_word).unwrap(), eth_payment());
+
+    // The receiver word (the second) with its twelve high bytes set.
+    let mut dirty_address = canonical.clone();
+    for byte in &mut dirty_address[4 + 32..4 + 32 + 12] {
+        *byte = 0xff;
+    }
+    assert_eq!(decode_call(&dirty_address).unwrap(), eth_payment());
+
+    // The lock time word (the fourth) with a bit above 64 set.
+    let mut dirty_lock_time = canonical;
+    dirty_lock_time[4 + 3 * 32] = 0x80;
+    assert!(matches!(decode_call(&dirty_lock_time), Err(TronSwapError::Abi(_))));
+}
+
 /// Fixture A8. Contract output `(bytes32 paymentHash, uint64 lockTime, uint8 state)`, states 0 to 3.
 #[test]
 fn a8_the_payments_output_decodes_to_the_stored_record() {
