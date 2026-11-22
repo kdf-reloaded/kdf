@@ -788,6 +788,11 @@ the previous version used. The safe way:
 
 #### Transport, TLS and dependencies
 
+- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** The `url` crate moved from 2.5.8 to
+  2.5.9, and `form_urlencoded`, which the new version requires, from 1.2.2 to 1.2.3. KDF Reloaded's own code
+  does not call the affected function. The dependency policy needs no exception for this advisory. Detail:
+  PR #492.
+
 - **The peer-to-peer encryption no longer uses the old curve25519 library with the timing advisory.** The
   encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
   (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
@@ -1171,6 +1176,11 @@ the previous version used. The safe way:
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
   CRD ch.51, status note of 2026-11-22 after R31a.
+- **The secret of a swap is checked against its hash on every coin.** When the taker, or a watcher acting for it
+  (once a watcher receives swap data), reads the secret from the transaction that claimed the taker payment, the
+  value is used only when it matches the swap's secret hash. EVM coins (ETH and ERC20 tokens) also read the secret
+  from the swap contract's claim event; Tendermint coins look at every message of the transaction. Detail: PR #488;
+  CRD ch.51, status note of 2026-11-22 before R31.
 
 ### Tests
 
@@ -1258,6 +1268,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 2 in PR #488.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
