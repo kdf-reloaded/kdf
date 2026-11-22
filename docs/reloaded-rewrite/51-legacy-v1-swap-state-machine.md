@@ -3609,7 +3609,7 @@ reference rows alike.
   field `swap_evidence_node`. It is Reloaded-original, records only the
   maintainer's decisions of 2026-11-22, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
-- *Clean-side addition of 2026-11-22 (PR #NNN):* the status note after T42,
+- *Clean-side addition of 2026-11-22 (PR #508):* the status note after T42,
   the shared core of R100: nodes, the field, the policy per family, adoption
   and the release gate, and asking two nodes. It records maintainer decisions
   and decisions within the lane, takes no reference input, and changes no

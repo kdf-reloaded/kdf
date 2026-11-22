@@ -29,7 +29,7 @@ or undo, and every change that needs a step from you.
     not answer, the step waits; no other node is asked in its place.
   - *Coin families covered:* none yet. The rule is switched on family by family as each family's chain reads move
     onto it, and this list grows with them.
-  - Detail: PR #NNN; CRD ch.51 §51.6G R100.
+  - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
   instead of running on a database layout it does not know. No released version of KDF Reloaded or GLEEC KDF records
@@ -205,7 +205,7 @@ the previous version used. The safe way:
   accepts it: UTXO, BCH and SLP, QTUM and QRC20, EVM and ERC20, ZHTLC, Sia and Tendermint, in the legacy and in the
   task-based activation methods. A value that names no entry of the coin's list is refused with the `error_type`
   `SwapEvidenceNodeNotInList`, whose data and message name the ticker and the node as host and port only. Detail: PR
-  #NNN; CRD ch.51 §51.6G R100 item 2.
+  #508; CRD ch.51 §51.6G R100 item 2.
 - **The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized`, and takes
   `force_disable`.** A platform coin (an EVM, BCH, Tendermint, Solana or standard UTXO coin) that has at least one
   active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens
