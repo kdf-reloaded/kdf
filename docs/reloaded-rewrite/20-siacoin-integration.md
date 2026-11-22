@@ -1092,6 +1092,17 @@ rather than defects. None is a correctness claim.
   `siacoin_helpers.rs`, `mod.rs`,
   `mm2src/coins_activation/src/sia_activation.rs`.
 
+  *Pointer (2026-11-22, Spec Reader round 0.5.0-26; passed the KDF Dirty
+  Gate with chapter 49 §49.2.3).* What the reference releases do for a Sia
+  coin under an HD login is recorded in
+  [Chapter 49](49-withdrawal-task-path.md) R49.43: a single address, the
+  single-address activation result, no account method
+  (`get_new_address` and its task form, `account_balance` and its task
+  form, the address scan, account creation), and no `scan_policy` in the
+  activation request. The HD surface this item describes is therefore a
+  Reloaded extension without a reference shape to match. This note binds
+  nothing of its own and changes no sentence of D1.
+
 - **D2 -- History persistence.** *Closed by*
   [Chapter 53](53-sia-transaction-history.md), which binds Sia
   transaction history as a projection of walletd's per-address
@@ -1434,3 +1445,8 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   the standard that any single item of discretionary expression fails
   regardless of score; none was found. For orientation only, the
   repository tooling's absolute cap of 0.50 was not approached.
+- *Pointer added 2026-11-22 (Spec Reader round 0.5.0-26) -- under D1 of
+  §20.10.* It names chapter 49 R49.43 and states no behavior of its own; it
+  travels with chapter 49 §49.2.3 for the KDF Dirty Gate. **KDF Dirty
+  Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for §49.2.3
+  in chapter 49's provenance footer. No cleared sentence was edited.
