@@ -12,7 +12,7 @@ Hardening area: the correctness of the chain reads the legacy (v1) swap path mak
 1. A found spend of a UTXO swap payment is read from the input that spends the payment — PR #481.
 2. To follow.
 3. The refund of an SLP, QRC20, ETH or ERC20 swap payment is judged by the chain's time: the platform coin's median
-   time past for SLP and QRC20 tokens, the latest block's timestamp for ETH and ERC20 — PR (to follow).
+   time past for SLP and QRC20 tokens, the latest block's timestamp for ETH and ERC20 — PR #490.
 4. To follow.
 
 ## Decisions

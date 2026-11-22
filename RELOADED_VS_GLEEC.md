@@ -880,7 +880,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   at most an hour at a time. GLEEC KDF's rule for each coin family is recorded in CRD ch.51 §51.6E R88. A refund can
   therefore start later than on GLEEC KDF (for an SLP token up to about an hour); no message and no transaction a
   peer validates changes, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
-  Plan [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 3 (PR to follow); CRD
+  Plan [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 3 (PR #490); CRD
   ch.51, status note of 2026-11-22 after §51.6E R92.
 
 ### Removed / disabled in KDF Reloaded
