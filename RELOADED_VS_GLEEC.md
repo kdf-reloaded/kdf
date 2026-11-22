@@ -934,8 +934,9 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Solana coin or SPL token with "Trading is not supported for coin …", and
   every swap operation of such a coin answers an error that names it (CRD
   ch.60 R60.6.5). No switch exists: an abnormal end is no compatibility
-  target. There is no Solana transaction history yet, as in GLEEC KDF (CRD
-  ch.40 D40.1, D40.4).
+  target. Reloaded has a Solana and SPL transaction history of its own,
+  started by `tx_history: true` at the platform's activation; GLEEC KDF has
+  none (CRD ch.40 §40.6C, D40.4).
 - **TRON (TRX, TRC20) coins are wallet-only.** Since 2026-11-20 TRON can be
   activated again (0.4.0 refused it on every route): on the
   platform-with-tokens activation, `enable_eth_with_tokens` and the

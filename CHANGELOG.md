@@ -283,9 +283,22 @@ the previous version used. The safe way:
   `enable_solana_with_tokens` or `enable_spl`, as GLEEC KDF also refuses Solana there. *Orders and
   swaps stay off:* `setprice`, `buy`, `sell` and `trade_preimage` refuse a pair with a Solana coin or
   SPL token with "Trading is not supported for coin …", and every swap operation of such a coin
-  answers an error that names it. *No transaction history yet:* the versioned `my_tx_history`
-  answers `NotSupportedFor` and the legacy one an error that names the coin. Detail: PR #475; CRD
+  answers an error that names it. The transaction history is the next item. Detail: PR #475; CRD
   ch.40 D40.4.
+
+- **Solana and SPL tokens have a transaction history.** With `tx_history: true` at the platform's
+  activation (`enable_solana_with_tokens` or `experimental::enable_solana_with_assets`), the node
+  reads the whole history of the wallet's address and of its token accounts from the coin's Solana
+  nodes, at most four requests per second, then checks for new transactions every minute. Both
+  forms of `my_tx_history` serve it, for the platform and for each SPL token it serves, in native
+  and browser builds (the versioned form is not served in browser builds, as for every coin).
+  Only finalized transactions are listed. A SOL row's `my_balance_change` is the exact change of
+  the address's balance, fee and rent deposits included; the rent is in `fee_details.rent_amount`.
+  A failed transaction whose fee was charged is a row with that fee only. Without `tx_history`
+  nothing changes: `my_tx_history` answers as before. A platform made passive by the legacy
+  `disable_coin` keeps the history setting it had when it is activated again; to turn the history
+  on, remove it with `"force_disable": true` and activate it again. GLEEC KDF has no Solana
+  history. Detail: PR #494; CRD ch.40 §40.6C.
 
 - **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
   entries in both forms and route `enable_solana_with_tokens`, `enable_spl` and the two
@@ -1322,7 +1335,7 @@ the previous version used. The safe way:
   S5 in PR #465, S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
   withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
   S9 in PR #475: on 2026-11-22 Solana was switched on as a wallet-only coin family; orders and
-  swaps stay off, and the transaction history follows in S10.
+  swaps stay off. S10 in PR #494: the transaction history of SOL and SPL tokens.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
@@ -1359,10 +1372,10 @@ the previous version used. The safe way:
   `start_swap` refuse a TRON coin with the "… is wallet only" answer. This replaces the item of 0.4.0-beta.1 that
   says TRON cannot be activated. More in [`tron-support`](docs/plans/tron-support.md) and
   [`tron-swap-support`](docs/plans/tron-swap-support.md). Detail: PR #451; CRD ch.21 R-D1, R21.B3.
-- **Solana coins cannot be traded and have no transaction history yet.** SOL and SPL tokens are wallet-only:
-  activation, balances, withdrawals, message signing and `disable_coin` work, and orders and swaps do not.
+- **Solana coins cannot be traded.** SOL and SPL tokens are wallet-only: activation, balances, withdrawals,
+  message signing, `disable_coin` and the transaction history work, and orders and swaps do not.
   `setprice`, `buy`, `sell` and `trade_preimage` refuse a pair with a Solana coin with "Trading is not supported for
-  coin …". `my_tx_history` answers an error for a Solana coin, and a Token-2022 token is refused at activation. This
+  coin …". A Token-2022 token is refused at activation. This
   replaces the item of 0.4.0-beta.1 that says Solana cannot be activated. More in
   [`solana-support`](docs/plans/solana-support.md). Detail: PR #475; CRD ch.40 D40.4.
 - **Gasless TRC20 transfers through GasFree are signed but not submitted.** A GasFree provider can be configured,

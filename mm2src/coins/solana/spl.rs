@@ -720,14 +720,15 @@ impl MmCoin for SplToken {
 
     fn validate_address(&self, address: &str) -> ValidateAddressResult { self.platform_coin.validate_address(address) }
 
-    /// Solana has no transaction history yet (CRD ch.40 R40.6B.15): the loop has nothing to do and ends at once, so
-    /// a background start can never abort the process.
+    /// The history is written by the process of its platform (CRD ch.40 R40.6C.3): the loop has nothing to do and
+    /// ends at once, so a background start can never abort the process.
     fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> {
         Box::new(futures01::future::ok(()))
     }
 
-    /// There is no history to sync, so the state is the neutral `NotEnabled`.
-    fn history_sync_status(&self) -> HistorySyncState { HistorySyncState::NotEnabled }
+    /// `NotEnabled` without history on the platform (CRD ch.40 R40.6C.2), else the state the platform's history
+    /// process reports for this token.
+    fn history_sync_status(&self) -> HistorySyncState { self.platform_coin.history.state_of(&self.conf.ticker) }
 
     /// Get fee to be paid per 1 swap transaction
     fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
