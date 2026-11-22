@@ -18,8 +18,8 @@
 use super::contract_abi::{decode_allowance, decode_payments_output, encode_allowance_query, encode_approve,
                           encode_call, encode_payments_query, PaymentState, TronSwapCall};
 use super::fee_limit::swap_call_fee_limit;
-use super::ids::{require_32_byte_hash, tron_swap_id};
-use super::trigger::{dry_run_energy, send_trigger, SWAP_HEAD_TIME_TOLERANCE_SECS};
+use super::ids::{require_32_byte_hash, tron_payment_hash, tron_swap_id};
+use super::trigger::{dry_run_energy, read_swap_head, send_trigger};
 use super::tx::{call_of, TronSwapTx};
 use super::TronSwapError;
 use crate::eth::tron::api::{AccountListing, TronApiClient, TronApiError};
@@ -95,6 +95,9 @@ pub(crate) enum TronSendError {
     DexFee(&'static str),
     /// A token approval that failed. Its transaction is not kept: it is not the payment.
     Approve(String),
+    /// The contract holds a payment under the swap id whose stored payment hash is not the one of this swap's
+    /// terms: the id is taken by another payment.
+    OtherPayment,
     /// The contract holds a payment under the swap id, and its transaction could not be found.
     Undetermined(String),
 }
@@ -117,6 +120,10 @@ impl fmt::Display for TronSendError {
             },
             TronSendError::DexFee(reason) => write!(f, "no DEX-fee transaction is sent: {reason}"),
             TronSendError::Approve(reason) => write!(f, "the token approval failed: {reason}"),
+            TronSendError::OtherPayment => write!(
+                f,
+                "the swap id holds another payment: its stored payment hash is not the one of this swap"
+            ),
             TronSendError::Undetermined(reason) => {
                 write!(f, "Undetermined whether the payment was sent: {reason}")
             },
@@ -202,8 +209,7 @@ async fn read_token_setting(
 }
 
 /// Refuses a token that takes a fee on a transfer (maintainer decision of 2026-11-22). The swap contract checks
-/// that the receiver's balance grew by exactly the amount, so a payment in such a token could be locked with no
-/// way to claim or refund it.
+/// that the receiver's balance grew by exactly the amount.
 ///
 /// The token's setting is read with two constant calls, `basisPointsRate()` and `maximumFee()`; nothing is
 /// broadcast. The fee of a transfer is `min(amount * rate / 10000, maximum)`, so it is zero when either value
@@ -422,18 +428,12 @@ async fn send_trx_transfer(coin: &EthCoin, to: &TronAddress, amount_sun: i64) ->
         return Err(TronSwapError::NoLocalKey);
     }
     let api = tron_api(coin)?;
-    let block = api.get_now_block().await.map_err(TronSwapError::Node)?;
+    // The expiry counts from the head block's time, so the local clock bounds it, node by node, as for a
+    // contract call (R21.11C.7).
+    let block = read_swap_head(api).await?;
     let tapos = block.to_tapos().map_err(TronSwapError::Node)?;
     let head_time_ms = block.block_header.raw_data.timestamp;
     let local_time_ms = now_ms() as i64;
-    // The expiry counts from the head block's time, so the local clock bounds it, as for a contract call
-    // (R21.11C.7).
-    if head_time_ms.abs_diff(local_time_ms) > SWAP_HEAD_TIME_TOLERANCE_SECS * 1000 {
-        return Err(TronSwapError::HeadTimeOutOfTolerance {
-            head_time_ms,
-            local_time_ms,
-        });
-    }
     let expiration_ms = head_time_ms
         .checked_add(DEFAULT_EXPIRATION_SEC as i64 * 1000)
         .ok_or_else(|| {
@@ -507,12 +507,19 @@ pub(crate) async fn send_dex_fee(
 /// address: one read of `payments(id)` at the head.
 ///
 /// `None` when the contract holds no payment under the id. Otherwise the payment transaction, looked up in the
-/// confirmed transaction listing of the coin's address.
+/// confirmed transaction listing of the coin's address: a successful payment call of `contract` for the id,
+/// made by the coin's address.
+///
+/// `terms`, when given, are the receiver and the amount of the payment this swap would send. The contract
+/// takes the first payment for an id from anyone, so the stored payment hash is compared with the one of these
+/// terms before anything is looked up.
 ///
 /// # Errors
 ///
 /// [`TronSendError::Swap`] for a secret hash that is not 32 bytes and for a failed or unusable read: a failed
-/// read never answers `None`. [`TronSendError::Undetermined`] when the contract holds a payment and its
+/// read never answers `None`. [`TronSendError::Amount`]. [`TronSendError::OtherPayment`] when the contract
+/// holds a payment under the id and its stored payment hash is not the one of `terms`; nothing is looked up
+/// then. [`TronSendError::Undetermined`] when the contract holds a payment and its
 /// transaction is not found: the node list has no node that serves the listing, the listing fails, or the
 /// transaction is not among the rows read.
 pub(crate) async fn my_payment_sent(
@@ -520,22 +527,41 @@ pub(crate) async fn my_payment_sent(
     contract: &TronAddress,
     time_lock: u32,
     secret_hash: &[u8],
+    terms: Option<(&TronAddress, &BigDecimal)>,
 ) -> Result<Option<TronSwapTx>, TronSendError> {
     let secret_hash = require_32_byte_hash(secret_hash)?;
     let id = tron_swap_id(time_lock, &secret_hash);
-    payment_sent_from(tron_api(coin)?, &my_address(coin), contract, &id).await
+    let owner = my_address(coin);
+    let payment_hash = match terms {
+        Some((receiver, amount)) => {
+            let token = match &coin.coin_type {
+                EthCoinType::Trc20 { token_addr, .. } => Some(TronAddress::from_evm_address(*token_addr)),
+                _ => None,
+            };
+            let units = units_of(coin, amount)?;
+            Some(tron_payment_hash(receiver, &owner, &secret_hash, token.as_ref(), units))
+        },
+        None => None,
+    };
+    payment_sent_from(tron_api(coin)?, &owner, contract, &id, payment_hash.as_ref()).await
 }
 
-/// [`my_payment_sent`] for the payment of the swap `id` from `owner`, asked of `api`.
+/// [`my_payment_sent`] for the payment of the swap `id` from `owner`, asked of `api`. `payment_hash` is the
+/// payment hash of the swap's terms, when they are known.
 pub(super) async fn payment_sent_from(
     api: &TronApiClient,
     owner: &TronAddress,
     contract: &TronAddress,
     id: &[u8; 32],
+    payment_hash: Option<&[u8; 32]>,
 ) -> Result<Option<TronSwapTx>, TronSendError> {
     let output = constant_read(api, owner, contract, &encode_payments_query(id)?).await?;
-    if decode_payments_output(&output)?.state == PaymentState::Uninitialized {
+    let record = decode_payments_output(&output)?;
+    if record.state == PaymentState::Uninitialized {
         return Ok(None);
+    }
+    if payment_hash.is_some_and(|expected| *expected != record.payment_hash) {
+        return Err(TronSendError::OtherPayment);
     }
 
     let mut cursor: Option<String> = None;
@@ -549,7 +575,11 @@ pub(super) async fn payment_sent_from(
                      cannot be listed: {e}"
                 ))
             })?;
-        if let Some(tx) = page.data.iter().find_map(|row| payment_of_row(row, contract, id)) {
+        if let Some(tx) = page
+            .data
+            .iter()
+            .find_map(|row| payment_of_row(row, owner, contract, id))
+        {
             return Ok(Some(tx));
         }
         cursor = page.meta.and_then(|meta| meta.fingerprint);
@@ -565,8 +595,8 @@ pub(super) async fn payment_sent_from(
 }
 
 /// The transaction of the listing row `row` when it is a successful payment call of `contract` for the swap
-/// `id`. A row of any other kind, or one that cannot be read, is no candidate.
-fn payment_of_row(row: &Json, contract: &TronAddress, id: &[u8; 32]) -> Option<TronSwapTx> {
+/// `id`, made by `owner`. A row of any other kind, or one that cannot be read, is no candidate.
+fn payment_of_row(row: &Json, owner: &TronAddress, contract: &TronAddress, id: &[u8; 32]) -> Option<TronSwapTx> {
     let succeeded = row
         .get("ret")?
         .as_array()?
@@ -584,6 +614,9 @@ fn payment_of_row(row: &Json, contract: &TronAddress, id: &[u8; 32]) -> Option<T
         .collect();
     let bytes = signed_transaction_bytes(raw_data_hex, &signatures).ok()?;
     let tx = TronSwapTx::from_bytes(&bytes).ok()?;
+    if tx.trigger().ok()?.owner != *owner {
+        return None;
+    }
     let (called, _, call) = call_of(&tx).ok()?;
     let is_payment = matches!(
         call,

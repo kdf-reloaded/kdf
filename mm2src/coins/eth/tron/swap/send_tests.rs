@@ -96,6 +96,8 @@ struct Chain {
     allowance: Arc<Mutex<U256>>,
     /// The `state` of every `payments(id)` read.
     payment_state: u64,
+    /// The `paymentHash` of every `payments(id)` read.
+    stored_hash: [u8; 32],
     /// The selector (hex) of the call whose dry run reverts.
     reverting: Option<String>,
     /// The `energy_used` of every other dry run.
@@ -122,6 +124,7 @@ impl Chain {
         Chain {
             allowance: Arc::new(Mutex::new(U256::zero())),
             payment_state: 0,
+            stored_hash: [0xab; 32],
             reverting: None,
             energy: ENERGY,
             receipt: "SUCCESS",
@@ -208,7 +211,12 @@ impl Chain {
             json!({ "result": { "result": true }, "constant_result": [allowance] })
         } else if called == payments_selector() {
             let lock_time = uint_word(u64::from(LOCK_TIME));
-            let record = format!("{}{}{}", "ab".repeat(32), lock_time, uint_word(self.payment_state));
+            let record = format!(
+                "{}{}{}",
+                hex::encode(self.stored_hash),
+                lock_time,
+                uint_word(self.payment_state)
+            );
             json!({ "result": { "result": true }, "energy_used": 643, "constant_result": [record] })
         } else if self.reverting.as_deref() == Some(called) {
             json!({
@@ -583,6 +591,56 @@ fn a_stale_head_refuses_the_send_without_a_broadcast() {
     }
 }
 
+/// R21.11C.7 for the TRX DEX-fee transfer: the head time is judged node by node. With one node stale and one in
+/// tolerance the transfer is sent on the fresh head; with every node stale it is the head-time error and nothing
+/// is broadcast.
+#[test]
+fn the_trx_dex_fee_transfer_judges_the_head_time_node_by_node() {
+    let two_nodes = |offsets: [i64; 2]| {
+        let nodes = offsets.map(|head_offset_ms| {
+            let mut chain = Chain::new();
+            chain.head_offset_ms = head_offset_ms;
+            chain.start()
+        });
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let mut key = [0u8; 32];
+        key[31] = 1;
+        let request = json!({ "urls": [nodes[0].url(), nodes[1].url()] });
+        let protocol = CoinProtocol::TRX { network: Network::Nile };
+        let coin = block_on(crate::eth::tron::tron_coin_from_conf_and_request(
+            &ctx,
+            "TRX",
+            &json!({}),
+            &request,
+            &key,
+            protocol,
+        ))
+        .expect("a TRX coin activates against stub nodes");
+        let result = send_taker_fee(&coin, &standard_fee("0.5"));
+        let sent: usize = nodes.iter().map(|node| broadcasts(node).len()).sum();
+        (result, sent)
+    };
+
+    let (result, sent) = two_nodes([-45_000, 0]);
+    let tx = tron_tx(result.expect("a fee transaction"));
+    assert_eq!(sent, 1);
+    let local_ms = common::now_ms() as i64;
+    assert!(
+        (tx.raw().expiration - 60_000 - local_ms).abs() < 10_000,
+        "built on the fresh head"
+    );
+
+    let (result, sent) = two_nodes([-45_000, 45_000]);
+    let error = result.unwrap_err();
+    assert!(matches!(error, TransactionErr::Plain(_)));
+    assert!(
+        error.get_plain_text_format().contains("the local clock may be wrong"),
+        "{}",
+        error.get_plain_text_format()
+    );
+    assert_eq!(sent, 0);
+}
+
 /// A TRX amount beyond the protocol's signed 64-bit field is a typed error before any node is asked.
 #[test]
 fn an_amount_beyond_the_field_is_refused() {
@@ -817,7 +875,10 @@ fn my_payment_sent(coin: &EthCoin, hash: &[u8]) -> Result<Option<TransactionEnum
 }
 
 /// A signed payment call of the test swap, as the chain would hold it.
-fn listed_payment(contract: &TronAddress, id: [u8; 32]) -> TronSwapTx {
+fn listed_payment(contract: &TronAddress, id: [u8; 32]) -> TronSwapTx { listed_payment_from(&sender(), contract, id) }
+
+/// [`listed_payment`] made by the caller `owner`.
+fn listed_payment_from(owner: &TronAddress, contract: &TronAddress, id: [u8; 32]) -> TronSwapTx {
     let data = super::encode_call(&super::TronSwapCall::EthPayment {
         id,
         receiver: other_address(),
@@ -826,7 +887,7 @@ fn listed_payment(contract: &TronAddress, id: [u8; 32]) -> TronSwapTx {
     })
     .unwrap();
     let tapos = tapos_from_block(HEAD_BLOCK, &[7; 32]);
-    let raw = build_trigger_smart_contract(&sender(), contract, data, 1_000_000, &tapos, 1, 2, 3);
+    let raw = build_trigger_smart_contract(owner, contract, data, 1_000_000, &tapos, 1, 2, 3);
     TronSwapTx::new(raw, vec![9; 65])
 }
 
@@ -873,8 +934,28 @@ fn a_sent_spent_or_refunded_payment_is_found_in_the_listing() {
         listing_row(&listed_payment(&selected_contract(), [0x33; 32]), "SUCCESS"),
         listing_row(&listed_payment(&token(), swap_id()), "SUCCESS"),
         listing_row(&listed_payment(&selected_contract(), swap_id()), "REVERT"),
+        // The right contract, method and id from another caller is not our payment.
+        listing_row(
+            &listed_payment_from(&other_address(), &selected_contract(), swap_id()),
+            "SUCCESS",
+        ),
         listing_row(&payment, "SUCCESS"),
     ];
+    // Without our own row the other caller's payment is not taken for ours.
+    let mut foreign = Chain::new();
+    foreign.payment_state = 1;
+    foreign.listing = rows[..rows.len() - 1].to_vec();
+    let node = foreign.start();
+    let missing = block_on(payment_sent_from(
+        &keyed_client(&node),
+        &sender(),
+        &selected_contract(),
+        &swap_id(),
+        None,
+    ))
+    .unwrap_err();
+    assert!(matches!(missing, TronSendError::Undetermined(_)), "{missing}");
+
     for state in [1, 2, 3] {
         let mut chain = Chain::new();
         chain.payment_state = state;
@@ -885,6 +966,7 @@ fn a_sent_spent_or_refunded_payment_is_found_in_the_listing() {
             &sender(),
             &selected_contract(),
             &swap_id(),
+            None,
         ))
         .unwrap_or_else(|e| panic!("state {state}: {e}"));
         assert_eq!(found, Some(payment.clone()), "state {state}");
@@ -904,6 +986,7 @@ fn a_sent_payment_that_cannot_be_found_is_undetermined() {
             &sender(),
             &selected_contract(),
             &swap_id(),
+            None,
         ))
         .unwrap_err();
         assert!(
@@ -917,6 +1000,81 @@ fn a_sent_payment_that_cannot_be_found_is_undetermined() {
             error.contains("Undetermined whether the payment was sent"),
             "state {state}: {error}"
         );
+    }
+}
+
+/// The contract takes the first payment for an id from anyone. With the amount and the other side's key known,
+/// a stored payment hash that is not the one of this swap's terms is the typed "another payment" error at once:
+/// never "not sent", never undetermined, and nothing is looked up. An equal hash goes on to the lookup.
+#[test]
+fn an_id_that_holds_another_payment_is_a_typed_error() {
+    let for_amount = |coin: &EthCoin, amount: &str| {
+        let contract = selected_contract_bytes();
+        let hash = secret_hash();
+        block_on(
+            coin.check_if_my_payment_sent_for_amount(LOCK_TIME, &[], &other_pub(), &hash, 0, &contract, &dec(amount))
+                .compat(),
+        )
+    };
+    for is_token in [false, true] {
+        let token_address = token();
+        let asset = is_token.then_some(&token_address);
+        let ours = super::tron_payment_hash(
+            &other_address(),
+            &sender(),
+            &secret_hash(),
+            asset,
+            U256::from(5_000_000u64),
+        );
+        let coin_of = |node: &StubNode| {
+            if is_token {
+                block_on(trc20_coin(&node.url())).1
+            } else {
+                block_on(trx_coin(&node.url())).1
+            }
+        };
+        for state in [1, 2, 3] {
+            // Another payment under the id: the hash of another amount is not ours.
+            let mut chain = Chain::new();
+            chain.payment_state = state;
+            chain.stored_hash = ours;
+            let node = chain.start();
+            let error = for_amount(&coin_of(&node), "5.000001").unwrap_err();
+            assert!(error.contains("the swap id holds another payment"), "{error}");
+            assert!(!error.contains("Undetermined"), "{error}");
+            assert_eq!(
+                node.requests().len(),
+                1,
+                "one read and no lookup: {:?}",
+                node.requests()
+            );
+
+            // Our terms: the lookup goes on as without the amount (this coin has no node that lists).
+            let error = for_amount(&coin_of(&node), "5").unwrap_err();
+            assert!(error.contains("Undetermined whether the payment was sent"), "{error}");
+
+            // With a node that lists, the equal hash finds the payment.
+            let payment = listed_payment(&selected_contract(), swap_id());
+            let mut chain = Chain::new();
+            chain.payment_state = state;
+            chain.stored_hash = ours;
+            chain.listing = vec![listing_row(&payment, "SUCCESS")];
+            let node = chain.start();
+            let lookup = |hash: &[u8; 32]| {
+                block_on(payment_sent_from(
+                    &keyed_client(&node),
+                    &sender(),
+                    &selected_contract(),
+                    &swap_id(),
+                    Some(hash),
+                ))
+            };
+            assert_eq!(lookup(&ours).unwrap(), Some(payment));
+            assert!(matches!(lookup(&[0x01; 32]), Err(TronSendError::OtherPayment)));
+        }
+        // State 0 is "not sent" whatever hash the empty record shows.
+        let node = Chain::new().start();
+        assert_eq!(for_amount(&coin_of(&node), "5").map(|tx| tx.is_none()), Ok(true));
     }
 }
 

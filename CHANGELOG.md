@@ -509,7 +509,7 @@ the previous version used. The safe way:
   wallet-only and still ignores the swap contracts of an `enable` or `electrum` request. The log line now reads
   "swap_contract_address is ignored, the coin is wallet-only". Nothing else changes for a user: the groundwork for
   TRON swaps added here (the contract interface, the transaction form and the contract binding at activation) is not
-  used by any order or swap while TRON swaps are off. Detail: PR #N; CRD ch.21 §21.11C, R21.B2.
+  used by any order or swap while TRON swaps are off. Detail: PR #506; CRD ch.21 §21.11C, R21.B2.
 
 #### Tendermint (Cosmos) coins
 
@@ -1180,8 +1180,8 @@ the previous version used. The safe way:
   is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
   (HTTP 400), and, for a TRON coin without a swap contract, which is every TRON coin while TRON swaps are off,
   the legacy `get_trade_fee` and `trade_preimage` with that coin on the receiving side (`InternalError`), both
-  with the text "the coin has no swap contract: it cannot trade". EVM coins are unchanged. Detail: PR #469; CRD
-  ch.21 §21.11 (D7).
+  with the text "the coin has no swap contract: it cannot trade". EVM coins are unchanged. Detail: PRs #469,
+  #506; CRD ch.21 §21.11 (D7).
 
 #### Swap and order records
 

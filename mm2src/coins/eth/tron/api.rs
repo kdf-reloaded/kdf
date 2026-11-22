@@ -788,6 +788,18 @@ impl TronApiClient {
         .await
     }
 
+    /// [`Self::get_now_block`] with `validate` as the check of each node's answer, in place of the default one: an
+    /// answer `validate` refuses is that node's bad answer and moves on to the next node (R-N4 (d)).
+    pub(crate) async fn get_now_block_validated(
+        &self,
+        validate: fn(&GetNowBlockResponse) -> Result<(), TronApiError>,
+    ) -> Result<GetNowBlockResponse, TronApiError> {
+        #[derive(Serialize)]
+        struct Empty {}
+        self.try_post_validated("/wallet/getnowblock", &Empty {}, validate)
+            .await
+    }
+
     /// Get account info. Returns `None` only when the node answers a 2xx empty JSON object `{}`, its documented
     /// form for an account that does not exist on chain.
     ///

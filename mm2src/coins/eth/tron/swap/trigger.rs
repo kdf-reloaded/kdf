@@ -8,7 +8,7 @@
 
 use super::tx::TronSwapTx;
 use super::TronSwapError;
-use crate::eth::tron::api::{TronApiClient, TronApiError};
+use crate::eth::tron::api::{GetNowBlockResponse, TronApiClient, TronApiError};
 use crate::eth::tron::fee::TronFeeError;
 use crate::eth::tron::proto::DEFAULT_EXPIRATION_SEC;
 use crate::eth::tron::sign::sign_transaction_raw;
@@ -25,6 +25,63 @@ const LIFETIME_MS: i64 = DEFAULT_EXPIRATION_SEC as i64 * 1000;
 /// With the expiry 60 seconds after the head block's time, a call has at least 30 seconds of validity left by the
 /// local clock when it is built.
 pub const SWAP_HEAD_TIME_TOLERANCE_SECS: u64 = 30;
+
+/// What a node's head block is refused with when its time is outside the tolerance. The two times follow it.
+const HEAD_TIME_REFUSAL: &str = "the head block's time is outside the tolerance of the local time";
+
+/// The check of one node's head block for a transaction that is built on it: a usable block id, a positive
+/// time, and a time within [`SWAP_HEAD_TIME_TOLERANCE_SECS`] of the local time. A block outside the tolerance
+/// is that node's unusable answer, so the node list moves on to its next node.
+fn check_swap_head(block: &GetNowBlockResponse) -> Result<(), TronApiError> {
+    let head_ms = block.block_header.raw_data.timestamp;
+    if head_ms <= 0 {
+        return Err(TronApiError::InvalidResponse(
+            "getnowblock answer has a non-positive timestamp".to_owned(),
+        ));
+    }
+    block.to_tapos()?;
+    let local_ms = now_ms() as i64;
+    if head_ms.abs_diff(local_ms) > SWAP_HEAD_TIME_TOLERANCE_SECS * 1000 {
+        return Err(TronApiError::InvalidResponse(format!(
+            "{HEAD_TIME_REFUSAL}: head {head_ms} ms, local {local_ms} ms"
+        )));
+    }
+    Ok(())
+}
+
+/// The head and the local time of the refusal `entry` of [`check_swap_head`], in milliseconds.
+fn refused_head_times(entry: &str) -> Option<(i64, i64)> {
+    let (_, times) = entry.split_once(HEAD_TIME_REFUSAL)?;
+    let (head, local) = times.strip_prefix(": head ")?.split_once(" ms, local ")?;
+    Some((head.parse().ok()?, local.strip_suffix(" ms")?.parse().ok()?))
+}
+
+/// The head block a transaction of a swap is built on: the answer of the first node of the coin's node list
+/// whose head block passes [`check_swap_head`].
+///
+/// # Errors
+///
+/// [`TronSwapError::HeadTimeOutOfTolerance`] when every node that was asked answered a head block whose time is
+/// outside the tolerance, with the times of the last one: the local clock may be the cause.
+/// [`TronSwapError::Node`] for every other failure of the read.
+pub(super) async fn read_swap_head(api: &TronApiClient) -> Result<GetNowBlockResponse, TronSwapError> {
+    let error = match api.get_now_block_validated(check_swap_head).await {
+        Ok(block) => return Ok(block),
+        Err(error) => error,
+    };
+    // The error of a request every node failed lists each node with its failure, separated by "; ". Only when
+    // each of them is the refusal above did every node answer out of tolerance.
+    if let TronApiError::InvalidResponse(listing) = &error {
+        let times: Option<Vec<(i64, i64)>> = listing.split("; ").map(refused_head_times).collect();
+        if let Some((head_time_ms, local_time_ms)) = times.and_then(|times| times.last().copied()) {
+            return Err(TronSwapError::HeadTimeOutOfTolerance {
+                head_time_ms,
+                local_time_ms,
+            });
+        }
+    }
+    Err(TronSwapError::Node(error))
+}
 
 /// The node client of a TRX or TRC20 coin.
 pub(super) fn tron_api(coin: &EthCoin) -> Result<TronApiClient, TronSwapError> {
@@ -44,8 +101,9 @@ pub(super) fn tron_api(coin: &EthCoin) -> Result<TronApiClient, TronSwapError> {
 /// Before any node is asked: [`TronSwapError::NoLocalKey`] for a coin a hardware or an external wallet signs
 /// for, [`TronSwapError::NotTronCoin`], [`TronSwapError::NegativeCallValue`], and [`TronSwapError::FeeLimit`] for a
 /// `fee_limit_sun` beyond the protocol's signed 64-bit field. Then [`TronSwapError::Node`] when the head block
-/// cannot be read, [`TronSwapError::HeadTimeOutOfTolerance`] when its time is more than
-/// [`SWAP_HEAD_TIME_TOLERANCE_SECS`] from the local time (nothing is signed or broadcast), and
+/// cannot be read, [`TronSwapError::HeadTimeOutOfTolerance`] when every node of the coin's node list that was
+/// asked reports a head block whose time is more than [`SWAP_HEAD_TIME_TOLERANCE_SECS`] from the local time
+/// (nothing is signed or broadcast), and
 /// [`TronSwapError::Signing`]. After signing, [`TronSwapError::Broadcast`] with the signed
 /// transaction: no node took the request, a node refused the transaction (`result: false`), or the accepting
 /// node named another transaction id.
@@ -66,17 +124,11 @@ pub async fn send_trigger(
     let fee_limit = i64::try_from(fee_limit_sun).map_err(|_| TronSwapError::FeeLimit(TronFeeError::Overflow))?;
     let owner = TronAddress::from_evm_address(coin.my_address);
 
-    let block = api.get_now_block().await.map_err(TronSwapError::Node)?;
+    let block = read_swap_head(&api).await?;
     let tapos = block.to_tapos().map_err(TronSwapError::Node)?;
     let block_ms = block.block_header.raw_data.timestamp;
     // The transaction's own timestamp is the local time of building, as on the withdraw path.
     let timestamp_ms = now_ms() as i64;
-    if block_ms.abs_diff(timestamp_ms) > SWAP_HEAD_TIME_TOLERANCE_SECS * 1000 {
-        return Err(TronSwapError::HeadTimeOutOfTolerance {
-            head_time_ms: block_ms,
-            local_time_ms: timestamp_ms,
-        });
-    }
     let expiration_ms = block_ms.checked_add(LIFETIME_MS).ok_or_else(|| {
         TronSwapError::Node(TronApiError::InvalidResponse(
             "the head block's time leaves no room for an expiry".to_owned(),

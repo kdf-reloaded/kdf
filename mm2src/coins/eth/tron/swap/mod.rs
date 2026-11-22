@@ -144,7 +144,8 @@ impl fmt::Display for TronSwapError {
                 local_time_ms,
             } => write!(
                 f,
-                "the head block's time {head_time_ms} ms is too far from the local time {local_time_ms} ms"
+                "the head block's time {head_time_ms} ms is too far from the local time {local_time_ms} ms on every \
+                 node that was asked: the local clock may be wrong"
             ),
             TronSwapError::UnknownEvent => write!(f, "the log entry is not an event of the swap contract"),
             TronSwapError::Mismatch { field } => write!(f, "{field} differs from the value the swap expects"),

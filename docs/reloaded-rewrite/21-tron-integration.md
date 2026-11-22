@@ -2792,10 +2792,11 @@ transaction of any other kind, a TRX transfer included, is a typed
 
 An operation that uses this type MUST take only the transaction id from
 bytes a peer sent. The transaction, its receipt and the contract's
-`payments(id)` are read from the node, under the two-node evidence rule
-of chapter 51, and a payment is judged by the stored payment hash
-(R21.11C.3), not by decoding the peer's call data. That is what makes
-the decoder's tolerance of R21.11C.4 harmless.
+`payments(id)` are read from the node, under chapter 51 R100 (§51.6G),
+and a payment is judged by the stored payment hash (R21.11C.3) and the
+stored lock time, because the payment hash does not cover the lock
+time, not by decoding the peer's call data. That is what makes the
+decoder's tolerance of R21.11C.4 harmless.
 
 **R21.11C.7 (sending a contract call).** A contract call is sent as a
 `TriggerSmartContract` with the call value and the `fee_limit` its
@@ -2814,11 +2815,15 @@ an answer without a positive energy figure is a node error. No figure
 stands in for a missing one.
 
 The expiry counts from the head block's time, which the one node that
-answered states, so the local clock bounds it: a head block whose time
-is more than 30 seconds from the local time, ahead or behind, is refused
-typed before anything is signed, and nothing is broadcast, so that a
-call has at least 30 seconds of validity left by the local clock when it
-is built.
+answered states, so the local clock bounds it, node by node: a head
+block whose time is more than 30 seconds from the local time, ahead or
+behind, is that node's unusable answer, and the next node of the coin's
+node list is asked under the rules of §21.9. A call is built only on a
+head block inside the tolerance, so that it has at least 30 seconds of
+validity left by the local clock when it is built. When every node that
+was asked answered a head block outside the tolerance, the call is
+refused typed before anything is signed and nothing is broadcast; the
+error says that the local clock may be the cause.
 
 The `fee_limit` of a swap contract call is worked out from that dry run:
 the cost of the dry-run energy at the chain's energy price plus a margin
@@ -2944,26 +2949,31 @@ TRX balance and answer `NotSufficientBaseCoinBalance` for a token
 the platform coin, as the EVM family of this repository does.
 
 **R21.11C.13 (was the own payment sent).** The question is answered by
-one read of `payments(id)` on the selected contract at the head. State
-0 answers "not sent". States 1, 2 and 3 mean that the payment was sent;
+one read of `payments(id)` on the selected contract at the head. State 0
+answers "not sent". States 1, 2 and 3 mean that the payment was sent;
 its transaction is then looked up in the confirmed transaction listing
 of the coin's address (§21.10C), among at most five pages: a successful
-call of the selected contract whose decoded call is a payment with that
-id. When the listing is not available, fails, or does not have the
-transaction, the answer is a typed "undetermined" error. A failed read,
-an unusable answer and a state outside 0 to 3 are errors. No error
-answers "not sent".
+call of the selected contract, made by the coin's own address, whose
+decoded call is a payment with that id. The contract takes the first
+payment for an id from anyone, so when the swap's amount and receiver
+are known the stored payment hash is compared with the hash of the
+swap's own terms (R21.11C.3) first: a payment under the id with another
+hash is a typed "the swap id holds another payment" error at once, never
+"not sent" and never "undetermined", and nothing is looked up. When the
+listing is not available, fails, or does not have the transaction, the
+answer is a typed "undetermined" error. A failed read, an unusable
+answer and a state outside 0 to 3 are errors. No error answers "not
+sent".
 
 **R21.11C.14 (a token that takes a transfer fee is not swapped).**
-*(Maintainer decision of 2026-11-22.)* The swap contract accepts a
-token payment, spend or refund only when the receiver's balance grew by
-exactly the amount (§21.11B.2). A token that takes a fee on each
-transfer could therefore lock a payment that neither side can claim or
-refund. For a TRC20 leg the client reads the token's transfer-fee
-setting with two constant calls of the token, `basisPointsRate()` and
-`maximumFee()`, each returning one `uint256`; nothing is broadcast. The
-fee of a transfer is the smaller of the amount times the rate over
-10 000 and the maximum, so it is zero when either value is zero.
+*(Maintainer decision of 2026-11-22.)* The swap contract accepts a token
+payment, spend or refund only when the receiver's balance grew by
+exactly the amount (§21.11B.2). For a TRC20 leg the client reads the
+token's transfer-fee setting with two constant calls of the token,
+`basisPointsRate()` and `maximumFee()`, each returning one `uint256`;
+nothing is broadcast. The fee of a transfer is the smaller of the amount
+times the rate over 10 000 and the maximum, so it is zero when either
+value is zero.
 
 - A rate of zero, or a maximum of zero, passes.
 - A token without the rate getter (the constant call reverts, or
@@ -2979,11 +2989,11 @@ fee of a transfer is the smaller of the amount times the rate over
 The check is made where a swap starts, in the fee figures for sending
 the payment and for spending the counterparty's payment, which both
 sides compute at the start (chapter 51 R96): the refusal is
-`InternalError` there and a failed read is `Transport`. It is made
-again right before the payment, before any approval is sent. A TRX leg
-is never read. *Residual risk, not handled:* a token whose issuer
-switches the fee on while a swap is running is caught by neither check
-once that swap's payment is sent.
+`InternalError` there and a failed read is `Transport`. It is made again
+right before the payment, before any approval is sent. A TRX leg is
+never read. The checks cover the state of the token at the swap's start
+and before the payment, not a change of its transfer-fee setting after
+the payment; the coins file qualifies such tokens (`wallet_only`).
 
 **Tests (sending side).** The rules above are tested against a scripted
 node in the TRON swap test modules of the coin crate, the selectors
@@ -3422,9 +3432,10 @@ V3. The address encoding, protobuf transaction/contract formats,
   and the status note of this date on the two trade-fee refusals at D7
   are Reloaded-original. They rest on the cleared text of §21.11B.2,
   D21.B5, D21.B6 and D21.B9, on the maintainer decisions of 2026-11-08
-  those notes record and of 2026-11-22 on a token's transfer fee, on the cleared text of chapter 51 R93, R95, R98
-  and R99 and of chapter 57 R57.5.2 and R57.5.3b, on the public TRON
-  node API (§21.9) and transaction format (§21.6), and on this
-  repository's own code. The six fixed energy estimates are Reloaded's
-  own figures, derived as R21.11C.12 says. No cleared sentence was
-  edited, and R21.11C.1 to R21.11C.8 are unchanged.
+  those notes record and of 2026-11-22 on a token's transfer fee, on the
+  cleared text of chapter 51 R93, R95, R98 and R99 and of chapter 57
+  R57.5.2 and R57.5.3b, on the public TRON node API (§21.9) and
+  transaction format (§21.6), and on this repository's own code. The six
+  fixed energy estimates are Reloaded's own figures, derived as
+  R21.11C.12 says. No cleared sentence was edited, and R21.11C.1 to
+  R21.11C.8 are unchanged.
