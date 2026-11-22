@@ -562,8 +562,8 @@ lineage and a conversion rule for existing `MM2.db` files.
 ## 44.9A Swap Storage Shared With the Reference in One Data Directory
 
 > **Status note (2026-11-22).** This section was added by the KDF Spec Reader
-> in round 0.5.0-24. **KDF Dirty Gate pass: pending.** Until that marker is
-> replaced by a recorded pass, the section is not cleared for clean sessions.
+> in round 0.5.0-24. **KDF Dirty Gate pass: PASS on 2026-11-22, measure
+> 0.00** (attestation in the provenance footer).
 > It adds rules and tests only; no sentence of §§44.1-44.9 or §44.10 is
 > changed by it.
 
@@ -824,7 +824,8 @@ section, the highest ledger value is still `15` (R44.9.5).
   [Chapter 26](26-cross-platform-and-wasm.md).
 - *Forbidden corpus:* not consulted.
 - *Addition of 2026-11-22 (KDF Spec Reader, round 0.5.0-24; **KDF Dirty Gate
-  pass: pending**):* §44.9A (R44.9A.1 through R44.9A.13, T44.9A.1 through
+  pass: PASS on 2026-11-22, measure 0.00, no findings**):* §44.9A
+  (R44.9A.1 through R44.9A.13, T44.9A.1 through
   T44.9A.5, its status notes and its code-quality finding). The *not
   consulted* statement above continues to describe every other section of
   this chapter. For §44.9A the forbidden corpus was consulted under the
@@ -843,6 +844,21 @@ section, the highest ledger value is still `15` (R44.9.5).
   surface (R36). No private identifier, function body, helper decomposition,
   control-flow transcription, log or error literal was reproduced. R44.9A.13,
   the tests and the Reloaded status note are Reloaded-original; the status
-  note rests on this repository's own lock and saved-swap code. The scope
-  attestation of the Dirty Gate (extent, method, measure) is not yet
-  recorded; it is to be written here when the pass is relayed.
+  note rests on this repository's own lock and saved-swap code.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.00,
+  no findings, in a single pass; all seven chapter 02 §2.15A rows read were
+  verified, including the two rows added in this round, `lr-swap-wip-3 (as of
+  2025-12-03)` and `tpu-status (as of 2026-01-08)`. *Extent:* the reference's
+  node-database migration ledger, the per-swap lock file (the primitive and
+  its acquisition by the legacy maker and taker runs and by the version-two
+  runs) and the reading and writing of saved-swap files, at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` for the whole subject (eight source files);
+  the migration step list at the rows `dev (as of 2026-03-27)`, `staging (as
+  of 2026-03-27)`, `main (as of 2026-10-07)`, `lr-swap-wip-3 (as of
+  2025-12-03)` and `tpu-status (as of 2026-01-08)`; and a search of all 255
+  release tags; on the candidate side, the 250 added lines. *Method:* reading
+  plus a mechanical comparison of the added lines against 141 reference source
+  files at the row `v2.6.0-beta` (identifier-token intersection and five-word
+  shingles); the repository's clean-room gate tool was not applicable because
+  the additions embed no code blocks. *Measure:* 0.00, on the
+  discretionary-expression basis.

@@ -168,7 +168,7 @@ proceeds, the lock MUST be refreshed on a thirty-second interval, i.e.
 strictly more often than its time-to-live, so that a live runner never
 appears expired.
 
-> **Pointer (2026-11-22; KDF Dirty Gate pass pending with its target).**
+> **Pointer (2026-11-22; passed the KDF Dirty Gate with its target).**
 > The on-disk form of the persistence that R2 through R5 rely on, where a
 > data directory is shared with a reference build, is bound by
 > [Chapter 44](44-database-persistence-and-migrations.md) §44.9A: the lock
@@ -2769,4 +2769,5 @@ reference rows alike.
   Written by the KDF Spec Reader in round 0.5.0-24. It carries no reference
   content of its own beyond naming what its target binds; the reference
   facts are in chapter 44 §44.9A, whose provenance footer records the rows
-  read. **KDF Dirty Gate pass: pending**, to be judged with its target.
+  read. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.00, no findings**, as
+  recorded for §44.9A in chapter 44's provenance footer.
