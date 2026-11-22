@@ -4,6 +4,7 @@ use num_traits::Zero;
 use serde_json as json;
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_solana_and_spl_balance_enable_spl_v2() {
     let mm = solana_supplied_node();
     let tx_history = false;
@@ -43,6 +44,7 @@ fn test_solana_and_spl_balance_enable_spl_v2() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sign_verify_message_solana() {
     let mm = solana_supplied_node();
     let tx_history = false;
@@ -76,6 +78,7 @@ fn test_sign_verify_message_solana() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "live-network-tests"), ignore = "needs public servers")]
 fn test_sign_verify_message_spl() {
     let mm = solana_supplied_node();
     let tx_history = false;

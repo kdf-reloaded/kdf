@@ -858,9 +858,9 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
-- **Solana (SOL, SPL tokens) coins are wallet-only.** Since 2026-11-22 Solana
-  can be activated again (0.4.0 refused it on every route): on Reloaded's own
-  `enable_solana_with_tokens` and `enable_spl`, and on
+- **Solana (SOL, SPL tokens) coins are wallet-only.** In 0.5.0 Solana can be
+  activated again (earlier releases refused it on every route): on Reloaded's
+  own `enable_solana_with_tokens` and `enable_spl`, and on
   `experimental::enable_solana_with_assets` and
   `experimental::enable_solana_token`, the methods GLEEC KDF `v3.0.0-beta`
   serves, in native and browser (WASM) builds. The legacy `enable` /
@@ -868,7 +868,7 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   as GLEEC KDF does (CRD ch.55 R55.4.7). Activation, balances, `withdraw`,
   message signing and `disable_coin` work. Orders and swaps do not: no GLEEC
   KDF release has a Solana swap, and placing an order with a Solana coin
-  there ends without an answer (CRD ch.40 R40.6B.6, F40.6B.3). Reloaded
+  there ends abnormally (CRD ch.40 R40.6B.6, F40.6B.3). Reloaded
   refuses `setprice`, `buy`, `sell` and `trade_preimage` for a pair with a
   Solana coin or SPL token with "Trading is not supported for coin …", and
   every swap operation of such a coin answers an error that names it (CRD

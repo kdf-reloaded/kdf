@@ -53,7 +53,9 @@ env-gated tests:
 - `test_solana_and_spl_balance_enable_spl_v2`, `test_sign_verify_message_solana`,
   `test_sign_verify_message_spl` (`mm2_main/src/docker_tests/solana_tests.rs`) —
   were ignored while Solana activation was switched off for the beta. Solana is
-  switched on again (CRD ch.40 D40.4), so they are no longer ignored. They
+  switched on again (CRD ch.40 D40.4), so they run again behind the
+  `live-network-tests` feature (`cfg_attr(not(feature = "live-network-tests"),
+  ignore = …)`), like the repository's other tests that need public servers. They
   need network access to the public Solana devnet
   (`https://api.devnet.solana.com`); no docker container is involved, because
   `solana_supplied_node` only starts a node with a Solana coins configuration.
