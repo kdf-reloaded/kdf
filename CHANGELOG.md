@@ -1056,8 +1056,8 @@ the previous version used. The safe way:
   middle of a save could leave an empty or cut-off file, and the swap could not be resumed from it. Each save now
   writes a new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the
   record holds either its previous or its new complete content. A temporary `*.tmp` file left by a crash is
-  ignored. Browser builds already saved each record in one storage transaction and do not change. Detail: CRD
-  ch.51 R3 and ch.44 R44.8A.6.
+  ignored. Browser builds already saved each record in one storage transaction and do not change. Detail: PR #480;
+  CRD ch.51 R3 and ch.44 R44.8A.6.
 
 ### Tests
 
