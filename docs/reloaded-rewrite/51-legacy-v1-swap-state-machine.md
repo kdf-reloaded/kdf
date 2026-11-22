@@ -517,12 +517,13 @@ carrying both the spending transaction and the recovered secret.
 > states.
 
 > **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
-> of 2026-11-22).** The taker uses a value as the swap's secret only when it
-> hashes to the swap's secret hash, for every coin family: RIPEMD-160 of
-> SHA-256 for a 20-byte hash, SHA-256 for a 32-byte hash (R71). A value that
-> does not match is an extraction error; R30's exit applies in the wait for
-> the spend, and the manual recovery and the refund chain's look keep the
-> handling they already give an extraction error. An ETH or ERC20 coin reads
+> of 2026-11-22).** The taker, and a watcher acting for it, uses a value as
+> the swap's secret only when it hashes to the swap's secret hash, for every
+> coin family: RIPEMD-160 of SHA-256 for a 20-byte hash, SHA-256 for a 32-byte
+> hash (R71). A value that does not match is an extraction error; R30's exit
+> applies in the wait for the spend, and the manual recovery, the refund
+> chain's look and the watcher keep the handling they already give an
+> extraction error. An ETH or ERC20 coin reads
 > the secret from the call input when that is a direct call of the swap
 > contract's claim method, and otherwise from the `secret` word of a
 > `ReceiverSpent` log in the transaction's receipt. A Tendermint coin examines

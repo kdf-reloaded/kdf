@@ -873,6 +873,16 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   different state 16, so that value identifies no layout. The refusal is compatible with GLEEC KDF: a database KDF
   Reloaded leaves at state 15 is fully migrated for both. No switch exists; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.44 R44.9A.1 to R44.9A.5.
+- **The swap's secret is checked against its hash on every coin family.** A taker, and a watcher acting for one,
+  uses a value read from the transaction that claimed the taker payment as the swap's secret only when it matches
+  the swap's secret hash (RIPEMD-160 of SHA-256 for a 20-byte hash, SHA-256 for a 32-byte one); otherwise the read
+  fails as an extraction error. For ETH and ERC20 coins KDF Reloaded also reads the secret from the swap
+  contract's `ReceiverSpent` event in the transaction's receipt when the call input is not a direct claim call,
+  and for Tendermint coins it examines every message of the transaction. GLEEC KDF's reading for each coin family
+  is recorded in CRD ch.51 §51.6E. No message and no transaction a peer validates changes, so no switch exists;
+  row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). Plan
+  [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 2 (PR #488); CRD ch.51,
+  status note of 2026-11-22 before R31.
 
 ### Removed / disabled in KDF Reloaded
 

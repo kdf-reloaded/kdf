@@ -3133,7 +3133,7 @@ pub fn maker_payment_wait(swap_started_at: u64, payment_locktime: u64) -> u64 {
 /// The secret of the swap read from the transaction that spent the taker payment (CRD ch.51 §51.6E R85, R86,
 /// R91): the coin's extraction, then the secret-hash rule applied here for every coin family. A value that
 /// fails the rule is an extraction error.
-async fn spend_secret(coin: &MmCoinEnum, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+pub(super) async fn spend_secret(coin: &MmCoinEnum, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
     let secret = coin.extract_secret_from_spend(secret_hash, spend_tx).await?;
     crypto::secret_hash_algo::ensure_secret_matches_hash(secret, secret_hash)
 }

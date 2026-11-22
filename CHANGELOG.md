@@ -1085,10 +1085,11 @@ the previous version used. The safe way:
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
   CRD ch.51, status note of 2026-11-22 after R31a.
-- **The secret of a swap is checked against its hash on every coin.** When the taker reads the secret from the
-  transaction that claimed its payment, the value is used only when it matches the swap's secret hash. EVM coins
-  (ETH and ERC20 tokens) also read the secret from the swap contract's claim event; Tendermint coins look at every
-  message of the transaction. Detail: PR #488; CRD ch.51, status note of 2026-11-22 before R31.
+- **The secret of a swap is checked against its hash on every coin.** When the taker, or a watcher acting for it,
+  reads the secret from the transaction that claimed the taker payment, the value is used only when it matches the
+  swap's secret hash. EVM coins (ETH and ERC20 tokens) also read the secret from the swap contract's claim event;
+  Tendermint coins look at every message of the transaction. Detail: PR #488; CRD ch.51, status note of 2026-11-22
+  before R31.
 
 ### Tests
 
