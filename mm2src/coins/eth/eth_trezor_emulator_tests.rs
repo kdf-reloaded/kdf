@@ -13,7 +13,8 @@
 //!   cargo test -p coins --features trezor-emulator-tests \
 //!   eth_trezor_emulator_tests -- --nocapture --test-threads=1
 //! ```
-//! If the emulator is unreachable the tests print a skip message and pass.
+//! When `TREZOR_EMULATOR_UDP` is set, an unreachable emulator makes the tests fail;
+//! when it is not set, the tests print a skip message and pass.
 //!
 //! Coverage of the §50.8 acceptance tests in this module:
 //!   * T50.1 / T50.4 — `emulator_trezor_withdraw_native_no_from`
@@ -111,6 +112,29 @@ fn emulator_reachable(addr: &str) -> bool {
     }
     let mut buf = [0u8; 8];
     matches!(socket.recv(&mut buf), Ok(n) if &buf[..n] == b"PONGPONG")
+}
+
+/// Probes the emulator, retrying briefly so one lost datagram does not decide
+/// the result. When `TREZOR_EMULATOR_UDP` is set the emulator must be reachable
+/// (the test panics otherwise); when it is not set an unreachable emulator
+/// prints a skip line and the test returns early.
+fn emulator_available(test_name: &str) -> bool {
+    let addr = emulator_addr();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if emulator_reachable(&addr) {
+            return true;
+        }
+    }
+    if std::env::var_os("TREZOR_EMULATOR_UDP").is_some() {
+        panic!(
+            "{test_name}: emulator unreachable at {addr}; start it first, e.g. with `python3 mm2src/trezor/tests/emulator/emulator_control.py setup`"
+        );
+    }
+    println!("SKIP {test_name}: emulator unreachable at {addr}");
+    false
 }
 
 /// Start + wipe + seed the emulator with the SLIP-14 mnemonic (idempotent).
@@ -735,9 +759,7 @@ fn drive_withdraw(
 /// address and the recovered sender of `tx_hex` equals it (byte-parity check).
 #[test]
 fn emulator_trezor_withdraw_native_no_from() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_withdraw_native_no_from: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_withdraw_native_no_from") {
         return;
     }
     emulator_setup();
@@ -804,9 +826,7 @@ fn emulator_trezor_withdraw_native_no_from() {
 /// ABI payload (the `EthereumTxAck` streaming path) and device signing.
 #[test]
 fn emulator_trezor_withdraw_erc20_with_from_path() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_withdraw_erc20_with_from_path: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_withdraw_erc20_with_from_path") {
         return;
     }
     emulator_setup();
@@ -933,9 +953,7 @@ fn emulator_trezor_withdraw_erc20_with_from_path() {
 /// is needed, as the platform's Trezor coin derives the addresses from the xpub.
 #[test]
 fn emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens") {
         return;
     }
     emulator_setup();
@@ -997,16 +1015,16 @@ fn emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_i
 /// unsupported error with NO device interaction (rejected before any exchange).
 #[test]
 fn emulator_trezor_withdraw_tron_unsupported() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_withdraw_tron_unsupported: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_withdraw_tron_unsupported") {
         return;
     }
     // No emulator_setup / no device material / no confirm-loop: the rejection is
-    // raised before any device exchange (R50.20).
+    // raised before any device exchange (R50.20). The hardware context is
+    // installed with no client, so any device exchange would fail the test.
     let conf = serde_json::json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [] });
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
-    let _crypto = CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "trezor emulator test passphrase").unwrap();
+    let crypto = CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "trezor emulator test passphrase").unwrap();
+    crypto.init_trezor_ctx_for_tests(H264::default(), None);
 
     let node = spawn_mock_node("0x0", "0x0", "0x0");
     let dummy = Address::from_str("0000000000000000000000000000000000000001").unwrap();
@@ -1037,9 +1055,7 @@ fn emulator_trezor_withdraw_tron_unsupported() {
 /// sender-selector discriminant BEFORE any device exchange (no confirm-loop).
 #[test]
 fn emulator_trezor_withdraw_bad_from_selector() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_withdraw_bad_from_selector: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_withdraw_bad_from_selector") {
         return;
     }
     emulator_setup();
@@ -1214,9 +1230,7 @@ fn drive_withdraw_with_user_action(
 /// `user_action` -> `ack_passphrase` end-to-end.
 #[test]
 fn emulator_trezor_withdraw_passphrase_user_action() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_withdraw_passphrase_user_action: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_withdraw_passphrase_user_action") {
         return;
     }
     emulator_setup_passphrase();
@@ -1318,9 +1332,7 @@ fn emulator_trezor_withdraw_passphrase_user_action() {
 /// panic, no malformed transaction.
 #[test]
 fn emulator_trezor_withdraw_passphrase_action_mismatch() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_withdraw_passphrase_action_mismatch: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_withdraw_passphrase_action_mismatch") {
         return;
     }
     emulator_setup_passphrase();
@@ -1465,9 +1477,7 @@ impl TrezorConnectProcessor for AutoConnectProcessor {
 /// same device address (activate -> withdraw end-to-end).
 #[test]
 fn emulator_trezor_activate_eth_native() {
-    let addr = emulator_addr();
-    if !emulator_reachable(&addr) {
-        println!("SKIP emulator_trezor_activate_eth_native: emulator unreachable at {addr}");
+    if !emulator_available("emulator_trezor_activate_eth_native") {
         return;
     }
     emulator_setup();

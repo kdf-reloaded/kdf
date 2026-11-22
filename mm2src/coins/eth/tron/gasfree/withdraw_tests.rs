@@ -1,4 +1,5 @@
-//! Tests of the gasless TRC20 withdraw (CRD ch.63 T8, T11, T12, T13, T15, T16, T17) through the withdraw RPCs.
+//! Tests of the gasless TRC20 withdraw (CRD ch.63 T8, T11, T12, T13, T15, T16, T17, and T18 to T20 with the
+//! submission flow of D63.9) through the withdraw RPCs.
 //!
 //! The TRON node and the GasFree provider are loopback stubs; the coins are built the way the mmrpc 2.0 activation
 //! builds them and registered, so that a test calls the direct `withdraw` method and `task::withdraw::init` as a
@@ -15,23 +16,24 @@ use super::super::withdraw::{withdraw_tron, GUARD_ALLOWS_FALLBACK_KEY};
 use super::super::{parse_trc20_contract, tron_coin_from_params, tron_coin_from_params_with_global_hd, Network,
                    TronAddress, TronCoinParams, TronGaslessProviderRequest, TronTokenGaslessRequest};
 use super::address_word;
-use super::authorization::{typed_data_hash, GasFreeRelayPayload, SignedPermit};
+use super::authorization::{sign_permit, typed_data_hash, GasFreeRelayPayload, PermitTransfer, SignedPermit};
 use super::binding::{gasfree_custody_address, GasFreeBinding};
 use super::networks::gasfree_network;
 use super::test_vectors::USERS;
+use super::withdraw::{submit, track, MIN_POLL_INTERVAL_MS, SETTLEMENT_GRACE_MS};
 use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
 use crate::eth::eth_tests::eth_coin_for_test;
 use crate::eth::{EthCoin, EthCoinType, EvmWithdrawSender};
 use crate::rpc_command::get_my_address::PathToAddress;
-use crate::rpc_command::init_withdraw::{init_withdraw, withdraw_status, WithdrawCompatRpcStatus,
+use crate::rpc_command::init_withdraw::{init_withdraw, withdraw_cancel, withdraw_status, WithdrawCompatRpcStatus,
                                         WithdrawInProgressStatus, WithdrawStatusRequest};
 use crate::{lp_register_coin, CoinProtocol, GaslessWithdrawError, MmCoinEnum, RegisterCoinParams, TransactionDetails,
             TxFeeDetails, WithdrawError, WithdrawRequest};
 use bigdecimal::BigDecimal;
-use common::{block_on, HttpStatusCode};
-use ethereum_types::H256;
+use common::{block_on, now_ms, HttpStatusCode};
+use ethereum_types::{H256, U256};
 use mm2_core::mm_ctx::{MmArc, MmCtxBuilder};
-use mm2_eth::keys::{verify_address, Signature};
+use mm2_eth::keys::{verify_address, Secret, Signature};
 use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{json, Value as Json};
@@ -49,6 +51,14 @@ const RECEIVER: &str = "TNPeeaaFB7K9cmo4uQpcU32zGK8G1NYqeL";
 const GET_GASFREE_ADDRESS: &str = "getGasFreeAddress(address)";
 const TRANSFER: &str = "transfer(address,uint256)";
 const BALANCE_OF: &str = "balanceOf(address)";
+const SUBMIT_PATH: &str = "/nile/api/v1/gasfree/submit";
+const TRACE_PATH_PREFIX: &str = "/nile/api/v1/gasfree/";
+/// The trace id of the stub provider and the hash of its transaction.
+const TRACE_ID: &str = "6c3ff67e-0bf4-4c09-91ca-0c7c254b01a0";
+/// The advice the error of a submission with an unknown outcome ends with.
+const MAYBE_ACCEPTED: &str = "The provider may have accepted the transfer; check the GasFree address balance and its \
+                              history before trying again";
+const TXN_HASH: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 /// The provider's fees of the stub, in the smallest unit of the 6-decimal token: 2 and 1 tokens.
 const TRANSFER_FEE: u64 = 2_000_000;
 const ACTIVATE_FEE: u64 = 1_000_000;
@@ -225,8 +235,198 @@ fn node_over(chain: Arc<Mutex<Chain>>) -> StubNode {
     })
 }
 
-fn provider_over(provider: Arc<Mutex<Provider>>) -> StubNode {
-    StubNode::start(move |path, _| {
+/// One answer of the stub provider to a trace call.
+#[derive(Clone)]
+enum Trace {
+    /// The record of the submitted transfer in this `state`, with this `txnHash` and this `txnState`.
+    Record(&'static str, Option<&'static str>, Option<&'static str>),
+    /// This status and body.
+    Raw(u16, &'static str),
+}
+
+/// What the stub provider answers to the submit and trace calls.
+#[derive(Clone)]
+struct Relay {
+    /// The answer to a submit call, when it is not the record of the submitted transfer in the state `WAITING`.
+    submit_raw: Option<(u16, &'static str)>,
+    /// How long the answer to a submit call takes, in milliseconds.
+    submit_delay_ms: u64,
+    /// Members that replace those of the record in the answer to a submit call.
+    submit_patch: Json,
+    /// Whether the records have the shape the provider sends on the Nile test network instead of the shape of its
+    /// published API: see [`to_live_shape`].
+    live_shape: bool,
+    /// The answers to the trace calls, one per call; the last one repeats.
+    trace: Vec<Trace>,
+    /// The body of the last submit call.
+    submitted: Option<Json>,
+    /// The number of trace calls answered since `trace` was set.
+    traced: usize,
+}
+
+impl Relay {
+    /// A provider that takes the submission and reports the transfer as settled at the first trace call.
+    fn usual() -> Self {
+        Relay {
+            submit_raw: None,
+            submit_delay_ms: 0,
+            submit_patch: json!({}),
+            live_shape: false,
+            trace: vec![Trace::Record("SUCCEED", Some(TXN_HASH), Some("ON_CHAIN"))],
+            submitted: None,
+            traced: 0,
+        }
+    }
+
+    fn set_trace(&mut self, trace: Vec<Trace>) {
+        self.trace = trace;
+        self.traced = 0;
+    }
+}
+
+/// Rewrites `record` into the shape the provider sends on the Nile test network: the times as Unix milliseconds,
+/// the integers as numbers, the fee estimate without the `d`, no `version`. A trace answer (`trace`) also has no
+/// `signature`, `maxFee` and `updatedAt`, and carries the transaction members it does not know yet as `""`.
+fn to_live_shape(record: &mut Json, trace: bool) {
+    let Some(object) = record.as_object_mut() else { return };
+    for (member, millis) in [
+        ("createdAt", 1_795_354_473_207u64),
+        ("updatedAt", 1_795_354_473_300),
+        ("expiredAt", 1_795_354_773_000),
+    ] {
+        object.insert(member.to_owned(), json!(millis));
+    }
+    for member in ["amount", "maxFee", "nonce"] {
+        let number = object[member].as_str().and_then(|text| text.parse::<u64>().ok());
+        if let Some(number) = number {
+            object.insert(member.to_owned(), json!(number));
+        }
+    }
+    object.remove("version");
+    if let Some(fee) = object.remove("estimatedTransferFee") {
+        object.insert("estimateTransferFee".to_owned(), fee);
+    }
+    if trace {
+        for member in ["signature", "maxFee", "updatedAt"] {
+            object.remove(member);
+        }
+        for member in [
+            "txnHash",
+            "txnState",
+            "txnBlockNum",
+            "txnBlockTimestamp",
+            "txnTotalCost",
+        ] {
+            object.entry(member).or_insert(json!(""));
+        }
+    }
+}
+
+/// The success envelope with the provider's record of the transfer the submit body `submitted` asks for. `live`
+/// is `None` for the shape of the published API, and says whether the record is a trace answer for the shape of
+/// [`to_live_shape`].
+fn transfer_envelope(
+    submitted: &Json,
+    state: &str,
+    txn_hash: Option<&str>,
+    txn_state: Option<&str>,
+    patch: &Json,
+    live: Option<bool>,
+) -> String {
+    let custody = submitted["user"]
+        .as_str()
+        .and_then(|user| TronAddress::from_base58(user).ok())
+        .map(|user| gasfree_custody_address(&Network::Nile, &user).to_base58());
+    let mut record = json!({
+        "id": TRACE_ID,
+        "createdAt": "2026-11-22T10:00:00.000Z",
+        "updatedAt": "2026-11-22T10:00:01.000Z",
+        "expiredAt": "2026-11-22T10:05:00.000Z",
+        "accountAddress": submitted["user"],
+        "gasFreeAddress": custody,
+        "providerAddress": submitted["serviceProvider"],
+        "targetAddress": submitted["receiver"],
+        "tokenAddress": submitted["token"],
+        "amount": submitted["value"],
+        "maxFee": submitted["maxFee"],
+        "signature": submitted["sig"],
+        "nonce": submitted["nonce"],
+        "version": 1,
+        "estimatedActivateFee": 0,
+        "estimatedTransferFee": TRANSFER_FEE,
+        "state": state
+    });
+    if let Some(txn_hash) = txn_hash {
+        record["txnHash"] = json!(txn_hash);
+    }
+    if let Some(txn_state) = txn_state {
+        record["txnState"] = json!(txn_state);
+    }
+    for (member, value) in patch.as_object().expect("an object").iter() {
+        record[member] = value.clone();
+    }
+    if let Some(trace) = live {
+        to_live_shape(&mut record, trace);
+    }
+    json!({ "code": 200, "reason": null, "message": "", "data": record }).to_string()
+}
+
+/// The stub provider's answer to a submit call with `body`.
+fn submit_reply(relay: &Mutex<Relay>, body: &str) -> Reply {
+    let submitted: Json = serde_json::from_str(body).unwrap_or(Json::Null);
+    let script = {
+        let mut relay = relay.lock().unwrap_or_else(|e| e.into_inner());
+        relay.submitted = Some(submitted.clone());
+        relay.clone()
+    };
+    std::thread::sleep(Duration::from_millis(script.submit_delay_ms));
+    match script.submit_raw {
+        Some((status, body)) => Reply::status(status, body),
+        None => Reply::ok(&transfer_envelope(
+            &submitted,
+            "WAITING",
+            None,
+            None,
+            &script.submit_patch,
+            script.live_shape.then_some(false),
+        )),
+    }
+}
+
+/// The stub provider's answer to a trace call.
+fn trace_reply(relay: &Mutex<Relay>) -> Reply {
+    let (step, submitted, live) = {
+        let mut relay = relay.lock().unwrap_or_else(|e| e.into_inner());
+        let index = relay.traced.min(relay.trace.len().saturating_sub(1));
+        relay.traced += 1;
+        (
+            relay.trace.get(index).cloned(),
+            relay.submitted.clone(),
+            relay.live_shape.then_some(true),
+        )
+    };
+    match (step, submitted) {
+        (Some(Trace::Raw(status, body)), _) => Reply::status(status, body),
+        (Some(Trace::Record(state, txn_hash, txn_state)), Some(submitted)) => Reply::ok(&transfer_envelope(
+            &submitted,
+            state,
+            txn_hash,
+            txn_state,
+            &json!({}),
+            live,
+        )),
+        _ => Reply::status(404, r#"{"code":404,"message":"no such transfer"}"#),
+    }
+}
+
+fn provider_over(provider: Arc<Mutex<Provider>>, relay: Arc<Mutex<Relay>>) -> StubNode {
+    StubNode::start(move |path, body| {
+        if path == SUBMIT_PATH {
+            return submit_reply(&relay, body);
+        }
+        if path.starts_with(TRACE_PATH_PREFIX) {
+            return trace_reply(&relay);
+        }
         let mode = provider.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let account = path
             .strip_prefix("/nile/api/v1/address/")
@@ -257,6 +457,8 @@ struct Setup {
     /// The value of the MM2.json switch, when the configuration has the key.
     switch: Option<Json>,
     request_timeout_ms: Option<u64>,
+    /// The provider object's `status_poll_interval_ms`.
+    status_poll_interval_ms: Option<u64>,
     /// The provider URL, when it is not the stub's.
     provider_url: Option<String>,
     api_key: &'static str,
@@ -265,7 +467,8 @@ struct Setup {
 }
 
 impl Setup {
-    /// A single-key login, a provider on the platform and a token with the gasless rail enabled and no cap.
+    /// A single-key login, a provider on the platform and a token with the gasless rail enabled and no cap. The
+    /// task route asks for a submitted transfer every 20 milliseconds.
     fn usual() -> Self {
         Setup {
             provider: true,
@@ -273,6 +476,7 @@ impl Setup {
             transfer_max_fee: None,
             switch: None,
             request_timeout_ms: None,
+            status_poll_interval_ms: Some(20),
             provider_url: None,
             api_key: API_KEY,
             hd: false,
@@ -287,6 +491,7 @@ struct Lab {
     provider: StubNode,
     chain: Arc<Mutex<Chain>>,
     provider_mode: Arc<Mutex<Provider>>,
+    relay: Arc<Mutex<Relay>>,
     platform: EthCoin,
     token: EthCoin,
 }
@@ -348,8 +553,9 @@ impl Lab {
             senders: Vec::new(),
         }));
         let provider_mode = Arc::new(Mutex::new(Provider::Account(Account::usual())));
+        let relay = Arc::new(Mutex::new(Relay::usual()));
         let node = node_over(chain.clone());
-        let provider = provider_over(provider_mode.clone());
+        let provider = provider_over(provider_mode.clone(), relay.clone());
         let ctx = if setup.hd {
             hd_ctx()
         } else {
@@ -365,6 +571,9 @@ impl Lab {
             });
             if let Some(timeout) = setup.request_timeout_ms {
                 object["request_timeout_ms"] = json!(timeout);
+            }
+            if let Some(interval) = setup.status_poll_interval_ms {
+                object["status_poll_interval_ms"] = json!(interval);
             }
             let request: TronGaslessProviderRequest = serde_json::from_value(object).expect("a provider object");
             GasFreeBinding::from_request(&Network::Nile, &request).expect("a valid provider object")
@@ -437,6 +646,7 @@ impl Lab {
             provider,
             chain,
             provider_mode,
+            relay,
             platform,
             token,
         }
@@ -447,6 +657,49 @@ impl Lab {
     }
 
     fn set_provider(&self, mode: Provider) { *self.provider_mode.lock().unwrap_or_else(|e| e.into_inner()) = mode; }
+
+    fn set_relay(&self, change: impl FnOnce(&mut Relay)) {
+        change(&mut self.relay.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// The bodies of the submit calls the provider received.
+    fn submit_calls(&self) -> Vec<Json> { self.provider.bodies_for(SUBMIT_PATH) }
+
+    /// The number of trace calls the provider received.
+    fn trace_calls(&self) -> usize {
+        self.provider
+            .requests()
+            .iter()
+            .filter(|(path, _)| path != SUBMIT_PATH && path.starts_with(TRACE_PATH_PREFIX))
+            .count()
+    }
+
+    /// The provider binding of the platform coin.
+    fn binding(&self) -> &GasFreeBinding {
+        self.platform
+            .gasfree_platform_binding()
+            .expect("a provider binding on the platform coin")
+    }
+
+    /// An authorization of 10 tokens from the single-key sender to [`RECEIVER`] with `deadline`, signed one
+    /// second before it.
+    fn signed(&self, deadline: u64) -> SignedPermit {
+        let permit = PermitTransfer {
+            token: tron(TRC20_CONTRACT),
+            service_provider: tron(USERS[4].address),
+            user: self.sender(),
+            receiver: tron(RECEIVER),
+            value: U256::from(10_000_000u64),
+            max_fee: U256::from(TRANSFER_FEE),
+            deadline,
+            nonce: 7,
+        };
+        let secret = Secret::from_slice(&priv_key()).expect("a valid test key");
+        match sign_permit(&Network::Nile, permit, &secret, deadline - 1) {
+            Ok(signed) => signed,
+            Err(_) => panic!("the sender signs"),
+        }
+    }
 
     /// The sending address of a request without `from`.
     fn sender(&self) -> TronAddress { TronAddress::from_evm_address(self.platform.my_address) }
@@ -472,22 +725,63 @@ impl Lab {
         }
     }
 
-    /// `task::withdraw::init` and its status, polled to the terminal one. Returns the terminal status and every
-    /// progress value seen on the way, as its JSON.
-    fn task_withdraw(&self, request: WithdrawRequest) -> (WithdrawCompatRpcStatus, Vec<Json>) {
+    /// `task::withdraw::init`: the id of the started task.
+    fn start_task(&self, request: WithdrawRequest) -> u64 {
         let Ok(init) = block_on(init_withdraw(self.ctx.clone(), request)) else {
             panic!("the task must start")
         };
+        init.task_id
+    }
+
+    /// `task::withdraw::status` of the task `task_id`.
+    fn task_status(&self, task_id: u64) -> WithdrawCompatRpcStatus {
+        let request = WithdrawStatusRequest {
+            task_id,
+            forget_if_finished: false,
+        };
+        let Ok(status) = block_on(withdraw_status(self.ctx.clone(), request)) else {
+            panic!("the task has a status")
+        };
+        status
+    }
+
+    /// Polls the status of the task `task_id` until its progress value, as JSON, has the member `phase`.
+    fn wait_for_phase(&self, task_id: u64, phase: &str) {
+        let started = Instant::now();
+        loop {
+            if let WithdrawCompatRpcStatus::InProgress(progress) = self.task_status(task_id) {
+                if serde_json::to_value(progress)
+                    .expect("a progress value")
+                    .get(phase)
+                    .is_some()
+                {
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the task did not reach the phase"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The error a task withdraw of `request` ends with.
+    fn task_refused(&self, request: WithdrawRequest) -> WithdrawError {
+        match self.task_withdraw(request).0 {
+            WithdrawCompatRpcStatus::Error(error) => error,
+            _ => panic!("the task must end with an error"),
+        }
+    }
+
+    /// `task::withdraw::init` and its status, polled to the terminal one. Returns the terminal status and every
+    /// progress value seen on the way, as its JSON.
+    fn task_withdraw(&self, request: WithdrawRequest) -> (WithdrawCompatRpcStatus, Vec<Json>) {
+        let task_id = self.start_task(request);
         let started = Instant::now();
         let mut progress = Vec::new();
         loop {
-            let request = WithdrawStatusRequest {
-                task_id: init.task_id,
-                forget_if_finished: false,
-            };
-            let Ok(status) = block_on(withdraw_status(self.ctx.clone(), request)) else {
-                panic!("the task has a status")
-            };
+            let status = self.task_status(task_id);
             match status {
                 WithdrawCompatRpcStatus::InProgress(phase) => {
                     let phase = serde_json::to_value(phase).expect("a progress value");
@@ -633,8 +927,13 @@ fn the_name_check_finds_a_repeated_name() {
 // T15, T16, the signature: the sign-only result
 // ---------------------------------------------------------------------------------------------------------------
 
-/// The checks of T15 and T16 on the answer text `text` of a gasless withdraw of 10 tokens from `sender`.
-fn assert_sign_only_result(text: &str, sender: &str) {
+/// The checks of T15 and T16 on the answer text `text` of a sign-only gasless withdraw of 10 tokens from `sender`.
+fn assert_sign_only_result(text: &str, sender: &str) { assert_rail_result(text, sender, None) }
+
+/// The checks of T15 and T16 on the answer text `text` of a gasless withdraw of 10 tokens from `sender`. `settled`
+/// is `None` for the sign-only result; for the result of a transfer the task route followed to its settlement it
+/// is the trace id and the transaction hash the result must carry (D63.9).
+fn assert_rail_result(text: &str, sender: &str, settled: Option<(&str, &str)>) {
     assert!(
         serde_json::from_str::<NoRepeatedNames>(text).is_ok(),
         "a member name is repeated"
@@ -643,14 +942,15 @@ fn assert_sign_only_result(text: &str, sender: &str) {
     let result: Json = serde_json::from_str(text).expect("JSON");
     let custody = gasfree_custody_address(&Network::Nile, &tron(sender)).to_base58();
 
-    // R25 to R28 under D63.8 (a): exactly these members, each once.
+    // R25 to R28 under D63.8 (a): exactly these members, each once; `tx_hash` beside them once the transfer is
+    // settled, and never `tx_hex`.
     let names: BTreeSet<&str> = result
         .as_object()
         .expect("an object")
         .keys()
         .map(String::as_str)
         .collect();
-    let expected: BTreeSet<&str> = [
+    let mut expected: BTreeSet<&str> = [
         "relay_type",
         "chain_id",
         "coin",
@@ -673,6 +973,10 @@ fn assert_sign_only_result(text: &str, sender: &str) {
     ]
     .into_iter()
     .collect();
+    if let Some((_, tx_hash)) = settled {
+        expected.insert("tx_hash");
+        assert_eq!(result["tx_hash"], tx_hash);
+    }
     assert_eq!(names, expected);
 
     // R26.
@@ -761,7 +1065,11 @@ fn assert_sign_only_result(text: &str, sender: &str) {
     assert_eq!(dec_of(&fee["activation_fee"]), dec("0"));
     assert_eq!(dec_of(&fee["total_token_fee"]), dec("2"));
     assert_eq!(dec_of(&fee["signed_max_fee"]), dec("2"));
-    assert!(fee.as_object().expect("an object").contains_key("trace_id") && fee["trace_id"].is_null());
+    assert!(fee.as_object().expect("an object").contains_key("trace_id"));
+    match settled {
+        Some((trace_id, _)) => assert_eq!(fee["trace_id"], trace_id),
+        None => assert!(fee["trace_id"].is_null()),
+    }
 
     // The signature: 130 lower-case hex digits, the last byte 27 or 28, recovering to the sender for the
     // typed-data hash.
@@ -783,8 +1091,9 @@ fn assert_sign_only_result(text: &str, sender: &str) {
     );
 }
 
-/// ch.63 T15, T16 without `from`: the direct method and the task answer the same members, and the task reports
-/// the quote phase.
+/// ch.63 T15, T16 without `from`: the direct method answers the sign-only result and asks the provider for the
+/// account record only; the task reports the quote phase and answers the same members with the trace id and the
+/// transaction hash of the settled transfer (D63.9).
 #[test]
 fn t15_t16_the_sign_only_result_of_a_single_key_withdraw() {
     let lab = Lab::new(Setup::usual());
@@ -802,6 +1111,11 @@ fn t15_t16_the_sign_only_result_of_a_single_key_withdraw() {
         .to_owned();
     assert!(!rendering.contains(&sig), "Debug renders the signature");
     assert_sign_only_result(&text, &sender);
+    assert!(
+        lab.submit_calls().is_empty() && lab.trace_calls() == 0,
+        "the direct method submitted or traced"
+    );
+    assert_eq!(lab.provider.requests().len(), 1);
 
     // The task: a slow provider keeps the quote phase visible.
     lab.set_provider(Provider::Slow(400));
@@ -814,14 +1128,14 @@ fn t15_t16_the_sign_only_result_of_a_single_key_withdraw() {
     let status = serde_json::to_value(&status).expect("a status");
     assert_eq!(status["status"], "Ok");
     let text = serde_json::to_string(&status["details"]).expect("the details text");
-    assert_sign_only_result(&text, &sender);
+    assert_rail_result(&text, &sender, Some((TRACE_ID, TXN_HASH)));
     // The whole status text repeats no name either.
     let status_text = serde_json::to_string(&status).expect("the status text");
     assert!(serde_json::from_str::<NoRepeatedNames>(&status_text).is_ok());
 }
 
 /// ch.63 T15, T16 with an HD `from` selector: the selected address sends and signs, `from` is the address array
-/// and no selector is in the answer.
+/// and no selector is in the answer. The task submits the authorization of the selected address.
 #[test]
 fn t15_t16_the_sign_only_result_of_an_hd_withdraw_with_from() {
     let lab = Lab::new(Setup {
@@ -841,11 +1155,59 @@ fn t15_t16_the_sign_only_result_of_an_hd_withdraw_with_from() {
         let status = serde_json::to_value(&status).expect("a status");
         assert_eq!(status["status"], "Ok");
         let text = serde_json::to_string(&status["details"]).expect("the details text");
-        assert_sign_only_result(&text, ADDRESS_1);
+        assert_rail_result(&text, ADDRESS_1, Some((TRACE_ID, TXN_HASH)));
+        let submitted = lab.submit_calls();
+        assert_eq!(submitted.last().expect("a submit call")["user"], ADDRESS_1);
     }
     // Without `from` the activated address sends.
     let direct = lab.withdrawn(gasless(json!({})));
     assert_sign_only_result(&serde_json::to_string(&direct).expect("the answer text"), ADDRESS_0);
+}
+
+/// ch.63 T19, R33: the three phases of the submission flow in their wire forms. `tx_hash` is always present.
+#[test]
+fn t19_the_submission_phases_have_their_wire_forms() {
+    let wire = |phase: WithdrawInProgressStatus| serde_json::to_string(&phase).expect("JSON");
+    assert_eq!(
+        wire(WithdrawInProgressStatus::SubmittingGaslessAuthorization),
+        r#""SubmittingGaslessAuthorization""#
+    );
+    assert_eq!(
+        wire(WithdrawInProgressStatus::WaitingForGaslessProvider {
+            trace_id: TRACE_ID.to_owned(),
+            provider_state: "INPROGRESS".to_owned(),
+        }),
+        format!(r#"{{"WaitingForGaslessProvider":{{"trace_id":"{TRACE_ID}","provider_state":"INPROGRESS"}}}}"#)
+    );
+    assert_eq!(
+        wire(WithdrawInProgressStatus::WaitingForGaslessSettlement {
+            trace_id: TRACE_ID.to_owned(),
+            tx_hash: Some(TXN_HASH.to_owned()),
+        }),
+        format!(r#"{{"WaitingForGaslessSettlement":{{"trace_id":"{TRACE_ID}","tx_hash":"{TXN_HASH}"}}}}"#)
+    );
+    assert_eq!(
+        wire(WithdrawInProgressStatus::WaitingForGaslessSettlement {
+            trace_id: TRACE_ID.to_owned(),
+            tx_hash: None,
+        }),
+        format!(r#"{{"WaitingForGaslessSettlement":{{"trace_id":"{TRACE_ID}","tx_hash":null}}}}"#)
+    );
+    // In the task status the phase is the `details` of an `InProgress` status.
+    let status = serde_json::to_value(WithdrawCompatRpcStatus::InProgress(
+        WithdrawInProgressStatus::WaitingForGaslessSettlement {
+            trace_id: TRACE_ID.to_owned(),
+            tx_hash: None,
+        },
+    ))
+    .expect("a status");
+    assert_eq!(
+        status,
+        json!({
+            "status": "InProgress",
+            "details": { "WaitingForGaslessSettlement": { "trace_id": TRACE_ID, "tx_hash": null } }
+        })
+    );
 }
 
 /// §63.3.6, D63.2 (a): the two phases the sign-only path emits have the reference's wire values.
@@ -1712,4 +2074,565 @@ fn a_gasless_withdraw_to_the_own_address_is_the_return_path() {
     assert_eq!(dec_of(&result["received_by_me"]), dec("10"));
     assert_eq!(dec_of(&result["spent_by_me"]), dec("12"));
     assert_eq!(dec_of(&result["my_balance_change"]), dec("-2"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// D63.9, T18 to T20: the task route submits the authorization and follows the transfer
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Whether `error` is the member `member` of the gasless family with the HTTP status `status` and names the trace
+/// id of the stub provider in its text.
+fn is_gasless_with_trace_id(error: &WithdrawError, member: &str, status: u16) -> bool {
+    wire_types(error) == ("Gasless".to_owned(), Some(member.to_owned()))
+        && error.status_code().as_u16() == status
+        && error.to_string().contains(TRACE_ID)
+}
+
+/// D63.9: the task route reports the phases in order, makes one submit request whose members are the signed
+/// ones, and answers the result with the trace id and the transaction hash. Each submission has its own version-4
+/// `requestId`. The two INFO lines carry the trace id and no secret.
+#[test]
+fn the_task_route_submits_and_follows_the_transfer_to_its_settlement() {
+    let log_captured = install_log_capture();
+    let lab = Lab::new(Setup {
+        status_poll_interval_ms: Some(150),
+        ..Setup::usual()
+    });
+    let sender = lab.sender().to_base58();
+    lab.set_relay(|relay| {
+        relay.submit_delay_ms = 300;
+        relay.set_trace(vec![
+            Trace::Record("INPROGRESS", None, Some("NOT_ON_CHAIN")),
+            Trace::Record("CONFIRMING", Some(TXN_HASH), Some("ON_CHAIN")),
+            Trace::Record("SUCCEED", Some(TXN_HASH), Some("SOLIDITY")),
+        ]);
+    });
+
+    let (status, progress) = lab.task_withdraw(gasless(json!({})));
+    let phases = [
+        json!("SubmittingGaslessAuthorization"),
+        json!({ "WaitingForGaslessProvider": { "trace_id": TRACE_ID, "provider_state": "WAITING" } }),
+        json!({ "WaitingForGaslessProvider": { "trace_id": TRACE_ID, "provider_state": "INPROGRESS" } }),
+        json!({ "WaitingForGaslessSettlement": { "trace_id": TRACE_ID, "tx_hash": TXN_HASH } }),
+    ];
+    let positions: Vec<Option<usize>> = phases
+        .iter()
+        .map(|phase| progress.iter().position(|seen| seen == phase))
+        .collect();
+    assert!(positions.iter().all(Option::is_some), "a phase is not reported");
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "the phases are out of order"
+    );
+
+    let status = serde_json::to_value(&status).expect("a status");
+    assert_eq!(status["status"], "Ok");
+    let details = &status["details"];
+    let text = serde_json::to_string(details).expect("the details text");
+    assert_rail_result(&text, &sender, Some((TRACE_ID, TXN_HASH)));
+
+    // One submit request: every member is the member of the signed authorization, the version is 1.
+    let submitted = lab.submit_calls();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(lab.trace_calls(), 3);
+    let (body, authorization) = (&submitted[0], &details["signed_authorization"]);
+    for (sent, signed) in [
+        ("token", "token"),
+        ("serviceProvider", "service_provider"),
+        ("user", "user"),
+        ("receiver", "receiver"),
+        ("value", "value"),
+        ("maxFee", "max_fee"),
+        ("deadline", "deadline"),
+        ("version", "version"),
+        ("nonce", "nonce"),
+        ("sig", "sig"),
+    ] {
+        assert!(body[sent].is_string(), "a submit member is not a string");
+        assert!(
+            body[sent] == authorization[signed],
+            "a submit member is not the signed one"
+        );
+    }
+    assert_eq!(body["version"], "1");
+    assert_eq!(body.as_object().expect("an object").len(), 11);
+    let request_id = |body: &Json| {
+        let id = uuid::Uuid::parse_str(body["requestId"].as_str().expect("a request id")).expect("a UUID");
+        assert_eq!(id.get_version_num(), 4);
+        id
+    };
+    let first_id = request_id(body);
+
+    // The next submission has another request id.
+    lab.set_relay(|relay| relay.set_trace(vec![Trace::Record("SUCCEED", Some(TXN_HASH), None)]));
+    let (status, _) = lab.task_withdraw(gasless(json!({})));
+    assert!(
+        matches!(status, WithdrawCompatRpcStatus::Ok(_)),
+        "the second task succeeds"
+    );
+    let submitted = lab.submit_calls();
+    assert_eq!(submitted.len(), 2);
+    assert!(request_id(&submitted[1]) != first_id, "a request id is reused");
+
+    if log_captured {
+        let lines = captured_log_lines();
+        let sig = body["sig"].as_str().expect("a string");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("GasFree submission is being sent")
+                    && line.contains(TOKEN)
+                    && line.contains(&sender)
+                    && line.contains(RECEIVER)
+                    && line.contains(&first_id.to_string())),
+            "the sending of the submission is not logged"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("GasFree transfer submitted")
+                && line.contains(TRACE_ID)
+                && line.contains(TOKEN)
+                && line.contains(&sender)
+                && line.contains(RECEIVER)),
+            "the submission is not logged"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(TRACE_ID) && line.contains("settled") && line.contains(TXN_HASH)),
+            "the settlement is not logged"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains(sig) && !line.contains(API_KEY) && !line.contains(API_SECRET)),
+            "a log line carries a signature or a credential"
+        );
+    }
+}
+
+/// D63.9: `state` `FAILED` and `txnState` `ON_CHAIN_FAILED`, in a trace answer or in the answer to the submission,
+/// end the task with `ProviderRejected` (502) and the trace id; a settled transfer without a hash cannot be used.
+#[test]
+fn a_failed_transfer_ends_the_task_and_names_the_trace_id() {
+    let lab = Lab::new(Setup::usual());
+    for trace in [
+        vec![Trace::Record("FAILED", None, None)],
+        vec![
+            Trace::Record("WAITING", None, Some("INIT")),
+            Trace::Record("CONFIRMING", Some(TXN_HASH), Some("ON_CHAIN_FAILED")),
+        ],
+        vec![Trace::Record("SUCCEED", Some(TXN_HASH), Some("ON_CHAIN_FAILED"))],
+    ] {
+        lab.set_relay(|relay| relay.set_trace(trace));
+        let error = lab.task_refused(gasless(json!({})));
+        assert!(
+            is_gasless_with_trace_id(&error, "ProviderRejected", 502),
+            "a failed transfer"
+        );
+        assert_no_credential(&format!("{error} {error:?}"));
+    }
+
+    // The answer to the submission says so itself: no trace request follows.
+    let traced = lab.trace_calls();
+    for patch in [json!({ "state": "FAILED" }), json!({ "txnState": "ON_CHAIN_FAILED" })] {
+        lab.set_relay(|relay| relay.submit_patch = patch);
+        let error = lab.task_refused(gasless(json!({})));
+        assert!(
+            is_gasless_with_trace_id(&error, "ProviderRejected", 502),
+            "a failed submission answer"
+        );
+    }
+    assert_eq!(lab.trace_calls(), traced, "a failed transfer was traced");
+
+    lab.set_relay(|relay| {
+        relay.submit_patch = json!({});
+        relay.set_trace(vec![Trace::Record("SUCCEED", None, None)]);
+    });
+    let error = lab.task_refused(gasless(json!({})));
+    assert!(
+        is_gasless_with_trace_id(&error, "InvalidProviderResponse", 502),
+        "a settled transfer without a transaction"
+    );
+}
+
+/// D63.9 item 3: an answer to the submission whose nonce, version, sender, receiver, token or amount is not the
+/// signed one, or whose id is no UUID, is `InvalidProviderResponse` (502); nothing is traced.
+#[test]
+fn a_submission_answer_that_differs_from_the_signed_values_is_not_trusted() {
+    let lab = Lab::new(Setup::usual());
+    let sender = lab.sender().to_base58();
+    let patches = [
+        json!({ "nonce": 8 }),
+        json!({ "accountAddress": RECEIVER }),
+        json!({ "targetAddress": sender }),
+        json!({ "tokenAddress": USERS[3].address }),
+        json!({ "amount": "10000001" }),
+        json!({ "version": 2 }),
+        json!({ "id": "not a uuid" }),
+    ];
+    let cases = patches.len();
+    for patch in patches {
+        lab.set_relay(|relay| relay.submit_patch = patch);
+        let error = lab.task_refused(gasless(json!({})));
+        assert_eq!(
+            wire_types(&error),
+            ("Gasless".to_owned(), Some("InvalidProviderResponse".to_owned()))
+        );
+        assert_eq!(error.status_code().as_u16(), 502);
+        assert!(error.to_string().contains(MAYBE_ACCEPTED), "the advice is missing");
+        assert_no_credential(&format!("{error} {error:?}"));
+    }
+    assert_eq!(lab.submit_calls().len(), cases, "a submission was repeated");
+    assert_eq!(lab.trace_calls(), 0, "an untrusted transfer was traced");
+}
+
+/// D63.9 item 4: an authorization whose deadline has passed is `QuoteExpired` (400) and nothing is sent; the
+/// sender's lock is free again.
+#[test]
+fn an_authorization_past_its_deadline_is_not_submitted() {
+    let lab = Lab::new(Setup::usual());
+    let binding = lab.binding();
+    let lock = binding.sender_lock(&lab.sender());
+    for age_s in [0, 5] {
+        let signed = lab.signed(now_ms() / 1000 - age_s);
+        let guard = block_on(lock.lock());
+        let Err(error) = block_on(submit(binding, &signed, guard, None, TOKEN, &dec("10"))) else {
+            panic!("an expired authorization must be refused")
+        };
+        assert_eq!(
+            wire_types(&error),
+            ("Gasless".to_owned(), Some("QuoteExpired".to_owned()))
+        );
+        assert_eq!(error.status_code().as_u16(), 400);
+        assert!(
+            !error.to_string().contains(MAYBE_ACCEPTED),
+            "nothing was sent, and the text says the provider may have accepted"
+        );
+        assert!(lock.try_lock().is_some(), "the sender's lock is still held");
+    }
+    assert!(lab.provider.requests().is_empty(), "the provider was asked");
+}
+
+/// D63.9 item 7: no trace request is made at or after the bound; the task then ends with `Transport`, whose text
+/// names the trace id and says that the outcome is unknown. The rail's bound is the deadline plus 120 seconds.
+#[test]
+fn the_wait_is_bounded_and_its_end_names_the_trace_id() {
+    assert_eq!(SETTLEMENT_GRACE_MS, 120_000);
+    let lab = Lab::new(Setup {
+        status_poll_interval_ms: Some(50),
+        ..Setup::usual()
+    });
+    lab.set_relay(|relay| relay.set_trace(vec![Trace::Record("INPROGRESS", None, None)]));
+    let binding = lab.binding();
+    let lock = binding.sender_lock(&lab.sender());
+    let signed = lab.signed(now_ms() / 1000 + 300);
+    let guard = block_on(lock.lock());
+    let Ok(submitted) = block_on(submit(binding, &signed, guard, None, TOKEN, &dec("10"))) else {
+        panic!("the provider takes the submission")
+    };
+    assert_eq!(submitted.trace_id, TRACE_ID);
+
+    let started = Instant::now();
+    let Err(error) = block_on(track(binding, submitted, now_ms() + 2_500, None)) else {
+        panic!("the transfer must not settle")
+    };
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(&error, WithdrawError::Transport(text) if text.contains(TRACE_ID) && text.contains("unknown")),
+        "the end of the wait"
+    );
+    assert_eq!(error.status_code().as_u16(), 502);
+    assert!(
+        elapsed >= Duration::from_millis(2_400) && elapsed < Duration::from_secs(5),
+        "the wait did not end at its bound"
+    );
+    let polls = lab.trace_calls();
+    assert_eq!(polls, 2, "the transfer was not traced once a second");
+    std::thread::sleep(Duration::from_millis(1_300));
+    assert_eq!(lab.trace_calls(), polls, "the transfer was traced after the bound");
+}
+
+/// D63.9: a trace request that fails with a 5xx or a 429 is not the end; the next one is made and the transfer
+/// settles.
+#[test]
+fn a_failed_trace_request_is_followed_by_the_next_one() {
+    let log_captured = install_log_capture();
+    let lab = Lab::new(Setup::usual());
+    lab.set_relay(|relay| {
+        relay.set_trace(vec![
+            Trace::Raw(503, r#"{"code":503,"message":"maintenance"}"#),
+            Trace::Raw(429, "slow down"),
+            Trace::Record("SUCCEED", Some(TXN_HASH), Some("ON_CHAIN")),
+        ])
+    });
+    let (status, _) = lab.task_withdraw(gasless(json!({})));
+    let status = serde_json::to_value(&status).expect("a status");
+    assert_eq!(status["status"], "Ok");
+    assert_eq!(status["details"]["tx_hash"], TXN_HASH);
+    assert_eq!(lab.trace_calls(), 3);
+    assert_eq!(lab.submit_calls().len(), 1);
+    if log_captured {
+        assert!(
+            captured_log_lines()
+                .iter()
+                .any(|line| line.contains(TRACE_ID) && line.contains("a trace request failed")),
+            "the failed trace request is not logged"
+        );
+    }
+}
+
+/// ch.63 T20: a 404 of the trace request, as the HTTP status and as the envelope code, reaches the caller as
+/// `TraceNotFound` (404); a 404 of the submit request stays `ProviderRejected` (502). Another trace error that is
+/// not a passing failure ends the task with its own arm and the trace id.
+#[test]
+fn t20_a_trace_404_is_trace_not_found_and_a_submit_404_is_a_rejection() {
+    let lab = Lab::new(Setup::usual());
+    for raw in [
+        Trace::Raw(404, "Not Found"),
+        Trace::Raw(200, r#"{"code":404,"reason":"NotFound","message":"no such transfer"}"#),
+    ] {
+        let traced = lab.trace_calls();
+        lab.set_relay(|relay| relay.set_trace(vec![raw]));
+        let error = lab.task_refused(gasless(json!({})));
+        assert!(
+            is_gasless_with_trace_id(&error, "TraceNotFound", 404),
+            "an unknown trace"
+        );
+        assert_eq!(lab.trace_calls(), traced + 1, "an unknown trace was asked for again");
+    }
+
+    lab.set_relay(|relay| relay.set_trace(vec![Trace::Raw(401, r#"{"code":401,"message":"bad key"}"#)]));
+    let error = lab.task_refused(gasless(json!({})));
+    assert!(
+        matches!(&error, WithdrawError::Transport(text) if text.contains(TRACE_ID)),
+        "a refused trace request"
+    );
+    lab.set_relay(|relay| relay.set_trace(vec![Trace::Raw(400, r#"{"code":400,"message":"bad id"}"#)]));
+    let error = lab.task_refused(gasless(json!({})));
+    assert!(
+        is_gasless_with_trace_id(&error, "ProviderRejected", 502),
+        "a rejected trace request"
+    );
+
+    let (submitted, traced) = (lab.submit_calls().len(), lab.trace_calls());
+    lab.set_relay(|relay| relay.submit_raw = Some((404, r#"{"code":404,"message":"no such path"}"#)));
+    let error = lab.task_refused(gasless(json!({})));
+    assert_eq!(
+        wire_types(&error),
+        ("Gasless".to_owned(), Some("ProviderRejected".to_owned()))
+    );
+    assert_eq!(error.status_code().as_u16(), 502);
+    assert!(
+        !error.to_string().contains(MAYBE_ACCEPTED),
+        "the provider refused, and the text says it may have accepted"
+    );
+    assert_eq!(lab.submit_calls().len(), submitted + 1);
+    assert_eq!(lab.trace_calls(), traced, "a refused submission was traced");
+}
+
+/// ch.63 T18 through the task route: a submission that fails with a 5xx answer or a timeout ends the task with
+/// `Transport`; the submit request is made once and nothing is traced. The sender's lock is free afterwards.
+#[test]
+fn t18_a_failed_submission_is_not_repeated_by_the_task() {
+    let log_captured = install_log_capture();
+    let failing = Lab::new(Setup::usual());
+    failing.set_relay(|relay| relay.submit_raw = Some((503, r#"{"code":503,"message":"maintenance"}"#)));
+    let slow = Lab::new(Setup {
+        request_timeout_ms: Some(300),
+        ..Setup::usual()
+    });
+    slow.set_relay(|relay| relay.submit_delay_ms = 1_200);
+
+    for lab in [&failing, &slow] {
+        let error = lab.task_refused(gasless(json!({})));
+        assert!(
+            matches!(&error, WithdrawError::Transport(text) if text.contains(MAYBE_ACCEPTED)),
+            "a failed submission"
+        );
+        assert_eq!(error.status_code().as_u16(), 502);
+        assert_no_credential(&format!("{error} {error:?}"));
+        assert!(
+            lab.binding().sender_lock(&lab.sender()).try_lock().is_some(),
+            "the sender's lock is still held"
+        );
+    }
+    if log_captured {
+        let lines = captured_log_lines();
+        let sender = failing.sender().to_base58();
+        let warned: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("GasFree submission with an unknown outcome"))
+            .collect();
+        assert!(
+            warned.iter().any(|line| line.contains(TOKEN)
+                && line.contains(&sender)
+                && line.contains(RECEIVER)
+                && line.contains("request id")),
+            "the unknown outcome is not logged"
+        );
+        let sigs: Vec<String> = [&failing, &slow]
+            .iter()
+            .flat_map(|lab| lab.submit_calls())
+            .filter_map(|body| body["sig"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            warned.iter().all(|line| !line.contains(API_KEY)
+                && !line.contains(API_SECRET)
+                && !sigs.iter().any(|sig| line.contains(sig))),
+            "the warning carries a signature or a credential"
+        );
+    }
+    // Time for a repeated request to arrive, if one were made.
+    std::thread::sleep(Duration::from_millis(1_400));
+    for lab in [&failing, &slow] {
+        assert_eq!(lab.submit_calls().len(), 1, "the submission was repeated");
+        assert_eq!(lab.trace_calls(), 0, "a failed submission was traced");
+    }
+}
+
+/// D63.9 item 1: the sender's lock is released when the provider answered the submission; a second send from the
+/// same address takes it while the first transfer is still awaited.
+#[test]
+fn the_sender_lock_is_released_before_the_wait_for_the_settlement() {
+    let lab = Lab::new(Setup {
+        status_poll_interval_ms: Some(50),
+        ..Setup::usual()
+    });
+    lab.set_relay(|relay| relay.set_trace(vec![Trace::Record("WAITING", None, None)]));
+    let task_id = lab.start_task(gasless(json!({})));
+    lab.wait_for_phase(task_id, "WaitingForGaslessProvider");
+
+    assert!(
+        lab.binding().sender_lock(&lab.sender()).try_lock().is_some(),
+        "the sender's lock is held during the wait"
+    );
+    let second = lab.withdrawn(gasless(json!({})));
+    assert!(is_gasless(&second));
+    assert!(
+        matches!(lab.task_status(task_id), WithdrawCompatRpcStatus::InProgress(_)),
+        "the first transfer ended before the second send"
+    );
+
+    lab.set_relay(|relay| relay.set_trace(vec![Trace::Record("SUCCEED", Some(TXN_HASH), None)]));
+    let started = Instant::now();
+    while matches!(lab.task_status(task_id), WithdrawCompatRpcStatus::InProgress(_)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the first transfer did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        matches!(lab.task_status(task_id), WithdrawCompatRpcStatus::Ok(_)),
+        "the first transfer settles"
+    );
+    assert_eq!(lab.submit_calls().len(), 1);
+}
+
+/// D63.9: `task::withdraw::cancel` during the wait stops the trace requests; the submission is not repeated.
+#[test]
+fn a_cancel_during_the_wait_stops_the_trace_requests() {
+    let lab = Lab::new(Setup {
+        status_poll_interval_ms: Some(50),
+        ..Setup::usual()
+    });
+    lab.set_relay(|relay| relay.set_trace(vec![Trace::Record("WAITING", None, None)]));
+    let task_id = lab.start_task(gasless(json!({})));
+    lab.wait_for_phase(task_id, "WaitingForGaslessProvider");
+
+    let cancel = WithdrawStatusRequest {
+        task_id,
+        forget_if_finished: false,
+    };
+    assert!(
+        block_on(withdraw_cancel(lab.ctx.clone(), cancel)).is_ok(),
+        "the task is cancelled"
+    );
+    // A trace request that was under way may still arrive.
+    std::thread::sleep(Duration::from_millis(300));
+    let polls = lab.trace_calls();
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(lab.trace_calls(), polls, "a cancelled task still traces");
+    assert_eq!(lab.submit_calls().len(), 1);
+}
+
+/// D63.9: under `auto` the task route submits too, once the native rail could not be funded; the direct method
+/// does not.
+#[test]
+fn auto_on_the_task_route_submits_after_a_funding_failure_of_the_native_rail() {
+    let lab = Lab::new(Setup::usual());
+    lab.set_chain(|chain| chain.trx_sun = 0);
+    let auto = || request(TOKEN, json!({ "fee_method": "auto" }));
+
+    let direct = lab.withdrawn(auto());
+    assert!(is_gasless(&direct) && direct.tx_hash.is_empty());
+    assert!(lab.submit_calls().is_empty() && lab.trace_calls() == 0);
+
+    let (status, _) = lab.task_withdraw(auto());
+    let status = serde_json::to_value(&status).expect("a status");
+    assert_eq!(status["status"], "Ok");
+    assert_eq!(status["details"]["tx_hash"], TXN_HASH);
+    assert_eq!(status["details"]["fee_details"]["trace_id"], TRACE_ID);
+    assert_eq!(lab.submit_calls().len(), 1);
+}
+
+/// D63.9: two trace requests of one transfer are at least a second apart, also when the configured interval is 0.
+#[test]
+fn a_poll_interval_of_zero_is_raised_to_a_second() {
+    assert_eq!(MIN_POLL_INTERVAL_MS, 1_000);
+    let lab = Lab::new(Setup {
+        status_poll_interval_ms: Some(0),
+        ..Setup::usual()
+    });
+    assert_eq!(lab.binding().status_poll_interval_ms(), 0);
+    lab.set_relay(|relay| {
+        relay.set_trace(vec![
+            Trace::Record("INPROGRESS", None, None),
+            Trace::Record("SUCCEED", Some(TXN_HASH), None),
+        ])
+    });
+    let binding = lab.binding();
+    let lock = binding.sender_lock(&lab.sender());
+    let signed = lab.signed(now_ms() / 1000 + 300);
+    let guard = block_on(lock.lock());
+    let Ok(submitted) = block_on(submit(binding, &signed, guard, None, TOKEN, &dec("10"))) else {
+        panic!("the provider takes the submission")
+    };
+    let started = Instant::now();
+    let settled = block_on(track(binding, submitted, now_ms() + 30_000, None));
+    let elapsed = started.elapsed();
+    assert!(settled.is_ok(), "the transfer settles");
+    assert_eq!(lab.trace_calls(), 2);
+    assert!(
+        elapsed >= Duration::from_millis(1_900) && elapsed < Duration::from_secs(10),
+        "the trace requests are less than a second apart"
+    );
+}
+
+/// §63.4.7, status note of 2026-11-22: the task route settles a transfer whose records have the shape the
+/// provider sends on the Nile test network (the times as Unix milliseconds, a trace answer without `signature`,
+/// `maxFee`, `updatedAt` and `version`, unknown transaction members as empty strings).
+#[test]
+fn the_task_route_settles_a_transfer_with_the_records_of_the_live_provider() {
+    let lab = Lab::new(Setup::usual());
+    let sender = lab.sender().to_base58();
+    lab.set_relay(|relay| {
+        relay.live_shape = true;
+        relay.set_trace(vec![
+            Trace::Record("WAITING", None, None),
+            Trace::Record("SUCCEED", Some(TXN_HASH), Some("ON_CHAIN")),
+        ]);
+    });
+    let (status, progress) = lab.task_withdraw(gasless(json!({})));
+    let status = serde_json::to_value(&status).expect("a status");
+    assert_eq!(status["status"], "Ok");
+    let text = serde_json::to_string(&status["details"]).expect("the details text");
+    assert_rail_result(&text, &sender, Some((TRACE_ID, TXN_HASH)));
+    assert!(
+        progress
+            .contains(&json!({ "WaitingForGaslessProvider": { "trace_id": TRACE_ID, "provider_state": "WAITING" } })),
+        "the waiting phase is not reported"
+    );
+    assert_eq!(lab.submit_calls().len(), 1);
+    assert_eq!(lab.trace_calls(), 2);
 }

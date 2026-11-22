@@ -1527,6 +1527,25 @@ absence is not an error.
 > wire form of the three values in R33. §63.8B passed the KDF Dirty Gate on
 > 2026-11-21.
 
+> *Status note (2026-11-22, Reloaded-original), gasless submission on the task
+> route.* For a gasless TRON withdraw the task route now goes further than the
+> direct method: it submits the signed authorization and follows the transfer
+> ([Chapter 63](63-tron-gasfree-fee-delegation.md), the status note after
+> D63.9). Three statements of this chapter are qualified for that rail:
+>
+> - the task status vocabulary also has `SubmittingGaslessAuthorization`,
+>   `WaitingForGaslessProvider` and `WaitingForGaslessSettlement`; the last
+>   two are objects with one member, not bare strings (chapter 63 R33);
+> - the terminal payload of the task is the sign-only result with the fee
+>   details' `trace_id` filled and a top-level `tx_hash`, the hash of the
+>   provider's transaction; it has no `tx_hex`;
+> - so the direct result and the task result of R49.25 and T49.25 are not the
+>   same object on this rail: the direct method answers the sign-only result.
+>
+> `task::withdraw::cancel` (R49.24) has no gasless-specific part: before the
+> submit request is sent it stops everything, afterwards it only stops the
+> waiting.
+
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
 `withdraw` result with the `details` payload of a successful task withdrawal.
@@ -1940,6 +1959,12 @@ addresses.
   HD).* Reloaded-original, clean side: it records the balance maps of an EVM
   platform ticker as built; no forbidden-class input. No cleared sentence was
   edited.
+- *Status note added 2026-11-22 (gasless submission on the task route; after
+  the gasless submission pointer of 2026-11-21).* Reloaded-original, clean
+  side: it records, from chapter 63 and this repository's code, the three
+  task progress values, the terminal payload of the task and the difference
+  between the direct and the task result on the gasless TRON rail; no
+  forbidden-class input. No cleared sentence was edited.
 - *Scoped addition (2026-11-22, Spec Reader round 0.5.0-21) -- §49.2.2
   (R49.35 -- R49.37, the two code-quality findings, the Reloaded status
   note, T49.33 -- T49.35) and the status note of 2026-11-22 in §49.2.1.*
