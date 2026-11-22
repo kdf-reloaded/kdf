@@ -883,6 +883,17 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). Plan
   [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 2 (PR #488); CRD ch.51,
   status note of 2026-11-22 before R31.
+- **An already-sent read that cannot decide stops the payment step.** Before a legacy swap sends its payment it
+  asks the paying coin whether that payment already exists. For EVM coins and tokens, QRC20 tokens and Sia, KDF
+  Reloaded answers an error that names the condition when the answer cannot be decided, and the payment step fails
+  without a broadcast; the manual recovery gets the same error. GLEEC KDF answers these cases differently (CRD ch.39
+  §39.11.5A). No switch exists. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.39
+  D39.11.5A.1; PR #489.
+- **A swap resumed at its payment step repeats an already-sent check that cannot decide.** In KDF Reloaded, a
+  legacy swap that a restart resumes right before its payment repeats the check within a bound, and then waits
+  without sending until the payment is found or the refund deadline passes. A swap that was not resumed at this
+  step asks once. GLEEC KDF asks once (CRD ch.39 §39.11.5A). No switch exists. Row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). PR #489.
 
 - **Saved swap and order records are synced to disk when they are replaced.** Both write a saved swap through a
   temporary file and a rename. KDF Reloaded also forces the temporary file to disk before the rename and, on Unix,

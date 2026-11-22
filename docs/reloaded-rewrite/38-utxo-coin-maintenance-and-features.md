@@ -4854,6 +4854,13 @@ token's swap paths were read only for the set of methods they send
 > UTXO coin, BCH and the QTUM base coin. The rules of this chapter are
 > unchanged.
 
+> **Pointer (2026-11-22).** [Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> §39.11.5A, R39.11.5A.7, records the reference's QRC20 already-sent query:
+> the state call, the transfer-history and receipt reads, and its "not sent"
+> answer when the contract state says the payment exists but no matching
+> transaction is found. The pointer is a Spec Reader addition and passed the
+> KDF Dirty Gate with that subsection on 2026-11-22.
+
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
 events over the streaming infrastructure, registering the addresses to be watched

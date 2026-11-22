@@ -1170,6 +1170,14 @@ the previous version used. The safe way:
   value is used only when it matches the swap's secret hash. EVM coins (ETH and ERC20 tokens) also read the secret
   from the swap contract's claim event; Tendermint coins look at every message of the transaction. Detail: PR #488;
   CRD ch.51, status note of 2026-11-22 before R31.
+- **A swap's payment step stops with an error when the check for an earlier payment cannot decide.** Before a swap
+  sends its payment, it checks whether it already sent one. For EVM coins and tokens, QRC20 tokens and Sia, an
+  answer that cannot decide is now an error that names the condition, and the payment step stops as it does for any
+  other error; the manual recovery answers the same error. Detail: PR #489; CRD ch.39 §39.11.5A.
+- **A swap resumed at its payment step repeats a check for an earlier payment that cannot decide.** A swap that a
+  restart resumes right before its payment repeats the check within a bound, and then waits without sending until
+  the payment is found or the refund deadline passes. A payment it finds is taken over and the swap continues. A
+  swap that was not resumed at this step checks once, as before. Detail: PR #489; CRD ch.39 §39.11.5A.
 
 ### Tests
 
