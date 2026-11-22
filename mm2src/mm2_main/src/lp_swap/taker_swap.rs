@@ -2,7 +2,7 @@ use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, Ch
                            TakerFeeAdditionalInfo};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::stale_tip_watch::{sleep_observing_tip, StaleTipWatch};
-use super::swap_lock::{SwapLock, SwapLockOps};
+use super::swap_lock::{run_while_lock_held, SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
 use super::{already_sent_check_pubkey, check_held_htlc_key, derive_htlc_pubkeys, recover_within, recovery_key_pairs,
             resolve_recovery_htlc_key, restored_htlc_key_pair, start_htlc_key_pair, swap_node_key_pair,
@@ -398,18 +398,7 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
         },
     };
 
-    let mut touch_loop = Box::pin(
-        async move {
-            loop {
-                match swap_lock.touch().await {
-                    Ok(_) => (),
-                    Err(e) => warn!("Swap {} file lock error: {}", uuid, e),
-                };
-                Timer::sleep(30.).await;
-            }
-        }
-        .fuse(),
-    );
+    let lock_uuid = uuid;
 
     let ctx = swap.ctx.clone();
     subscribe_to_topic(&ctx, swap_topic(&swap.uuid));
@@ -423,7 +412,7 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
     let shutdown_rx = swap_ctx.shutdown_rx.clone();
     let swap_for_log = running_swap.clone();
 
-    let mut swap_fut = Box::pin(
+    let swap_fut = Box::pin(
         async move {
             let mut events;
             loop {
@@ -470,10 +459,11 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
     );
     let mut shutdown_fut = Box::pin(shutdown_rx.recv().fuse());
     let do_nothing = (); // to fix https://rust-lang.github.io/rust-clippy/master/index.html#unused_unit
+                         // Ends when the swap finishes, or, if the swap lock is lost, before the swap's next step (ch.44 R44.9A.13).
+    let mut held_swap_fut = Box::pin(run_while_lock_held(swap_fut, swap_lock, lock_uuid, 30.).fuse());
     select! {
-        _swap = swap_fut => do_nothing, // swap finished normally
+        _swap = held_swap_fut => do_nothing, // swap finished normally, or its lock was lost
         _shutdown = shutdown_fut => log!("on_stop] swap " (swap_for_log.uuid) " stopped!"),
-        _touch = touch_loop => unreachable!("Touch loop can not stop!"),
     };
 }
 

@@ -1071,6 +1071,15 @@ the previous version used. The safe way:
   holds the new file is retried briefly. A temporary `*.tmp` file left by a crash is ignored. Browser builds already
   saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3,
   ch.44 R44.8A.6 and §44.9A (status update).
+- **A swap run whose swap lock was taken over now stops.** Each swap is run by one runner, which holds a lock file
+  and refreshes it every 30 seconds. A runner that stalled for more than 40 seconds while another runner took the
+  lock over kept running and refreshing, so two runners could work on one swap, and the first one deleted the
+  other's lock when it ended. A runner now checks before each refresh that the lock file still holds the value it
+  wrote last. When the file is gone or holds another value, or when refreshing has failed for longer than 40
+  seconds, the run stops before its next step, without writing to the swap's record, and leaves the lock file to its
+  holder; the swap goes on wherever the lock is held, or at the next start. A late refresh that finds its own value
+  goes on with a warning. The lock file is now replaced in one step, so a reader never sees it empty, and its
+  content keeps the form GLEEC KDF reads. Detail: PR #480; CRD ch.51 R5 and ch.44 §44.9A (status update).
 
 ### Tests
 
