@@ -2162,6 +2162,10 @@ policy bans that crate and its resolver library (chapter 45 R45.6B.11).
 > tempfile 3.3.0 pull them. `deny.toml` holds the current list with its
 > reasons.
 
+*2026-11-22 (clean-side note): the Noise crate is vendored with `x25519-dalek 2` and `curve25519-dalek 4` (as
+upstream libp2p-noise 0.43.2, whose code equals 0.43.0), so the fork no longer pulls `curve25519-dalek 3.2`
+(RUSTSEC-2024-0344); nothing on the wire changes.*
+
 ## 28.12 External References
 
 - *libp2p* — the underlying networking substrate. The target dependency

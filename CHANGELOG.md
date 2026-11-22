@@ -706,6 +706,16 @@ the previous version used. The safe way:
 
   Detail: PR #431; CRD ch.39 R39.11.4V.10 status note.
 
+#### Transport, TLS and dependencies
+
+- **The peer-to-peer encryption no longer uses the old curve25519 library with the timing advisory.** The
+  encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
+  (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
+  (`x25519-dalek` 2, `curve25519-dalek` 4). The handshake itself is unchanged, byte for byte, and nodes running
+  older versions connect as before. The advisory stays listed in `deny.toml` for now, because the Solana
+  libraries still bring the old library into the build. Detail: CRD ch.28 OQ2 status note of 2026-11-22;
+  `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
+
 ### Fixed
 
 #### EVM, BCH, Sia and Lightning coins

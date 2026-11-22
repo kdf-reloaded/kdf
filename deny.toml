@@ -92,6 +92,10 @@ ignore = [
     # Old ed25519/curve25519 persist through the Solana SDK, independent of
     # libp2p; cleared only by an upstream Solana SDK bump.
     "RUSTSEC-2022-0093", # ed25519-dalek 1.x (double public key signing oracle)
+    # RUSTSEC-2024-0344: the libp2p Noise path is cleared (libp2p-noise is vendored
+    # on x25519-dalek 2 / curve25519-dalek 4); only the Solana crates
+    # (solana-keypair, solana-signature -> ed25519-dalek 1.x) still pull
+    # curve25519-dalek 3.2.
     "RUSTSEC-2024-0344", # curve25519-dalek (timing variability)
 
     # --- EC stack (crypto-bigint 0.5.5 via elliptic-curve 0.13) ---
