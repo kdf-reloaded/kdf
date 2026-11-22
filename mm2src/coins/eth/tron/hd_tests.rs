@@ -485,13 +485,26 @@ fn a_trc20_ticker_answers_its_own_ticker_only_and_its_scan_finds_a_token_only_ad
             assert_eq!(tickers_of(&address.balance), ["USDT-TRC20"]);
         }
         assert_eq!(of_token.addresses[2].address, ADDRESS_2);
-        assert_eq!(of_token.page_balance.spendable, "1.234567".parse().expect("a decimal"));
+        assert_eq!(tickers_of(&of_token.page_balance), ["USDT-TRC20"]);
+        assert_eq!(
+            of_token.page_balance["USDT-TRC20"].spendable,
+            "1.234567".parse().expect("a decimal")
+        );
         let of_platform = balances(platform.clone()).await;
         assert_eq!(of_platform.addresses.len(), 5);
         for address in &of_platform.addresses {
             assert_eq!(tickers_of(&address.balance), ["TRX", "USDT-TRC20"]);
         }
-        assert_eq!(of_platform.page_balance.spendable, "2.5".parse().expect("a decimal"));
+        // The page total sums each ticker the entries carry (CRD ch.49 R49.35 item 1).
+        assert_eq!(tickers_of(&of_platform.page_balance), ["TRX", "USDT-TRC20"]);
+        assert_eq!(
+            of_platform.page_balance["TRX"].spendable,
+            "2.5".parse().expect("a decimal")
+        );
+        assert_eq!(
+            of_platform.page_balance["USDT-TRC20"].spendable,
+            "1.234567".parse().expect("a decimal")
+        );
     });
 }
 

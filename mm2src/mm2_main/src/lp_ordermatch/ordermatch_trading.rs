@@ -573,6 +573,14 @@ impl BalanceUpdateOrdermatchHandler {
                 if order.base != coin.ticker() {
                     continue;
                 }
+                // CRD ch.60 R60.6.5: an order whose pair cannot trade, by the startup's mark or by the check on its
+                // active coins, is neither resized nor cancelled here, so nothing about it is published.
+                if ordermatch_ctx
+                    .order_is_untradable_by_tickers(&ctx, "Maker", &order.uuid, &order.base, &order.rel)
+                    .await
+                {
+                    continue;
+                }
 
                 // This checks that the order hasn't been removed by another process
                 let cancelled = if new_volume < order.min_base_vol {
@@ -1357,10 +1365,19 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
     let mut max_vols: HashMap<String, Result<MmNumber, String>> = HashMap::new();
     let mut reads = Vec::new();
     for (uuid, order_mutex, base_ticker, rel_ticker) in missing_orders {
+        // CRD ch.60 R60.6.5: an order the startup found untradable costs no lookup and no read.
+        if ordermatch_ctx.is_kept_untradable(&uuid) {
+            continue;
+        }
         let (base, rel) = match find_pair(ctx, &base_ticker, &rel_ticker).await {
             Ok(Some(pair)) => pair,
             _ => continue,
         };
+        // CRD ch.60 R60.6.5: the check of order creation, on the active coins, before any balance is read: an
+        // order of a pair that cannot trade is not announced, and it is not cancelled either.
+        if ordermatch_ctx.order_is_untradable(ctx, "Maker", &uuid, &base, &rel) {
+            continue;
+        }
         if !max_vols.contains_key(&base_ticker) {
             let max_vol = match base.my_spendable_balance().compat().await {
                 Ok(current_balance) => {
@@ -1500,8 +1517,11 @@ pub(crate) async fn handle_timed_out_taker_orders(ctx: MmArc, ordermatch_ctx: &O
                 .error_log_with_msg("!update_was_taker_in_filtering_history");
         }
 
-        // notify other peers
+        // notify other peers, unless the pair cannot trade (CRD ch.60 R60.6.5)
         if let Ok(Some((base, rel))) = find_pair(&ctx, &maker_order.base, &maker_order.rel).await {
+            if ordermatch_ctx.order_is_untradable(&ctx, "Maker", &maker_order.uuid, &base, &rel) {
+                continue;
+            }
             maker_order_created_p2p_notify(
                 ctx.clone(),
                 &maker_order,
@@ -1524,6 +1544,14 @@ pub(crate) async fn check_balance_for_maker_orders(ctx: MmArc, ordermatch_ctx: &
         let cancelled = {
             let order = order.lock().await;
             if order.available_amount() >= order.min_base_vol || order.has_ongoing_matches() {
+                continue;
+            }
+            // CRD ch.60 R60.6.5: an order whose pair cannot trade, by the startup's mark or by the check on its
+            // active coins, is not cancelled for its volume.
+            if ordermatch_ctx
+                .order_is_untradable_by_tickers(&ctx, "Maker", &order.uuid, &order.base, &order.rel)
+                .await
+            {
                 continue;
             }
 
@@ -1586,6 +1614,10 @@ pub(crate) async fn process_maker_reserved(ctx: MmArc, from_pubkey: H256Json, re
             return;
         }
     }
+    // CRD ch.60 R60.6.5: a taker order kept although its pair cannot trade is not matched.
+    if ordermatch_ctx.is_kept_untradable(&reserved_msg.taker_order_uuid) {
+        return;
+    }
 
     let our_public_id = ctx.public_id().unwrap();
     if our_public_id.bytes == from_pubkey.0 {
@@ -1621,6 +1653,12 @@ pub(crate) async fn process_maker_reserved(ctx: MmArc, from_pubkey: H256Json, re
         _ => return, // attempt to match with deactivated coin
     };
     let mut pending_map = ordermatch_ctx.pending_maker_reserved.lock().await;
+    // CRD ch.60 R60.6.5: the check of order creation, on the active coins: no connect message is sent for a pair
+    // that cannot trade, and the reservations collected for the order are dropped.
+    if ordermatch_ctx.order_is_untradable(&ctx, "Taker", &uuid, &base_coin, &rel_coin) {
+        pending_map.remove(&uuid);
+        return;
+    }
     if let Some(mut reserved_messages) = pending_map.remove(&uuid) {
         reserved_messages.sort_unstable_by_key(|r| r.price());
 
@@ -1706,6 +1744,27 @@ pub(crate) async fn process_maker_connected(ctx: MmArc, from_pubkey: H256Json, c
         Entry::Occupied(e) => e,
         Entry::Vacant(_) => return,
     };
+    // CRD ch.60 R60.6.5: a taker order whose pair cannot trade, by the startup's mark or by the check on its active
+    // coins, starts no swap, whatever match it holds.
+    let (maker_coin_ticker, taker_coin_ticker) = {
+        let my_order = my_order_entry.get();
+        (
+            my_order.maker_coin_ticker().to_owned(),
+            my_order.taker_coin_ticker().to_owned(),
+        )
+    };
+    if ordermatch_ctx
+        .order_is_untradable_by_tickers(
+            &ctx,
+            "Taker",
+            &connected.taker_order_uuid,
+            &maker_coin_ticker,
+            &taker_coin_ticker,
+        )
+        .await
+    {
+        return;
+    }
     let order_match = match my_order_entry.get().matches.get(&connected.maker_order_uuid) {
         Some(o) => o,
         None => {
@@ -1764,6 +1823,12 @@ pub(crate) async fn process_taker_request(ctx: MmArc, from_pubkey: H256Json, tak
                 Ok(Some(c)) => c,
                 _ => return, // attempt to match with deactivated coin
             };
+
+            // CRD ch.60 R60.6.5: the check of order creation, on the active coins: an order of ours whose pair
+            // cannot trade gets no reservation. It is kept, not cancelled.
+            if ordermatch_ctx.order_is_untradable(&ctx, "Maker", uuid, &base_coin, &rel_coin) {
+                return;
+            }
 
             // CRD ch.05 R37, R39: an order of ours whose swap key is not the key it pays from gets no
             // reservation; it is cancelled as any cancellation is, and peers see the cancellation.
@@ -1864,6 +1929,14 @@ pub(crate) async fn process_taker_connect(ctx: MmArc, sender_pubkey: H256Json, c
         }
     };
     let mut my_order = order_mutex.lock().await;
+    // CRD ch.60 R60.6.5: a maker order whose pair cannot trade, by the startup's mark or by the check on its active
+    // coins, starts no swap, whatever match it holds.
+    if ordermatch_ctx
+        .order_is_untradable_by_tickers(&ctx, "Maker", &my_order.uuid, &my_order.base, &my_order.rel)
+        .await
+    {
+        return;
+    }
     let order_match = match my_order.matches.get_mut(&connect_msg.taker_order_uuid) {
         Some(o) => o,
         None => {
@@ -3164,6 +3237,8 @@ async fn update_maker_order_impl(
     // the order's other changes. An order that was cancelled in the meantime has announced its cancellation.
     let order = order_mutex.lock().await;
     // CRD ch.59 R59.4.6: an update that changes nothing peers see is not broadcast.
+    // CRD ch.60 R60.6.5: an order of a pair that cannot trade was never announced, so its update is not either.
+    let broadcast = broadcast && !ordermatch_ctx.order_is_untradable(ctx, "Maker", &req.uuid, &base_coin, &rel_coin);
     if broadcast && ordermatch_ctx.maker_orders_ctx.lock().contains_key(&req.uuid) {
         // CRD ch.12 R7a: every value the message carries is the order's state now, not the one the update was
         // computed from, because another path (the balance handler, a negotiation) may have changed the order
@@ -3785,29 +3860,11 @@ pub struct HistoricalOrder {
     pub(crate) conf_settings: Option<OrderConfirmationsSettings>,
 }
 
-/// The log line for a saved order that must be cancelled at startup because it involves a coin of a family whose
-/// swaps are switched off in this build; `None` when the order is kept. The families are Tendermint (platform coin
-/// or token) while [`coins::TENDERMINT_SWAPS_AVAILABLE`] is `false`, and TRON (TRX or TRC20) while
-/// [`coins::TRON_SWAPS_AVAILABLE`] is `false` (CRD ch.21 R-D1). The coins configuration decides, so the coins do
-/// not have to be activated yet.
-pub(super) fn swaps_off_order_cancel_message(
-    ctx: &MmArc,
-    kind: &str,
-    uuid: &Uuid,
-    base: &str,
-    rel: &str,
-) -> Option<String> {
-    let family_switched_off = |ticker: &str| match coin_conf(ctx, ticker)["protocol"]["type"].as_str() {
-        Some("TENDERMINT" | "TENDERMINTTOKEN") if !coins::TENDERMINT_SWAPS_AVAILABLE => Some("Tendermint"),
-        Some("TRX" | "TRC20") if !coins::TRON_SWAPS_AVAILABLE => Some("TRON"),
-        _ => None,
-    };
-    let family = family_switched_off(base).or_else(|| family_switched_off(rel))?;
-    Some(format!(
-        "Cancelled saved {kind} order {uuid} ({base}/{rel}): {family} swaps are not available in this build"
-    ))
-}
-
+/// Restores the saved active orders. An order of a pair this build cannot trade is restored like any other, so
+/// `my_orders` lists it and `cancel_order` removes it, but it is marked so that it is never announced or matched,
+/// and one INFO line names it (CRD ch.60 R60.6.5). No coin is active here, so the coins configuration decides
+/// ([`untradable_pair_by_conf`]). The coins of such an order are among the coins the kick-start needs, as those of
+/// any other restored order.
 pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
     let mut coins = HashSet::new();
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
@@ -3837,18 +3894,15 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
                 continue;
             }
         }
-        if let Some(message) = swaps_off_order_cancel_message(ctx, "maker", &order.uuid, &order.base, &order.rel) {
-            log::info!("{}", message);
-            delete_my_maker_order(ctx.clone(), order, MakerOrderCancellationReason::Cancelled)
-                .compat()
-                .await
-                .ok();
-            continue;
-        }
+        let untradable = ordermatch_ctx.keep_untradable_saved_order(ctx, "Maker", &order.uuid, &order.base, &order.rel);
         coins.insert(order.base.clone());
         coins.insert(order.rel.clone());
         let order_arc = Arc::new(AsyncMutex::new(order.clone()));
         ordermatch_ctx.maker_orders_ctx.lock().add_order(&order, order_arc);
+        if untradable {
+            // No balance is ever read for it, so it starts no watch.
+            continue;
+        }
         // CRD ch.60 R60.4.6 item 4: the watch of the base coin starts unseeded, no balance is read here.
         start_maker_balance_watch(ctx, &ordermatch_ctx, &order.base, None);
     }
@@ -3856,15 +3910,7 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
     let mut taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
     for order in saved_taker_orders {
         let request = &order.request;
-        if let Some(message) = swaps_off_order_cancel_message(ctx, "taker", &request.uuid, &request.base, &request.rel)
-        {
-            log::info!("{}", message);
-            delete_my_taker_order(ctx.clone(), order, TakerOrderCancellationReason::Cancelled)
-                .compat()
-                .await
-                .ok();
-            continue;
-        }
+        ordermatch_ctx.keep_untradable_saved_order(ctx, "Taker", &request.uuid, &request.base, &request.rel);
         coins.insert(order.request.base.clone());
         coins.insert(order.request.rel.clone());
         taker_orders.insert(order.request.uuid, order);

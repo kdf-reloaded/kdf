@@ -513,6 +513,16 @@ used-address rule and the listed entries of the scan that runs at
 activation (R49.36), and what remains recorded when the balance query of a
 newly generated address fails (R49.37). No sentence above was changed.
 
+*Status note (2026-11-22), the task form of `get_new_address` and Sia under
+HD (Spec Reader round 0.5.0-26; passed the KDF Dirty Gate with §49.2.3).*
+R49.32 and R49.33 name `task::get_new_address::init` without its wire form,
+and R49.37 item 4 gives only its precondition and order. The request, the
+status values with the device-confirmation state, cancel, the error set and
+the show-on-display rule of the reference are recorded in §49.2.3 below
+(R49.38 -- R49.42). The same subsection records that the reference serves
+no HD account method for a Sia coin (R49.43). No sentence above was
+changed.
+
 > **Code-quality finding (informative; this repository).** The Trezor
 > emulator test that stands for T49.9 builds the ERC-20 coin directly with
 > an HD derivation instead of activating it on a Trezor platform. It
@@ -723,6 +733,76 @@ R49.37. *A new address whose balance query fails (reference contract).*
 > This repository has no `task::get_new_address::init` (chapter 21, the
 > Reloaded note after R21.10B.4).
 
+*Status note (2026-11-22), per-ticker totals, the scan at activation and the
+rescan (as built; clean side, not corpus-sourced).* The points the Reloaded
+status above lists as open are built, with two recorded divergences that the
+maintainer decided on 2026-11-22.
+
+- *R49.35, the totals.* `page_balance` of `account_balance` is a ticker-keyed
+  map for every HD family (`HDAccountBalanceResponse.page_balance` is a
+  `CoinBalanceMap`). Each ticker the page's entries carry is summed over the
+  returned page, and a ticker whose sum is zero stays present. A UTXO, QTUM or
+  Sia coin answers its own ticker. An EVM platform ticker answers the platform
+  and every ERC-20 token registered on it at call time (R49.32 item 1); a TRX
+  ticker answers TRX and its enabled TRC20 tokens; an ERC-20 or TRC20 ticker
+  answers that token alone. `total_balance` of `task::account_balance::init`
+  sums every ticker over the addresses it reports: the external chain on an EVM
+  coin, which has no other, and both chains on a UTXO coin, whose answer lists
+  both. The `total_balance` of an activation report is formed the same way over
+  the entries the report lists; an entry with an empty map adds nothing.
+  *Divergence:* where R49.35 answers `{}` -- a page that lists no address, and
+  the `total_balance` of an account with no known address -- this repository
+  answers a one-entry map with the requested coin's ticker and a zero balance,
+  which keeps chapter 38 R38.8.5. A caller reads a ticker's balance from
+  `page_balance["<TICKER>"]`, and the change is breaking for the members
+  `spendable` and `unspendable` that used to sit directly under `page_balance`.
+- *R49.36, the scan at activation.* `enable_eth_with_tokens` and
+  `task::enable_eth::init` of an EVM (non-TRON) platform scan with the
+  used-address rule of R49.32 item 3, over the tokens named in the same request:
+  they are on the platform's token record before the report is built, and the
+  scanner (`produce_hd_activation_scanner`) is made from that record. An address
+  that holds only a token is found. The report lists, per account, the known
+  addresses with the full map, the scan's entries (an unused address that lies
+  between the known range and a used one with `{}`, a used address with the full
+  map), and the addresses generated for the minimum count with the full map at
+  zero values. Each token's `balanceOf` is asked once per address the report
+  queries: the scan keeps the token balances it read while testing an address,
+  and the report takes them from there. A failing node query of the scan or the
+  report fails the activation with `Transport`; the known count is written only
+  when a scan completes. A TRON platform keeps its answers (chapter 21).
+  `add_erc20_balances_to_hd_report`, which asked each token again for every
+  entry of the report, is retired.
+- *Rescan, a recorded divergence.* The second code-quality finding above is
+  adopted: under `scan_if_new_wallet` a stored account that has no known address
+  on any of its chains is scanned at activation as a new one would be (chapter
+  05, status note of 2026-11-22 after R35a). The decision is made in the shared
+  `enable_hd_wallet` and reaches UTXO coins, QTUM, Sia and the EVM coins
+  including TRON. An account that knows an address is left alone, and
+  `do_not_scan` never scans. The rule does not tell such an account apart from
+  one that knows no address because it was never used, for example one made by
+  `task::create_new_account` and activated with `min_addresses_number` 0: that
+  account is scanned again at every activation under the default policy, up to
+  `gap_limit` addresses per chain, and on an EVM platform every token's balance
+  is asked at each of them.
+- *R49.37, kept as parity.* `get_new_address` keeps the order of this
+  repository: the count is raised and stored before the balance query, and a
+  failing query fails the request with the address still known. The first
+  code-quality finding is not adopted. By the mapping of this repository, a node
+  that is unreachable, a failed connection, a transport error and a JSON-RPC
+  error of the platform or of a token answer `Transport` (HTTP 500). Two
+  differences from item 3 remain unchanged: a `balanceOf` answer whose data
+  cannot be decoded answers `Internal`, and one that is not an unsigned integer
+  answers `RpcInvalidResponse`, where item 3 names `Transport` for an answer
+  that could not be decoded; and this repository's `get_new_address` runs no gap
+  check before it derives the address (item 1), so it has no
+  `EmptyAddressesLimitReached`.
+
+Tests: T49.33 to T49.35 are the `evm_hd_p3_*` tests of
+`mm2src/coins_activation/src/evm_hd_p3_tests.rs`, with the shared scripted node
+of `evm_hd_p2_tests.rs`; the UTXO case of the page total is
+`test_account_balance_rpc` (`coins/src/utxo/utxo_tests.rs`), and the QTUM and
+Sia answers are built by the same shared routine.
+
 T49.33. *(Reloaded-original; R49.35.)* Against a mocked EVM node, under a
 software global-HD login, activate a platform with one ERC-20 token and
 three known addresses in account `0`, each holding both assets. Then:
@@ -762,6 +842,308 @@ address at index `2`. The same holds when the platform balance query is
 the one that fails. If this repository adopts one of the changes of the
 code-quality finding above, this test is rewritten to that decision and
 the divergence is recorded here.
+
+### 49.2.3 The task form of `get_new_address`, and Sia under an HD login (reference behavior)
+
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-22, measure 0.03**
+> (chapter 01 R40; attestation in the Provenance Footer).
+> This subsection was written by the dirty-side specification author on
+> 2026-11-22 (Spec Reader round 0.5.0-26) under the two-team procedure of
+> chapter 01 §1.4A, from the rows `v2.6.0-beta` and `v3.0.0-beta` of
+> chapter 02 §2.15A, and from this repository's own tree. The row
+> `main (as of 2026-10-07)` differs from `v3.0.0-beta` only in its read-me
+> file. Every reference statement below holds **identically at both
+> release rows** unless it names a row; the TRON statements hold at
+> `v3.0.0-beta` only, because the earlier row has no TRON HD wallet
+> (chapter 21). It edits no sentence of R49.32 -- R49.37, and it completes
+> R49.37 item 4.
+
+R49.38. *`task::get_new_address::init` (reference contract).*
+
+1. *Request.* `coin` (string, required); `account_id` (unsigned integer,
+   required, no default); `chain` (optional, `External` or `Internal`,
+   default `External`); `gap_limit` (optional unsigned integer, default the
+   wallet's gap limit); and the `client_id` every task init accepts
+   (optional unsigned integer, default `0`). The members are those of the
+   direct `get_new_address`, plus `client_id`.
+2. *Result.* `{task_id}` (integer).
+3. *Errors init itself answers.* Only two: `NoSuchCoin` with `{coin}`
+   (HTTP 400) when the ticker is not activated, and `Internal` (HTTP 500).
+   A request that cannot be decoded, for example one without `account_id`,
+   is refused by the dispatcher as for any method. Init checks neither the
+   coin family, nor the HD mode, nor the account, nor the hardware
+   context: every such condition appears in the task status (R49.41).
+4. *Families served.* A standard UTXO coin, a QTUM coin, and an EVM coin
+   (platform or ERC-20 token; at `v3.0.0-beta` also a TRX or TRC20
+   ticker). For every other coin kind -- BCH, SLP, QRC20, the shielded
+   coins, Tendermint, Lightning and Sia among them -- init still answers a
+   task id, and the task ends at once with
+   `CoinIsActivatedNotWithHDWallet`, whatever the hardware context.
+5. *The policy does not select the path.* The task has one path, the
+   device path. It does not look at the coin's key policy. For a served
+   family its first step is the hardware-context check of R49.37 item 4,
+   so under a software HD login without a hardware context every served
+   coin ends with `HwContextNotInitialized`, also a coin that is not in HD
+   mode at all. Where a hardware context exists beside a software login
+   (chapter 05 §5.10B), the task runs the device path for a software-keyed
+   coin as well: the device is asked for the address at the same
+   derivation path and its answer is compared with the address derived
+   from the software seed (R49.39 item 3). The task then completes only
+   if the device holds the same seed and passphrase. A TRX or TRC20 ticker
+   cannot complete on any login: the device is asked for an Ethereum
+   address, and the expected address is base58check, so the two never
+   agree. That qualifies the "HD methods" item of chapter 21 R21.10B.4
+   for this one method. This reading was not run against a device.
+
+R49.39. *`task::get_new_address::status` (reference contract).* The
+request and the envelope are those of R49.11 -- R49.16 and R49.20.
+
+1. *In-progress values* (`status: "InProgress"`). Six values are declared:
+   `Preparing`, `RequestingAccountBalance`, `Finishing`,
+   `WaitingForTrezorToConnect`, `FollowHwDeviceInstructions`, each a bare
+   JSON string in `details`, and `ConfirmAddress`, an object (item 2). The
+   task sets three of them, in this order: `Preparing` from the start and
+   through the checks of R49.41 item 1; `ConfirmAddress` once the device
+   asks for a button press; `RequestingAccountBalance` once the address
+   exchange with the device has ended, whether it succeeded or failed. No
+   path of this task was seen to set `Finishing`,
+   `WaitingForTrezorToConnect` or `FollowHwDeviceInstructions`: the task
+   does not reconnect a device, and the confirmation state stands where
+   the generic device-instruction value would.
+2. *The device-confirmation state.* `details` is
+   `{"ConfirmAddress": {"expected_address": "<address>"}}`. The string is
+   the address the daemon derived, written exactly as the `address` member
+   of the final result: the coin's own display form for a UTXO or QTUM
+   coin (legacy, CashAddress or SegWit, as the coin is configured) and the
+   EIP-55 form of R49.33 for an EVM coin. The caller shows it so the user
+   can compare it with the device's screen.
+3. *The daemon compares as well.* When the device has answered, the
+   daemon compares the address string the device returned with
+   `expected_address`. If they differ, the task ends with `Internal` and
+   records nothing, even though the user pressed the button.
+4. *Awaiting values* (`status: "UserActionRequired"`). `details` is the
+   string `EnterTrezorPin` or `EnterTrezorPassphrase`. The answer goes
+   through `task::get_new_address::user_action` with `task_id` and a
+   `user_action` of R49.22's form:
+   `{"action_type": "TrezorPin", "pin": "<pin>"}` or
+   `{"action_type": "TrezorPassphrase", "passphrase": "<passphrase>"}`.
+   After an accepted action the status returns to the in-progress value
+   that preceded the wait. An action of the other type is accepted by the
+   `user_action` call, and the task then ends with `UnexpectedUserAction`
+   carrying `{expected}`. A wait that is not answered within 300 seconds
+   ends the task with `Timeout`. A `user_action` for a task that is not
+   waiting answers `Internal` (HTTP 500), and one for an unknown task
+   `NoSuchTask` (HTTP 400).
+5. *The `Ok` result.* `details` is the result of the direct method with
+   no wrapper: `{"new_address": {address, derivation_path, chain,
+   balance}}`. `balance` is a map from ticker to
+   `{spendable, unspendable}` for every served family: the coin's own
+   ticker alone for a UTXO or QTUM coin, the tickers of R49.32 for an EVM
+   coin.
+6. *One step the direct method does not have.* For a UTXO or QTUM coin on
+   Electrum servers, after the balance was read the task registers the new
+   address with the coin's address subscription, so that later balance
+   events cover it. A failure of that step ends the task with
+   `FailedScripthashSubscription`; the address is already recorded then.
+
+R49.40. *`task::get_new_address::cancel`, and what stays recorded
+(reference contract).* The request is `{task_id}`.
+
+1. *When it is allowed.* At any moment before the task has reached `Ok`
+   or `Error`, including while a PIN or passphrase is awaited and while
+   the device shows the address. The call answers success, the task is
+   stopped, and a later status call answers `NoSuchTask` (R49.14). A
+   finished task answers `TaskFinished` (HTTP 409), an unknown one
+   `NoSuchTask` (HTTP 404). This task has no clean-up step of its own on
+   cancel.
+2. *Before the device has confirmed.* Nothing is recorded: the known
+   address count and the wallet's storage are unchanged, and the next
+   request derives the same address again. The same holds for a refusal
+   on the device, a device failure, a mismatch (R49.39 item 3) and every
+   earlier error. Whether the device's screen is cleared when the task is
+   cancelled was not established.
+3. *After the device has confirmed.* The raised count is written to the
+   wallet's storage and to the loaded wallet immediately after the
+   confirmation, before the balance is asked (R49.37 item 4). A cancel
+   that arrives during the balance query, and a failure of that query or
+   of the step of R49.39 item 6, leave the address known, with no
+   rollback, exactly as R49.37 item 2 describes. The caller was shown the
+   address in `expected_address`, which is the one thing that differs
+   from the direct method's failed answer.
+4. *What "recorded" is.* Only the count of known addresses of the
+   account's chain. The reference stores no address string per address;
+   every listing derives the addresses again from the count.
+
+R49.41. *The `Error` status (reference contract).* `details` carries
+`error_type` and, where given, `error_data` (R49.20). The status call
+itself is successful, so the HTTP classes of these errors are not seen by
+the caller of the task.
+
+1. *Order of the checks.* The first failing one wins: the coin family
+   (`CoinIsActivatedNotWithHDWallet`); the hardware context
+   (`HwContextNotInitialized`); the coin's HD mode
+   (`CoinIsActivatedNotWithHDWallet`); the account (`UnknownAccount`);
+   the gap check of R49.37 item 1, made with the request's `gap_limit`;
+   the address limit; the coin's device coin name (item 3); the device;
+   the recording; the balance; the subscription of R49.39 item 6.
+2. *The set* (`error_type`, `error_data`):
+   `HwContextNotInitialized` (none); `NoSuchCoin` (`{coin}`);
+   `UnexpectedUserAction` (`{expected}`);
+   `CoinIsActivatedNotWithHDWallet` (none); `UnknownAccount`
+   (`{account_id}`); `InvalidBip44Chain` (`{chain}`);
+   `ErrorDerivingAddress` (string); `AddressLimitReached`
+   (`{max_addresses_number}`); `EmptyAddressesLimitReached`
+   (`{gap_limit}`); `RpcInvalidResponse` (string); `WalletStorageError`
+   (string); `FailedScripthashSubscription` (string); `Timeout` (the
+   duration, an object `{secs, nanos}`); `HwError` (string, one word of
+   the vocabulary of chapter 55 R55.2.17); `Transport` (string);
+   `Internal` (string). The direct `get_new_address` shares this set. No
+   served family was seen to produce `InvalidBip44Chain`: both chain
+   values are accepted.
+3. *Device coin name.* A coin whose configuration has no `trezor_coin`
+   ends with `Internal` after the address was derived and before the
+   device is asked. An ERC-20 token uses its platform's value.
+4. *Refusal on the device.* The user rejecting the address on the device
+   ends the task with `HwError` and `error_data` `UserCancelled`. A wrong
+   PIN gives `HwError` with `InvalidPin`. The other failure answers of
+   the device map to their words of the same vocabulary.
+5. *Device not reachable.* A device that was unplugged, or that an
+   earlier call found unreachable, gives `HwError` with
+   `NoTrezorDeviceAvailable`; a transport failure without a vocabulary
+   word gives `Internal`. The task does not try to connect again. Once
+   the hardware context is marked unreachable, later tasks fail the same
+   way until it is initialized anew (chapter 05 §5.10A).
+6. *Wrong device.* The task has no identity check of the device. The
+   vocabulary word `FoundUnexpectedDevice` is not produced by it. A
+   device that holds another seed, or the right seed with another
+   passphrase, shows its own address at the path; the user sees that it
+   differs from `expected_address`. If the user confirms anyway, the
+   comparison of R49.39 item 3 ends the task with `Internal`. The caller
+   cannot tell this case from other internal failures by `error_type`.
+7. *After the confirmation.* A failing balance query maps as R49.37 item
+   3 says for an EVM coin (`Transport`, `Internal`, `RpcInvalidResponse`);
+   a failing write of the count gives `WalletStorageError`.
+8. *Cancel is not an error status.* A cancelled task has no status at all
+   (R49.40 item 1).
+
+R49.42. *Show-on-display (reference contract).* In the task form the
+device is always asked to **show** the address and to wait for the user's
+button press; there is no silent variant and no request member that
+switches it off. This holds for every served family:
+
+- *UTXO and QTUM.* The Bitcoin-family address request, with the coin's
+  `trezor_coin` name, the full derivation path, and the script type that
+  matches the coin's address format: pay-to-public-key-hash for the legacy
+  and CashAddress formats, native SegWit for the SegWit format.
+- *EVM (platform and token).* The Ethereum address request with the full
+  derivation path. No chain identifier or network definition is sent, so
+  the device labels the address by its own rules.
+- *TRON.* The same Ethereum request, which cannot succeed (R49.38
+  item 5).
+
+The direct `get_new_address` never contacts a device, under either
+policy. Under the `Trezor` policy it derives the address from the stored
+account public key and records it without any confirmation.
+
+R49.43. *Sia under an HD login (reference contract).* The reference has
+no HD account set for a Sia coin at either row.
+
+1. *Activation.* Under a software global-HD login a Sia coin activates as
+   a single address at the fixed path of chapter 20 §20.4.1, and its
+   activation result is the single-address form (chapter 46 R46.2.4, as
+   corrected in chapter 20 §20.10 D1). Under a hardware login the
+   activation is refused (chapter 46 R46.1.3).
+2. *`task::get_new_address::init` and `get_new_address`.* Not served.
+   The direct method answers `CoinIsActivatedNotWithHDWallet` (HTTP 400).
+   The task form answers a task id and then that error in the status, by
+   R49.38 item 4. No hardware context is consulted, the task shows no
+   state but `Preparing`, there is no result shape, and nothing is
+   recorded. The question of what stays recorded when the balance query
+   fails does not arise.
+3. *`account_balance` and `task::account_balance::init`.* Not served, in
+   the same two ways. There is therefore no reference shape of
+   `page_balance` or `total_balance` for a Sia coin. The same holds for
+   `task::scan_for_new_addresses::init` and `task::create_new_account`.
+4. *`scan_policy`.* The Sia activation request has no `scan_policy`,
+   `min_addresses_number` or `path_to_address` member. It has `gap_limit`,
+   which activation does not act on (chapter 46, request table). No
+   refusal of a `scan_policy` sent anyway was seen, and it has no effect.
+   No address scan runs and no used-address test exists for Sia.
+5. *Consequence.* Everything this repository serves for Sia under HD --
+   the HD activation report, the account methods, the scan and the
+   used-address test (chapter 20 §20.10 D1, chapter 46) -- is a Reloaded
+   extension with no reference contract to match. Its shapes follow the
+   shared HD answers of R49.35 by this repository's own choice.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort while reading R49.39 item 3 and R49.41 item 6 side by side).** A
+> device that derives another address is reported as `Internal`, after the
+> user has already pressed the button, and with no discriminant a client
+> could act on. A device with the wrong seed or passphrase is the most
+> likely cause, and it is a user-correctable condition. Proposed change
+> for this repository, when it builds the task form: answer a typed
+> request-class error for the mismatch (a Reloaded discriminant, since the
+> reference has none), and state in the client documentation that the
+> on-screen comparison by the user is the check that matters.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort while reading R49.38 item 5).** The task form takes the device
+> path for every coin, so it cannot serve a software-keyed coin and, with
+> a hardware context beside a software login, it compares a device address
+> with a software-derived one. Chapter 05 R54 already binds this
+> repository to choose by the coin's key policy. Proposed shape for this
+> repository: under the software policy the task derives, records and
+> queries without any device state, and reports `Preparing`, then
+> `RequestingAccountBalance`, then the result.
+
+> **Reloaded status (this repository, 2026-11-22; not corpus-sourced).**
+> This repository has no `task::get_new_address::init` (chapter 21, the
+> Reloaded note after R21.10B.4; the Reloaded status of §49.2.2).
+> R49.38 -- R49.42 are the reference contract a future task form is
+> measured against, with R54 of chapter 05 deciding the software case.
+> The direct `get_new_address` runs no gap check (the status note of
+> 2026-11-22 in §49.2.2). `account_balance` and
+> `task::account_balance::init` serve a Sia coin under HD with its own
+> ticker as the single map key (the same status note), which R49.43 item 5
+> classes as a Reloaded extension.
+
+T49.36. *(R49.38, R49.41.)* With a software global-HD login and no
+hardware context, call `task::get_new_address::init` for an HD-activated
+UTXO coin, a QTUM coin, an EVM platform and an ERC-20 token. Each answers
+a task id, and each status is `Error` with `details.error_type`
+`HwContextNotInitialized`. `account_balance` afterwards reports the same
+`total` as before. The same call for a ticker that is not activated
+answers `NoSuchCoin` from init itself. If this repository builds the
+software case of R54 instead, this test is rewritten to that decision and
+the divergence is recorded here.
+
+T49.37. *(R49.39, R49.40, R49.42.)* Against a Trezor emulator, under the
+`Trezor` policy, for a UTXO coin and for an EVM platform: start the task
+and poll. The status passes through `InProgress` with
+`{"ConfirmAddress": {"expected_address"}}`, whose string equals the
+`address` of the later result. While that state is shown,
+`account_balance` reports the old `total`. After the button press the
+status reaches `Ok` with `{"new_address": {address, derivation_path,
+chain, balance}}`, and `total` has risen by one. In a second run, cancel
+while `ConfirmAddress` is shown: the cancel answers success, the status
+answers `NoSuchTask`, `total` is unchanged, and the next run offers the
+same `expected_address`.
+
+T49.38. *(R49.41.)* Against a Trezor emulator: reject the address on the
+device. The status is `Error` with `error_type` `HwError` and
+`error_data` `UserCancelled`, and `total` is unchanged. With the emulator
+loaded with another seed than the one the coin was activated on, confirm
+the address: the status is `Error` with `Internal`, and `total` is
+unchanged. Make the balance query fail after a confirmation: the status
+is `Error` with `Transport`, and `total` has risen by one.
+
+T49.39. *(R49.43; reference parity statement, not a test of this
+repository.)* At the reference, with a software global-HD login and an
+activated Sia coin, `get_new_address` and `account_balance` answer
+`CoinIsActivatedNotWithHDWallet`, the task forms answer it in their
+status, and the activation result is the single-address form with or
+without a `scan_policy` member. This repository's Sia answers are tested
+by its own HD tests (chapter 20 §20.10 D1).
 
 ### 49.2A Cosmos-family fee descriptors (gated text; passed the KDF Dirty Gate on 2026-11-08)
 
@@ -1597,3 +1979,52 @@ addresses.
   comparison was run, and the repository's clean-room gate tool was not
   applicable because the additions embed no code blocks. *Measure:* 0.03, on
   the discretionary-expression basis.
+- *Status note added 2026-11-22 (after the Reloaded status of §49.2.2).*
+  Reloaded-original, clean side: it records the per-ticker totals, the scan
+  at activation and the rescan of an account with no known address as built,
+  with the two divergences the maintainer decided on 2026-11-22, written from
+  the cleared text of §49.2.2 and this repository's code; no forbidden-class
+  input, chapter 01 R38 not engaged. No cleared sentence was edited.
+- *Scoped addition (2026-11-22, Spec Reader round 0.5.0-26) -- §49.2.3
+  (R49.38 -- R49.43, the two code-quality findings, the Reloaded status
+  note, T49.36 -- T49.39) and the second status note of 2026-11-22 in
+  §49.2.1.* **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings**
+  (chapter 01 R40; the attestation closes this item). *Inputs:* the forbidden
+  corpus at
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, with the
+  row `main (as of 2026-10-07)` compared by difference only, consulted
+  **only** to establish: for the task form of the new-address command, its
+  request members and defaults, its init result and init errors, the coin
+  kinds it serves, its in-progress and awaiting values and their order, the
+  body of the device-confirmation state, the user-action payloads and the
+  wait timeout, the completed result, what a cancel does and what stays
+  recorded before and after the device confirmation, the error
+  discriminants with their data members, how a refusal on the device, an
+  unreachable device and a device with another seed are reported, and
+  whether the device is asked to display the address per coin family; and,
+  for a Sia coin under an HD login, whether the account methods, the
+  activation scan policy and an HD activation report exist. Behavior and
+  dictated request and response members, status values and error
+  discriminants only; no private identifier, function body, helper
+  decomposition, error, log, comment or test text was reproduced. The
+  Reloaded status note rests on this repository's own tree; T49.36 --
+  T49.39 are Reloaded-original. No row was added to chapter 02 §2.15A: all
+  states read already have rows. The notes of the same date in chapter 05
+  (after the as-built note of R35c), chapter 20 (§20.10 D1) and chapter 21
+  (after R21.10B.4) travel with this item.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings, in a single pass; the chapter 02 §2.15A rows `v2.6.0-beta`,
+  `v3.0.0-beta` and `main (as of 2026-10-07)` were checked. *Extent:* the HD
+  new-address command in its direct and task forms, the device
+  address-confirmation step, the error surface of the task's status, user
+  action and cancel, and the hardware error vocabulary, at both release rows;
+  the row `main (as of 2026-10-07)` by its difference from `v3.0.0-beta` only;
+  1,701 source files of the two release rows (827 and 874) compared
+  mechanically, one file read in full and parts of four more; Sia and TRON
+  covered by the mechanical comparison only, not by reading; on the candidate
+  side, the 390 added lines. *Method:* reading, a per-token lookup of all 60
+  identifier-shaped tokens of the additions, and a word-sequence comparison
+  (six-word sequences: 0 of 3,902 shared; five-word: 3 of 3,906; four-word: 31
+  of 3,910, all common phrases or wire fragments); the repository's clean-room
+  gate tool was not applicable because the additions embed no code blocks.
+  *Measure:* 0.03, on the discretionary-expression basis.

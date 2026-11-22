@@ -22,6 +22,11 @@
 > D55.5). Work package 2 (switching activation on) is done with this; swap
 > participation (work package 5) and the reachable GasFree rail stay open.
 
+> **Saved orders are kept (2026-11-22).** A saved order that names a TRON coin
+> is no longer cancelled at startup. It is kept, so `my_orders` lists it and
+> `cancel_order` removes it, but it is never announced or matched, and one log
+> line names it (CRD ch.60 R60.6.5, status note of this date).
+
 ## Goal
 
 TRX and TRC20 activate, show balances and history, and withdraw reliably in

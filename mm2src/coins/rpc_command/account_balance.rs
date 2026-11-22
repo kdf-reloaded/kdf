@@ -1,7 +1,7 @@
-use crate::coin_balance::HDAddressBalance;
+use crate::coin_balance::{sum_hd_address_balances, CoinBalanceMap, HDAddressBalance};
 use crate::hd_wallet::HDWalletCoinOps;
 use crate::rpc_command::hd_account_balance_rpc_error::HDAccountBalanceRpcError;
-use crate::{lp_coinfind_or_err, CoinBalance, CoinWithDerivationMethod, MarketCoinOps, MmCoinEnum};
+use crate::{lp_coinfind_or_err, CoinWithDerivationMethod, MarketCoinOps, MmCoinEnum};
 use async_trait::async_trait;
 use common::PagingOptionsEnum;
 use crypto::{Bip44Chain, RpcDerivationPath};
@@ -31,7 +31,9 @@ pub struct HDAccountBalanceResponse {
     pub account_index: u32,
     pub derivation_path: RpcDerivationPath,
     pub addresses: Vec<HDAddressBalance>,
-    pub page_balance: CoinBalance,
+    /// The sum of each ticker over the addresses of the returned page (CRD ch.49 R49.35 item 1). The requested
+    /// coin's ticker is present with a zero balance for a page that lists no address (CRD ch.38 R38.8.5).
+    pub page_balance: CoinBalanceMap,
     pub limit: usize,
     pub skipped: u32,
     pub total: u32,
@@ -97,10 +99,7 @@ pub mod common_impl {
             .known_addresses_balances_with_ids(&hd_account, params.chain, from_address_id..to_address_id)
             .await
             .mm_err(Into::into)?;
-        let page_balance = addresses.iter().fold(CoinBalance::default(), |total, addr_balance| {
-            let addr_balance = addr_balance.balance.get(coin.ticker()).cloned().unwrap_or_default();
-            total + addr_balance
-        });
+        let page_balance = sum_hd_address_balances(coin.ticker(), &addresses);
 
         let result = HDAccountBalanceResponse {
             account_index: account_id,

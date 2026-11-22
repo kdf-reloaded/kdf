@@ -21,6 +21,17 @@
 > return in a later release, and the swap rules of this chapter
 > (§18.3, §18.5) stay the target for that return.
 
+> **Status note (2026-11-22), a saved Tendermint order is kept, not
+> cancelled (clean-side, not corpus-sourced).** From this date an order
+> with a Tendermint coin saved by an earlier version is no longer
+> cancelled at startup. It is kept, in memory and in the storage, so
+> `my_orders` lists it and `cancel_order` removes it, but it is never
+> announced and never matched, and one log line names it. The rule, which
+> is the same for every coin that cannot trade, is in the status note of
+> 2026-11-22 at
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) R60.6.5.
+> Nothing else in the note above changes.
+
 ---
 
 ## 18.0 Executive Summary
@@ -938,6 +949,12 @@ The chapter relies on one baseline-state claim:
   is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
   findings**, as recorded in chapter 51 §51.16. No cleared sentence was
   edited.
+- *Status note added 2026-11-22, clean side.* The status note under the
+  availability note at the head of this chapter, on a saved Tendermint
+  order being kept, records this repository's own behavior and the
+  maintainer's decision of 2026-11-22 on stored orders of untradable
+  coins. It was written by a context that never read the forbidden
+  corpus, takes no forbidden-class input and needs no Dirty Gate pass.
 
 ---
 

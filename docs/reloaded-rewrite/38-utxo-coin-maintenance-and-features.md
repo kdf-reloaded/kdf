@@ -5860,6 +5860,19 @@ value is a zero `CoinBalance`, not an untyped empty object. This preserves the
 wire shape consumed by wallet SDKs and keeps an intentionally empty HD wallet
 distinguishable from a malformed balance response.
 
+*Status note (2026-11-22), the page total is a map (as built; clean side, not
+corpus-sourced).* `account_balance` of every HD family now answers
+`page_balance` as a ticker-keyed map of the same type as an address's
+`balance`, where it answered one `{spendable, unspendable}` balance
+([Chapter 49](49-withdrawal-task-path.md) R49.35). Where the reference answers
+`{}` -- a page that lists no address, and the `total_balance` of an account with
+no known address -- this repository keeps the form of this rule: a one-entry map
+holding the requested coin's ticker and a zero balance. That is a recorded
+divergence, decided by the maintainer on 2026-11-22. A UTXO or QTUM coin's page
+total therefore holds its own ticker, summed over the addresses of the returned
+page; `total_balance` of the task form and of the activation report is formed as
+before.
+
 > **Cross-reference (informative).** The full wire contract of the UTXO-family
 > task activations (`task::enable_utxo`, `task::enable_qtum`,
 > `task::enable_bch`) -- request fields, success object including the Iguana
@@ -6685,3 +6698,9 @@ R38.8.6 **Tests (two-direction, observable).**
   summarizes what those rules record; its reference content is that of its
   target and is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure
   0.03, no findings**, as recorded in chapter 51 §51.16.
+- *Maintainer decision (2026-11-22), clean side -- status note after R38.8.5
+  (the page total of `account_balance` is a ticker-keyed map; the empty forms
+  keep this rule's ticker entry).* Written by a session that never read the
+  forbidden corpus, from the maintainer's decision, the cleared text of
+  chapter 49 §49.2.2 and this repository's code. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.
