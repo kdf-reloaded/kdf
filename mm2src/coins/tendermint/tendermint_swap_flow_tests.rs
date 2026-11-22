@@ -1431,6 +1431,47 @@ fn tm_flow_wait_for_confirmations_fails_on_an_error_status() {
 }
 
 // ---------------------------------------------------------------------------
+// extract_secret: every message, checked against the secret hash (CRD ch.51 §51.6E R91)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tm_flow_extract_secret_examines_every_message_and_checks_the_hash() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let claim = |secret: &[u8]| {
+            ClaimHtlcMsg::new(
+                chain.htlc_type(),
+                "ABCD".repeat(16),
+                fx.coin.account_id.clone(),
+                hex::encode(secret),
+            )
+            .to_any()
+            .expect("a claim-HTLC message")
+        };
+        let other = Any {
+            type_url: "/some.other.Msg".to_owned(),
+            value: vec![1, 2, 3],
+        };
+
+        // The claim is the second message.
+        let tx = signed_tx_with(&fx.coin, chain, vec![other.clone(), claim(&PREIMAGE)], "");
+        assert_eq!(fx.coin.extract_secret(&secret_hash(), &tx), Ok(PREIMAGE.to_vec()));
+
+        // A claim whose secret does not match the hash is no secret.
+        let tx = signed_tx_with(&fx.coin, chain, vec![claim(&[0x45; 32])], "");
+        let err = fx
+            .coin
+            .extract_secret(&secret_hash(), &tx)
+            .expect_err("the secret does not match");
+        assert!(err.contains("1 messages"), "{err}");
+
+        // Two claims, only the second matches.
+        let tx = signed_tx_with(&fx.coin, chain, vec![claim(&[0x45; 32]), claim(&PREIMAGE)], "");
+        assert_eq!(fx.coin.extract_secret(&secret_hash(), &tx), Ok(PREIMAGE.to_vec()));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // extract_secret: the length of the secret (CRD ch.18 R18.11.14)
 // ---------------------------------------------------------------------------
 

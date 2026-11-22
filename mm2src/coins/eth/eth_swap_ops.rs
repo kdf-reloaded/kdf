@@ -424,18 +424,59 @@ impl SwapOps for EthCoin {
             .await
     }
 
-    fn extract_secret(&self, _secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+    fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
         let unverified: UnverifiedTransaction = try_s!(rlp::decode(spend_tx));
-        let function = try_s!(SWAP_CONTRACT.function("receiverSpend"));
-        let tokens = try_s!(function.decode_input(&unverified.data[4..]));
-        if tokens.len() < 3 {
-            return ERR!("Invalid arguments in 'receiverSpend' call: {:?}", tokens);
+        match secret_of_claim_call(&unverified.data, secret_hash)? {
+            Some(secret) => Ok(secret),
+            None => ERR!("The call input of the spend is not a 'receiverSpend' call with the secret of the swap"),
         }
-        match &tokens[2] {
-            Token::FixedBytes(secret) => Ok(secret.to_vec()),
-            _ => ERR!(
-                "Expected secret to be fixed bytes, decoded function data is {:?}",
-                tokens
+    }
+
+    /// CRD ch.51 §51.6E R86: the call input first, then the `secret` word of the `ReceiverSpent` logs of the
+    /// transaction's receipt. A value is the secret only when it passes the secret-hash rule.
+    async fn extract_secret_from_spend(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        use crate::eth::alloy_compat::assert_send_future;
+        use alloy::providers::Provider;
+
+        let unverified: UnverifiedTransaction = try_s!(rlp::decode(spend_tx));
+        if let Some(secret) = secret_of_claim_call(&unverified.data, secret_hash)? {
+            return Ok(secret);
+        }
+
+        let spend_hash = unverified.hash();
+        let provider = self.alloy_provider();
+        let alloy_hash = alloy::primitives::B256::from_slice(&spend_hash.0);
+        let receipt = match assert_send_future(provider.get_transaction_receipt(alloy_hash)).await {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => {
+                return ERR!(
+                    "The node returned no receipt for the spend transaction {:02x}",
+                    spend_hash
+                )
+            },
+            Err(e) => {
+                return ERR!(
+                    "Error {} on getting the receipt of the spend transaction {:02x}",
+                    e,
+                    spend_hash
+                )
+            },
+        };
+        let logs: Vec<(Option<Vec<u8>>, Vec<u8>)> = receipt
+            .logs()
+            .iter()
+            .map(|log| {
+                (
+                    log.topics().first().map(|topic| topic.as_slice().to_vec()),
+                    log.data().data.to_vec(),
+                )
+            })
+            .collect();
+        match secret_of_spent_logs(&logs, secret_hash)? {
+            Some(secret) => Ok(secret),
+            None => ERR!(
+                "Neither the call input nor the logs of the spend transaction {:02x} carry the secret of the swap",
+                spend_hash
             ),
         }
     }
@@ -504,3 +545,150 @@ impl SwapOps for EthCoin {
 
 #[async_trait]
 impl WatcherOps for EthCoin {}
+
+/// The secret of `secret_hash` in the call input of a spend: the third argument of a `receiverSpend` call, when
+/// it passes the secret-hash rule (CRD ch.51 §51.6E R86). `Ok(None)` when the input is not such a call.
+///
+/// # Errors
+///
+/// `secret_hash` has an unsupported width.
+fn secret_of_claim_call(input: &[u8], secret_hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let function = try_s!(SWAP_CONTRACT.function("receiverSpend"));
+    let Some((selector, args)) = input.split_at_checked(4) else {
+        return Ok(None);
+    };
+    if selector != function.short_signature() {
+        return Ok(None);
+    }
+    let Ok(tokens) = function.decode_input(args) else {
+        return Ok(None);
+    };
+    match tokens.get(2) {
+        Some(Token::FixedBytes(secret)) => {
+            crypto::secret_hash_algo::secret_matches_hash(secret, secret_hash).map(|ok| ok.then(|| secret.clone()))
+        },
+        _ => Ok(None),
+    }
+}
+
+/// The first `secret` word of a `ReceiverSpent(bytes32 id, bytes32 secret)` log that passes the secret-hash rule
+/// (CRD ch.51 §51.6E R86). Each log is its first topic and its data; only a log whose first topic is the
+/// event's signature and whose data is the two words id and secret counts.
+///
+/// # Errors
+///
+/// `secret_hash` has an unsupported width.
+fn secret_of_spent_logs(logs: &[(Option<Vec<u8>>, Vec<u8>)], secret_hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let event_topic = try_s!(SWAP_CONTRACT.event("ReceiverSpent")).signature();
+    for (topic, data) in logs {
+        if topic.as_deref() != Some(event_topic.as_bytes()) || data.len() != 64 {
+            continue;
+        }
+        let secret = &data[32..];
+        if crypto::secret_hash_algo::secret_matches_hash(secret, secret_hash)? {
+            return Ok(Some(secret.to_vec()));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod extract_secret_tests {
+    use super::*;
+    use crypto::secret_hash_algo::SecretHashAlgo;
+
+    const SECRET: [u8; 32] = [0x44; 32];
+
+    fn claim_input(function: &str, secret: &[u8]) -> Vec<u8> {
+        SWAP_CONTRACT
+            .function(function)
+            .unwrap()
+            .encode_input(&[
+                Token::FixedBytes(vec![0x11; 32]),
+                Token::Uint(1000.into()),
+                Token::FixedBytes(secret.to_vec()),
+                Token::Address(Address::from_low_u64_be(1)),
+                Token::Address(Address::from_low_u64_be(2)),
+            ])
+            .unwrap()
+    }
+
+    fn secret_hash() -> Vec<u8> { SecretHashAlgo::DHASH160.hash_secret(&SECRET) }
+
+    fn spent_topic() -> Vec<u8> {
+        SWAP_CONTRACT
+            .event("ReceiverSpent")
+            .unwrap()
+            .signature()
+            .as_bytes()
+            .to_vec()
+    }
+
+    fn spent_data(secret: &[u8]) -> Vec<u8> { [&[0x11u8; 32][..], secret].concat() }
+
+    #[test]
+    fn claim_call_with_the_matching_secret_gives_the_secret() {
+        let input = claim_input("receiverSpend", &SECRET);
+        assert_eq!(secret_of_claim_call(&input, &secret_hash()), Ok(Some(SECRET.to_vec())));
+    }
+
+    #[test]
+    fn claim_call_with_another_secret_is_no_candidate() {
+        let input = claim_input("receiverSpend", &[0x45; 32]);
+        assert_eq!(secret_of_claim_call(&input, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn call_of_another_selector_with_the_same_layout_is_no_candidate() {
+        // Only the `receiverSpend` selector marks a claim, whatever the argument words hold.
+        let mut input = claim_input("receiverSpend", &SECRET);
+        input[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(secret_of_claim_call(&input, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn call_input_shorter_than_a_selector_is_no_candidate() {
+        for len in 0..4 {
+            assert_eq!(secret_of_claim_call(&vec![0xed; len], &secret_hash()), Ok(None));
+        }
+    }
+
+    #[test]
+    fn claim_call_with_a_wrong_hash_width_is_an_error() {
+        let input = claim_input("receiverSpend", &SECRET);
+        assert!(secret_of_claim_call(&input, &[0u8; 19]).is_err());
+    }
+
+    #[test]
+    fn spent_log_with_the_matching_secret_gives_the_secret() {
+        let logs = vec![(Some(spent_topic()), spent_data(&SECRET))];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(Some(SECRET.to_vec())));
+    }
+
+    #[test]
+    fn spent_log_with_another_secret_is_no_candidate() {
+        let logs = vec![(Some(spent_topic()), spent_data(&[0x45; 32]))];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn log_of_another_topic_is_ignored() {
+        let logs = vec![(Some(vec![0x99; 32]), spent_data(&SECRET)), (None, spent_data(&SECRET))];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn spent_log_with_data_of_another_size_is_ignored() {
+        let logs = vec![(Some(spent_topic()), SECRET.to_vec())];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn the_first_matching_log_wins() {
+        let logs = vec![
+            (Some(spent_topic()), spent_data(&[0x45; 32])),
+            (Some(spent_topic()), spent_data(&SECRET)),
+        ];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(Some(SECRET.to_vec())));
+    }
+}
