@@ -927,6 +927,16 @@ address it expects ([Chapter 49](49-withdrawal-task-path.md) R49.38 item 5,
 R49.42). The direct `get_new_address` and the other listed methods are not
 affected. The sentences of R21.10B.4 above are unchanged.
 
+*Reloaded note (2026-11-22), `task::get_new_address::init` for a TRON ticker
+is served here.* This repository serves the task form for a TRX and a TRC20
+ticker on the software path, the only path a TRON coin has, and it completes
+with the base58check address and the balance map of the direct method. The
+internal chain is refused with `InvalidBip44Chain`. The sentence of the
+Reloaded note of 2026-11-19 that this repository has no
+`task::get_new_address::init` is no longer true. The record is in
+[Chapter 49](49-withdrawal-task-path.md) §49.2.3, the status note "the task
+form of `get_new_address` (as built)". No sentence above is changed.
+
 *Reloaded note (2026-11-19), the HD methods for a TRC20 ticker in this
 repository (its own code, not the reference; PR #428).* Asked for a TRC20
 ticker, `get_new_address`, `account_balance`,

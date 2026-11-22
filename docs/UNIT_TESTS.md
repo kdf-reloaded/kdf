@@ -880,6 +880,52 @@ The UTXO tests, module `hd_accounts_at_index_tests` of `utxo_tests.rs`:
 the coin's ticker, including the pages that list no address. QTUM and Sia answer `account_balance` through the same
 shared routine and have no test of their own.
 
+## `task::get_new_address` by the coin's key policy (30 tests, plus 2 emulator tests)
+
+Location: `mm2src/coins/rpc_command/init_get_new_address.rs` (module `tests`, 6 tests: the request, the wire forms of the
+states and of the new errors, the mapping of the task framework's errors and of the device's answers),
+`mm2src/coins/utxo/utxo_tests.rs` (module `hd_accounts_at_index_tests`, names start with `leb_`, 14 tests),
+`mm2src/coins_activation/src/evm_hd_p4_tests.rs` (8 tests), one test each in
+`mm2src/coins_activation/src/eth_with_tokens_activation/tron/tests.rs` and `mm2src/coins_activation/src/sia_activation.rs`, and
+two emulator tests in `mm2src/coins/eth/eth_trezor_emulator_tests.rs`. CRD: chapter 49 R49.38 to R49.43 and T49.36 to
+T49.38 (as the status notes of 2026-11-22 in §49.2.3 record), chapter 05 R54 and R58a. Run with
+`cargo test -p coins --lib -- leb_ init_get_new_address` and `cargo test -p coins_activation --lib -- evm_hd_p4
+get_new_address_task`. The UTXO tests drive the steps of the task directly (the node mocks of that module are
+thread-local, the task runs on the executor); the tests that start the task through its entry points need no mock.
+
+| Test | Rule | What it checks |
+|------|------|----------------|
+| `leb_t4936_the_software_steps_complete_for_a_utxo_coin`, `leb_t4936_the_software_steps_complete_for_qtum` | T49.36 (rewritten), R54 | Under the software policy the steps plan, record and query without a device; the answer has the shape of `get_new_address` with no wrapper, the status callback runs once after the recording, and the storage holds one known address |
+| `leb_the_internal_chain_is_accepted_for_a_utxo_coin` | R49.41 item 2, decision 2 | UTXO accepts the `Internal` chain (path `.../1/0`) |
+| `leb_an_unknown_account_is_refused_before_anything_is_recorded` | R49.41 item 1 | `UnknownAccount` with the index; nothing is recorded |
+| `leb_the_gap_check_refuses_a_run_of_unused_addresses` | R49.41 item 1, decision 5 | `EmptyAddressesLimitReached` with the wallet's limit (3) and with the request's (2); only the last `gap_limit` addresses count; nothing is recorded |
+| `leb_fewer_known_addresses_than_the_limit_are_not_checked` | R49.41 item 1 | Fewer known addresses than the limit never ask the node |
+| `leb_a_failure_during_the_gap_check_records_nothing` | R49.37 item 1 | A failing node during the gap check ends the task before an address exists |
+| `leb_a_failing_balance_query_leaves_the_address_known` | R49.40 item 3, decision 6 | The count stays in the storage and in the loaded wallet; the status callback ran |
+| `leb_r4942_the_device_request_of_a_utxo_coin` | R49.42, R49.41 item 3 | The device name and the script type that matches the address format (legacy: pay-to-public-key-hash, SegWit: native SegWit); a coin with no `trezor_coin` answers `Internal` |
+| `leb_a_trezor_policy_coin_with_an_empty_slot_ends_with_hw_context_not_initialized` | R54, T35 | The task of a Trezor-policy coin with an empty hardware slot ends with `HwContextNotInitialized`; the count is unchanged |
+| `leb_a_replaced_device_ends_the_trezor_policy_task_with_found_unexpected_device` | R58a | Another device than the coin's ends the task with `HwError` `FoundUnexpectedDevice` before the device is asked |
+| `leb_an_unsupported_coin_kind_ends_with_coin_is_activated_not_with_hd_wallet` | R49.38 item 4 | Init answers a task id, the task ends with the error |
+| `leb_a_ticker_that_is_not_activated_answers_no_such_coin_from_init` | R49.38 item 3 | `NoSuchCoin` from init, HTTP 400 |
+| `leb_a_software_coin_ignores_the_hardware_context_and_reports_an_unknown_account` | R54 | A software coin on a node with a hardware context ends with `UnknownAccount` and never asks the device |
+| `evm_hd_p4_t4936_the_software_task_completes_for_a_platform_and_a_token` | T49.36 (rewritten), R49.39 item 5 | The task for an EVM platform and an ERC-20 token reaches `Ok`, shows only `Preparing` and `RequestingAccountBalance`, answers the EIP-55 address and the balance map of R49.32 (platform and token; the token alone for a token ticker), and the `total` of `account_balance` rises by one each time |
+| `evm_hd_p4_t4936_a_ticker_that_is_not_activated_answers_no_such_coin_from_init` | T49.36 | `NoSuchCoin` from init |
+| `evm_hd_p4_t4936_a_hardware_context_beside_a_software_login_is_not_touched` | R54 | A hardware context with no transport beside a software login does not stop the task |
+| `evm_hd_p4_the_internal_chain_is_refused_for_an_evm_platform_and_token` | decision 2 | `InvalidBip44Chain` with the chain, for the platform and the token; nothing is recorded |
+| `evm_hd_p4_an_unknown_account_is_an_error_status` | R49.41 | `UnknownAccount` |
+| `evm_hd_p4_the_gap_check_refuses_a_run_of_unused_addresses`, `evm_hd_p4_the_gap_check_of_a_token_counts_its_balance` | decision 5 | The gap check for the platform (nonce) and for a token ticker (the token's balance) |
+| `evm_hd_p4_a_failing_balance_query_leaves_the_address_known` | R49.40 item 3 | `Transport` in the `Error` status, the count raised, the next task derives the following address |
+| `the_get_new_address_task_completes_for_a_tron_coin_on_the_software_path` | R49.38 item 4, decision 2 | TRX and a TRC20 ticker complete with base58check addresses; the internal chain is refused |
+| `the_get_new_address_task_is_served_for_a_siacoin_on_the_software_path` | R49.43 item 5, decision 3 | A Siacoin completes on the software path against a mock walletd; the internal chain is refused |
+| `the_request_has_the_members_of_the_contract`, `the_in_progress_values_have_the_wire_form_of_the_contract` | R49.38 item 1, R49.39 items 1 and 2 | The request defaults and the wire form of `ConfirmAddress` |
+| `a_device_address_mismatch_is_a_typed_request_error_naming_both_addresses`, `the_gap_check_refusal_carries_the_limit` | R49.39 item 3, decision 4 | The wire form and HTTP 400 of `DeviceAddressMismatch` and `EmptyAddressesLimitReached` |
+| `the_awaiting_errors_of_the_task_framework_have_their_own_error_types`, `the_device_answers_map_to_the_hardware_vocabulary` | R49.39 item 4, R49.41 item 4 | `UnexpectedUserAction` with `expected`, `Timeout` with `{secs, nanos}`, and `HwError` `UserCancelled`, `InvalidPin`, `NoTrezorDeviceAvailable` |
+
+The two emulator tests (`emulator_trezor_get_new_address_shows_the_address_and_records_it_after_the_button`,
+`emulator_trezor_get_new_address_cancel_while_the_address_is_shown_records_nothing`; T49.37 for an EVM platform) run
+in the emulator job and print a skip line when no emulator is reachable. A rejection on the device, a device of another
+seed and a UTXO coin under the Trezor policy are not covered by an emulator test.
+
 ## EVM HD address methods and ERC-20 `from` (10 tests)
 
 Location: `mm2src/coins_activation/src/evm_hd_p1_tests.rs` (names start with `evm_hd_p1_`). CRD: chapter 49, R49.32 (last

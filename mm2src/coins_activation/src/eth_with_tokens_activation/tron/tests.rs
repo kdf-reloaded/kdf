@@ -1421,6 +1421,65 @@ fn task_scan_for_new_addresses_follows_the_used_address_rule() {
     assert_eq!(status["details"]["new_addresses"], json!([]), "{status}");
 }
 
+/// `task::get_new_address` for TRX and a TRC20 ticker (CRD ch.49 R49.38 item 4, ch.21 R21.10B.4): a TRON coin cannot be
+/// activated under the Trezor policy, so the task completes on the software path with the base58check address, and
+/// the maintainer decided on 2026-11-22 that the internal chain is refused for TRON as it is for EVM.
+#[test]
+fn the_get_new_address_task_completes_for_a_tron_coin_on_the_software_path() {
+    use coins::rpc_command::init_get_new_address::{init_get_new_address, init_get_new_address_status};
+
+    let ctx = tron_hd_ctx();
+    let address = |id: u32| independent_address(&ctx, &format!("m/44'/195'/0'/0/{id}"));
+    let node = hd_node(&[address(1)], &[address(0)]);
+    activated(
+        &ctx,
+        hd_request(&node, json!({ "erc20_tokens_requests": tokens(&["USDT-TRC20"]) })),
+    );
+    let run = |request: Json| -> Json {
+        let request = serde_json::from_value(request).expect("a task request");
+        let response = block_on(init_get_new_address(ctx.clone(), request))
+            .unwrap_or_else(|e| panic!("the task must start: {}", e.get_inner()));
+        poll_status(|| {
+            let status = block_on(init_get_new_address_status(
+                ctx.clone(),
+                status_request(response.task_id),
+            ))
+            .unwrap_or_else(|e| panic!("status failed: {e}"));
+            serde_json::to_value(&status).expect("a serializable status")
+        })
+    };
+
+    let status = run(json!({ "coin": "TRX", "account_id": 0 }));
+    assert_eq!(status["status"], "Ok", "{status}");
+    let first = &status["details"]["new_address"];
+    assert_eq!(first["address"], address(1).as_str());
+    assert_eq!(first["derivation_path"], "m/44'/195'/0'/0/1");
+    assert_eq!(tickers_of(&first["balance"]), ["TRX", "USDT-TRC20"]);
+
+    let status = run(json!({ "coin": "USDT-TRC20", "account_id": 0 }));
+    assert_eq!(status["status"], "Ok", "{status}");
+    let second = &status["details"]["new_address"];
+    assert_eq!(second["address"], address(2).as_str());
+    assert_eq!(
+        tickers_of(&second["balance"]),
+        ["USDT-TRC20"],
+        "the token's ticker only"
+    );
+
+    for ticker in ["TRX", "USDT-TRC20"] {
+        let status = run(json!({ "coin": ticker, "account_id": 0, "chain": "Internal" }));
+        assert_eq!(status["status"], "Error", "{ticker}: {status}");
+        assert_eq!(
+            status["details"]["error_type"], "InvalidBip44Chain",
+            "{ticker}: {status}"
+        );
+        assert_eq!(
+            status["details"]["error_data"]["chain"], "Internal",
+            "{ticker}: {status}"
+        );
+    }
+}
+
 /// `task::create_new_account::init` fails for TRX and for a TRC20 ticker with `Internal` in the task status, and no
 /// account is created (CRD ch.21 R21.10B.4).
 #[test]
