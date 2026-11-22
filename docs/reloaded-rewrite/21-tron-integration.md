@@ -2936,9 +2936,11 @@ decision of 2026-11-08 on D21.B8:
 - *Secret.* The secret is taken from the event or the call and used only when
   its SHA-256 equals the swap's secret hash.
 - *Window.* The search made by the wait for a spend starts at the last
-  block at which the record was read as unspent, one block earlier; the
-  one-time search starts at the payment's block. The caps count from that
-  start.
+  block at which the record was read as unspent, one block earlier; when
+  that search finds nothing while the record shows the payment claimed or
+  refunded, it is made once more from the payment's block. The one-time
+  search starts at the payment's block. The caps count from the start of
+  each search.
 - *Failure.* When a source fails, or a cap is reached (logged as a warning
   naming the payment), or the record says claimed but no consuming transaction
   is found, the search gives a typed error, never "not spent". The wait for a

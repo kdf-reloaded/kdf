@@ -946,16 +946,25 @@ pub(super) async fn wait_for_spend_with(
                         },
                         None => (known.block, known.block_time_ms),
                     };
-                    find_consumer(
-                        &api,
-                        &selected,
-                        &known.facts.id,
-                        Kind::Spend,
-                        from_block,
-                        since_ms,
-                        caps,
-                    )
-                    .await
+                    let id = known.facts.id;
+                    match find_consumer(&api, &selected, &id, Kind::Spend, from_block, since_ms, caps).await {
+                        // Nothing from the last unspent start while the record says spent: the node that gave the
+                        // state may have lagged the node that gave the head, so the search runs once more from
+                        // the payment, the start of the one-time search.
+                        Err(TronSwapError::NotYetFinal) if last_unspent.is_some() => {
+                            find_consumer(
+                                &api,
+                                &selected,
+                                &id,
+                                Kind::Spend,
+                                known.block,
+                                known.block_time_ms,
+                                caps,
+                            )
+                            .await
+                        },
+                        other => other,
+                    }
                     .map(Some)
                 },
             }

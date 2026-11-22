@@ -1407,3 +1407,50 @@ fn a_transaction_the_node_returns_under_another_id_is_refused() {
     let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
     assert_mismatch(validate(&coin, &payment, &contract()), "transaction id");
 }
+
+/// The node that gave the state lagged the node that gave the head: the claim lies one block before the start
+/// recorded from the last unspent read, and the search from the payment finds it.
+#[test]
+fn the_wait_falls_back_to_the_payment_when_the_claim_lies_before_the_recorded_start() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let spend = the_spend(&me);
+    let log = spent_log(&contract(), pay_id(), SECRET);
+    let node = Node::start(0, {
+        let mut world = World::new()
+            .with_state(expected_hash(&me), u64::from(LOCK_TIME), 1)
+            .with_tx(&payment, 497, "SUCCESS", vec![])
+            // The recorded start is block 499 (head 500, minus the one-block overlap); the claim is at 498.
+            .with_tx(&spend, 498, "SUCCESS", vec![log]);
+        world.head_number = 500;
+        world
+    });
+    let (_ctx, coin) = coin_over(&[&node], None, 1);
+    let world = node.world.clone();
+    let helper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
+        w.head_number = 510;
+        w.ordinary = Some(Rec {
+            hash: expected_hash(&my_address_of_test_coin()),
+            lock: u64::from(LOCK_TIME),
+            state: 2,
+        });
+    });
+    let caps = Caps {
+        event_pages: 3,
+        walk_blocks: 20,
+    };
+    let wait_until = common::now_ms() / 1000 + 10;
+    let found = block_on(wait_for_spend_with(
+        &coin,
+        &payment.to_bytes(),
+        wait_until,
+        &selected(&contract()),
+        0.05,
+        caps,
+    ))
+    .expect("the claim before the recorded start is found from the payment");
+    helper.join().unwrap();
+    assert_eq!(found, spend);
+}
