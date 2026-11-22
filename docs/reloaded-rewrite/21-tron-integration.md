@@ -1427,6 +1427,16 @@ availability note). The read-only views (`orderbook`, `best_orders`,
 unchanged, and so are `max_taker_vol`, `max_maker_vol` and the legacy
 `get_trade_fee`, which do not ask whether a coin is wallet-only.
 
+*Status note (2026-11-22), EVM-family methods called on a TRON coin (Spec
+Reader round 0.5.0-22; clearance pending).* What the reference answers when
+`get_raw_transaction`, `sign_raw_transaction`, the legacy `get_trade_fee`,
+`trade_preimage` for a coin that is not wallet-only,
+`get_eth_estimated_fee_per_gas`, `stream::fee_estimator::enable` and
+`get_token_info` are called for a TRX or TRC20 coin is stated in R21.10B.14
+-- R21.10B.21, in the block "EVM-family methods called on a TRX or TRC20
+coin" at the end of this section. The sentences of R21.10B.9 and R21.10B.10
+are unchanged.
+
 **D21.10B.1** *TRC20 `fee_limit` policy.* The reference sets `fee_limit` to
 the dry-run energy times the energy price with no margin; Reloaded today
 sets a fixed cap (compatibility note). The cap is not visible to a peer.
@@ -1657,6 +1667,195 @@ T21.10B.14 *Address methods.* `validateaddress` accepts a base58check, a
 T21.10B.15 *Orders.* With TRX configured wallet-only, `setprice`, `buy`
 and `sell` against any active coin each answer the legacy error body and
 `my_orders` stays empty.
+
+### 21.10B-E EVM-family methods called on a TRX or TRC20 coin (added 2026-11-22)
+
+> **Clearance (chapter 01 R40) -- candidate awaiting the KDF Dirty Gate;
+> clearance pending.** This block was written on 2026-11-22 by the KDF Spec
+> Reader (Spec Reader round 0.5.0-22) under the two-team procedure of
+> chapter 01 §1.4A, from the reference lineage at the rows `v3.0.0-beta`,
+> `v2.6.0-beta`, `feat/tron-swap-support (as of 2026-04-23)` and
+> `feat/tron-gasfree (as of 2026-05-04)` of chapter 02 §2.15A (read
+> read-only; no untabled state was read) and this repository's own
+> chapters. It edits no sentence of §21.0 -- §21.11B. It describes the
+> reference; what Reloaded answers on these methods is for the lane's own
+> notes. Numbering: R21.10B.14 -- R21.10B.21, T21.10B.19 -- T21.10B.22.
+
+**R21.10B.14** *Common ground and reference states (completes R21.10B.1
+and the "Trade-fee and swap-fee methods" bullet of R21.10B.10).* At the
+rows `v3.0.0-beta`, `feat/tron-swap-support (as of 2026-04-23)` and
+`feat/tron-gasfree (as of 2026-05-04)` each method below is the EVM
+family's own method. A TRX or TRC20 coin reaches it because it has the EVM
+coin type; none of the methods has a TRON case, and none refuses a coin for
+being TRON. A TRON coin is activated with no EVM node connection at all:
+its configured nodes are served by the TRON HTTP client only (R21.10B.3),
+and none of these methods uses that client. Every step that would ask an
+EVM node therefore fails inside the process, at once, and **no request
+reaches any node**. The two exceptions are named where they occur: the
+gas-fee provider of R21.10B.19, which is not a node of the coin, and the
+balance read of R21.10B.18. The three rows agree on every rule below; the
+two branch rows change nothing in these methods. TRX and TRC20 are
+answered alike unless a rule says otherwise, and a ticker that is not
+active is answered as for every other coin.
+
+The row `v2.6.0-beta` has no TRON behavior here either (R21.10B.1): a `TRX`
+platform is an ordinary EVM coin with EVM JSON-RPC over the given nodes,
+and there is no `TRC20` case. Every method below then takes the ordinary
+EVM path and **does** send EVM JSON-RPC requests to the configured nodes;
+the answer is what the EVM rules make of those nodes' replies. One outcome
+is fixed at that row: `sign_raw_transaction` is refused with
+`TransactionError` (HTTP 400) after the account nonce was read, because
+the coin has no EVM chain identifier to sign for.
+
+**R21.10B.15** *`get_raw_transaction`.* A `tx_hash` that is not 64 hex
+digits, with or without `0x`, answers `InvalidHashError` (HTTP 400). Any
+other request answers `Transport` (HTTP 502), with no request to any node.
+The method never answers `HashNotExist` and never succeeds for a TRON
+coin. A TRON transaction id has the accepted form, so the id of a real
+TRON transaction gets `Transport`.
+
+**R21.10B.16** *`sign_raw_transaction`.* The method never returns a signed
+transaction for a TRON coin and asks no node.
+
+- A request whose `type` is `UTXO` answers `InvalidParam` (HTTP 400).
+- With `type` `ETH`, the members are read as for an EVM coin: `to` must
+  be an EVM hex address, so a base58check address answers `InvalidParam`
+  (HTTP 400); `data` must be hex.
+- Under a single key, a request without `pay_for_gas`, or one whose
+  `pay_for_gas` names a fee policy instead of prices, fails at the
+  gas-price read with `InternalError` (HTTP 500) (but see the last
+  paragraph of R21.10B.19).
+- Under a single key, a request whose `pay_for_gas` gives the prices
+  goes on to the account nonce, which is asked of an empty set of nodes
+  in six rounds one second apart; the answer is `TransactionError`
+  (HTTP 400), about five seconds after the request.
+- A key the node does not hold is refused with `InvalidParam` (HTTP 400)
+  as for every EVM coin.
+
+**R21.10B.17** *Legacy `get_trade_fee` (completes R21.10B.10).* The answer
+is the legacy error body (chapter 55 R55.1.10, HTTP 500), produced by the
+failed gas-price read; no node is asked and no fee figure is returned. A
+TRC20 ticker is answered the same way, through the fee policy of its
+platform.
+
+**R21.10B.18** *`trade_preimage` (completes R21.10B.9 and R21.10B.10).*
+
+- *Wallet-only config.* `CoinIsWalletOnly` (HTTP 400) naming the ticker,
+  before either coin is looked up (R21.10B.10).
+- *Trading-capable config.* There is no TRON check. Every fee estimate
+  of a TRON coin fails at the gas-price read, and the method answers
+  `InternalError` (HTTP 500).
+- *`setprice` with the TRON coin as `rel`.* The sender fee of the `base`
+  coin is estimated first, and may ask that coin's own nodes; the
+  receiver fee of the TRON coin then fails as stated.
+- *`buy` and `sell` with the TRON coin as the coin received* (`base` of
+  `buy`, `rel` of `sell`). The two estimates of the paying coin run first;
+  the receiver fee of the TRON coin then fails as stated.
+- *The TRON coin as the paying coin* (`base` of `setprice` and `sell`,
+  `rel` of `buy`). The same `InternalError`, at the TRON coin's own first
+  estimate. With `setprice` and `max: true` the TRON balance is read
+  first, through the TRON client; this is the one TRON node request in
+  this block.
+
+No order is created and no TRON fee figure is returned in any case.
+
+**R21.10B.19** *`get_eth_estimated_fee_per_gas`.*
+
+- `estimator_type` `Simple`: `Internal` (HTTP 500); no request.
+- `estimator_type` `Provider` on a node whose configuration has no
+  `gas_api` member: as `Simple`.
+- `estimator_type` `Provider` with `gas_api` configured: one request goes
+  to the configured gas-fee provider. That service is not a node of the
+  coin, and the figures asked of it are those of the Ethereum main chain
+  whatever coin the request names. When it answers, the method
+  **succeeds** in its ordinary shape (the members of chapter 10 R36, with
+  the provider as `source`): a TRON ticker is answered with Ethereum's
+  fees. When it fails, the answer is `Internal` (HTTP 500).
+
+The same estimate is behind every fee read of R21.10B.16 -- R21.10B.18 when
+the platform's swap fee policy is not the legacy one (the activation member
+`swap_gas_fee_policy` of R21.10B.2). With the default legacy policy those
+reads fail as stated. With another policy and `gas_api` configured they
+obtain the provider's Ethereum figures instead of failing, and the method
+goes on with them.
+
+**R21.10B.20** *`stream::fee_estimator::enable`.* The request is **not**
+refused: it succeeds with `streamer_id` `FEE_ESTIMATION:<ticker>` (chapter
+10 R38), the periodic estimator starts, and no node is asked at
+activation. Each cycle then runs the estimate of R21.10B.19 for the
+configured `estimator_type`: with `Simple`, the default, every cycle emits
+an error event and never a fee event; with `Provider` and `gas_api`
+configured the events carry the provider's Ethereum figures. The stream
+runs until it is disabled or the coin is deactivated.
+
+**R21.10B.21** *`get_token_info` for a token protocol on a TRON platform.*
+The rule is the same for an `ERC20` protocol whose `platform` is the TRX
+ticker and for a `TRC20` protocol.
+
+- The platform is not active: `NoSuchCoin` (HTTP 404).
+- `contract_address` is read as an EVM address: a base58check value, or
+  either hex wire form of R-AD1, answers `InvalidRequest` (HTTP 400).
+- A `contract_address` in the EVM `0x` 20-byte form that passes the
+  method's address check: `RetrieveInfoError` (HTTP 500), at the symbol
+  read; no node is asked.
+
+The method never succeeds on a TRON platform, so a TRON token's symbol
+and decimals cannot be read through it at any of the three rows, although
+activation reads the token's `decimals()` through the TRON client
+(R21.10B.2).
+
+*Code-quality finding (informative; apparent from the reading, no audit
+was made).* None of these methods tells the caller that the coin is not
+supported. They answer with the transport and internal errors of a node
+outage: `get_raw_transaction` answers the HTTP 502 a client would retry,
+and `sign_raw_transaction` can hold the request for about five seconds
+first. The fee stream is accepted and then reports an error every cycle for
+as long as it runs. With a gas-fee provider configured, the fee estimate
+and the stream report Ethereum's fees under a TRON ticker, and no member of
+the answer says so. A possible remedy, in this chapter's own terms: refuse
+each of these methods for a TRX or TRC20 coin with a typed "not supported
+for this coin" answer before any other work, until the method has a TRON
+case.
+
+*Not established (R21.10B.14 -- R21.10B.21).* (1) Every outcome was read,
+none was executed against a reference binary. (2) At `v2.6.0-beta`, what
+the given nodes answer to the EVM JSON-RPC requests. (3)
+`sign_raw_transaction` under a global-HD login. (4) The form the legacy
+`trade_preimage` gives these answers. (5) How far each method of R21.10B.16
+-- R21.10B.18 gets once it holds the provider's figures. (6) The text of
+the legacy error body of R21.10B.17 is deliberately not recorded.
+
+T21.10B.19 *No node is asked (parity).* With TRX and one TRC20 token
+active under a single key against a stub TRON node that counts its
+requests: `get_raw_transaction` with a 64-digit hex id answers
+`Transport`, HTTP 502; `get_token_info` with an `ERC20` protocol on the
+TRX platform and an EVM-form contract address answers `RetrieveInfoError`,
+HTTP 500, and with a base58check address `InvalidRequest`, HTTP 400;
+`get_eth_estimated_fee_per_gas` with `Simple` answers `Internal`, HTTP
+500; the legacy `get_trade_fee` answers the legacy error body, HTTP 500.
+The stub's count does not change.
+
+T21.10B.20 *Raw signing (parity).* In the setup of T21.10B.19,
+`sign_raw_transaction` with `type` `ETH` and no `pay_for_gas` answers
+`InternalError`, HTTP 500; with explicit prices it answers
+`TransactionError`, HTTP 400, no sooner than five seconds later; with a
+base58check `to` it answers `InvalidParam`, HTTP 400. The stub's count does
+not change and no answer carries a transaction.
+
+T21.10B.21 *Trade preimage (parity).* With TRX configured trading-capable
+and a second active coin, `trade_preimage` answers `InternalError`, HTTP
+500, for `setprice` with TRX as `rel`, for `buy` with TRX as `base` and for
+`sell` with TRX as `rel`; the stub TRON node receives no request. With TRX
+configured wallet-only each answers `CoinIsWalletOnly`, HTTP 400.
+
+T21.10B.22 *Fee stream (parity).* `stream::fee_estimator::enable` for TRX
+with an empty `config` succeeds with `streamer_id` `FEE_ESTIMATION:TRX`,
+and the first event on the stream is an error event; the stub TRON node
+receives no request.
+
+A row marked *parity* states the reference. Where Reloaded refuses one of
+these methods for a TRON coin earlier and with another token, the lane's
+note names the token and the row is restated there.
 
 ## 21.10C Transaction history (Reloaded-original, added 2026-11-20)
 
@@ -2613,3 +2812,27 @@ V3. The address encoding, protobuf transaction/contract formats,
   note of chapter 18 for the form of the swap switch; and this
   repository's own code. *Forbidden corpus:* not consulted for these
   notes. No cleared sentence was edited.
+- *Scoped addition (2026-11-22, Spec Reader round 0.5.0-22) -- the block
+  "EVM-family methods called on a TRX or TRC20 coin" at the end of §21.10B
+  (R21.10B.14 -- R21.10B.21, the code-quality finding, the not-established
+  paragraph, T21.10B.19 -- T21.10B.22) and the status note of 2026-11-22
+  after R21.10B.9; no other text of this chapter was changed.* **KDF Dirty
+  Gate: clearance pending** (chapter 01 R40; a candidate until the gate
+  passes it, and the attestation is to be recorded here).
+  *Inputs:* (1) the forbidden corpus at the rows `v3.0.0-beta`,
+  `v2.6.0-beta`, `feat/tron-swap-support (as of 2026-04-23)` and
+  `feat/tron-gasfree (as of 2026-05-04)` of chapter 02 §2.15A, read
+  read-only and consulted **only** to establish, for a TRX and a TRC20
+  coin: whether `get_raw_transaction`, `sign_raw_transaction`, the legacy
+  `get_trade_fee`, `trade_preimage`, `get_eth_estimated_fee_per_gas`,
+  `stream::fee_estimator::enable` and `get_token_info` are reachable; with
+  which `error_type` token and HTTP status, or which success shape, each
+  ends; whether a request is sent to a node or to another service on the
+  way; and the agreement of the rows on these points. Behavior, public
+  method names, request and answer members, error tokens and statuses
+  only; no private identifier, body, helper decomposition, error, log,
+  comment or test text was reproduced, and the legacy error text is
+  deliberately not recorded. (2) This repository's chapters 10, 43 and 55
+  for the cross-references. No row was added to chapter 02 §2.15A: every
+  state read already had one. The remedy sketched in the code-quality
+  finding and the four acceptance rows are Reloaded-original.
