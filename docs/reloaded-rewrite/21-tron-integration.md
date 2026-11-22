@@ -2900,14 +2900,13 @@ typed error and nothing is broadcast.
 **R21.11D.4A (the two claims).** The claim that reveals the secret (the maker
 claiming the taker payment) is sent only after its dry run succeeded, with the
 `fee_limit` of R21.11C.7; when the dry run reverts nothing is signed or
-broadcast and the swap goes on to its refund, so the secret stays private (the
-contract review's finding that a failed claim still publishes the secret). The
-claim whose secret is already public (the taker claiming the maker payment) is
-sent while the `payments(id)` record does not show it claimed or refunded,
-whatever the chain time, also past the lock time, with no margin before or after
-it. Its `fee_limit` comes from the dry run when the dry run succeeds; when the
-dry run reverts, fails, or needs more than the cap, the call is sent with the
-fixed `fee_limit` of 100 TRX, the cap of R21.11C.7.
+broadcast and the swap goes on to its refund. The claim whose secret is already
+public (the taker claiming the maker payment) is sent while the `payments(id)`
+record does not show it claimed or refunded, whatever the chain time, also past
+the lock time, with no margin before or after it. Its `fee_limit` comes from the
+dry run when the dry run succeeds; when the dry run reverts, fails, or needs
+more than the cap, the call is sent with the fixed `fee_limit` of 100 TRX, the
+cap of R21.11C.7.
 
 **R21.11D.5 (refund gate).** A refund is allowed once the chain time agreed by
 R21.11D.1 is at or past the lock time; before that the swap waits (chapter 51

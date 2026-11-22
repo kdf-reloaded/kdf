@@ -514,7 +514,7 @@ impl From<OwnStepFailure> for crate::TransactionErr {
 /// Which claim a spend is: the one that reveals the secret, or the one whose secret is public already.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaimKind {
-    /// The maker claims the taker's payment: the call publishes the secret, so it is sent only after its dry run
+    /// The maker claims the taker's payment, the claim that reveals the secret: it is sent only after its dry run
     /// succeeded, under the swap fee-limit policy; a reverting dry run sends nothing.
     RevealsSecret,
     /// The taker claims the maker's payment with a secret that is public already: always worth sending while the

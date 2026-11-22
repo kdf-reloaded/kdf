@@ -1073,7 +1073,7 @@ fn our_spend_counts_after_a_successful_receipt_and_goes_to_the_selected_contract
 /// The claim is sent only after its dry run succeeded: a reverting dry run sends nothing, keeps no transaction
 /// (so the error is not recoverable), and the secret is in no request but the dry run's own.
 #[test]
-fn a_claim_whose_dry_run_reverts_is_not_sent_and_the_secret_stays_private() {
+fn a_revealing_claim_whose_dry_run_reverts_is_not_signed_or_sent() {
     let me = my_address_of_test_coin();
     let payment = good_payment(&me);
     let node = payment_node(0, &payment, &me, 1);
