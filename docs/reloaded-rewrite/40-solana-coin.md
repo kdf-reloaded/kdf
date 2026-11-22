@@ -2198,10 +2198,11 @@ payment account is present at `finalized` (as R40.6D.16 requires), only after
 the node's simulation of the transaction succeeds, and only while the cluster
 time (R40.6D.11) is at least 300 seconds before the lock time; otherwise it is
 not sent and the swap goes to its refund. The 300 seconds are this section's own
-figure. The taker's claim of the maker's payment is sent whenever the payment
-account is present at `finalized`, before or after the lock time, after a
-successful simulation, and is tried again while the account is present. The
-sender refunds with `sender_refund_*` once the refund gate (R40.6D.11) is open.
+figure. The taker's claim of the maker's payment is sent unless the payment
+account is known to be gone at `finalized` (an undetermined read does not hold
+it back), before or after the lock time, after a successful simulation, and is
+tried again until the account is known to be gone. The sender refunds with
+`sender_refund_*` once the refund gate (R40.6D.11) is open.
 
 **R40.6D.11 (refund gate).** The time compared with the lock is the cluster's:
 the block time of the latest `finalized` slot. The gate answers "wait" with the
@@ -2321,10 +2322,11 @@ T40.6D.13 Evidence: two agreeing nodes, a disagreement, one answer, and the
 named evidence node (R40.6D.16).
 T40.6D.14 Claim conditions: the maker's claim is not sent when the payment
 account is gone, when the simulation fails, or when the cluster time is less
-than 300 seconds before the lock time; the taker's claim is sent while the
-account is present, also after the lock time; an SPL vault that is frozen fails
-validation, and a frozen token account of either party refuses the swap at its
-start and before the payment (R40.6D.6, R40.6D.9, R40.6D.10).
+than 300 seconds before the lock time; the taker's claim is sent unless the
+account is known to be gone, also after the lock time and with an undetermined
+read; an SPL vault that is frozen fails validation, and a frozen token account
+of either party refuses the swap at its start and before the payment (R40.6D.6,
+R40.6D.9, R40.6D.10).
 
 ## 40.7 Tests
 
