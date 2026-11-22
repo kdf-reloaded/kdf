@@ -292,7 +292,15 @@ fn evm_hd_p1_account_balance_with_a_token_ticker_answers_token_only_maps() {
         assert_eq!(tickers(&entry["balance"]), vec![TOKEN.to_owned()]);
     }
     assert_eq!(addresses[1]["balance"][TOKEN]["spendable"], "2");
-    assert_eq!(answer["page_balance"]["spendable"], "5", "the page sums the token only");
+    assert_eq!(
+        tickers(&answer["page_balance"]),
+        vec![TOKEN.to_owned()],
+        "the page total holds the token only"
+    );
+    assert_eq!(
+        answer["page_balance"][TOKEN]["spendable"], "5",
+        "the page sums the token only"
+    );
 
     let initiated =
         block_on(token.init_account_balance_rpc(serde_json::from_value(json!({ "account_index": 0 })).unwrap()))

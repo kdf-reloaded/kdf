@@ -21,51 +21,67 @@ use serde_json::{json, Value as Json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-const USDT: &str = "USDT-ERC20";
-const DAI: &str = "DAI-ERC20";
+pub(crate) const USDT: &str = "USDT-ERC20";
+pub(crate) const DAI: &str = "DAI-ERC20";
 
 /// What the scripted chain holds per address, and every balance and nonce query it has answered.
 #[derive(Default)]
-struct Chain {
+pub(crate) struct Chain {
     native: Mutex<HashMap<String, u128>>,
     nonces: Mutex<HashMap<String, u64>>,
     /// The token balances by contract and holder, both in lower case.
     tokens: Mutex<HashMap<(String, String), u128>>,
     /// The contract whose `balanceOf` the node refuses.
     failing_contract: Mutex<Option<String>>,
+    /// Whether the node refuses `eth_getBalance`.
+    failing_native: std::sync::atomic::AtomicBool,
     queries: Mutex<Vec<String>>,
 }
 
 impl Chain {
-    fn set_token(&self, contract: &str, address: &str, value: u128) {
+    pub(crate) fn set_token(&self, contract: &str, address: &str, value: u128) {
         self.tokens
             .lock()
             .unwrap()
             .insert((contract.to_lowercase(), address.to_lowercase()), value);
     }
-    fn set_nonce(&self, address: &str, value: u64) {
+    pub(crate) fn set_nonce(&self, address: &str, value: u64) {
         self.nonces.lock().unwrap().insert(address.to_lowercase(), value);
     }
-    fn fail_token(&self, contract: &str) { *self.failing_contract.lock().unwrap() = Some(contract.to_lowercase()); }
-    fn forget_queries(&self) { self.queries.lock().unwrap().clear(); }
-    fn queries(&self) -> Vec<String> { self.queries.lock().unwrap().clone() }
+    pub(crate) fn set_native(&self, address: &str, value: u128) {
+        self.native.lock().unwrap().insert(address.to_lowercase(), value);
+    }
+    /// Makes the node answer again: the failing contract and the failing platform balance are cleared.
+    pub(crate) fn heal(&self) {
+        *self.failing_contract.lock().unwrap() = None;
+        self.failing_native.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub(crate) fn fail_native(&self) { self.failing_native.store(true, std::sync::atomic::Ordering::SeqCst); }
+    pub(crate) fn fail_token(&self, contract: &str) {
+        *self.failing_contract.lock().unwrap() = Some(contract.to_lowercase());
+    }
+    pub(crate) fn forget_queries(&self) { self.queries.lock().unwrap().clear(); }
+    pub(crate) fn queries(&self) -> Vec<String> { self.queries.lock().unwrap().clone() }
     /// How many `balanceOf` queries of `contract` the node answered for `address`.
-    fn token_queries(&self, contract: &str, address: &str) -> usize {
+    pub(crate) fn token_queries(&self, contract: &str, address: &str) -> usize {
         let wanted = format!("token {} {}", contract.to_lowercase(), address.to_lowercase());
         self.queries().iter().filter(|q| **q == wanted).count()
     }
     /// Whether any `balanceOf` of `contract` was asked.
-    fn asked_contract(&self, contract: &str) -> bool {
+    pub(crate) fn asked_contract(&self, contract: &str) -> bool {
         let prefix = format!("token {} ", contract.to_lowercase());
         self.queries().iter().any(|q| q.starts_with(&prefix))
     }
 }
 
-fn chain_node(chain: Arc<Chain>) -> MockEvmNode {
+pub(crate) fn chain_node(chain: Arc<Chain>) -> MockEvmNode {
     spawn_node(move |method, params| {
         let lower = |value: &Json| value.as_str().unwrap_or_default().to_lowercase();
         match method {
             "eth_getBalance" => {
+                if chain.failing_native.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Reply::RpcError;
+                }
                 let who = lower(&params[0]);
                 let value = chain.native.lock().unwrap().get(&who).copied().unwrap_or(0);
                 Reply::Result(json!(format!("0x{value:x}")))
@@ -103,7 +119,7 @@ fn chain_node(chain: Arc<Chain>) -> MockEvmNode {
     })
 }
 
-fn platform_request(
+pub(crate) fn platform_request(
     node: &MockEvmNode,
     tokens: &[&str],
 ) -> EnablePlatformCoinWithTokensReq<EthWithTokensActivationRequest> {
@@ -117,7 +133,7 @@ fn platform_request(
     .unwrap()
 }
 
-fn set_known_addresses(ctx: &MmArc, known_addresses: u32) {
+pub(crate) fn set_known_addresses(ctx: &MmArc, known_addresses: u32) {
     if let DerivationMethod::HDWallet(hd_wallet) = &coin(ctx, PLATFORM).derivation_method {
         let mut accounts = block_on(hd_wallet.accounts.lock());
         accounts.get_mut(&0).expect("account 0").external_addresses_number = known_addresses;
@@ -142,7 +158,7 @@ fn activate(node: &MockEvmNode, known_addresses: u32) -> MmArc {
     ctx
 }
 
-fn coin(ctx: &MmArc, ticker: &str) -> EthCoin {
+pub(crate) fn coin(ctx: &MmArc, ticker: &str) -> EthCoin {
     match block_on(lp_coinfind(ctx, ticker)).unwrap().expect("the coin is active") {
         MmCoinEnum::EthCoin(coin) => coin,
         other => panic!("not an EVM coin: {}", other.ticker()),
@@ -150,7 +166,7 @@ fn coin(ctx: &MmArc, ticker: &str) -> EthCoin {
 }
 
 /// The address `index` of account 0, in lower case.
-fn address_at(ctx: &MmArc, index: u32) -> String {
+pub(crate) fn address_at(ctx: &MmArc, index: u32) -> String {
     let platform = coin(ctx, PLATFORM);
     let DerivationMethod::HDWallet(hd_wallet) = &platform.derivation_method else {
         panic!("an HD platform expected");
@@ -162,7 +178,7 @@ fn address_at(ctx: &MmArc, index: u32) -> String {
     format!("{:#x}", derived.address)
 }
 
-fn known_addresses(ctx: &MmArc) -> u32 {
+pub(crate) fn known_addresses(ctx: &MmArc) -> u32 {
     let platform = coin(ctx, PLATFORM);
     let DerivationMethod::HDWallet(hd_wallet) = &platform.derivation_method else {
         panic!("an HD platform expected");
@@ -176,16 +192,16 @@ fn known_addresses(ctx: &MmArc) -> u32 {
 }
 
 /// The tickers of a balance map in the wire form.
-fn tickers(balance: &Json) -> Vec<String> {
+pub(crate) fn tickers(balance: &Json) -> Vec<String> {
     let mut tickers: Vec<String> = balance.as_object().expect("a balance map").keys().cloned().collect();
     tickers.sort();
     tickers
 }
 
 /// The error kind of a failed token balance query: the node answers a JSON-RPC error.
-const FAILED_KIND: &str = "Transport";
+pub(crate) const FAILED_KIND: &str = "Transport";
 
-mod erased {
+pub(crate) mod erased {
     use mm2_err_handle::prelude::{MmError, NotMmError};
     use serde_json::Value as Json;
 
@@ -199,17 +215,17 @@ mod erased {
     }
 }
 
-fn all_tickers() -> Vec<String> { vec![DAI.to_owned(), PLATFORM.to_owned(), USDT.to_owned()] }
+pub(crate) fn all_tickers() -> Vec<String> { vec![DAI.to_owned(), PLATFORM.to_owned(), USDT.to_owned()] }
 
-fn get_new_address_params() -> coins::hd_wallet::GetNewHDAddressParams {
+pub(crate) fn get_new_address_params() -> coins::hd_wallet::GetNewHDAddressParams {
     serde_json::from_value(json!({ "account_id": 0, "chain": "External" })).unwrap()
 }
 
-fn account_params() -> coins::rpc_command::account_balance::AccountBalanceParams {
+pub(crate) fn account_params() -> coins::rpc_command::account_balance::AccountBalanceParams {
     serde_json::from_value(json!({ "account_index": 0, "chain": "External", "limit": 20 })).unwrap()
 }
 
-fn scan_params(gap_limit: u32) -> coins::rpc_command::init_scan_for_new_addresses::ScanAddressesParams {
+pub(crate) fn scan_params(gap_limit: u32) -> coins::rpc_command::init_scan_for_new_addresses::ScanAddressesParams {
     serde_json::from_value(json!({ "account_index": 0, "gap_limit": gap_limit })).unwrap()
 }
 
@@ -251,8 +267,10 @@ fn evm_hd_p2_account_balance_and_its_task_form_list_every_ticker_at_every_addres
     }
     assert_eq!(addresses[2]["balance"][USDT]["spendable"], "7");
     assert_eq!(addresses[1]["balance"][USDT]["spendable"], "0");
-    // The page balance of the answer is a single balance: the platform ticker's sum.
-    assert_eq!(answer["page_balance"]["spendable"], "0.0");
+    // The page total is a map that sums each ticker over the page (CRD ch.49 R49.35 item 1).
+    assert_eq!(tickers(&answer["page_balance"]), all_tickers());
+    assert_eq!(answer["page_balance"][USDT]["spendable"], "7");
+    assert_eq!(answer["page_balance"][DAI]["spendable"], "0");
 
     let initiated =
         block_on(platform.init_account_balance_rpc(serde_json::from_value(json!({ "account_index": 0 })).unwrap()))
@@ -390,7 +408,8 @@ fn evm_hd_p2_a_token_ticker_asks_no_other_tokens_balance() {
     for entry in answer["addresses"].as_array().unwrap() {
         assert_eq!(tickers(&entry["balance"]), vec![USDT.to_owned()]);
     }
-    assert_eq!(answer["page_balance"]["spendable"], "7");
+    assert_eq!(tickers(&answer["page_balance"]), vec![USDT.to_owned()]);
+    assert_eq!(answer["page_balance"][USDT]["spendable"], "7");
     let initiated =
         block_on(token.init_account_balance_rpc(serde_json::from_value(json!({ "account_index": 0 })).unwrap()))
             .unwrap_or_else(|e| panic!("{e}"));
@@ -448,4 +467,4 @@ fn evm_hd_p2_the_activation_report_keeps_the_platform_and_every_token_and_asks_e
 }
 
 /// The activated address of the HD test context: address 0 of account 0 of the test mnemonic at `m/44'/60'/0'/0/0`.
-const ACTIVATED_ADDRESS: &str = "0x9858effd232b4033e47d90003d41ec34ecaeda94";
+pub(crate) const ACTIVATED_ADDRESS: &str = "0x9858effd232b4033e47d90003d41ec34ecaeda94";

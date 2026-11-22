@@ -386,9 +386,23 @@ pub struct EthAddressScanner {
     /// The used-address rule and the reported maps of an EVM platform ticker's scan (CRD ch.49 R49.32 items 2, 3): the
     /// platform and the tokens activated on it when the scan was created. An address is also used when one of
     /// these tokens has a balance at it, a used address reports the platform and every one of them, and an unused
-    /// address between the known range and a used one reports an empty map. `None` for the activation-time scan, which
-    /// keeps its own rule and reports (the activation report adds the tokens afterwards).
+    /// address between the known range and a used one reports an empty map. The scan of an activation (CRD ch.49
+    /// R49.36) is built the same way. `None` for the other scans, which keep the platform's own rule and report.
     platform_tokens: Option<(EthCoin, Vec<(String, Erc20TokenInfo)>)>,
+    /// The token balances the used-address test of `platform_tokens` read at the addresses it probed, so that the
+    /// activation reports an address it lists without asking each token's `balanceOf` a second time (CRD ch.49
+    /// R49.36 item 4). An address the test settled by its nonce or platform balance has no entry.
+    probed_tokens: std::sync::Mutex<std::collections::HashMap<Address, CoinBalanceMap>>,
+}
+
+impl EthAddressScanner {
+    /// Takes the token balances the used-address test read at `address`, when it read them.
+    fn take_probed_tokens(&self, address: &Address) -> Option<CoinBalanceMap> {
+        self.probed_tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(address)
+    }
 }
 
 #[async_trait]
@@ -420,12 +434,18 @@ impl HDAddressBalanceScanner for EthAddressScanner {
         }
         if let Some((platform, tokens)) = &self.platform_tokens {
             let zero = BigDecimal::from(0);
-            for (_, info) in tokens {
+            let mut read = CoinBalanceMap::new();
+            let mut used = false;
+            for (ticker, info) in tokens {
                 let balance = platform.erc20_balance_of(info, *address).await?;
-                if balance.spendable != zero || balance.unspendable != zero {
-                    return Ok(true);
-                }
+                used |= balance.spendable != zero || balance.unspendable != zero;
+                read.insert(ticker.clone(), balance);
             }
+            self.probed_tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(*address, read);
+            return Ok(used);
         }
         Ok(false)
     }
@@ -455,7 +475,46 @@ impl HDWalletBalanceOps for EthCoin {
             tron,
             token: None,
             platform_tokens: None,
+            probed_tokens: Default::default(),
         })
+    }
+
+    /// The scan of an EVM platform's activation counts an address as used by its nonce, its platform balance or the
+    /// balance of a token activated on the platform when the scan starts, which includes the tokens of the same
+    /// request (CRD ch.49 R49.36 items 2, 3). A TRON platform keeps its own rule.
+    async fn produce_hd_activation_scanner(&self) -> BalanceResult<Self::HDAddressScanner> {
+        let mut scanner = self.produce_hd_address_scanner().await?;
+        if self.is_evm_platform_coin() {
+            scanner.platform_tokens = Some((self.clone(), self.get_erc20_tokens_infos().into_iter().collect()));
+        }
+        Ok(scanner)
+    }
+
+    /// An EVM platform's activation report carries the platform and every token registered on it at each address it
+    /// queries (CRD ch.49 R49.32 item 1, R49.36 item 4), each token's balance asked once per address.
+    async fn complete_activation_entries(
+        &self,
+        address_scanner: &Self::HDAddressScanner,
+        entries: &mut [HDAddressBalance],
+    ) -> BalanceResult<()> {
+        if !self.is_evm_platform_coin() {
+            return Ok(());
+        }
+        let mut unread = Vec::new();
+        for entry in entries.iter_mut() {
+            let address = super::addr_from_str(&entry.address).map_to_mm(BalanceError::Internal)?;
+            match address_scanner.take_probed_tokens(&address) {
+                Some(read) => entry.balance.extend(read),
+                None => unread.push(entry),
+            }
+        }
+        let tokens: Vec<_> = self.get_erc20_tokens_infos().into_iter().collect();
+        for entry in unread {
+            let address = super::addr_from_str(&entry.address).map_to_mm(BalanceError::Internal)?;
+            self.add_tokens_to_hd_balance_map(&tokens, &address, &mut entry.balance)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn enable_hd_wallet<XPubExtractor>(
@@ -637,8 +696,13 @@ async fn scan_for_new_addresses_impl(
                 }
                 let mut balance = coin.hd_balance_map(&checking_address, non_empty_balance).await?;
                 if let Some((_, tokens)) = &address_scanner.platform_tokens {
-                    coin.add_tokens_to_hd_balance_map(tokens, &checking_address, &mut balance)
-                        .await?;
+                    match address_scanner.take_probed_tokens(&checking_address) {
+                        Some(read) => balance.extend(read),
+                        None => {
+                            coin.add_tokens_to_hd_balance_map(tokens, &checking_address, &mut balance)
+                                .await?
+                        },
+                    }
                 }
                 balances.push(
                     coin.hd_address_balance(&checking_address, checking_address_der_path, chain, balance)
@@ -690,17 +754,13 @@ impl AccountBalanceRpcOps for EthCoin {
         self.narrow_to_erc20_ticker(&mut response.addresses)
             .await
             .mm_err(HDAccountBalanceRpcError::from)?;
-        if matches!(self.coin_type, EthCoinType::Trc20 { .. } | EthCoinType::Erc20 { .. }) {
-            response.page_balance = response
-                .addresses
-                .iter()
-                .fold(CoinBalance::default(), |total, address| {
-                    total + address.balance.get(self.ticker()).cloned().unwrap_or_default()
-                });
-        }
         for address in response.addresses.iter_mut() {
             self.keep_own_ticker_if_trc20(&mut address.balance);
         }
+        // The page total sums each ticker the entries carry over the returned page (CRD ch.49 R49.35 item 1): the
+        // platform and its tokens for an EVM platform ticker, TRX and its tokens for a TRON platform, and the token
+        // alone for a token ticker. A page without an address holds the requested ticker at zero.
+        response.page_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &response.addresses);
         Ok(response)
     }
 }
@@ -727,22 +787,18 @@ impl InitAccountBalanceRpcOps for EthCoin {
             .await
             .map_to_mm(HDAccountBalanceRpcError::Internal)?;
         let mut response = init_account_balance_mod::common_impl::init_account_balance_rpc(&serving, params).await?;
-        self.keep_own_ticker_if_trc20(&mut response.total_balance);
-        if self.is_evm_platform_coin() {
-            self.add_tokens_to_platform_entries(&mut response.addresses)
-                .await
-                .mm_err(HDAccountBalanceRpcError::from)?;
-            response.total_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &response.addresses);
-        }
-        if self.erc20_ticker_info().is_some() {
-            self.narrow_to_erc20_ticker(&mut response.addresses)
-                .await
-                .mm_err(HDAccountBalanceRpcError::from)?;
-            response.total_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &response.addresses);
-        }
+        self.add_tokens_to_platform_entries(&mut response.addresses)
+            .await
+            .mm_err(HDAccountBalanceRpcError::from)?;
+        self.narrow_to_erc20_ticker(&mut response.addresses)
+            .await
+            .mm_err(HDAccountBalanceRpcError::from)?;
         for address in response.addresses.iter_mut() {
             self.keep_own_ticker_if_trc20(&mut address.balance);
         }
+        // The total sums each ticker the entries carry over every address reported (CRD ch.49 R49.35 item 2); an
+        // account without a known address holds the requested ticker at zero (CRD ch.38 R38.8.5).
+        response.total_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &response.addresses);
         Ok(response)
     }
 }
@@ -838,6 +894,7 @@ async fn scan_for_erc20_ticker(
         tron: None,
         token: Some((token.clone(), info)),
         platform_tokens: None,
+        probed_tokens: Default::default(),
     };
     let mut response = scan_with(platform, &address_scanner, params).await?;
     token
@@ -861,6 +918,7 @@ async fn scan_for_evm_platform_ticker(
             platform.clone(),
             platform.get_erc20_tokens_infos().into_iter().collect(),
         )),
+        probed_tokens: Default::default(),
     };
     scan_with(platform, &address_scanner, params).await
 }
@@ -980,7 +1038,7 @@ impl EthCoin {
 
     /// The balance map of one address of an HD wallet report: the coin's own ticker, and for a TRON platform also
     /// every enabled TRC20 token (CRD ch.21 R21.10B.4). An EVM coin reports its own ticker only; its tokens are
-    /// added by [`Self::add_erc20_balances_to_hd_report`].
+    /// added to the entries an activation queries by [`HDWalletBalanceOps::complete_activation_entries`].
     pub(crate) async fn hd_balance_map(
         &self,
         address: &Address,
@@ -1096,31 +1154,6 @@ impl EthCoin {
                 self.ticker()
             )),
         }
-    }
-
-    /// Adds the balance of every ERC-20 token registered on this platform coin to each address of an HD wallet
-    /// report, and recomputes the per-account totals (CRD R35.1.3(b): each balance map covers the platform
-    /// ticker and every activated token ticker). A TRON platform's reports carry its tokens already
-    /// ([`Self::hd_balance_map`]).
-    pub async fn add_erc20_balances_to_hd_report(&self, report: &mut HDWalletBalance) -> BalanceResult<()> {
-        if self.is_tron_platform_coin() {
-            return Ok(());
-        }
-        let tokens = self.get_erc20_tokens_infos();
-        if tokens.is_empty() {
-            return Ok(());
-        }
-        for account in report.accounts.iter_mut() {
-            for address in account.addresses.iter_mut() {
-                let owner = super::addr_from_str(&address.address).map_to_mm(BalanceError::Internal)?;
-                for (ticker, info) in tokens.iter() {
-                    let balance = self.erc20_balance_of(info, owner).await?;
-                    address.balance.insert(ticker.clone(), balance);
-                }
-            }
-            account.total_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &account.addresses);
-        }
-        Ok(())
     }
 
     /// The HD wallet report of one ERC-20 token over the known addresses of this platform coin's HD wallet:

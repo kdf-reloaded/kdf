@@ -1290,16 +1290,23 @@ fn the_hd_methods_answer_base58_addresses_and_a_balance_map_over_the_platform_an
         spendable_of(&trx["addresses"][1]["balance"]["TRX"]),
         BigDecimal::from_str("2.5").expect("a decimal")
     );
+    // The page total is a map: each ticker the entries carry, summed over the page (CRD ch.49 R49.35 item 1).
+    assert_eq!(tickers_of(&trx["page_balance"]), ["TRX", "USDT-TRC20"]);
     assert_eq!(
-        spendable_of(&trx["page_balance"]),
+        spendable_of(&trx["page_balance"]["TRX"]),
         BigDecimal::from_str("2.5").expect("a decimal")
+    );
+    assert_eq!(
+        spendable_of(&trx["page_balance"]["USDT-TRC20"]),
+        BigDecimal::from_str("1.234567").expect("a decimal")
     );
     for entry in trx["addresses"].as_array().expect("addresses") {
         assert_eq!(tickers_of(&entry["balance"]), ["TRX", "USDT-TRC20"], "{entry}");
     }
     let token = balances("USDT-TRC20");
+    assert_eq!(tickers_of(&token["page_balance"]), ["USDT-TRC20"]);
     assert_eq!(
-        spendable_of(&token["page_balance"]),
+        spendable_of(&token["page_balance"]["USDT-TRC20"]),
         dec("1.234567"),
         "the token's own balance"
     );

@@ -723,6 +723,76 @@ R49.37. *A new address whose balance query fails (reference contract).*
 > This repository has no `task::get_new_address::init` (chapter 21, the
 > Reloaded note after R21.10B.4).
 
+*Status note (2026-11-22), per-ticker totals, the scan at activation and the
+rescan (as built; clean side, not corpus-sourced).* The points the Reloaded
+status above lists as open are built, with two recorded divergences that the
+maintainer decided on 2026-11-22.
+
+- *R49.35, the totals.* `page_balance` of `account_balance` is a ticker-keyed
+  map for every HD family (`HDAccountBalanceResponse.page_balance` is a
+  `CoinBalanceMap`). Each ticker the page's entries carry is summed over the
+  returned page, and a ticker whose sum is zero stays present. A UTXO, QTUM or
+  Sia coin answers its own ticker. An EVM platform ticker answers the platform
+  and every ERC-20 token registered on it at call time (R49.32 item 1); a TRX
+  ticker answers TRX and its enabled TRC20 tokens; an ERC-20 or TRC20 ticker
+  answers that token alone. `total_balance` of `task::account_balance::init`
+  sums every ticker over the addresses it reports: the external chain on an EVM
+  coin, which has no other, and both chains on a UTXO coin, whose answer lists
+  both. The `total_balance` of an activation report is formed the same way over
+  the entries the report lists; an entry with an empty map adds nothing.
+  *Divergence:* where R49.35 answers `{}` -- a page that lists no address, and
+  the `total_balance` of an account with no known address -- this repository
+  answers a one-entry map with the requested coin's ticker and a zero balance,
+  which keeps chapter 38 R38.8.5. A caller reads a ticker's balance from
+  `page_balance["<TICKER>"]`, and the change is breaking for the members
+  `spendable` and `unspendable` that used to sit directly under `page_balance`.
+- *R49.36, the scan at activation.* `enable_eth_with_tokens` and
+  `task::enable_eth::init` of an EVM (non-TRON) platform scan with the
+  used-address rule of R49.32 item 3, over the tokens named in the same request:
+  they are on the platform's token record before the report is built, and the
+  scanner (`produce_hd_activation_scanner`) is made from that record. An address
+  that holds only a token is found. The report lists, per account, the known
+  addresses with the full map, the scan's entries (an unused address that lies
+  between the known range and a used one with `{}`, a used address with the full
+  map), and the addresses generated for the minimum count with the full map at
+  zero values. Each token's `balanceOf` is asked once per address the report
+  queries: the scan keeps the token balances it read while testing an address,
+  and the report takes them from there. A failing node query of the scan or the
+  report fails the activation with `Transport`; the known count is written only
+  when a scan completes. A TRON platform keeps its answers (chapter 21).
+  `add_erc20_balances_to_hd_report`, which asked each token again for every
+  entry of the report, is retired.
+- *Rescan, a recorded divergence.* The second code-quality finding above is
+  adopted: under `scan_if_new_wallet` a stored account that has no known address
+  on any of its chains is scanned at activation as a new one would be (chapter
+  05, status note of 2026-11-22 after R35a). The decision is made in the shared
+  `enable_hd_wallet` and reaches UTXO coins, QTUM, Sia and the EVM coins
+  including TRON. An account that knows an address is left alone, and
+  `do_not_scan` never scans. The rule does not tell such an account apart from
+  one that knows no address because it was never used, for example one made by
+  `task::create_new_account` and activated with `min_addresses_number` 0: that
+  account is scanned again at every activation under the default policy, up to
+  `gap_limit` addresses per chain, and on an EVM platform every token's balance
+  is asked at each of them.
+- *R49.37, kept as parity.* `get_new_address` keeps the order of this
+  repository: the count is raised and stored before the balance query, and a
+  failing query fails the request with the address still known. The first
+  code-quality finding is not adopted. By the mapping of this repository, a node
+  that is unreachable, a failed connection, a transport error and a JSON-RPC
+  error of the platform or of a token answer `Transport` (HTTP 500). Two
+  differences from item 3 remain unchanged: a `balanceOf` answer whose data
+  cannot be decoded answers `Internal`, and one that is not an unsigned integer
+  answers `RpcInvalidResponse`, where item 3 names `Transport` for an answer
+  that could not be decoded; and this repository's `get_new_address` runs no gap
+  check before it derives the address (item 1), so it has no
+  `EmptyAddressesLimitReached`.
+
+Tests: T49.33 to T49.35 are the `evm_hd_p3_*` tests of
+`mm2src/coins_activation/src/evm_hd_p3_tests.rs`, with the shared scripted node
+of `evm_hd_p2_tests.rs`; the UTXO case of the page total is
+`test_account_balance_rpc` (`coins/src/utxo/utxo_tests.rs`), and the QTUM and
+Sia answers are built by the same shared routine.
+
 T49.33. *(Reloaded-original; R49.35.)* Against a mocked EVM node, under a
 software global-HD login, activate a platform with one ERC-20 token and
 three known addresses in account `0`, each holding both assets. Then:
@@ -1597,3 +1667,9 @@ addresses.
   comparison was run, and the repository's clean-room gate tool was not
   applicable because the additions embed no code blocks. *Measure:* 0.03, on
   the discretionary-expression basis.
+- *Status note added 2026-11-22 (after the Reloaded status of §49.2.2).*
+  Reloaded-original, clean side: it records the per-ticker totals, the scan
+  at activation and the rescan of an account with no known address as built,
+  with the two divergences the maintainer decided on 2026-11-22, written from
+  the cleared text of §49.2.2 and this repository's code; no forbidden-class
+  input, chapter 01 R38 not engaged. No cleared sentence was edited.

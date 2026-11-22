@@ -5169,6 +5169,12 @@ fn test_account_balance_rpc() {
     });
     let coin = utxo_coin_from_fields(fields);
 
+    // The page total is a map keyed by the coin's ticker (CRD ch.49 R49.35 items 1 and 4); a page that lists no
+    // address holds the ticker at zero (CRD ch.38 R38.8.5).
+    let page_total = |sum: u64| {
+        crate::coin_balance::coin_balance_map_for_ticker(TEST_COIN_NAME, CoinBalance::new(BigDecimal::from(sum)))
+    };
+
     // Request a balance of Account#0, external addresses, 1st page
 
     let params = AccountBalanceParams {
@@ -5182,7 +5188,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/0", "m/44'/141'/0'/0/1", "m/44'/141'/0'/0/2"),
-        page_balance: CoinBalance::new(BigDecimal::from(0)),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 0,
         total: 7,
@@ -5204,7 +5210,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/3", "m/44'/141'/0'/0/4", "m/44'/141'/0'/0/5"),
-        page_balance: CoinBalance::new(BigDecimal::from(99)),
+        page_balance: page_total(99),
         limit: 3,
         skipped: 3,
         total: 7,
@@ -5226,7 +5232,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/0/6"),
-        page_balance: CoinBalance::new(BigDecimal::from(32)),
+        page_balance: page_total(32),
         limit: 3,
         skipped: 6,
         total: 7,
@@ -5248,7 +5254,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: Vec::new(),
-        page_balance: CoinBalance::default(),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 7,
         total: 7,
@@ -5270,7 +5276,7 @@ fn test_account_balance_rpc() {
         account_index: 0,
         derivation_path: DerivationPath::from_str("m/44'/141'/0'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/0'/1/1", "m/44'/141'/0'/1/2"),
-        page_balance: CoinBalance::new(BigDecimal::from(54)),
+        page_balance: page_total(54),
         limit: 3,
         skipped: 1,
         total: 3,
@@ -5292,7 +5298,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: Vec::new(),
-        page_balance: CoinBalance::default(),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 0,
         total: 0,
@@ -5314,7 +5320,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: get_balances!("m/44'/141'/1'/1/0"),
-        page_balance: CoinBalance::new(BigDecimal::from(0)),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 0,
         total: 1,
@@ -5336,7 +5342,7 @@ fn test_account_balance_rpc() {
         account_index: 1,
         derivation_path: DerivationPath::from_str("m/44'/141'/1'").unwrap().into(),
         addresses: Vec::new(),
-        page_balance: CoinBalance::default(),
+        page_balance: page_total(0),
         limit: 3,
         skipped: 1,
         total: 1,
@@ -14154,6 +14160,137 @@ pub(crate) mod hd_accounts_at_index_tests {
         assert_eq!(balance.accounts[1].addresses.len(), 2);
         assert_eq!(stored(&items, 0).external_addresses_number, 5);
         assert_eq!(stored(&items, 1).external_addresses_number, 2);
+    }
+
+    /// Mocks a node on which `used` alone has a history and a balance of 5.
+    fn mock_chain_with_a_used_address(used: String) {
+        let history_of = used.clone();
+        NativeClient::list_all_transactions.mock_safe(move |_, _| {
+            let history = vec![ListTransactionsItem {
+                address: history_of.clone(),
+                ..ListTransactionsItem::default()
+            }];
+            MockResult::Return(Box::new(futures01::future::ok(history)))
+        });
+        let balance_of =
+            |used: &str, address: &Address| BigDecimal::from(if address.to_string() == used { 5 } else { 0 });
+        let single = used.clone();
+        NativeClient::display_balance.mock_safe(move |_, address: Address, _| {
+            MockResult::Return(Box::new(futures01::future::ok(balance_of(&single, &address))))
+        });
+        NativeClient::display_balances.mock_safe(move |_, addresses: Vec<Address>, _| {
+            let balances = addresses
+                .into_iter()
+                .map(|address| {
+                    let balance = balance_of(&used, &address);
+                    (address, balance)
+                })
+                .collect();
+            MockResult::Return(Box::new(futures01::future::ok(balances)))
+        });
+    }
+
+    /// The external address `address_id` of account `0` as a string.
+    fn external_address_of_account_zero(coin: &UtxoStandardCoin, address_id: u32) -> String {
+        use crate::hd_wallet::HDWalletCoinOps;
+        coin.derive_address(&account_zero(), Bip44Chain::External, address_id)
+            .unwrap_or_else(|e| panic!("derive: {}", e))
+            .address
+            .to_string()
+    }
+
+    /// CRD ch.49 R49.36 item 7, ch.05 R35a: under the default `scan_policy` a stored account that has no known address
+    /// is scanned as a new one would be, which is what a first activation that failed during its scan leaves behind.
+    /// The scan finds the used address `1`, lists address `0` that it passed over, and records two addresses. The page
+    /// total of `account_balance` is then a map keyed by the coin's ticker (CRD ch.49 R49.35).
+    #[test]
+    fn t14a_a_stored_account_with_no_known_address_is_scanned_under_the_default_policy() {
+        let items = mock_storage();
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account_zero().extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 0,
+            internal_addresses_number: 0,
+        });
+        let coin = hd_coin_with_account_zero();
+        mock_chain_with_a_used_address(external_address_of_account_zero(&coin, 1));
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::ScanIfNewWallet,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0", "m/44'/141'/0'/0/1"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 2);
+
+        let page = external_balance_page(&coin, 0);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.page_balance.len(), 1);
+        assert_eq!(page.page_balance[TEST_COIN_NAME].spendable, BigDecimal::from(5));
+    }
+
+    /// The same chain and an account that knows an address: the default policy leaves it alone, `scan` still scans
+    /// it, and `do_not_scan` never scans a stored account that has no address.
+    #[test]
+    fn t14a_an_account_with_a_known_address_is_not_rescanned_under_the_default_policy() {
+        let items = mock_storage();
+        let mut account = account_zero();
+        account.external_addresses_number = 1;
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account.extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 1,
+            internal_addresses_number: 0,
+        });
+        let coin = hd_coin(HDAccountsMap::from([(0, account)]));
+        mock_chain_with_a_used_address(external_address_of_account_zero(&coin, 1));
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::ScanIfNewWallet,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 1);
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::Scan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0", "m/44'/141'/0'/0/1"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 2);
+    }
+
+    /// `do_not_scan` never scans, also a stored account that has no known address.
+    #[test]
+    fn t14a_do_not_scan_leaves_a_stored_account_with_no_known_address_alone() {
+        let items = mock_storage();
+        items.lock().unwrap().insert(0, HDAccountStorageItem {
+            account_id: 0,
+            account_xpub: account_zero().extended_pubkey.to_string(bip32::Prefix::XPUB),
+            external_addresses_number: 0,
+            internal_addresses_number: 0,
+        });
+        let coin = hd_coin_with_account_zero();
+        mock_chain_with_a_used_address(external_address_of_account_zero(&coin, 1));
+
+        let balance = enable(
+            &coin,
+            EnableCoinScanPolicy::DoNotScan,
+            0,
+            Some(path_of(0, Bip44Chain::External, 0)),
+        )
+        .unwrap_or_else(|e| panic!("the activation failed: {}", e));
+        assert_eq!(paths(&balance.accounts[0]), ["m/44'/141'/0'/0/0"]);
+        assert_eq!(stored(&items, 0).external_addresses_number, 1);
     }
 
     /// T14a: an iguana login is unchanged -- a single address, and no account or address is made known.
