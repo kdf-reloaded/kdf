@@ -570,6 +570,216 @@ lineage and a conversion rule for existing `MM2.db` files.
 > RELOADED-local additions must not claim future GLEEC migration numbers in this
 > shared ledger.
 
+## 44.9A Swap Storage Shared With the Reference in One Data Directory
+
+> **Status note (2026-11-22).** This section was added by the KDF Spec Reader
+> in round 0.5.0-24. **KDF Dirty Gate pass: PASS on 2026-11-22, measure
+> 0.00** (attestation in the provenance footer).
+> It adds rules and tests only; no sentence of §§44.1-44.9 or §44.10 is
+> changed by it.
+
+This section records what the reference does with three things a user's data
+directory carries when the user moves between a reference build and RELOADED
+on the same directory: the `MM2.db` migration ledger, the per-swap lock file,
+and the saved-swap JSON files. "The reference rows" below means the rows
+`v2.6.0-beta` and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md) §2.15A.
+Every reference fact in R44.9A.1 through R44.9A.9 was read at both rows and is
+the same at both. Paths are relative to the node database directory of
+R44.1.1, the directory that holds `MM2.db`. File names, file content formats
+and ledger values are on-disk interoperability surface (R36) and are normative;
+nothing else about the reference is.
+
+### 44.9A.1 Migration ledger above the known state
+
+R44.9A.1 *Highest reference state.* At both reference rows the highest state
+the reference can record is `15`, as §44.4 binds. The same holds at the rows
+`dev (as of 2026-03-27)`, `staging (as of 2026-03-27)` and
+`main (as of 2026-10-07)`. No release tag of the historical record defines a
+migration step that would record state `16` or higher; all 255 tags were
+checked for this. For builds published without source after `v3.0.0-beta`
+this is **not established**.
+
+R44.9A.2 *State 16 has no single meaning.* Two unmerged development branches of
+the historical record, the rows `lr-swap-wip-3 (as of 2025-12-03)` and
+`tpu-status (as of 2026-01-08)`, each define one further step that records
+state `16`. The two steps are different: one adds columns to `my_swaps`, the
+other adds columns to `stats_swaps`. Neither branch is part of a release, and
+their column lists are not bound here. The consequence for this chapter is
+that a ledger value of `16` in a user's database does not identify a schema.
+
+R44.9A.3 *Reference start-up with a ledger above its own latest state.* The
+reference does not compare the ledger's highest value with the highest state it
+knows. When the highest value is `1` or more, it skips bootstrap and looks for
+the step keyed by that value. For any value of `15` or more it finds no step,
+changes nothing, appends no ledger row, and continues start-up exactly as for a
+fully migrated database. It does not refuse to start and gives no warning or
+error; the only trace is its ordinary informational start-up report of the
+state it read. It does not lower or remove ledger rows it does not know.
+
+R44.9A.4 *What follows after such a start.* After R44.9A.3 the reference uses
+the database on the assumption that it has the state-15 shape. Whether its
+normal reads and writes then succeed depends only on what the unknown steps
+changed and on SQLite's own rules; no reference check is involved. Which
+changes it would survive is **not established** beyond that.
+
+R44.9A.5 *Consequence for RELOADED.* A refusal by RELOADED to open a database
+whose ledger is above the highest state the build knows is a RELOADED-only
+behavior with no reference counterpart, and it is compatible with the
+reference: a database that RELOADED leaves at state `15` (R44.9.5) is fully
+migrated for both reference rows. The reference gives no protection in the
+other direction, so R44.9.5 remains the rule that keeps a shared database
+readable by both.
+
+### 44.9A.2 The per-swap lock file
+
+R44.9A.6 *Name and location.* The reference uses one lock file per swap,
+named `<uuid>.lock`, where `<uuid>` is the swap identifier in its hyphenated
+lowercase text form. The file is in `SWAPS/MY/`, the same directory as the
+node's own saved-swap files of R44.9A.10. Missing parent directories are
+created. The same file and the same rules serve legacy maker swaps, legacy
+taker swaps and version-two swaps. The reference source carries a build option,
+off by default, that places the file elsewhere; whether any released binary was
+built with it is **not established**.
+
+R44.9A.7 *Content format.* The whole content of the file is the Unix time in
+whole seconds, written as ASCII decimal digits and nothing else: no line
+break, no white space, no surrounding structure, and no identification of the
+holder (no process identifier, host name or random token). The content is
+written when the lock is taken and written again at every refresh
+([Chapter 51](51-legacy-v1-swap-state-machine.md) R5: every thirty seconds).
+Each write replaces the content of the existing file in place; it is not a
+write to a temporary file followed by a rename.
+
+R44.9A.8 *Acquisition and foreign content.* The reference first tries to
+create the file exclusively. If the file already exists, it reads the content
+as text and decides as follows:
+
+| Content of the existing file | Reference behavior |
+| --- | --- |
+| The whole content is an unsigned decimal integer, and the current time is at most 40 seconds after it | The lock is held by another runner. Chapter 51 R5 applies: wait 40 seconds, try once more, then abandon the run. A value in the future counts as held for as long as this condition is true. |
+| The whole content is an unsigned decimal integer, and the current time is more than 40 seconds after it | The lock is stale. The reference takes it over by writing the current time into the existing file. |
+| Anything else that can be read as text: empty content, digits followed by a line break or space, a signed or fractional number, JSON, or any other format | The lock is treated as free. The reference takes it over at once by writing the current time into the file, without waiting and without a message. |
+| The content cannot be read as text (for example it is not valid UTF-8), or the file cannot be read | Acquisition fails with an error. The swap run is abandoned without the retry of chapter 51 R5; a legacy swap emits no event. |
+
+R44.9A.9 *Lifetime and removal.* The reference takes no operating-system
+file lock on the file; staleness is decided only by comparing the number in
+the file with the wall clock, with the 40-second limit of R44.9A.8. The file's
+modification time is not used. For a legacy swap the reference removes the
+file when the swap's run ends, on every way the run can end, and ignores a
+failure to remove it. Removal does not check that the file still carries the
+remover's own time. A process that is stopped abruptly leaves the file behind;
+the next runner takes it over under R44.9A.8 once it is stale. The reference
+has no start-up step that clears leftover lock files. Whether an orderly
+shutdown removes the files of swaps still running, and the exact point at
+which a version-two swap releases its lock, are **not established**.
+
+> **Code-quality finding (informative).** Three gaps in the reference's lock
+> follow directly from R44.9A.7 through R44.9A.9. (1) A refresh rewrites the
+> file in place, and empty content counts as a free lock, so a second runner
+> that reads the file during a refresh can take a lock that is held. (2) Two
+> runners that both find a stale lock can both take it, because the take-over
+> is a plain write and not an exclusive step. (3) A runner that has lost its
+> lock to a take-over keeps refreshing the file and removes it when its run
+> ends, although another runner now holds it. A proposed remedy for an
+> implementation that wants more than this is to keep the holder's identity
+> outside the lock file's content and to verify it before each refresh and
+> before removal; R44.9A.13 bounds how far that can go while the reference
+> shares the directory.
+
+### 44.9A.3 Saved-swap files
+
+R44.9A.10 *File names.* The reference keeps one JSON file per swap in three
+directories: `SWAPS/MY/<uuid>.json` for the node's own swaps,
+`SWAPS/STATS/MAKER/<uuid>.json` and `SWAPS/STATS/TAKER/<uuid>.json` for swap
+statistics. The content is the saved-swap JSON of §44.8A.
+
+R44.9A.11 *Which files the reference reads.* A single swap is read by its
+exact path; an absent file means "no such record", and a file that does not
+parse is an error for that one read. A whole directory is read only by the
+migration steps of R44.8.1. Such a read picks only entries that are not
+directories and whose name has the extension `json`, compared without regard
+to letter case; no other entry is opened. A picked file that does not parse
+is skipped and reported in the log; it does not stop the step. A directory
+that cannot be listed is treated as holding no records. A leftover file with
+any other extension, including `.tmp` and `.lock`, is therefore ignored. A
+leftover file whose name ends in `.json` is picked, and is imported if it
+parses.
+
+R44.9A.12 *How the reference writes.* The reference writes a saved swap, in
+all three directories, through a temporary file. It serializes the whole
+record, writes it to a file in the same directory whose name is the final
+name with `.tmp` appended (`<uuid>.json.tmp`), and then renames that file over
+the final name. The temporary name is fixed per record; it has no random or
+per-process part. The reference does not ask the operating system to force
+the file or the directory to stable storage before or after the rename. A
+failed write can leave the temporary file behind; the reference never clears
+such leftovers, but its next save of the same record overwrites the leftover
+and renames it.
+
+### 44.9A.4 Rules for RELOADED
+
+R44.9A.13 *Interoperability rules.* Where RELOADED shares a data directory
+with a reference build, the following hold.
+
+1. A temporary file that RELOADED creates in a saved-swap directory shall not
+   have the extension `json` in any letter case (R44.9A.11). The name
+   `<uuid>.json.tmp` is the one the reference itself uses and overwrites
+   (R44.9A.12); using the same name leaves no file that the other
+   implementation does not already handle.
+2. For a reference build to respect a lock that RELOADED holds, the lock shall
+   be the file of R44.9A.6 and its whole content shall have the form of
+   R44.9A.7, refreshed more often than every 40 seconds. Any additional
+   content in that file, such as a fencing token or a holder identifier, makes
+   the reference treat the lock as free and take it at once (R44.9A.8, third
+   row). Content that is not valid text makes the reference abandon the swap
+   run (fourth row).
+3. Data that RELOADED uses to fence its lock shall therefore be kept outside
+   the content of `<uuid>.lock`, and, if it is a file in `SWAPS/MY/`, under a
+   name that item 1 allows. The reference neither reads nor preserves such
+   data, and it may overwrite or remove `<uuid>.lock` without regard to it
+   (R44.9A.9).
+4. RELOADED shall read a `<uuid>.lock` file of the R44.9A.7 form by the
+   40-second rule of R44.9A.8, so that it does not start a second runner for a
+   swap that a reference build on the same directory is running.
+5. Fencing protects RELOADED runners from each other. Against a reference
+   build running at the same time on the same directory, the protection is
+   the timestamp rule of R44.9A.8 and no more.
+
+> **Reloaded status (informative, 2026-11-22).** At the base of this round's
+> branch, this repository keeps its lock at the R44.9A.6 path with the
+> R44.9A.7 content, and writes saved swaps in place, without a temporary
+> file. The reference rows write through `<uuid>.json.tmp` and a rename
+> (R44.9A.12), so a change of RELOADED to that form brings it to the
+> reference's behavior; it is not a divergence. This repository's start-up
+> behavior for a ledger above state `15` was not examined in this round.
+
+### 44.9A.5 Tests
+
+T44.9A.1 *Lock content form.* After RELOADED takes a swap lock and after each
+refresh, the content of `SWAPS/MY/<uuid>.lock` consists of one or more ASCII
+decimal digits only, with no other byte, and its value is the current Unix
+time in seconds within the test's tolerance.
+
+T44.9A.2 *Reading a reference-form lock.* With a `<uuid>.lock` file whose
+content is the current time in the R44.9A.7 form, RELOADED does not start a
+runner for that swap before the 40-second limit has passed. With a value more
+than 40 seconds old, it takes the lock.
+
+T44.9A.3 *Temporary files are invisible to a directory read.* With a file
+`<uuid>.json.tmp` and a file `<uuid>.lock` present in `SWAPS/MY/`, and the
+same temporary name present in both statistics directories, the migration
+steps of R44.8.1 import exactly the records of the `*.json` files and report
+no error for the other files.
+
+T44.9A.4 *An interrupted save leaves a readable record.* When a save of a swap
+record is interrupted after the temporary file is written and before the
+rename, the final `<uuid>.json` still holds the previous complete record, and
+the next save of that record succeeds.
+
+T44.9A.5 *Ledger stays at 15.* After RELOADED has run on a state-15 database,
+including a run that uses the lock and the saved-swap changes of this
+section, the highest ledger value is still `15` (R44.9.5).
+
 ## 44.10 Acceptance Criteria
 
 - A fresh native `MM2.db` initializes at state `1`, runs migrations through
@@ -624,3 +834,42 @@ lineage and a conversion rule for existing `MM2.db` files.
 - *Sibling-allowlist consultations:* [Chapter 25](25-sql-query-builder.md),
   [Chapter 26](26-cross-platform-and-wasm.md).
 - *Forbidden corpus:* not consulted.
+- *Addition of 2026-11-22 (KDF Spec Reader, round 0.5.0-24; **KDF Dirty Gate
+  pass: PASS on 2026-11-22, measure 0.00, no findings**):* §44.9A
+  (R44.9A.1 through R44.9A.13, T44.9A.1 through
+  T44.9A.5, its status notes and its code-quality finding). The *not
+  consulted* statement above continues to describe every other section of
+  this chapter. For §44.9A the forbidden corpus was consulted under the
+  two-team procedure of chapter 01 §1.4A, at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, identical at both for every fact
+  stated; the migration step list alone was also read at the rows
+  `dev (as of 2026-03-27)`, `staging (as of 2026-03-27)`,
+  `main (as of 2026-10-07)`, `lr-swap-wip-3 (as of 2025-12-03)` and
+  `tpu-status (as of 2026-01-08)`, and searched for across every release tag.
+  The facts taken are: the highest migration state and the start-up outcome
+  for a ledger above it; the lock file's name, place, content form, the
+  outcome for each kind of existing content, its staleness limit and its
+  removal; and, for saved-swap files, their names, which directory entries a
+  directory-wide read picks, and the temporary-file-and-rename form of a
+  write. File names, content formats and ledger values are dictated on-disk
+  surface (R36). No private identifier, function body, helper decomposition,
+  control-flow transcription, log or error literal was reproduced. R44.9A.13,
+  the tests and the Reloaded status note are Reloaded-original; the status
+  note rests on this repository's own lock and saved-swap code.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.00,
+  no findings, in a single pass; all seven chapter 02 §2.15A rows read were
+  verified, including the two rows added in this round, `lr-swap-wip-3 (as of
+  2025-12-03)` and `tpu-status (as of 2026-01-08)`. *Extent:* the reference's
+  node-database migration ledger, the per-swap lock file (the primitive and
+  its acquisition by the legacy maker and taker runs and by the version-two
+  runs) and the reading and writing of saved-swap files, at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` for the whole subject (eight source files);
+  the migration step list at the rows `dev (as of 2026-03-27)`, `staging (as
+  of 2026-03-27)`, `main (as of 2026-10-07)`, `lr-swap-wip-3 (as of
+  2025-12-03)` and `tpu-status (as of 2026-01-08)`; and a search of all 255
+  release tags; on the candidate side, the 250 added lines. *Method:* reading
+  plus a mechanical comparison of the added lines against 141 reference source
+  files at the row `v2.6.0-beta` (identifier-token intersection and five-word
+  shingles); the repository's clean-room gate tool was not applicable because
+  the additions embed no code blocks. *Measure:* 0.00, on the
+  discretionary-expression basis.
