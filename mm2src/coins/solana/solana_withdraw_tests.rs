@@ -266,6 +266,7 @@ fn sol_on(url: &str) -> SolanaCoin {
         spl_tokens_infos: Arc::new(Mutex::new(HashMap::new())),
         settings: SolanaCoinSettings::default(),
         history: SolanaHistoryStates::default(),
+        swap: SolanaSwapConfig::default(),
     }))
 }
 

@@ -387,6 +387,66 @@ impl SolanaRpcClient {
         .await
     }
 
+    /// `getAccountInfo` at commitment `finalized` (whatever the client's own level is), encoding `base64` (CRD ch.40
+    /// R40.6D.2, R40.6D.9): the whole account, or `None` when it does not exist.
+    pub async fn get_account_info_finalized(&self, address: &Pubkey) -> Result<Option<FullAccount>, RpcError> {
+        self.account_info_finalized(address, None).await
+    }
+
+    /// [`Self::get_account_info_finalized`] with only the first `length` bytes of the account's data (`dataSlice`
+    /// from offset 0): the header of a large account.
+    pub async fn get_account_header_finalized(
+        &self,
+        address: &Pubkey,
+        length: usize,
+    ) -> Result<Option<FullAccount>, RpcError> {
+        self.account_info_finalized(address, Some(length)).await
+    }
+
+    async fn account_info_finalized(
+        &self,
+        address: &Pubkey,
+        slice: Option<usize>,
+    ) -> Result<Option<FullAccount>, RpcError> {
+        let mut config = encoding_config("base64");
+        config.insert("commitment".to_owned(), json!("finalized"));
+        if let Some(length) = slice {
+            config.insert("dataSlice".to_owned(), json!({ "offset": 0, "length": length }));
+        }
+        let resp: ContextResponse<Option<AccountValue>> = self
+            .call(
+                "getAccountInfo",
+                Json::Array(vec![json!(address.to_string()), Json::Object(config)]),
+            )
+            .await?;
+        let Some(value) = resp.value else { return Ok(None) };
+        let owner = Pubkey::from_str(&value.owner)
+            .map_err(|e| RpcError::decode("getAccountInfo", format!("{e:?}"), value.owner.as_bytes()))?;
+        let (encoded, encoding) = value.data;
+        if encoding != "base64" {
+            return Err(RpcError::decode(
+                "getAccountInfo",
+                "the data is not in base64 encoding",
+                &[],
+            ));
+        }
+        let data = base64::decode(&encoded)
+            .map_err(|_| RpcError::decode("getAccountInfo", "the account data is not base64", &[]))?;
+        Ok(Some(FullAccount {
+            lamports: value.lamports,
+            owner,
+            executable: value.executable,
+            data,
+        }))
+    }
+
+    /// `getSlot` at commitment `finalized`: the slot of the latest finalized block (CRD ch.40 R40.6D.11).
+    pub async fn get_finalized_slot(&self) -> Result<u64, RpcError> {
+        let mut config = Map::new();
+        config.insert("commitment".to_owned(), json!("finalized"));
+        self.call("getSlot", Json::Array(vec![Json::Object(config)])).await
+    }
+
     /// `getBlock` of `slot` at commitment `finalized`, with `transactionDetails` `none` and `rewards` false: the
     /// block's height and time only (CRD ch.40 R40.6C.4). `None`: the node has no such block.
     pub async fn get_block_summary(&self, slot: u64) -> Result<Option<BlockSummary>, RpcError> {
@@ -455,6 +515,25 @@ struct ContextResponse<T> {
     #[allow(dead_code)]
     context: Option<Json>,
     value: T,
+}
+
+/// A `getAccountInfo` value in `base64` encoding.
+#[derive(Debug, Deserialize)]
+struct AccountValue {
+    lamports: u64,
+    owner: String,
+    #[serde(default)]
+    executable: bool,
+    data: (String, String),
+}
+
+/// An account as `getAccountInfo` answers it (CRD ch.40 R40.6D.2, R40.6D.9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FullAccount {
+    pub lamports: u64,
+    pub owner: Pubkey,
+    pub executable: bool,
+    pub data: Vec<u8>,
 }
 
 /// The one member of a `getAccountInfo` value that `get_account_owner` reads.
@@ -582,6 +661,9 @@ pub struct LoadedAddresses {
 pub struct BlockSummary {
     #[serde(default)]
     pub block_height: Option<u64>,
+    /// The block's time in seconds since the epoch (CRD ch.40 R40.6D.11).
+    #[serde(default)]
+    pub block_time: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -623,6 +623,7 @@ fn history_coin(url: &str, history: bool) -> SolanaCoin {
         spl_tokens_infos: Arc::new(Mutex::new(HashMap::new())),
         settings: SolanaCoinSettings::default(),
         history: SolanaHistoryStates::default(),
+        swap: SolanaSwapConfig::default(),
     }));
     coin.add_spl_token_info(TOKEN_TICKER.to_owned(), SplTokenInfo {
         token_contract_address: Pubkey::from_str(MINT).expect("a key"),

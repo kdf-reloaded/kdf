@@ -286,6 +286,16 @@ the previous version used. The safe way:
   answers an error that names it. The transaction history is the next item. Detail: PR #475; CRD
   ch.40 D40.4.
 
+- **Solana activation reads a swap program and an evidence node.** A `SOLANA` coins-file entry may name
+  the cluster's swap program in `protocol.protocol_data.swap_program_id` (base58). The activation reads that
+  program once: it must exist, be executable and have no upgrade authority, or the coin stays wallet-only.
+  A value that is not a base58 public key makes the entry unparsable (`CoinProtocolParseError`).
+  `enable_solana_with_tokens` and `experimental::enable_solana_with_assets` take an optional
+  `swap_evidence_node`, one URL of the coin's node list, which a swap uses as its one trusted node for the
+  reads before a refund or a secret step; a URL that is not in the list is refused. Solana and SPL tokens
+  still cannot be traded: the SOL side of the swap is built, and SPL and the switch-on follow. Detail: PR #N;
+  CRD ch.40 §40.6D.
+
 - **Solana and SPL tokens have a transaction history.** With `tx_history: true` at the platform's
   activation (`enable_solana_with_tokens` or `experimental::enable_solana_with_assets`), the node
   reads the whole history of the wallet's address and of its token accounts from the coin's Solana
