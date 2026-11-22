@@ -1225,6 +1225,10 @@ the previous version used. The safe way:
   restart resumes right before its payment repeats the check within a bound, and then waits without sending until
   the payment is found or the refund deadline passes. A payment it finds is taken over and the swap continues. A
   swap that was not resumed at this step checks once, as before. Detail: PR #489; CRD ch.39 §39.11.5A.
+- **The refund of an SLP, QRC20, ETH or ERC20 swap payment waits for the chain's time.** The node asks whether a
+  payment can be refunded from the chain: an SLP token by the median time past of BCH, a QRC20 token by that of
+  QTUM, and an ETH or ERC20 coin by the timestamp of the latest block, once the node's own clock is past the lock
+  time. Detail: PR #490; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
 
 ### Tests
 
@@ -1320,8 +1324,8 @@ the previous version used. The safe way:
 
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
   the closing note names what no row covers, in PR #497.
-- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
-- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 2 in PR #488.
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 1 in PR #481,
+  step 2 in PR #488, step 3 in PR #490.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the

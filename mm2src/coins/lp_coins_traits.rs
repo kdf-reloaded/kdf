@@ -225,13 +225,10 @@ pub trait SwapOps {
     /// For example: there are no additional conditions for ETH, but for some UTXO coins we should wait for
     /// locktime < MTP
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
-        let now = now_ms() / 1000;
-        let result = if now > locktime {
-            CanRefundHtlc::CanRefundNow
-        } else {
-            CanRefundHtlc::HaveToWait(locktime - now + 1)
-        };
-        Box::new(futures01::future::ok(result))
+        Box::new(futures01::future::ok(wall_clock_refund_eligibility(
+            now_ms() / 1000,
+            locktime,
+        )))
     }
 
     /// CRD ch.39 R39.5.13. When the refund broadcast of this coin was rejected with `rejection` (the plain
@@ -870,5 +867,15 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
             try_s!(handler.on_connected(address.clone()))
         }
         Ok(())
+    }
+}
+
+/// The wall-clock refund rule (CRD ch.51 §51.6E R88 item 1): refundable once `now` is strictly past the lock
+/// time, otherwise a wait of the difference plus one second, uncapped.
+pub(crate) fn wall_clock_refund_eligibility(now: u64, locktime: u64) -> CanRefundHtlc {
+    if now > locktime {
+        CanRefundHtlc::CanRefundNow
+    } else {
+        CanRefundHtlc::HaveToWait(locktime - now + 1)
     }
 }

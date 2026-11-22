@@ -2685,6 +2685,37 @@ authored from the tabled states and the public sources named in
 - *Clearance:* **passed the KDF Dirty Gate on 2026-11-08**, measure 0.01
   (chapter 01 R37-R41); the attestation is in the scoped record of §21.13.
 
+### 21.11B.7 Pointer (2026-11-22): the EVM legacy token-leg points the TRON swap track mirrors
+
+> **Status note (2026-11-22, KDF Spec Reader, round 0.5.0-27).** This pointer
+> carries no reference content of its own. Its target, chapter 51 §51.6F,
+> **passed the KDF Dirty Gate on 2026-11-22, measure 0.03, no findings**; the
+> pointer passed with it, as recorded in chapter 51 §51.16. No sentence of
+> §21.0 -- §21.11B.6 is edited.
+
+A TRON legacy swap would take the EVM family's legacy shapes (R21.B2,
+F21.B3). Three of those shapes are recorded for the reference's ERC20 token
+leg in [Chapter 51](51-legacy-v1-swap-state-machine.md) §51.6F, at the rows
+`v2.6.0-beta` and `v3.0.0-beta`:
+
+- *Fees (R93 -- R96).* Which coin each swap fee names, the
+  `paid_from_trading_vol` value, the `trade_preimage` members, the fee
+  members of the swap status, and the answer when the platform coin cannot
+  pay the gas (`NotSufficientBaseCoinBalance` and its data).
+- *Volume limits (R97).* What `max_maker_vol` and `max_taker_vol` do about
+  the platform coin for a token.
+- *Swap-contract addresses (R98 -- R99).* Which addresses the negotiation
+  messages carry, how a declared address is accepted, replaced by the
+  fallback contract or refused, and at which stage.
+
+These rules describe ERC20 on an EVM platform. The reference has no TRON
+case in any of them (F21.B1, R21.10B.17, R21.10B.18): at the reference a
+TRX or TRC20 fee figure fails before a descriptor exists. Which coin a TRC20
+descriptor names (TRX by the mirror of R93), how the energy and bandwidth
+figures replace the gas figures, and the byte form of a TRON contract
+address in the negotiation members (the 20-byte payload of R-AD1 by the
+mirror of R98) are decisions of the TRON swap lane, not reference facts.
+
 ## 21.11C TRON V1 swap interop as built (Reloaded-original, added 2026-11-22)
 
 Reloaded-original rules for the part of a TRON V1 swap that every swap
@@ -3367,6 +3398,13 @@ V3. The address encoding, protobuf transaction/contract formats,
   Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for
   §49.2.3 in chapter 49's provenance footer. No cleared sentence was
   edited.
+- *Pointer added 2026-11-22 (Spec Reader round 0.5.0-27) -- §21.11B.7.* It
+  names chapter 51 §51.6F (R93 -- R99) and states which of its points the
+  TRON swap track mirrors; the reference facts are in that section, whose
+  provenance record in chapter 51 §51.16 names the rows read. It carries no
+  reference content of its own. No cleared sentence was edited. **KDF Dirty
+  Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for
+  §51.6F in chapter 51 §51.16.
 - *Clean-context addition (2026-11-22, forbidden corpus not consulted):*
   §21.11C and the status notes of this date at R21.B2 and D21.B4 are
   Reloaded-original. They rest on the cleared text of §21.11B.2, R21.B2,
