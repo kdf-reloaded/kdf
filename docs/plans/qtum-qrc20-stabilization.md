@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 and P7 #436 merged; Phase C item 3 #462 and item 5 #476 merged; P8 in PR #473; P9 next) — **Last reviewed:** 2026-11-22
+**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 and P7 #436 merged; Phase C item 3 #462 and item 5 #476 merged; P8 #473 merged; P9 lab rows passed 2026-11-22) — **Last reviewed:** 2026-11-22
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -293,6 +293,48 @@ Electrum server are the evidence of the fix.
 - Update Chapter 38 in the implementation commit, plus `CHANGELOG.md`,
   `docs/DISABLED_TESTS.md`, and operator documentation affected by activation or
   configuration behavior.
+
+*P9 (2026-11-22).* The lab rows ran on dev with PRs #473 and #476. Every row
+passed:
+
+- **Mainnet, read-only, with the four `qtum.site` servers.** QTUM and two tokens
+  with the same server list shared one connection set, and a token with another
+  list got a set of its own. Each set logged one INFO line when it was created,
+  one per reuse and one when it was released, with the servers as `host:port`.
+  No session stayed open after the last disable. A repeated or concurrent
+  activation of one ticker answered "already initialized" and opened nothing.
+  After a token was disabled and the session was closed, only QTUM's
+  subscriptions were placed again; the token, enabled again, placed its own once
+  per reconnect. With only the servers of the published coins file, which answer
+  the contract-event methods with an error, the history ended with code -2 after
+  three passes and sent no further requests; with the `qtum.site` servers added,
+  it finished.
+- **QTUM regtest over a native node.** A QRC20 maker with a UTXO taker, and the
+  reverse, finished on both sides with no refused broadcast. A maker refund
+  finished after a restart, once the coins were enabled again. Spends back to
+  back from one address (token then QTUM, QTUM then token, one token then
+  another, QTUM then QTUM) each used the previous spend's change, and every
+  broadcast was accepted. A first regtest stalled on node RPC calls with this
+  build and with the build before P7 alike; the rows ran on a fresh regtest.
+- **Mainnet swaps over the shared client.** A QRC20 token against RIN, in both
+  directions between two lab wallets, finished on both sides with no refused
+  broadcast. A token send followed at once by a QTUM send from the same address
+  both went through, the second on the first's change. The token was bought for
+  these rows in a mainnet swap against LTC on the same build, which also
+  finished.
+
+Not covered by a lab row:
+
+- A delegation started while a withdraw is built. Delegation is not supported
+  over a native node, so the tests of PR #354 stay its evidence.
+- The QRC20 docker swap tests (docs/DISABLED_TESTS.md, Group 4) stay ignored
+  until a CI run shows them green; enabling them is a separate PR. The exact
+  transaction checks of Phase E item 4 belong to those tests.
+- The TRACE attribution of Phase C item 5 (see there).
+
+Noted for after the beta: on the regtest node, `estimatefee` answered "Method
+not found", and activation over the native node failed unless the coins entry
+set a fixed `txfee`.
 
 ## Definition of done
 

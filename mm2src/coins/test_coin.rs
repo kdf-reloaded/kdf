@@ -265,6 +265,11 @@ impl SwapOps for TestCoin {
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> { unimplemented!() }
 
+    // The coin's own extraction without the secret-hash rule, so a test sees what the swap machine's check does.
+    async fn extract_secret_from_spend(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        self.extract_secret(secret_hash, spend_tx)
+    }
+
     fn can_refund_htlc(
         &self,
         locktime: u64,
