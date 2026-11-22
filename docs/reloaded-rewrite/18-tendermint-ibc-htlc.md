@@ -932,6 +932,12 @@ The chapter relies on one baseline-state claim:
   row-to-row difference; the additions embed no code blocks, so the
   repository's clean-room gate tool was not applicable. The comparison
   concerns expression; it does not attest the accuracy of the statements.
+- *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
+  after R18.11.14.* It names chapter 51 §51.6E (R88, R91) and summarizes
+  what those rules record; its reference content is that of its target and
+  is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
+  findings**, as recorded in chapter 51 §51.16. No cleared sentence was
+  edited.
 
 ---
 
@@ -1139,6 +1145,16 @@ zero the hash lock is the plain SHA-256 of the secret. The module accepts
 > **As-built note (2026-11-08, clean side, PR #299).** `extract_secret`
 > (coin and token) refuses a secret whose hex decodes to any length other
 > than 32 bytes, with an error naming the length.
+
+> **Pointer (2026-11-22, KDF Spec Reader, round 0.5.0-23; gate status as
+> chapter 51 §51.6E states).** What the reference does not check around
+> R18.11.14, R18.11.16 and R18.11.19 is recorded in
+> [chapter 51](51-legacy-v1-swap-state-machine.md) R91: only the first
+> message of the spending transaction is read, the secret is not compared
+> with the secret hash, and the result code of a claim transaction found by
+> the search is not examined. The refund-eligibility answer of the family is
+> the wall-clock rule of chapter 51 R88, which agrees with R18.11.15. The
+> rules of this section are unchanged.
 
 ### 18.11.4 Refund: what the reference does and what it reports
 

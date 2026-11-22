@@ -14,6 +14,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
+  `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
+  instead of running on a database layout it does not know. No released version of KDF Reloaded or GLEEC KDF records
+  a state above 15, so this matters only when a node goes back from a later version, or from an unreleased
+  development build, that migrated the database further.
+  - *What to do:* start the version that migrated the database, or move `MM2.db` aside (keep it) to start with a new
+    one. The legacy swaps and their statistics are imported again from their saved files; data kept only in the
+    database, namely swaps of the newer swap protocol, the order history and the node statistics, stays in the file
+    you moved aside.
+  - Detail: PR #486; CRD ch.44 R44.2.3 and §44.9A R44.9A.5.
 - **The shielded (ARRR, Pirate) wallet database is migrated irreversibly on the first start of this version, and an
   older build cannot open the migrated database.** The Zcash libraries were upgraded (see "Changed"), and the new
   wallet library changes the layout of the wallet database. On the first activation of a shielded coin the node
@@ -1041,6 +1051,15 @@ the previous version used. The safe way:
   node built that transaction itself, so it cannot be a coinbase output, and the check no longer
   fetches it. Every other coin is checked as before. Detail: PR #436; CRD ch.38 status note
   after R38.5B.4.
+- **A disabled QTUM or QRC20 instance no longer comes back into the subscriptions of the shared Electrum connections,
+  and a subscription lost on a reconnect is placed again when it is asked for.** Two cases left the shared set of
+  connections of QTUM and its tokens with a wrong record of its subscriptions. A subscription request that was still
+  waiting for its answer when its instance was disabled, or one sent later by a balance stream of the disabled
+  instance, recorded that instance again, and its subscription was then placed again after every reconnect. And when
+  a subscription could not be placed again over a new connection, it still counted as placed, so a later request for
+  it sent nothing. Now a disabled instance records nothing, and a subscription is skipped only while it is placed
+  over the current connection. One instance sends at most one request per subscription at a time. Detail: PR #473;
+  CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
 
 #### TRON coins
 
@@ -1081,6 +1100,13 @@ the previous version used. The safe way:
   lock. A late refresh that finds its own value goes on with a warning. A new lock file is created in one step and
   replaced in one step, so a reader never sees it empty, and its content keeps the form GLEEC KDF reads. Detail: PR
   #480; CRD ch.51 R5 and ch.44 §44.9A (status updates).
+
+#### Legacy swaps
+
+- **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
+  refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
+  that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
+  CRD ch.51, status note of 2026-11-22 after R31a.
 
 ### Tests
 
@@ -1167,8 +1193,11 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
+  shared QTUM Electrum client after a disable or a failed placement, in PR #473.
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
   confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
   PR #461; step 3, the lab row, is listed there.
