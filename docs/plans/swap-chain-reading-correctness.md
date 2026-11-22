@@ -23,7 +23,7 @@ the Spec Reader, and steps 2 to 4 wait for their gated answers.
 
 ### 1. A spend is classified by the input that spends the payment (UTXO family)
 
-Status: in progress (PR #NNN).
+Status: in progress (PR #481).
 
 `search_for_swap_output_spend_of` and the every-server search read the spending transaction's first input to
 decide between claim and refund. The spend lookup already returns the index of the input that spends the swap
