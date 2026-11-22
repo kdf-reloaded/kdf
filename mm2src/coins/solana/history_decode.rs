@@ -460,7 +460,7 @@ impl ParsedTx {
                 total = total
                     .checked_add(u128::from(*lamports))
                     .ok_or_else(|| DecodeError::new("an amount does not fit 64 bits"))?;
-                if destination == index && source != index {
+                if destination == index {
                     received = received
                         .checked_add(u128::from(*lamports))
                         .ok_or_else(|| DecodeError::new("an amount does not fit 64 bits"))?;
@@ -567,7 +567,7 @@ impl ParsedTx {
             total = total
                 .checked_add(u128::from(*amount))
                 .ok_or_else(|| DecodeError::new("an amount does not fit 64 bits"))?;
-            if destination_holder == *me && source_holder != *me {
+            if destination_holder == *me {
                 received = received
                     .checked_add(u128::from(*amount))
                     .ok_or_else(|| DecodeError::new("an amount does not fit 64 bits"))?;

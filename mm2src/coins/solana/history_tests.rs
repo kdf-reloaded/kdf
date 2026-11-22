@@ -14,15 +14,16 @@
 //! A stub node on a loopback socket serves the fixtures, so the real HTTP layer, node pool and RPC client run. No
 //! assertion message carries a key-derived value: values are compared with `assert!(a == b, "<fixed text>")`.
 
-use super::history::{run_pass_and_report, HistoryConfig, WalkState};
+use super::history::{history_loop, run_pass_and_report, HistoryConfig, WalkState};
 use super::history_decode::{parse_transaction, TokenSpec};
 use super::rpc_client::ConfirmedTransaction;
 use super::solana_common_tests::generate_key_pair_from_iguana_seed;
 use super::spl::SplToken;
 use super::*;
-use crate::my_tx_history_v2::{my_tx_history_v2_rpc, MyTxHistoryRequestV2};
+use crate::my_tx_history_v2::{my_tx_history_v2_rpc, MyTxHistoryErrorV2, MyTxHistoryRequestV2};
 use crate::{CoinsContext, MmCoinEnum, TransactionType};
 use common::block_on;
+use common::executor::Timer;
 use futures::compat::Future01CompatExt;
 use mm2_core::mm_ctx::MmCtxBuilder;
 use serde_json::json;
@@ -182,12 +183,13 @@ fn t40_6c_4_the_first_funding_is_a_receive_too() {
 }
 
 #[test]
-fn t40_6c_4_a_send_to_self_names_the_address_on_both_sides() {
+fn t40_6c_4_a_send_to_self_has_the_figures_of_its_withdraw_answer() {
     let row = sol_row(TX_SELF, WALLET);
     assert_identity(&row);
     assert!(row.total_amount == dec("0.001"), "the lamports of the self transfer");
-    assert!(row.received_by_me == dec("0"), "a transfer from itself is not received");
-    assert!(row.spent_by_me == dec("0.000005"), "only the fee is lost");
+    assert!(row.received_by_me == dec("0.001"), "the amount is received");
+    assert!(row.spent_by_me == dec("0.001005"), "the amount and the fee are spent");
+    assert!(row.my_balance_change == dec("-0.000005"), "only the fee is lost");
     assert!(
         row.from == vec![WALLET.to_owned()] && row.to == vec![WALLET.to_owned()],
         "from and to"
@@ -458,6 +460,8 @@ fn spawn_stub(handler: impl Fn(&str, &Json) -> Answer + Send + 'static) -> Stub 
 struct Script {
     /// Every listing fails while set.
     fail_listing: AtomicBool,
+    /// The most entries a listing page holds, whatever `limit` asks; 0 is no cap (a node may serve fewer).
+    page_cap: AtomicUsize,
     /// The transaction with this signature is answered with bytes that are no transaction (altered answer).
     unreadable: Mutex<Option<String>>,
     /// The block of this slot is answered without `blockHeight` (altered answer).
@@ -495,7 +499,11 @@ fn fixture_node(script: Arc<Script>) -> Stub {
                     .map_or(all.len(), |i| i + 1),
                 None => 0,
             };
-            let limit = params[1]["limit"].as_u64().unwrap_or(1000) as usize;
+            let mut limit = params[1]["limit"].as_u64().unwrap_or(1000) as usize;
+            let cap = script.page_cap.load(Ordering::SeqCst);
+            if cap > 0 {
+                limit = limit.min(cap);
+            }
             Answer::Result(Json::Array(all.into_iter().skip(start).take(limit).collect()))
         },
         "getTransaction" => {
@@ -592,6 +600,10 @@ fn stored(ctx: &MmArc, coin: &MmCoinEnum) -> Vec<TransactionDetails> {
     block_on(async { coin.load_history_from_file(ctx).compat().await }).expect("the list loads")
 }
 
+async fn stored_async(ctx: &MmArc, coin: &MmCoinEnum) -> Vec<TransactionDetails> {
+    coin.load_history_from_file(ctx).compat().await.expect("the list loads")
+}
+
 fn state_name(state: &HistorySyncState) -> String {
     serde_json::to_value(state).expect("a state")["state"]
         .as_str()
@@ -603,7 +615,7 @@ fn state_name(state: &HistorySyncState) -> String {
 // T40.6C.3: paging
 // ---------------------------------------------------------------------------------------------------------------
 
-/// Three pages of signatures, the cursor of each request, the end at a short page, and a later pass that stops at the
+/// Three pages of signatures, the cursor of each request, the end at an empty page, and a later pass that stops at the
 /// first page without a new signature (R40.6C.4, R40.6C.5). The page limit of the test is 4; the production limit is
 /// checked in `t40_6c_3_the_requests_carry_the_documented_parameters`.
 #[test]
@@ -628,12 +640,18 @@ fn t40_6c_3_pages_cursors_and_the_stop_of_a_later_pass() {
         .map(|p| p[1]["before"].as_str().map(str::to_owned))
         .collect();
     assert!(
-        wallet_cursors == vec![None, Some(signatures[3].clone()), Some(signatures[7].clone())],
-        "three pages, each after the oldest signature of the previous one"
+        wallet_cursors
+            == vec![
+                None,
+                Some(signatures[3].clone()),
+                Some(signatures[7].clone()),
+                Some(signatures[8].clone())
+            ],
+        "three pages and the empty one, each after the oldest signature of the previous one"
     );
     assert!(
-        listings.len() == 4,
-        "the token account is listed once, in one short page"
+        listings.len() == 6,
+        "the token account is listed in a page and its empty page"
     );
     assert!(
         state_name(&coin.history_sync_status()) == "Finished",
@@ -643,7 +661,7 @@ fn t40_6c_3_pages_cursors_and_the_stop_of_a_later_pass() {
     // A later pass of the same process stops at the first page without a new signature: one request per account.
     block_on(run_pass_and_report(&coin, &ctx, &mut state, &test_config(4)));
     assert!(
-        node.count("getSignaturesForAddress") == 6,
+        node.count("getSignaturesForAddress") == 8,
         "one first page per watched account, no further page"
     );
     assert!(node.count("getTransaction") == 9, "no signature is read twice");
@@ -912,7 +930,7 @@ fn t40_6c_2_without_history_both_forms_refuse_and_the_node_is_not_asked() {
             panic!("the versioned form must refuse");
         };
         assert!(
-            matches!(err.get_inner(), crate::my_tx_history_v2::MyTxHistoryErrorV2::NotSupportedFor(name) if name == ticker),
+            matches!(err.get_inner(), MyTxHistoryErrorV2::NotSupportedFor(name) if name == ticker),
             "NotSupportedFor"
         );
     }
@@ -981,4 +999,157 @@ fn t40_6c_3_both_forms_serve_the_written_lists() {
             "the legacy state"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// T40.6C.3: a node that serves pages shorter than the limit
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A node serves at most two entries a page although the limit is 1000: the walk goes on to the empty page and the
+/// history holds every row (R40.6C.4).
+#[test]
+fn t40_6c_3_a_node_with_pages_shorter_than_the_limit_is_walked_to_its_empty_page() {
+    let ctx = history_ctx();
+    let script = Arc::new(Script::default());
+    script.page_cap.store(2, Ordering::SeqCst);
+    let node = fixture_node(script);
+    let coin = history_coin(&node.url, true);
+    let mut state = WalkState::default();
+    block_on(run_pass_and_report(&coin, &ctx, &mut state, &test_config(1000)));
+    let wallet_pages = node
+        .params_of("getSignaturesForAddress")
+        .iter()
+        .filter(|p| p[0] == WALLET)
+        .count();
+    assert!(wallet_pages == 6, "five pages of at most two entries and the empty one");
+    assert!(node.count("getTransaction") == 9, "every signature is read");
+    assert!(
+        stored(&ctx, &MmCoinEnum::from(coin.clone())).len() == 8,
+        "the rows of the platform coin"
+    );
+    assert!(
+        stored(&ctx, &MmCoinEnum::from(token_of(&coin))).len() == 3,
+        "the rows of the token"
+    );
+    assert!(
+        state_name(&coin.history_sync_status()) == "Finished",
+        "the history finished"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// T40.6C.9: disable_coin
+// ---------------------------------------------------------------------------------------------------------------
+
+fn register_for_disable(ctx: &MmArc, coin: MmCoinEnum) {
+    let params = crate::RegisterCoinParams {
+        ticker: coin.ticker().to_owned(),
+        tx_history: false,
+    };
+    block_on(crate::lp_register_coin(ctx, coin, params)).expect("the coin registers");
+}
+
+/// Waits until the history of `coin` has finished once (the node is asked at most 10 seconds).
+async fn wait_finished(coin: &SolanaCoin) {
+    for _ in 0..1000 {
+        if state_name(&coin.history_sync_status()) == "Finished" {
+            return;
+        }
+        Timer::sleep(0.01).await;
+    }
+    panic!("the history did not finish");
+}
+
+/// After `disable_coin` of the platform the writer sends no further history request, writes no list and ends; after
+/// a token's disable its list is no longer written and its accounts are no longer asked, while the platform's history
+/// goes on (R40.6C.1).
+#[test]
+fn t40_6c_9_disable_coin_stops_the_writer_of_the_platform_and_of_a_token() {
+    let ctx = history_ctx();
+    let node = fixture_node(Arc::default());
+    let coin = history_coin(&node.url, true);
+    register_for_disable(&ctx, MmCoinEnum::from(coin.clone()));
+    register_for_disable(&ctx, MmCoinEnum::from(token_of(&coin)));
+    let token_account = fixtures()["token_accounts"][0]
+        .as_str()
+        .expect("a token account")
+        .to_owned();
+    let config = HistoryConfig {
+        poll_interval_s: 0.2,
+        request_spacing_s: 0.,
+        page_limit: 1000,
+    };
+    let requests = |node: &Stub| {
+        (
+            node.count("getSignaturesForAddress"),
+            node.count("getTransaction"),
+            node.count("getTokenAccountsByOwner"),
+        )
+    };
+    let token_listings = |node: &Stub| {
+        node.params_of("getSignaturesForAddress")
+            .iter()
+            .filter(|p| p[0] == token_account.as_str())
+            .count()
+    };
+    let wallet_listings = |node: &Stub| {
+        node.params_of("getSignaturesForAddress")
+            .iter()
+            .filter(|p| p[0] == WALLET)
+            .count()
+    };
+
+    block_on(async {
+        let writer = history_loop(coin.clone(), ctx.clone(), config);
+        let driver = async {
+            wait_finished(&coin).await;
+            // The token goes; the writer sleeps between passes.
+            crate::disable_coin(&ctx, TOKEN_TICKER)
+                .await
+                .expect("the token is disabled");
+            let token_rows = stored_async(&ctx, &MmCoinEnum::from(token_of(&coin))).await.len();
+            let (accounts_asked, token_listed, wallet_listed) = (
+                node.count("getTokenAccountsByOwner"),
+                token_listings(&node),
+                wallet_listings(&node),
+            );
+            // The platform's history goes on: its listing is asked again, the token's accounts are not.
+            for _ in 0..1000 {
+                if wallet_listings(&node) > wallet_listed {
+                    break;
+                }
+                Timer::sleep(0.01).await;
+            }
+            assert!(wallet_listings(&node) > wallet_listed, "the platform's history goes on");
+            assert!(
+                node.count("getTokenAccountsByOwner") == accounts_asked && token_listings(&node) == token_listed,
+                "the token's accounts are no longer asked"
+            );
+            assert!(
+                stored_async(&ctx, &MmCoinEnum::from(token_of(&coin))).await.len() == token_rows,
+                "the token's list is no longer written"
+            );
+            // The platform goes: no further request is sent.
+            wait_finished(&coin).await;
+            crate::disable_coin(&ctx, "SOL")
+                .await
+                .expect("the platform is disabled");
+            let (listed, read, asked) = requests(&node);
+            let platform_rows = stored_async(&ctx, &MmCoinEnum::from(coin.clone())).await.len();
+            (listed, read, asked, platform_rows)
+        };
+        let (writer_end, (listed, read, asked, platform_rows)) = futures::join!(
+            async { futures::future::select(Box::pin(writer), Box::pin(Timer::sleep(20.))).await },
+            driver
+        );
+        assert!(
+            matches!(writer_end, futures::future::Either::Left(_)),
+            "the writer ends once the platform is disabled"
+        );
+        assert!(requests(&node) == (listed, read, asked), "no request after the disable");
+        assert!(
+            stored_async(&ctx, &MmCoinEnum::from(coin.clone())).await.len() == platform_rows,
+            "no list is written after the disable"
+        );
+    });
 }

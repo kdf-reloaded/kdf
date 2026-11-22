@@ -14,8 +14,9 @@
 //!
 //! # Invariants
 //! - Finalized transactions only, so a stored row is never changed or removed.
-//! - The first pass of a process walks each watched account's listing to its end; a later pass stops at the first
-//!   page that has no new signature. A walk that failed leaves its account unwalked, so no gap is left.
+//! - The first pass of a process walks each watched account's listing to its end, which is the first empty page (a
+//!   node may serve fewer entries than asked); a later pass stops at the first page that has no new signature. A
+//!   walk that failed leaves its account unwalked, so no gap is left.
 //! - At most four requests per second (a pause before every request).
 //! - A transaction that cannot be read is logged and left out; it never stops the pass (R40.6C.11).
 //! - No log or error text carries a node URL beyond its host: the node errors arrive scrubbed.
@@ -437,7 +438,7 @@ impl Pass<'_> {
             // What was read is stored even when a request failed: the next pass need not read it again.
             self.save_all().await?;
             outcome?;
-            if page.len() < self.config.page_limit || (!whole_listing && fresh.is_empty()) {
+            if page.is_empty() || (!whole_listing && fresh.is_empty()) {
                 break;
             }
             let Some(last) = page.last() else { break };

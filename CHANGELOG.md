@@ -295,8 +295,10 @@ the previous version used. The safe way:
   Only finalized transactions are listed. A SOL row's `my_balance_change` is the exact change of
   the address's balance, fee and rent deposits included; the rent is in `fee_details.rent_amount`.
   A failed transaction whose fee was charged is a row with that fee only. Without `tx_history`
-  nothing changes: `my_tx_history` answers as before. GLEEC KDF has no Solana history. Detail:
-  PR #494; CRD ch.40 §40.6C.
+  nothing changes: `my_tx_history` answers as before. A platform made passive by the legacy
+  `disable_coin` keeps the history setting it had when it is activated again; to turn the history
+  on, remove it with `"force_disable": true` and activate it again. GLEEC KDF has no Solana
+  history. Detail: PR #494; CRD ch.40 §40.6C.
 
 - **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
   entries in both forms and route `enable_solana_with_tokens`, `enable_spl` and the two

@@ -720,8 +720,8 @@ impl MmCoin for SplToken {
 
     fn validate_address(&self, address: &str) -> ValidateAddressResult { self.platform_coin.validate_address(address) }
 
-    /// The history is written by the process of its platform (CRD ch.40 R40.6C.3): the loop has nothing to do and ends at once, so
-    /// a background start can never abort the process.
+    /// The history is written by the process of its platform (CRD ch.40 R40.6C.3): the loop has nothing to do and
+    /// ends at once, so a background start can never abort the process.
     fn process_history_loop(&self, _ctx: MmArc) -> Box<dyn Future<Item = (), Error = ()> + Send> {
         Box::new(futures01::future::ok(()))
     }

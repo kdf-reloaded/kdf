@@ -410,7 +410,7 @@ proceed as with `false`.
 > *Reloaded status (clean side, 2026-11-22):* `tx_history` now takes
 > effect in this repository: `true` starts the history of §40.6C on this
 > method and on `enable_solana_with_tokens` (PR #494). A value of another
-> type is still `InvalidRequest` (T40.7).
+> type is still `InvalidRequest` (status note of 2026-11-19 above).
 
 ## 40.2A The string form of balances and amounts (reference behavior)
 
@@ -1897,14 +1897,16 @@ tests check are public devnet data (chapter 01 R6).
 of the SPL tokens it serves is enabled when the platform's activation request
 asks `tx_history: true`, on either surface: `enable_solana_with_tokens` gains
 the optional boolean member `tx_history` (default `false`), and
-`experimental::enable_solana_with_assets` honors the member it already reads.
-A re-activation does not start a second history. A token activated later by
-`enable_spl` or `experimental::enable_solana_token` is served by its platform's
-history when that history is enabled. The history runs on native and browser
-builds. It stops when the node stops or when the coin instance is no longer the
-registered one (after `disable_coin`). Honoring `tx_history` diverges from
-R40.2.5, where the member has no effect; it is additive, not visible to a peer,
-and has no switch.
+`experimental::enable_solana_with_assets` honors the member it already reads. A
+re-activation does not start a second history, and the re-activation of a
+passive platform starts none even when its request asks `tx_history: true`
+(chapter 43 D43.1F.5 (a)); such a platform gets its history when it is removed
+(chapter 43 §43.1E) and activated again. A token activated later by `enable_spl`
+or `experimental::enable_solana_token` is served by its platform's history when
+that history is enabled. The history runs on native and browser builds. It stops
+when the node stops or when the coin instance is no longer the registered one
+(after `disable_coin`). Honoring `tx_history` diverges from R40.2.5, where the
+member has no effect; it is additive, not visible to a peer, and has no switch.
 
 **R40.6C.2 (without it).** A coin whose history is not enabled answers as
 before S10: the versioned `my_tx_history` answers `NotSupportedFor` (HTTP 400)
@@ -1921,20 +1923,21 @@ transactions are stored (R40.6C.4), so §38.5C has nothing to remove.
 
 **R40.6C.4 (source).** The writer lists, for each *watched account*, the
 signatures by `getSignaturesForAddress` with `limit` 1000, commitment
-`finalized`, and the `before` cursor set to the oldest signature of the
-previous page; a page with fewer than 1000 entries is the last. The watched
-accounts are the platform address and, for each served token, every token
-account the platform address owns for the token's mint
-(`getTokenAccountsByOwner` with the mint filter, read again on each pass).
-Every new signature is read once by `getTransaction` with encoding `base64`,
-commitment `finalized` and `maxSupportedTransactionVersion` 0; a signature
-listed by two watched accounts is read once. The block height of a new slot is
-read once by `getBlock` with `transactionDetails` `none` and `rewards` `false`.
-The requests go to the coin's node pool like every other request of the coin
-(R40.1.5, §40.5A), at most four per second. A failed request, or an answer that
-has no finalized transaction or block for a listed signature or its slot, ends
-the pass, which is tried again after the pause of R40.6C.9; rows already stored
-stay.
+`finalized`, and the `before` cursor set to the oldest signature of the previous
+page. A walk of the whole listing ends at an empty page, since a node may serve
+fewer entries than asked; a later pass also ends at the first page that brings
+no new signature (R40.6C.5). The watched accounts are the platform address and,
+for each served token, every token account the platform address owns for the
+token's mint (`getTokenAccountsByOwner` with the mint filter, read again on each
+pass). Every new signature is read once by `getTransaction` with encoding
+`base64`, commitment `finalized` and `maxSupportedTransactionVersion` 0; a
+signature listed by two watched accounts is read once. The block height of a new
+slot is read once by `getBlock` with `transactionDetails` `none` and `rewards`
+`false`. The requests go to the coin's node pool like every other request of the
+coin (R40.1.5, §40.5A), at most four per second. A failed request, or an answer
+that has no finalized transaction or block for a listed signature or its slot,
+ends the pass, which is tried again after the pause of R40.6C.9; rows already
+stored stay.
 
 **R40.6C.5 (depth).** The first pass after a start walks each watched
 account's listing to its end. A later pass stops at the first
@@ -1963,8 +1966,10 @@ makes the transaction unreadable (R40.6C.11).
 lamports of the platform address change (`postBalances` minus `preBalances`)
 or when the platform address is its fee payer. Its members:
 - `my_balance_change`: the change of the platform address's lamports, in SOL;
-- `received_by_me`: the lamports the transfers move to the platform address
-  from another account; `spent_by_me`: `received_by_me` minus
+- `received_by_me`: the lamports the transfers move to the platform address,
+  a transfer from the platform address to itself included, so that a send to
+  self has the figures of its withdraw answer (the amount received, the amount
+  and the fee spent); `spent_by_me`: `received_by_me` minus
   `my_balance_change`. When that is negative, `received_by_me` is raised by the
   difference and `spent_by_me` is 0. Then `my_balance_change` equals
   `received_by_me` minus `spent_by_me` for every row;
@@ -1983,30 +1988,34 @@ or when the platform address is its fee payer. Its members:
   payer, the transaction has a token transfer (of any mint) and no transfer
   names the platform address; else `StandardTransfer`;
 - `tx_hash`: the signature in base58; `internal_id`: the 64 bytes of the
-  signature; `tx_hex`: the transaction's wire bytes; `timestamp`: `blockTime`;
+  signature (a withdraw answer carries the bytes of the base58 text there;
+  `tx_hash` is the same in both); `tx_hex`: the transaction's wire bytes;
+  `timestamp`: `blockTime`;
   `block_height`: the block height of the transaction's slot (R40.6C.4).
 
-**R40.6C.8 (SPL rows).** A transaction is a row of a served token when the
-token amount of the watched accounts of that token changes
-(`meta.postTokenBalances` minus `meta.preTokenBalances`, entries of the token's
-mint whose owner is the platform address; an account absent on one side counts
-0 there). Its members follow R40.6C.7 in the token's own units and decimals,
-with token transfers of the mint in place of transfers, and the owner of a
-token account (from the token balance entries) in place of the account when
-the entry names one. A token balance entry without an owner is not the
-wallet's. For a row without a token transfer of the mint, `total_amount` is
-the change without sign, with no fee subtracted (the fee is SOL), `from` the
-fee payer and `to` the platform address. `fee_details` is the SOL fee of R40.6C.7, so the fee is
-never part of the token's `spent_by_me`. `transaction_type` is
-`TokenTransfer` with the token's id. One transaction is at most one row in each
-list.
+**R40.6C.8 (SPL rows).** A transaction is a row of a served token when the token
+amount of the watched accounts of that token changes (`meta.postTokenBalances`
+minus `meta.preTokenBalances`, entries of the token's mint whose owner is the
+platform address; an account absent on one side counts 0 there). Its members
+follow R40.6C.7 in the token's own units and decimals, with token transfers of
+the mint in place of transfers, and the owner of a token account (from the token
+balance entries) in place of the account when the entry names one. A token
+balance entry without an owner is not the wallet's. For a row without a token
+transfer of the mint, `total_amount` is the change without sign, with no fee
+subtracted (the fee is SOL), `from` the fee payer and `to` the platform address.
+`fee_details` is the SOL fee of R40.6C.7, so the fee is never part of the
+token's `spent_by_me`. `transaction_type` is `TokenTransfer` with the token's
+id. One transaction is at most one row in each list. A send of the token to self
+is received and spent with a change of 0, as its withdraw answer says.
 
 **R40.6C.9 (passes and states).** A pass runs at the start and then 60 seconds
-after the end of the previous one. `history_sync_status` follows chapter 21
-R21.10C's states: `InProgress` with `transactions_left` (the listed signatures
-not yet read), `Finished` after a pass that read everything, and `Error` with a
-message until the history has finished once; after that a failed pass is
-logged only.
+after the end of the previous one. `sync_status` follows chapter 21 R21.10C.10:
+`NotEnabled` without history (R40.6C.2), `NotStarted` before the first pass,
+`InProgress` with `transactions_left` (the new signatures of the page in hand
+not yet read) while the history has not finished once, `Finished` after a pass
+that read everything, and `Error` with a message for a pass that fails before
+the first `Finished`; after that a failed pass keeps `Finished` and is logged
+only.
 
 **R40.6C.10 (failed transactions).** A transaction with a non-null `meta.err`
 is a row when the platform address paid its fee: a SOL row whose only change
@@ -2015,9 +2024,9 @@ is the fee payer, `to` the platform address, `total_amount` 0, `rent_amount`
 0, and `transaction_type` `StandardTransfer`. It is no token row, since a failed
 transaction changes no token balance.
 
-**R40.6C.11 (rows not read).** A transaction that cannot be decoded, that has
-no `blockTime`, or whose block has no `blockHeight`, is logged and left out;
-it does not stop the history (R38.5A.9). No member is filled with a stand-in value.
+**R40.6C.11 (rows not read).** A transaction that cannot be decoded, that has no
+`blockTime`, or whose block has no `blockHeight`, is logged and left out; it
+does not stop the history (R38.5A.9). No member is filled with a stand-in value.
 
 **R40.6C.12 (limits).** Finalized transactions only; a transaction appears
 after finalization, so a withdraw shows in the history some seconds after its
@@ -2031,20 +2040,26 @@ T40.6C.1 `tx_history: true` on both surfaces starts the history; `false` or
 absent does not; re-activation does not start a second one (R40.6C.1).
 T40.6C.2 Without history, both `my_tx_history` forms answer as R40.6C.2.
 T40.6C.3 Paging over a scripted node: three pages of signatures, the cursor of
-each request, the end at a short page, a later pass that stops at the first
-page without a new signature (R40.6C.4, R40.6C.5).
+each request, the end at an empty page, a node that serves pages shorter than
+the limit walked to its end, a later pass that stops at the first page without a
+new signature (R40.6C.4, R40.6C.5).
 T40.6C.4 SOL rows from captured devnet transactions: a send, a receive, a send
-to self, an SPL withdraw that creates the receiver's token account (rent in
-`fee_details`, `FeeForTokenTx`), a failed transaction (fee only), and a version-0
-transaction with loaded addresses; the identity of R40.6C.7 on every row.
+to self (the figures of its withdraw answer), an SPL withdraw that creates the
+receiver's token account (rent in `fee_details`, `FeeForTokenTx`), a failed
+transaction (fee only), and a version-0 transaction with loaded addresses; the
+identity of R40.6C.7 on every row.
 T40.6C.5 SPL rows: a send, a receive (the receiver's token account created in
 the same transaction), and the absence of a token row for the failed one.
 T40.6C.6 A transaction listed by the platform address and a token account is
 read once and is one row in each list it changes; a restart adds no duplicate.
 T40.6C.7 An undecodable transaction and a block without height are logged and
 left out; the pass goes on (R40.6C.11).
-T40.6C.8 States: `InProgress` with `transactions_left`, `Finished`, `Error`
-before the first finish and only a log line after it (R40.6C.9).
+T40.6C.8 States: `NotEnabled`, `NotStarted`, `InProgress` with
+`transactions_left`, `Finished`, `Error` before the first finish and only a log
+line after it (R40.6C.9).
+T40.6C.9 After `disable_coin` of the platform no history request is sent and no
+list is written; after a token's disable its list is no longer written while the
+platform's history goes on (R40.6C.1).
 
 ## 40.7 Tests
 
