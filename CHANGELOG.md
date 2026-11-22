@@ -694,8 +694,9 @@ the previous version used. The safe way:
   signature, a SOL and an SPL transfer, and the token-account address under both token programs. The
   old `ed25519-dalek` 1.0.1 library leaves the dependency tree, so the dependency policy no longer
   ignores RUSTSEC-2022-0093.
-  RUSTSEC-2024-0344 stays ignored: `curve25519-dalek` 3.2.0 still comes in through the peer-to-peer
-  library's encryption layer, not through Solana. Solana stays switched off in this build.
+  RUSTSEC-2024-0344 is not cleared by this change: `curve25519-dalek` 3.2.0 also came in through the
+  peer-to-peer library's encryption layer, which PR #470 moves to the new library line. Solana stays
+  switched off in this build.
   Detail: PR #465.
 
 #### UTXO coins and Electrum
@@ -724,6 +725,17 @@ the previous version used. The safe way:
     because the other side of such a swap checks it against that figure.
 
   Detail: PR #431; CRD ch.39 R39.11.4V.10 status note.
+
+#### Transport, TLS and dependencies
+
+- **The peer-to-peer encryption no longer uses the old curve25519 library with the timing advisory.** The
+  encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
+  (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
+  (`x25519-dalek` 2, `curve25519-dalek` 4). The handshake itself is unchanged, byte for byte, and nodes running
+  older versions connect as before. With the Solana libraries already moved off it, the old library is now out
+  of the build, and the dependency policy no longer ignores RUSTSEC-2024-0344. Detail: PR #470; CRD ch.28 OQ2
+  status note of 2026-11-22;
+  `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
 
 ### Fixed
 
@@ -1137,7 +1149,8 @@ the previous version used. The safe way:
   last — with the decisions of CRD ch.39 D39.6.6.a–i as proposals.
 - [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — done: the Solana crates moved to the 3.x
   line (package S5 of `solana-support`, PR #465); RUSTSEC-2022-0093 is cleared, and RUSTSEC-2024-0344
-  moves to the libp2p modernization task (it comes in through the peer-to-peer library).
+  moves to the libp2p modernization task (it comes in through the peer-to-peer library); PR #470 clears
+  it by vendoring the Noise crate.
 - [`solana-support`](docs/plans/solana-support.md) — in progress: checked against the code, gaps
   corrected, packages S0 to S11 in a new order, the maintainer decisions of 2026-11-15 recorded;
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,

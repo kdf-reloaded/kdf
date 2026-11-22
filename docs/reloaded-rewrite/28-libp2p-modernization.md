@@ -2162,6 +2162,12 @@ policy bans that crate and its resolver library (chapter 45 R45.6B.11).
 > tempfile 3.3.0 pull them. `deny.toml` holds the current list with its
 > reasons.
 
+*2026-11-22 (clean-side note): the Noise crate is vendored with
+`x25519-dalek 2` and `curve25519-dalek 4` (as upstream libp2p-noise 0.43.2,
+whose code equals 0.43.0). With the Solana crates on their 3.x line, nothing
+pulls `curve25519-dalek 3.2` any more, and RUSTSEC-2024-0344 leaves
+`deny.toml`. Nothing on the wire changes.*
+
 ## 28.12 External References
 
 - *libp2p* — the underlying networking substrate. The target dependency
@@ -2591,3 +2597,8 @@ per-peer IHAVE and IWANT caps of R13a) MUST be confirmed to add no rule that rea
   clean side: it records this repository's stuck-close mark (PR #328) and
   takes no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required.
+- *Status note added 2026-11-22 -- under OQ2.* Reloaded-original, clean
+  side: it records this repository's vendored Noise crate (PR #470), the
+  public libp2p-noise 0.43.2 manifest and RFC 7748, and takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required.

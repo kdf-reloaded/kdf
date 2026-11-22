@@ -88,12 +88,6 @@ ignore = [
     "RUSTSEC-2024-0019", # mio (crossterm / signal-hook-mio)
     "RUSTSEC-2023-0018", # remove_dir_all (tempfile 3.3.0)
 
-    # --- curve25519-dalek 3.2.0 (via the libp2p fork's Noise stack) ---
-    # The Solana crates moved to the 3.x line and no longer pull it; the only
-    # remaining path is libp2p-noise 0.43 -> x25519-dalek 1.1 (see
-    # `cargo tree -i curve25519-dalek@3.2.0`).
-    "RUSTSEC-2024-0344", # curve25519-dalek (timing variability)
-
     # --- EC stack (crypto-bigint 0.5.5 via elliptic-curve 0.13) ---
     # RUSTSEC-2026-0387 (timing variability in constant-time operations) is fixed
     # only in crypto-bigint >= 0.7.6. `cargo tree -i crypto-bigint@0.5.5` shows
