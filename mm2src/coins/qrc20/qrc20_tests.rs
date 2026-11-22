@@ -1270,7 +1270,7 @@ fn r72a_qrc20_extract_secret_refuses_a_wrongly_sized_secret_hash() {
 
 // ---- CRD ch.51 §51.6E R89: a found spend or refund is bound to its contract call ----
 
-use super::swap::{bound_swap_event_output, ExpectedSwapEvent};
+use super::swap::{bound_swap_event_output, holds_swap_call, ExpectedSwapEvent};
 
 const R89_SWAP_ID: [u8; 32] = [7; 32];
 const R89_SECRET: [u8; 32] = [1; 32];
@@ -1619,4 +1619,42 @@ fn r89_refund_whose_event_data_carries_another_swap_id_is_skipped() {
     )
     .unwrap_err();
     assert!(err.contains("holds no event"), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r89_precheck_finds_the_swap_call_without_receipts() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let spend = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    assert!(holds_swap_call(&spend, &r89_expected_spend(&hash), &R89_SWAP_ID));
+    // another swap id, a secret of another hash, a refund where a spend is expected, no outputs: no call of the swap
+    assert!(!holds_swap_call(&spend, &r89_expected_spend(&hash), &[9; 32]));
+    let wrong_secret = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &[2; 32],
+    )]);
+    assert!(!holds_swap_call(
+        &wrong_secret,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID
+    ));
+    let refund = r89_tx(vec![r89_refund_call(&coin, &r89_swap_contract(), &R89_SWAP_ID)]);
+    assert!(!holds_swap_call(&refund, &r89_expected_spend(&hash), &R89_SWAP_ID));
+    assert!(holds_swap_call(
+        &refund,
+        &ExpectedSwapEvent::SenderRefunded,
+        &R89_SWAP_ID
+    ));
+    assert!(!holds_swap_call(
+        &UtxoTx::default(),
+        &ExpectedSwapEvent::SenderRefunded,
+        &R89_SWAP_ID
+    ));
 }

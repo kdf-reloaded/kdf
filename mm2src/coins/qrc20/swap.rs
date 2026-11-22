@@ -860,6 +860,16 @@ impl Qrc20Coin {
     ) -> Result<Option<UtxoTx>, String> {
         for candidate in candidates {
             let tx_hash: H256Json = candidate.hash().reversed().into();
+            // The node is asked for the receipts only of a transaction that holds the swap's call.
+            if !holds_swap_call(&candidate, expected, swap_id) {
+                debug!(
+                    "Skip the tx {:?} as {}: no '{}' call of the swap in the transaction",
+                    tx_hash,
+                    expected.name(),
+                    expected.name()
+                );
+                continue;
+            }
             let receipts = try_s!(self.utxo.rpc_client.get_transaction_receipts(&tx_hash).compat().await);
             match bound_swap_event_output(&candidate, &receipts, expected, swap_id, swap_contract) {
                 Ok(_) => return Ok(Some(candidate)),
@@ -1057,6 +1067,15 @@ fn is_bound_swap_event_log(
     }
     let data = log.data.strip_prefix("0x").unwrap_or(&log.data);
     matches!(hex::decode(data), Ok(data) if data.starts_with(swap_id))
+}
+
+/// Whether an output of `tx` is the call of `expected` for the swap `swap_id` (for a spend, with the expected secret
+/// hash). It reads the transaction only; [`bound_swap_event_output`] binds the call to its receipt.
+pub(super) fn holds_swap_call(tx: &UtxoTx, expected: &ExpectedSwapEvent<'_>, swap_id: &[u8]) -> bool {
+    tx.outputs.iter().any(|output| {
+        let script_pubkey: Script = output.script_pubkey.clone().into();
+        matches!(expected.call_swap_id(&script_pubkey), Ok(id) if id == swap_id)
+    })
 }
 
 /// The index of the first output of `tx` that is the call of `expected` for the swap `swap_id` and is bound to its own
