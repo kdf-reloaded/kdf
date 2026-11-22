@@ -1015,7 +1015,7 @@ cannot spend from.
 > serves EVM coins under an HD wallet, for the platform ticker and for an ERC-20
 > token ticker (chapter 49 R49.32, last paragraph).
 
-> **Pointer (2026-11-22, Spec Reader round 0.5.0-21; pending the KDF Dirty
+> **Pointer (2026-11-22, Spec Reader round 0.5.0-21; passed the KDF Dirty
 > Gate with chapter 49 §49.2.2).** What the reference releases do when the
 > balance query of a newly generated EVM address fails, and the
 > hardware-context precondition of their `task::get_new_address::init`,
@@ -2445,8 +2445,8 @@ surface.
 - *Pointer added 2026-11-22 (Spec Reader round 0.5.0-21) -- the note after
   the 2026-11-20 status note under R54.* It names chapter 49 R49.37 and
   states no behavior of its own; it travels with chapter 49 §49.2.2 for the
-  KDF Dirty Gate. **KDF Dirty Gate: pending**, to be recorded as for
-  §49.2.2 in chapter 49's provenance footer.
+  KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
+  findings**, as recorded for §49.2.2 in chapter 49's provenance footer.
 - *Status note added 2026-11-16 (under §5.9B R35c item 5).* Reloaded-original,
   clean side: it records this repository's alignment of the HD account methods'
   hardware and timeout errors with the cleared item 5; no forbidden-class

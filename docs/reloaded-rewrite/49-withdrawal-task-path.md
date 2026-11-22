@@ -471,7 +471,7 @@ platform ticker only, its scan rule is unchanged, and the intervening unused
 entries of a scan carry a zero entry.
 
 *Status note (2026-11-22), three open points of the platform-ticker maps
-(Spec Reader round 0.5.0-21; pending the KDF Dirty Gate with §49.2.2).* The
+(Spec Reader round 0.5.0-21; passed the KDF Dirty Gate with §49.2.2).* The
 reference answers to three points this subsection left open are recorded in
 §49.2.2 below: the shape of `page_balance` and `total_balance` (R49.35), the
 used-address rule and the listed entries of the scan that runs at
@@ -524,7 +524,8 @@ one activated ERC-20 token:
 
 ### 49.2.2 EVM HD: balance totals, the scan at activation, and a new address whose balance query fails (reference behavior)
 
-> **Provenance status: pending the KDF Dirty Gate** (chapter 01 R38, R41).
+> **Provenance status: passed the KDF Dirty Gate on 2026-11-22, measure 0.03**
+> (chapter 01 R40; attestation in the Provenance Footer).
 > This subsection was written by the dirty-side specification author on
 > 2026-11-22 (Spec Reader round 0.5.0-21) under the two-team procedure of
 > chapter 01 §1.4A, from the rows `v2.6.0-beta`, `v3.0.0-beta` and
@@ -532,8 +533,7 @@ one activated ERC-20 token:
 > repository's own tree. The source tree of the third row equals that of
 > `v3.0.0-beta`. Every reference statement below holds **identically at all
 > three rows** unless it names a row. It edits no sentence of R49.32 --
-> R49.34, which it completes. Until this marker records a pass, the
-> subsection is not cleared and a clean-side reader must not rely on it.
+> R49.34, which it completes.
 
 R49.35. *The page and account totals are per-ticker maps (reference
 contract).* On an HD-activated EVM platform the totals have the same JSON
@@ -1522,9 +1522,8 @@ addresses.
 - *Scoped addition (2026-11-22, Spec Reader round 0.5.0-21) -- §49.2.2
   (R49.35 -- R49.37, the two code-quality findings, the Reloaded status
   note, T49.33 -- T49.35) and the status note of 2026-11-22 in §49.2.1.*
-  **KDF Dirty Gate: pending** (chapter 01 R38, R41); no clearance is
-  recorded yet, and the attestation's extent, method and measure are to be
-  written here when a pass is relayed. *Inputs:* the forbidden corpus at
+  **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings** (chapter
+  01 R40; the attestation closes this item). *Inputs:* the forbidden corpus at
   the rows `v2.6.0-beta`, `v3.0.0-beta` and `main (as of 2026-10-07)` of
   chapter 02 §2.15A, consulted **only** to establish, for an EVM platform
   under an HD wallet: the JSON type of the page and account balance totals
@@ -1542,3 +1541,20 @@ addresses.
   No row was added to chapter 02 §2.15A: all three states read already
   have rows. The pointers of the same date in chapter 35 (after R35.1.3)
   and chapter 05 (after R54) travel with this item.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.03,
+  no findings, in a single pass; the chapter 02 §2.15A rows were verified.
+  *Extent:* the HD wallet subsystem as §49.2.1 -- §49.2.2 of this chapter,
+  chapter 35 R35.1.3 and R35.1.6 and chapter 05 R54 scope it -- the
+  account-balance and new-address commands and their task forms, the
+  activation balance report and its address scan, the EVM used-address test,
+  the recording of the address count, the hardware address confirmation, and
+  the mapping of EVM node failures to balance-error discriminants -- at the
+  row `v3.0.0-beta` (about twelve source files read) and the row `v2.6.0-beta`
+  (through the difference between the rows, plus its differing error mapping);
+  the row `main (as of 2026-10-07)` was compared commit to commit and is
+  identical in this subsystem; on the candidate side, the 261 added lines.
+  *Method:* reading plus mechanical per-token occurrence counts (29 tokens) at
+  both release rows, with a forced-versus-free test; no word-shingle
+  comparison was run, and the repository's clean-room gate tool was not
+  applicable because the additions embed no code blocks. *Measure:* 0.03, on
+  the discretionary-expression basis.
