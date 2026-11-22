@@ -2193,11 +2193,15 @@ answers "valid" on it.
 **R40.6D.10 (claim and refund).** The receiver claims with `receiver_spend_*`
 and the secret; for SPL, when the receiver has no associated token account for
 the mint, the claim transaction first creates it (idempotently; the receiver
-pays its rent). A claim is sent only while the payment account is present at
-`finalized` (as R40.6D.16 requires), only after the node's simulation of the
-transaction succeeds, and only while the cluster time (R40.6D.11) is at least
-300 seconds before the lock time. The sender refunds with `sender_refund_*` once
-the refund gate (R40.6D.11) is open.
+pays its rent). The maker's claim of the taker's payment is sent only while the
+payment account is present at `finalized` (as R40.6D.16 requires), only after
+the node's simulation of the transaction succeeds, and only while the cluster
+time (R40.6D.11) is at least 300 seconds before the lock time; otherwise it is
+not sent and the swap goes to its refund. The 300 seconds are this section's own
+figure. The taker's claim of the maker's payment is sent whenever the payment
+account is present at `finalized`, before or after the lock time, after a
+successful simulation, and is tried again while the account is present. The
+sender refunds with `sender_refund_*` once the refund gate (R40.6D.11) is open.
 
 **R40.6D.11 (refund gate).** The time compared with the lock is the cluster's:
 the block time of the latest `finalized` slot. The gate answers "wait" with the
@@ -2315,11 +2319,12 @@ T40.6D.12 A repeated payment send with the same terms does not pay twice; a
 failed read before it sends nothing (R40.6D.7).
 T40.6D.13 Evidence: two agreeing nodes, a disagreement, one answer, and the
 named evidence node (R40.6D.16).
-T40.6D.14 Claim conditions: no claim is sent when the payment account is gone,
-when the simulation fails, or when the cluster time is less than 300 seconds
-before the lock time; an SPL vault that is frozen fails validation, and a frozen
-token account of either party refuses the swap at its start and before the
-payment (R40.6D.6, R40.6D.9, R40.6D.10).
+T40.6D.14 Claim conditions: the maker's claim is not sent when the payment
+account is gone, when the simulation fails, or when the cluster time is less
+than 300 seconds before the lock time; the taker's claim is sent while the
+account is present, also after the lock time; an SPL vault that is frozen fails
+validation, and a frozen token account of either party refuses the swap at its
+start and before the payment (R40.6D.6, R40.6D.9, R40.6D.10).
 
 ## 40.7 Tests
 
