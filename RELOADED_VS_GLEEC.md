@@ -129,8 +129,8 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   and `init_trezor*` task aliases and the one-shot `enable_lightning` (all
   inherited from the GPLv2 baseline), the flat `init_lightning*` /
   `cancel_init_lightning` aliases (uniform with the other `init_<coin>*` names),
-  and its own Solana surface `enable_solana_with_tokens` / `enable_spl` (routed,
-  but refusing every request in this beta; see
+  and its own Solana surface `enable_solana_with_tokens` / `enable_spl`
+  (Solana is wallet-only; see
   [Removed / disabled](#removed--disabled-in-kdf-reloaded)). GLEEC
   KDF (`v2.6.0-beta` and `v3.0.0-beta`) routes none of them; clients written for
   GLEEC use the `task::` equivalents, which Reloaded also routes. The extra
@@ -144,9 +144,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   `platform`, `decimals` and `token_contract_address`, which means the SPL
   Token program. The extra forms are additive and need no switch. Native and
   browser (WASM) builds read all of these (browser builds since PR #430).
-  Solana stays switched off in this beta (see
-  [Removed / disabled](#removed--disabled-in-kdf-reloaded)). CRD ch.40
-  R40.1.2, R40.1.3; PR #361.
+  CRD ch.40 R40.1.2, R40.1.3; PR #361.
 
 - **Solana compatibility activation methods.** `experimental::enable_solana_with_assets`
   and `experimental::enable_solana_token` take GLEEC KDF's requests and answer its results
@@ -155,7 +153,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   activates the token with balance `"0"` (GLEEC KDF fails the activation); the platform
   method also takes `hd_path_layout`, `path_to_address` and `priv_key_policy`; an inline
   token `protocol` may also use Reloaded's `SPLTOKEN` form. Native and browser (WASM)
-  builds (browser builds since PR #430); Solana stays switched off in this beta. CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
+  builds (browser builds since PR #430). CRD ch.40 §40.2, §40.3, D40.6B.2; PR #426.
 
 - **Solana node selection.** GLEEC KDF asks the nodes `getHealth` in list order before every
   request and uses the first healthy one. Reloaded draws a random node order once when the coin is
@@ -879,13 +877,23 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
-- **Solana (SOL, SPL tokens) is switched off in this beta.** Its support is
-  not finished, so Reloaded does not activate it at all: the legacy `enable` /
-  `electrum`, `enable_solana_with_tokens` and `enable_spl` answer "Solana
-  support is not available in this build". Nothing is registered and the rest
-  of the node is unaffected. Solana is planned to return in the next beta. No
-  switch exists: the build constant `SOLANA_ACTIVATION_AVAILABLE`
-  (`coins/lp_coins_ops.rs`) is `false`.
+- **Solana (SOL, SPL tokens) coins are wallet-only.** In 0.5.0 Solana can be
+  activated again (earlier releases refused it on every route): on Reloaded's
+  own `enable_solana_with_tokens` and `enable_spl`, and on
+  `experimental::enable_solana_with_assets` and
+  `experimental::enable_solana_token`, the methods GLEEC KDF `v3.0.0-beta`
+  serves, in native and browser (WASM) builds. The legacy `enable` /
+  `electrum` reject a Solana coin as one that needs an mmrpc 2.0 activation,
+  as GLEEC KDF does (CRD ch.55 R55.4.7). Activation, balances, `withdraw`,
+  message signing and `disable_coin` work. Orders and swaps do not: no GLEEC
+  KDF release has a Solana swap, and placing an order with a Solana coin
+  there ends abnormally (CRD ch.40 R40.6B.6, F40.6B.3). Reloaded
+  refuses `setprice`, `buy`, `sell` and `trade_preimage` for a pair with a
+  Solana coin or SPL token with "Trading is not supported for coin …", and
+  every swap operation of such a coin answers an error that names it (CRD
+  ch.60 R60.6.5). No switch exists: an abnormal end is no compatibility
+  target. There is no Solana transaction history yet, as in GLEEC KDF (CRD
+  ch.40 D40.1, D40.4).
 - **TRON (TRX, TRC20) coins are wallet-only.** Since 2026-11-20 TRON can be
   activated again (0.4.0 refused it on every route): on the
   platform-with-tokens activation, `enable_eth_with_tokens` and the

@@ -50,7 +50,7 @@ KDF Reloaded is currently in **public beta** (the early roadmap is in [`ROADMAP.
 ## What it does
 
 - **Atomic swaps** between supported chains via Hash Time Locked Contracts (HTLCs) — no custodian, no proxy tokens, you keep your keys.
-- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos (wallet-only in this beta), TRON (TRX and TRC20 tokens; wallet-only: activation, HD wallet, withdrawals, and a transaction history with a TronGrid API key, no orders or swaps), Solana (cannot be activated in this beta), Zcash (sapling), Lightning Network (no orders or swaps yet), and others — see [`mm2src/coins/`](mm2src/coins/).
+- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos (wallet-only in this beta), TRON (TRX and TRC20 tokens; wallet-only: activation, HD wallet, withdrawals, and a transaction history with a TronGrid API key, no orders or swaps), Solana (SOL and SPL tokens; wallet-only: activation, HD wallet, withdrawals and message signing, no orders or swaps and no transaction history yet), Zcash (sapling), Lightning Network (no orders or swaps yet), and others — see [`mm2src/coins/`](mm2src/coins/).
 - **Distributed orderbook** propagated over [libp2p](https://libp2p.io/) gossipsub.
 - **JSON-RPC API** consumable from CLI, scripts, or third-party GUIs.
 

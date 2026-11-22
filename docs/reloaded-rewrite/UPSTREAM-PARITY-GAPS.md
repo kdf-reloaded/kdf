@@ -283,6 +283,13 @@ preimage/conversion flows.
   `enable_spl`, legacy `enable` / `electrum`) refuses with "Solana support is
   not available in this build" and registers nothing (ch. 40 availability
   note, D40.4). The items below apply to the next beta.
+  *Status 2026-11-22:* Solana is switched on (PR #475; ch. 40 D40.4 and its
+  status note of this date). The constant and its refusal are removed: the
+  primary methods and the `experimental::` methods activate on native and
+  browser builds, and the legacy `enable` / `electrum` answer the mmrpc 2.0
+  rejection of ch. 55 R55.4.7. Solana is wallet-only: market and swap
+  operations stay refused (ch. 60 R60.6.5), and history is still open
+  (ch. 40 D40.1).
 - [ ] **Activation compatibility surface (decided 2026-10-11, deferred).**
   Reloaded's `enable_solana_with_tokens` / `enable_spl` stay the primary
   activation surface. The reference's `experimental::enable_solana_with_assets`
