@@ -271,10 +271,25 @@ the previous version used. The safe way:
 
 #### Solana coins
 
+- **Solana is back, as a wallet-only coin family: SOL and SPL tokens can be activated and used as a
+  wallet, and cannot be traded.** Earlier releases refused every Solana activation. Now a Solana
+  platform and its SPL tokens activate through `enable_solana_with_tokens` and `enable_spl`, and
+  through the methods GLEEC KDF uses, `experimental::enable_solana_with_assets` and
+  `experimental::enable_solana_token`, in native and browser (WASM) builds, from coins-file entries in
+  either form. A Solana wallet covers balances, an HD wallet under a global-HD login, withdrawals of
+  SOL and SPL tokens, message signing and verification, `show_priv_key` and `disable_coin`; the items
+  below describe each. A Token-2022 token is still refused at activation. The legacy `enable` and
+  `electrum` methods do not activate Solana: they answer that the coin needs
+  `enable_solana_with_tokens` or `enable_spl`, as GLEEC KDF also refuses Solana there. *Orders and
+  swaps stay off:* `setprice`, `buy`, `sell` and `trade_preimage` refuse a pair with a Solana coin or
+  SPL token with "Trading is not supported for coin …", and every swap operation of such a coin
+  answers an error that names it. *No transaction history yet:* the versioned `my_tx_history`
+  answers `NotSupportedFor` and the legacy one an error that names the coin. Detail: PR #475; CRD
+  ch.40 D40.4.
+
 - **Solana and SPL tokens in browser builds.** Browser (WASM) builds now read Solana coins-file
   entries in both forms and route `enable_solana_with_tokens`, `enable_spl` and the two
-  `experimental::` methods as native builds do, with the same node pool. While Solana is switched
-  off they answer the same refusal as native builds instead of an unknown method. A Solana coin
+  `experimental::` methods as native builds do, with the same node pool. A Solana coin
   cannot be traded in browser builds either. Detail: PR #430; CRD ch.40 R40.1.1, T40.1.
 
 - **The Solana activation methods of GLEEC KDF are routed.** `experimental::enable_solana_with_assets`
@@ -285,8 +300,7 @@ the previous version used. The safe way:
   can also be activated from a `protocol` given in the request; such a token is wallet-only. A coin
   activated through these methods sends no commitment level, so the node's default applies.
   `enable_solana_with_tokens` now also refuses an inline token whose platform is another coin
-  (`PlatformCoinMismatch`). Solana stays switched off in this build. Detail: PR #426; CRD ch.40
-  §40.2, §40.3, R40.3A.3.
+  (`PlatformCoinMismatch`). Detail: PR #426; CRD ch.40 §40.2, §40.3, R40.3A.3.
 
 - **Solana activates under an HD login, at a path the request chooses.** Under an HD login the
   Solana key is now derived from the seed phrase at `m/44'/501'/N'/0'` by default, or at
@@ -296,15 +310,14 @@ the previous version used. The safe way:
   addresses: as a single-key passphrase, with the default layout, and with `"bip44"`. A request
   that asks for a hardware wallet is refused and the WalletConnect form is an invalid request; a
   request that asks for `IguanaPrivKey` under an HD login gets the wallet's single internal key and
-  its address, not the address of a single-key login with the same words. Solana stays switched off in this build. Detail:
-  PR #392; CRD ch.40 §40.1A.
+  its address, not the address of a single-key login with the same words. Detail: PR #392; CRD
+  ch.40 §40.1A.
 
 - **Solana entries of a coins file in the form GLEEC KDF uses can be read.** Besides its own
   forms, KDF Reloaded now reads, in native builds, a Solana platform entry with
   `"protocol_data": {}` and an SPL token entry of type `SOLANATOKEN` with `platform`, `decimals`, `mint_address` and `program_id`. A
   `mint_address` or `program_id` that is not a valid public key makes the entry unreadable, and the
-  activation reports a protocol parse error. Solana stays switched off in this build, so no Solana
-  coin can be activated yet. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
+  activation reports a protocol parse error. Detail: PR #361; CRD ch.40 R40.1.2, R40.1.3.
 
 #### TRON coins
 
@@ -318,7 +331,7 @@ the previous version used. The safe way:
   *Swaps stay off.* Reloaded has no TRON swap, so every TRX and TRC20 coin counts as wallet-only, whatever its
   coins-file entry says: `setprice`, `buy`, `sell` and `start_swap` refuse it with the usual "… is wallet only"
   answer, as GLEEC KDF does for a coin configured `"wallet_only": true` (every published TRON entry is), a TRON coin
-  declines to match, an order with a TRON coin saved earlier is cancelled at startup with a line in the log, and an
+  declines to match, an order with a TRON coin saved earlier is kept at startup but not announced or matched, and an
   unfinished saved swap that names a TRON coin is not resumed at startup (its record is kept). For a TRON entry that
   does not say `"wallet_only": true`, GLEEC KDF refuses the order at a later check; the answer has the same form, so
   no setting exists for this. Gasless TRC20 transfers through GasFree are signed but not submitted yet: a GasFree
@@ -664,6 +677,11 @@ the previous version used. The safe way:
   balance is not zero. Detail: PR #438; CRD ch.49 R49.32.
 - **`task::scan_for_new_addresses::init` serves EVM coins under an HD wallet.** It was answered only for TRON coins
   and UTXO coins; an EVM platform now answers it. Detail: PR #438; CRD ch.05 R54.
+- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
+  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
+  transaction of another coin family. It now refuses the transaction with an error message. In the
+  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
+  Detail: PR #452.
 
 #### Solana coins
 
@@ -675,7 +693,7 @@ the previous version used. The safe way:
   to 12 hours, and a recovered node that ranks higher is used again. The reads of one withdraw go to
   one node, and a sent transaction is never rebuilt: a failed broadcast is retried with the same
   signed bytes, and the error names the transaction's signature. This applies to both Solana
-  activation surfaces. Solana stays switched off in this build. Detail: PR #426; CRD ch.40 R40.1.5.
+  activation surfaces. Detail: PR #426; CRD ch.40 R40.1.5.
 
 - **Solana withdraws send the right amounts and say what they cost.** An SPL withdraw with `max` now
   sends the whole token balance (it used to move the requested amount while the answer showed the
@@ -688,13 +706,12 @@ the previous version used. The safe way:
   amount below the coin's minimum transaction amount answers `AmountTooLow`. Activation now checks
   that the token's mint belongs to its token program, so a node failure while an inline token is
   checked answers `Transport`; a Token-2022 token is refused at activation until it is supported.
-  Solana stays switched off in this build. Detail: PR #425; CRD ch.40 R40.6B.9-R40.6B.12,
-  D40.6B.2-D40.6B.6; ch.43 R43.1D.2.
+  Detail: PR #425; CRD ch.40 R40.6B.9-R40.6B.12, D40.6B.2-D40.6B.6; ch.43 R43.1D.2.
 - **`disable_coin` works for Solana coins and SPL tokens.** A token, and a platform without tokens,
   are removed and can be activated again; a removed token no longer stays in its platform's token
   records. A platform with active tokens is handled as for every other family: the platform is
-  removed and its tokens stay. A Solana ticker that is not active answers the usual refusal. Solana
-  stays switched off in this build. Detail: PR #413; CRD ch.40 D40.6B.1, T40.6B.20; ch.43 §43.1E.
+  removed and its tokens stay. A Solana ticker that is not active answers the usual refusal.
+  Detail: PR #413; CRD ch.40 D40.6B.1, T40.6B.20; ch.43 §43.1E.
 
 - **Every wallet request naming a Solana coin or SPL token answers, and Solana swap operations
   answer an error.** Message signing and verification, address validation, the confirmation settings
@@ -705,7 +722,7 @@ the previous version used. The safe way:
   error that names the coin instead of ending the request, and so does every swap operation, also
   for a swap imported or recovered by hand; switching a coin off follows in a later change. The
   minimum transaction amount is now one lamport for SOL and one smallest unit of each SPL token.
-  Solana stays switched off in this build. Detail: PR #401; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
+  Detail: PR #401; CRD ch.40 D40.6B.1, R40.6B.14, §40.6A.
 
 - **Solana activation errors follow the shapes GLEEC KDF uses, and a token address is checked when
   its coins entry is parsed.** On `enable_solana_with_tokens` a failed block-height or balance read
@@ -713,8 +730,7 @@ the previous version used. The safe way:
   `enable_spl` a node failure stays `Transport`. An SPL token entry whose `token_contract_address`
   is not a valid public key is now `TokenProtocolParseError` instead of `Internal`. The Solana
   platform always counts 9 decimals; a `decimals` value in its coins entry is ignored, and a token
-  takes its decimals from `protocol_data` only. Solana stays switched off in this build. Detail:
-  PR #371; CRD ch.40 §40.3A, R40.6B.2.
+  takes its decimals from `protocol_data` only. Detail: PR #371; CRD ch.40 §40.3A, R40.6B.2.
 
 - **Solana libraries moved to their 3.x line.** The Solana and SPL token libraries the coin is built on
   moved from the 2.x line to the 3.x line (`spl-token` 9). Addresses, signatures and the bytes of the
@@ -723,8 +739,7 @@ the previous version used. The safe way:
   old `ed25519-dalek` 1.0.1 library leaves the dependency tree, so the dependency policy no longer
   ignores RUSTSEC-2022-0093.
   RUSTSEC-2024-0344 is not cleared by this change: `curve25519-dalek` 3.2.0 also came in through the
-  peer-to-peer library's encryption layer, which PR #470 moves to the new library line. Solana stays
-  switched off in this build.
+  peer-to-peer library's encryption layer, which PR #470 moves to the new library line.
   Detail: PR #465.
 
 #### UTXO coins and Electrum
@@ -762,6 +777,11 @@ the previous version used. The safe way:
 
 #### Transport, TLS and dependencies
 
+- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** The `url` crate moved from 2.5.8 to
+  2.5.9, and `form_urlencoded`, which the new version requires, from 1.2.2 to 1.2.3. KDF Reloaded's own code
+  does not call the affected function. The dependency policy needs no exception for this advisory. Detail:
+  PR #492.
+
 - **The peer-to-peer encryption no longer uses the old curve25519 library with the timing advisory.** The
   encrypted handshake between nodes (Noise) was built on `curve25519-dalek` 3.2, which carries RUSTSEC-2024-0344
   (the time of one arithmetic step can depend on secret data). It now uses the fixed library line
@@ -772,6 +792,17 @@ the previous version used. The safe way:
   `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
 
 ### Fixed
+
+#### Orders
+
+- **Saved orders of a coin that cannot be traded are kept, but no longer announced or matched.** After a restart,
+  a saved order of a coin this build cannot trade stays in `my_orders` but is not announced to the order book and
+  is not matched, and one line in the log names it. This covers wallet-only coins, Lightning, Solana, and
+  Tendermint and TRON while their swaps are off. Before, a saved Lightning or Solana order returned to the order
+  book and every match failed, and a saved Tendermint or TRON order was cancelled. The operator can still cancel
+  such an order with `cancel_order`, which still sends its cancel message. A kept taker order still times out as
+  before: fill-or-kill is removed, good-till-cancelled becomes a maker order that is kept and not announced.
+  Detail: PR #485; CRD ch.60 R60.6.5.
 
 #### EVM, BCH, Sia and Lightning coins
 
@@ -968,14 +999,6 @@ the previous version used. The safe way:
   balance change, and one WARN line names the height from which the chain changed. At most one small request is made
   per new block. Detail: PR #409; CRD ch.38 §38.5C (the amendment after D38.5C.2).
 
-#### EVM coins
-
-- **An EVM fee check no longer aborts on a non-EVM transaction; it returns an error.** The check of a
-  swap's dex-fee transaction on an EVM coin or token stopped the running task when it was handed a
-  transaction of another coin family. It now refuses the transaction with an error message. In the
-  same way, a payment event that a node reports without a transaction hash is an error, not an abort.
-  Detail: PR #452.
-
 #### Kerrigan (KRGN)
 
 - **KRGN swaps can claim and refund over Electrum.** Kerrigan headers are 80, 124, 543 or 1487 bytes long,
@@ -1000,7 +1023,6 @@ the previous version used. The safe way:
   12.3456789) and a zero balance read `0.00000000`. SOL and token balances are now the exact amount
   without trailing zeros (`0`, `1.5`, `12.345678901`); token balances are computed from the raw amount
   the node reports. Withdraw values were never rounded; the text of their sums is in the next item.
-  Solana stays switched off in this beta.
   Detail: PR #456; CRD ch.40 §40.2A (R40.2A.1, R40.2A.5), R40.2.3, R40.3A.2, T40.6B.7.
 - **Sums in Solana withdraw answers carry the coin's full decimals.** Members that add or subtract two
   amounts (`spent_by_me` and `my_balance_change` of a SOL withdraw, `my_balance_change` of a token
@@ -1009,7 +1031,6 @@ the previous version used. The safe way:
   and the mint's decimals for a token, for example `1.000000000` or `-1.500000`. The values are unchanged;
   single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
   CRD ch.40 R40.2A.4, D40.2A.1.
-
 #### QTUM and QRC20
 
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
@@ -1115,12 +1136,40 @@ the previous version used. The safe way:
   with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
   supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
 
+#### Swap and order records
+
+- **A crash or power loss while a swap or order record is being saved no longer damages it.** The saved record of a
+  legacy swap, its statistics copy and the saved record of an order were rewritten in place, so a crash in the middle
+  of a save could leave an empty or cut-off file, and the swap could not be resumed from it. Each save now writes a
+  new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the record
+  holds either its previous or its new complete content. Where a folder cannot be synced (some network mounts), the
+  save still succeeds and logs a warning. On Windows a replace refused because another program, such as a virus
+  scanner, holds the new file is retried briefly. A temporary `*.tmp` file left by a crash is ignored. Browser builds
+  already saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3, ch.44
+  R44.8A.6 and §44.9A (status update).
+- **A swap run whose swap lock was taken over now stops.** Each swap is run by one runner, which holds a lock file
+  and refreshes it every 30 seconds. A runner that stalled for more than 40 seconds while another runner took the
+  lock over kept running and refreshing, so two runners could work on one swap, and the first one deleted the
+  other's lock when it ended. A runner now checks before each refresh that the lock file still holds the value it
+  wrote last. When the file is gone or holds another value, or when refreshing has failed for longer than 40
+  seconds, the run is stopped where it stands, like an abrupt stop, and leaves the lock file. The swap is then
+  handed to the ordinary start of a saved swap, which waits 40 seconds and resumes it if no other runner holds the
+  lock. A late refresh that finds its own value goes on with a warning. A new lock file is created in one step and
+  replaced in one step, so a reader does not see it empty (on a file system without hard links a new lock file is
+  empty for a moment), and its content keeps the form GLEEC KDF reads. Detail: PR #480; CRD ch.51 R5 and ch.44
+  §44.9A (status updates).
+
 #### Legacy swaps
 
 - **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
   CRD ch.51, status note of 2026-11-22 after R31a.
+- **The secret of a swap is checked against its hash on every coin.** When the taker, or a watcher acting for it
+  (once a watcher receives swap data), reads the secret from the transaction that claimed the taker payment, the
+  value is used only when it matches the swap's secret hash. EVM coins (ETH and ERC20 tokens) also read the secret
+  from the swap contract's claim event; Tendermint coins look at every message of the transaction. Detail: PR #488;
+  CRD ch.51, status note of 2026-11-22 before R31.
 - **The refund of an SLP, QRC20, ETH or ERC20 swap payment waits for the chain's time.** The node asks whether a
   payment can be refunded from the chain: an SLP token by the median time past of BCH, a QRC20 token by that of
   QTUM, and an ETH or ERC20 coin by the timestamp of the latest block, once the node's own clock is past the lock
@@ -1211,8 +1260,10 @@ the previous version used. The safe way:
 
 ### Plans touched
 
-- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
-- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 3 in PR #490.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
+  the closing note names what no row covers, in PR #497.
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 1 in PR #481,
+  step 2 in PR #488, step 3 in PR #490.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the
@@ -1260,11 +1311,14 @@ the previous version used. The safe way:
   packages S0 and S2 done in PR #361, S1 in PR #371, S4 in PR #392, S3 in PRs #401 and #413,
   S5 in PR #465, S6 in PR #425, S7 in PR #426, S8 in PR #430; new package S6c (a rent-exempt guard for SOL
   withdraws); switch-on lab rows for `disable_coin` and the Token-2022 refusal.
+  S9 in PR #475: on 2026-11-22 Solana was switched on as a wallet-only coin family; orders and
+  swaps stay off, and the transaction history follows in S10.
 - [`startup-clock-check`](docs/plans/startup-clock-check.md) — new, planning: the clock check against
   NTP time servers, implemented in PR #348; the open points O9 and O10 stay open.
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — item 4, the
   Tendermint transaction history, is built in PR #363; its address index now covers every
   store-served coin family (PR #380); item 1a, the WalletConnect form of the activation, is built (PR #393).
+  The beta-availability note now says a saved Tendermint order is kept at startup, not cancelled.
 - [`tron-support`](docs/plans/tron-support.md) — work package 3 (node access) done on 2026-11-17: the TRON node
   client has a time limit per node, fails over on bad answers, runs requests at the same time and accepts request
   headers and an API key; decisions about what lands before TRON is switched back on recorded. Work package 1
@@ -1273,6 +1327,7 @@ the previous version used. The safe way:
   The accuracy of the withdraw fee estimate and the withdraw amounts are done on 2026-11-19, still switched off.
   The transaction history (work package 4) is built with a TronGrid API key, still switched off (PR #440).
   On 2026-11-20 TRON was switched on as a wallet-only coin family; swaps stay off.
+  The plan now also says a saved TRON order is kept at startup, not cancelled.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — in progress: the bytecode blocker is resolved: the creation bytecode is taken
   from the public chain, embedded and verified against every published mainnet and Nile vector and the live Shasta
   controller; the support modules are built; the activation binding and the `gasfree_address` fields in the reports
@@ -1284,11 +1339,22 @@ the previous version used. The safe way:
 
 ### Known limitations (additions since 0.4.0-beta.1)
 
+- **QRC20 transaction history needs Electrum servers that answer the contract-event methods.** As of 2026-11-22, the
+  QTUM servers of the published coins file answer them with an error. With only those servers, a QRC20 token's
+  history stops with error code -2 after three passes in a row in which every listed server answered with an error.
+  List QTUM Electrum servers that answer them, for example `s1.electrum.qtum.site:50001`, in the activation request.
+  Detail: PR #417; CRD ch.38 R38.6.4Q.6, amendment of 2026-11-17.
 - **TRON coins cannot be traded.** TRX and TRC20 tokens are wallet-only: activation, balances, addresses,
   withdrawals and the transaction history work, and orders and swaps do not. `setprice`, `buy`, `sell` and
   `start_swap` refuse a TRON coin with the "… is wallet only" answer. This replaces the item of 0.4.0-beta.1 that
   says TRON cannot be activated. More in [`tron-support`](docs/plans/tron-support.md) and
   [`tron-swap-support`](docs/plans/tron-swap-support.md). Detail: PR #451; CRD ch.21 R-D1, R21.B3.
+- **Solana coins cannot be traded and have no transaction history yet.** SOL and SPL tokens are wallet-only:
+  activation, balances, withdrawals, message signing and `disable_coin` work, and orders and swaps do not.
+  `setprice`, `buy`, `sell` and `trade_preimage` refuse a pair with a Solana coin with "Trading is not supported for
+  coin …". `my_tx_history` answers an error for a Solana coin, and a Token-2022 token is refused at activation. This
+  replaces the item of 0.4.0-beta.1 that says Solana cannot be activated. More in
+  [`solana-support`](docs/plans/solana-support.md). Detail: PR #475; CRD ch.40 D40.4.
 - **Gasless TRC20 transfers through GasFree are signed but not submitted.** A GasFree provider can be configured,
   the GasFree address (`gasfree_address`) is shown, and a withdrawal with `fee_method` `gasless` returns a signed
   authorization instead of a transaction. KDF does not hand it to the provider and no RPC does it yet, so this
@@ -1307,6 +1373,12 @@ the previous version used. The safe way:
   and repeating the request later succeeded. For regular use, set a TronGrid API key (`tron_api_key`) or use your
   own full node. More in [NETWORK_CONFIG](docs/NETWORK_CONFIG.md#tron-node-list-and-api-key). Detail: PR #467;
   CRD ch.21 §21.9.
+- **No watcher can refund a Siacoin (SC) payment yet.** The 0.4.0-beta.1 item "Siacoin (SC) swaps: what is not
+  covered" says that a node watching other traders' swaps can refund a Siacoin payment for an offline taker. That
+  overstated it: a taker hands its swap data to watchers only when both coins of the swap offer watching, and
+  Siacoin is the only coin that does, so no swap hands its data to a watcher, as the 0.4.0-beta.1 item "The swap
+  watcher does not work yet" says. Keep your node running until your swaps have finished. Detail: CRD ch.09 R17,
+  ch.20 D7.
 
 ## [0.4.1-beta.1] — 2026-11-21
 

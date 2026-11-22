@@ -14,8 +14,7 @@ use coins::solana::rpc_pool::solana_node_order;
 use coins::solana::spl::{TOKEN_2022_NOT_SUPPORTED, TOKEN_2022_PROGRAM_ID};
 use coins::solana::{solana_hd_derivation_path, solana_hd_secret, SolanaHdLayout};
 use coins::{coin_conf, solana_coin_with_node_order, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum,
-            PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE,
-            SOLANA_NOT_AVAILABLE};
+            PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken};
 use common::mm_number::BigDecimal;
 use crypto::{Bip44Chain, CryptoCtx, KeyPairPolicy};
 use futures::future::AbortHandle;
@@ -26,21 +25,11 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::HashMap;
 
-/// The `enable_solana_with_tokens` entry point.
-///
-/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` (Solana is postponed for the current beta) the request is
-/// refused with a `PlatformCoinCreationError` saying so, and nothing is registered. Otherwise it is the generic
-/// platform activation.
+/// The `enable_solana_with_tokens` entry point: the generic platform activation.
 pub async fn enable_solana_with_tokens(
     ctx: MmArc,
     req: EnablePlatformCoinWithTokensReq<SolanaWithTokensActivationRequest>,
 ) -> Result<SolanaWithTokensActivationResult, MmError<EnablePlatformCoinWithTokensError>> {
-    if !SOLANA_ACTIVATION_AVAILABLE {
-        return MmError::err(EnablePlatformCoinWithTokensError::PlatformCoinCreationError {
-            ticker: req.ticker,
-            error: SOLANA_NOT_AVAILABLE.to_owned(),
-        });
-    }
     enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req).await
 }
 

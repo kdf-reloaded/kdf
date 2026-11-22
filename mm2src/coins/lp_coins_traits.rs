@@ -211,6 +211,16 @@ pub trait SwapOps {
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String>;
 
+    /// The secret of `secret_hash` read from the transaction that spent the payment (CRD ch.51 §51.6E). The
+    /// answer is a value that passes the secret-hash rule, or an error.
+    ///
+    /// The default is [`SwapOps::extract_secret`] followed by that rule. A coin that needs its node to read
+    /// the secret overrides it.
+    async fn extract_secret_from_spend(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        let secret = self.extract_secret(secret_hash, spend_tx)?;
+        crypto::secret_hash_algo::ensure_secret_matches_hash(secret, secret_hash)
+    }
+
     /// Whether the refund transaction can be sent now
     /// For example: there are no additional conditions for ETH, but for some UTXO coins we should wait for
     /// locktime < MTP

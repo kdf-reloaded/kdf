@@ -97,6 +97,13 @@ The chapter is organised in three layers:
 | Lightning | `task::enable_lightning::*` | layer-2 task | [Chapter 41](41-lightning-network.md) |
 | MetaMask connection | `task::connect_metamask::*` | init task | [Chapter 47](47-metamask-integration.md) |
 
+> *Reloaded status (clean side, 2026-11-22):* the Solana row's "switched off
+> in this beta" describes the tree until this date. Solana is switched on
+> (Chapter 40 D40.4 and its status note of this date): the two methods of the
+> row and the two `experimental::` methods of Chapter 40 §40.1 activate a
+> Solana platform and its tokens on native and browser builds, as a
+> wallet-only coin family.
+
 The four task substrates (standalone-coin, platform-with-tokens, token, and
 layer-2) and the hardware-wallet and MetaMask init tasks share one task
 framework; §55.2 binds its observable contract once.
@@ -478,6 +485,14 @@ gives the status the discriminant would carry if it were mmrpc-level.
 | `task::init_trezor` | no device reachable | `HwError` | string `NoTrezorDeviceAvailable` | 410 | status | §55.11 |
 | `task::init_trezor` | device not connected within the connection timeout | `Timeout` | object `{secs, nanos}` | 408 | status | §55.11 |
 
+> *Reloaded status (clean side, 2026-11-22):* the two Solana rows "in this
+> beta, every request" describe the tree until this date. Solana is switched
+> on (Chapter 40 D40.4 and its status note of this date), the constant
+> `SOLANA_ACTIVATION_AVAILABLE` and its text no longer exist, and a Solana
+> activation request reaches the activation and the failure rows that
+> follow; the `experimental::` methods answer as Chapter 40 R40.2.4 and
+> R40.3.4 bind.
+
 **R55.3.1** Each activation family shall report an unreachable or unresponsive
 backend with exactly the discriminant, `error_data` shape and placement listed
 above; the owning chapter binds the precise failure points.
@@ -524,6 +539,16 @@ other row the public reference is silent and the reference release decides.
 > invalid token address is `TokenProtocolParseError`. Initialising inline
 > tokens contacts no node on that surface yet, so the `Transport` row with
 > HTTP 502 is not reached there. Chapter 40 §40.3A binds the surface. PR #371.
+>
+> *Reloaded status (clean side, 2026-11-22):* "in this beta Solana is
+> switched off" above describes the tree until this date. Solana is switched
+> on (Chapter 40 D40.4 and its status note of this date), so Solana requests
+> reach the Solana failure rows above instead of the refusal rows. Since the
+> mint-owner check of Chapter 40 R40.2.2 (PR #425), initialising an inline
+> token reads its mint from a node on Reloaded's own platform method too: in
+> this repository's offline route test, `enable_solana_with_tokens` with an
+> inline token and an unreachable node answers `Transport` with HTTP 502, as
+> `experimental::enable_solana_with_assets` does.
 >
 > **Error texts (pointer, 2026-10-28).** The `error` text of these rows stays
 > unbound, but what it may say about a node is bound by the owning chapters:
@@ -656,6 +681,17 @@ is registered.
 *Status note (2026-11-20).* TRX and TRC20 are activated on this path again
 (D55.5 and its status note of this date); the TRON rejection text above no
 longer exists.
+
+*Status note (2026-11-22), Solana.* Solana is switched on (Chapter 40 D40.4
+and its status note of this date) and the build constant
+`SOLANA_ACTIVATION_AVAILABLE` no longer exists, so the Solana rejection text
+above no longer exists either. Legacy `enable` and `electrum` now answer this
+item's mmrpc 2.0 rejection for Solana and Solana tokens, in both
+coin-configuration forms of Chapter 40 R40.1.2 and R40.1.3: the legacy error
+body of R55.1.10 (HTTP 500), with a text that names the method to use
+(`enable_solana_with_tokens` for the platform, `enable_spl` for a token), and
+nothing is registered. Reloaded activates Solana only through the mmrpc 2.0
+methods of Chapter 40.
 
 **R55.4.8** *Sia on the legacy path.* A coin whose configured protocol is the
 Sia protocol is activated synchronously by the legacy path, with the request
@@ -1732,3 +1768,12 @@ R55.4.5 and the error body of R55.1.10.
   ends; TRON activates as a wallet-only coin family) are Reloaded-original.
   They add no reference content, so chapter 01 R38 is not engaged and no
   clearance above is widened. No cleared sentence was edited.
+- *Clean-context addition (2026-11-22, forbidden corpus not consulted):* the
+  status notes of this date after the routing table of the subsystem shape,
+  after the failure table of §55.3, in the Reloaded status box after that
+  table, and after R55.4.7 (Solana switched on as a wallet-only coin family;
+  legacy `enable` / `electrum` answer the R55.4.7 rejection for Solana) are
+  Reloaded-original. They record this repository's own code and the
+  maintainer's decision of 2026-11-15 on the switch-on and add no reference
+  content, so chapter 01 R38 is not engaged and no clearance above is
+  widened. No cleared sentence was edited.

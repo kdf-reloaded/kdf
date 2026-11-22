@@ -526,6 +526,56 @@ Solana request shall terminate abnormally.
 > places also refuse a pair whose swap key and paying key do not agree
 > ([chapter 05](05-hd-wallet-support.md) §5.12B R36–R38).
 
+> *Status note (2026-11-22), saved orders of a coin that cannot trade
+> (clean-side, not corpus-sourced; maintainer decision of 2026-11-22 on
+> stored orders of untradable coins).* One rule covers every coin that
+> order creation refuses: a Lightning coin; Solana (the platform coin and
+> a token in either configuration form); a Tendermint platform coin or
+> token while the build constant `TENDERMINT_SWAPS_AVAILABLE` is `false`;
+> TRX or a TRC20 token while `TRON_SWAPS_AVAILABLE` is `false`; and a
+> wallet-only coin, that is one whose coins-file entry says
+> `"wallet_only": true` or one that has no coins-file entry. A saved
+> maker or taker order with such a coin on either side is kept: the
+> startup restores it to memory and leaves it in the storage, so
+> `my_orders` lists it and `cancel_order` removes it. It is never
+> announced and never matched: the periodic maintenance does not publish
+> it, a balance change neither resizes nor cancels it, a taker request
+> that names it gets no reservation, a reservation for such a taker order
+> gets no connect message, and no swap starts from it. One INFO line per
+> order, written once while the node runs, names the order, the pair, the
+> coin and the reason. The order is not cancelled and not deleted; the
+> operator decides. `cancel_order` on a kept maker order still publishes
+> its cancel message, which peers that never saw the order ignore.
+>
+> A kept taker order still reaches its timeout, as any taker order does.
+> A fill-or-kill order is then deleted as timed out. A
+> good-till-cancelled order becomes a maker order with the same uuid;
+> that maker order is kept and not announced, and a balance watch starts
+> for its base coin, whose readings neither resize nor cancel it.
+>
+> Two checks apply the rule. At startup no coin is active, so the coins
+> configuration decides: the protocol type (`LIGHTNING`; `SOLANA`,
+> `SPLTOKEN`, `SOLANATOKEN`; `TENDERMINT`, `TENDERMINTTOKEN`; `TRX`,
+> `TRC20`), the `wallet_only` flag, a missing entry, and the two build
+> constants. Before an order is announced and before it is matched, when
+> both coins are active, the check of order creation runs on the coins
+> themselves: the refusal of R60.2.3 and of this rule, and the coin's own
+> wallet-only answer. An order that fails it is not announced and not
+> matched, whether or not the startup had marked it, and it is neither
+> resized nor cancelled by a balance change and starts no swap from a
+> match it already holds. The coins of an
+> order the startup marked stay among those the kick-start asks to be
+> enabled (`coins_needed_for_kick_start`), as the coins of any other
+> restored order.
+>
+> This replaces the startup cancel of saved Tendermint and TRON orders
+> ([Chapter 18](18-tendermint-ibc-htlc.md), the availability note;
+> [Chapter 21](21-tron-integration.md), the status notes at R21.10B.9),
+> and it ends the earlier behavior for Lightning and Solana, whose saved
+> orders returned to the order book, where every match failed. Order
+> creation is unchanged: a new order with such a coin is refused as
+> before.
+
 **R60.6.6** *Minimum transaction amount is frozen parity data.* For every
 family that can swap, reloaded's minimum transaction amount shall equal
 the reference's (§60.3). Changing it for any such family is a wire change
@@ -1152,3 +1202,8 @@ the bound value satisfies.
   session that never read the corpus, from the maintainer's decision of
   2026-11-08 (option (A)) and this chapter's own rules. They take no
   forbidden-class input and need no Dirty Gate pass.
+- *Status note added 2026-11-22, clean side.* The status note under
+  R60.6.5 on saved orders of a coin that cannot trade records this
+  repository's own behavior and the maintainer's decision of 2026-11-22.
+  It was written by a context that never read the forbidden corpus,
+  takes no forbidden-class input and needs no Dirty Gate pass.
