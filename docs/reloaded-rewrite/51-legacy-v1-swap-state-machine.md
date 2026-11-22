@@ -178,6 +178,16 @@ appears expired.
 > the rules for RELOADED in R44.9A.13. This pointer changes no rule of this
 > chapter.
 
+> **Reloaded status note (2026-11-22, Reloaded-original; informative).** R5 is
+> silent on a runner whose lock is no longer its own while the run proceeds.
+> With PR #480 a RELOADED runner checks before each refresh that the lock
+> still holds the value it wrote last (chapter 44 §44.9A, Reloaded status
+> update). When it does not, the run is stopped where it stands, like an
+> abrupt stop, with no event, and the swap is handed to the kick-start of a
+> saved swap: that start takes the lock by this rule (wait one time-to-live,
+> retry once, abandon without an event if still held) and, when it gets the
+> lock, resumes the swap from its event log by R6 and R7. Detail: PR #480.
+
 **R6.** *Two entry modes.* The runner MUST support starting a fresh swap
 at `STAGE-START` and resuming a persisted swap from its event log. On
 resume, if the log's last event yields no next stage, the swap is
@@ -492,6 +502,15 @@ ordering is required by R7: a replayed stage must not refuse to continue
 a swap whose payment is already on chain merely because the send window
 has since closed.
 
+> **Reloaded status note (2026-11-22, Reloaded-original; informative).** R17
+> and R29 let a failed search end the swap. For a swap that the kick-start
+> resumes with the payment stage as its next stage, this project asks the
+> search again within a bound and then waits without sending, as the status
+> note of 2026-11-22 after T39.11.5A.1 in
+> [chapter 39](39-zcash---z_coin-shielded-coin.md) records. Every other swap
+> keeps R17 and R29 as written. The event sets and resume maps of R19 and R32
+> are unchanged. Detail: PR #489.
+
 **R30.** *Await spend.* `STAGE-AWAIT-TAKER-PAYMENT-SPEND` MUST
 repeatedly broadcast the taker payment message on a fifteen-second
 interval and, when the coin pair supports third-party watchers and both
@@ -515,6 +534,21 @@ carrying both the spending transaction and the recovered secret.
 > counts as refundable, is recorded for the reference rows in §51.6E
 > (R85–R92, T36–T38). R30, R31 and R18 are unchanged. Gate status as §51.6E
 > states.
+
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-22).** The taker, and a watcher acting for it, uses a value as
+> the swap's secret only when it hashes to the swap's secret hash, for every
+> coin family: RIPEMD-160 of SHA-256 for a 20-byte hash, SHA-256 for a 32-byte
+> hash (R71). A value that does not match is an extraction error; R30's exit
+> applies in the wait for the spend, and the manual recovery, the refund
+> chain's look and the watcher keep the handling they already give an
+> extraction error. An ETH or ERC20 coin reads
+> the secret from the call input when that is a direct call of the swap
+> contract's claim method, and otherwise from the `secret` word of a
+> `ReceiverSpent` log in the transaction's receipt. A Tendermint coin examines
+> every message of the transaction for a claim. This is stricter than the
+> reference record of §51.6E (R85, R86, R91), which §51.6E permits; no message
+> and no transaction a peer validates changes.
 
 **R31.** *Spend maker payment and refund chain.*
 `STAGE-SPEND-MAKER-PAYMENT` MUST broadcast the spend of the maker
@@ -610,6 +644,10 @@ locktime.
 > server, R82, R83 and R84) and for the swap's other searches of the same
 > payment. A spend whose spending input carries neither form is an error that
 > names the input.
+
+> **Pointer (2026-11-22, clean side).** The reference record of the same
+> classification, and its difference from the baseline anchor, is §51.6E R90
+> items 2 and 5.
 
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
@@ -3013,6 +3051,13 @@ reference rows alike.
   maintainer's decision of 2026-11-22 and this workspace's own UTXO spend
   search; no reference input was consulted, the note makes no parity claim,
   and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-22, a second one: the status note before R31 that
+  follows the round-0.5.0-23 note, and the pointer after the 2026-11-22 note
+  under R31a, are a Reloaded addition written in a clean session from the
+  maintainer's decision of 2026-11-22, the cleared §51.6E and this
+  workspace's own secret extraction code; no other reference input was
+  consulted, the note makes no parity claim, and no Dirty Gate pass is
+  needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
@@ -3165,3 +3210,11 @@ reference rows alike.
   repository's clean-room gate tool was not applicable because the additions
   embed no code blocks. *Measure:* 0.03, on the discretionary-expression
   basis.
+- *Clean-side addition of 2026-11-22 (PR #480):* the Reloaded status note
+  under R5 on a runner that lost its lock. It is Reloaded-original, rests only
+  on this repository's own lock and kick-start code and the cleared text of
+  R5 to R7 and chapter 44 §44.9A, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-22 (PR #489):* the Reloaded status note
+  after R29 on a swap resumed at its payment stage. It is Reloaded-original,
+  rests only on this repository's own swap code and the cleared text of R7,
+  R17 and R29, and changes no sentence of the chapter.

@@ -4323,3 +4323,81 @@ fn t38_5c_a_changed_height_is_taken_over_with_the_new_time_and_an_unconfirmed_li
         assert!(b_rows.iter().all(|row| row.block_height == 0), "{b_rows:?}");
     });
 }
+
+// ---- The already-sent query (CRD ch.39 §39.11.5A) ----
+
+/// Makes the stub answer `payments(id)` of the swap contract with `state` (payment hash, lock time, state).
+fn serve_payment_state(server: &StubServer, state: u8) {
+    let swap_contract = SWAP_CONTRACT.trim_start_matches("0x");
+    let output = format!("{}{}{:064x}", "00".repeat(32), "00".repeat(32), state);
+    server.set_params_prefix_result(
+        CALL,
+        json!([swap_contract]),
+        json!({"address": swap_contract, "executionResult": {"output": output}}),
+    );
+}
+
+/// The answer of the query for a swap whose payment the wallet never built, from block 600.
+async fn already_sent(coin: &Qrc20Coin) -> Result<Option<TransactionEnum>, String> {
+    let swap_id = qrc20_swap_id(1_000, &[7u8; 20]);
+    coin.check_if_my_payment_sent_impl(coin.swap_contract_address, swap_id, 600)
+        .await
+}
+
+/// R39.11.5A.7: a state of `Uninitialized` answers "not sent" at once, without a history request.
+#[test]
+fn r39_11_5a_7_qrc20_uninitialized_state_is_not_sent_without_a_history_request() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        serve_payment_state(&server, 0);
+        server.set_result(GET_HISTORY, json!([]));
+
+        assert_eq!(already_sent(&coin).await.unwrap(), None);
+        assert_eq!(server.requests(GET_HISTORY), 0);
+    });
+}
+
+/// T39.11.5A.5 (R39.11.5A.7, D39.11.5A.1 (a)): the state says the payment exists and the token history holds no
+/// payment of this swap, so the answer is undetermined and the error names the condition. Both an empty history and
+/// a history whose only swap-contract payment belongs to another swap give it.
+#[test]
+fn t39_11_5a_5_qrc20_state_without_matching_transaction_is_undetermined() {
+    block_on(async {
+        let env = token_env(Some(8));
+        let server = token_stub(1).await;
+        let coin = init_token(&env, &[&server], false).await.unwrap();
+        serve_payment_state(&server, 1);
+        server.set_result(GET_HISTORY, json!([]));
+
+        let assert_undetermined = |answer: Result<Option<TransactionEnum>, String>| {
+            let err = answer.unwrap_err();
+            assert!(err.contains("Undetermined whether the payment was sent"), "{err}");
+            assert!(
+                err.contains(
+                    "the swap contract reports a payment for this swap, but no payment transaction was found in the \
+                     token history from block 600"
+                ),
+                "{err}"
+            );
+        };
+        assert_undetermined(already_sent(&coin).await);
+        assert_eq!(server.requests(GET_HISTORY), 1);
+
+        // A transaction whose receipt carries the swap contract's payment-sent event, but which holds no payment
+        // call with this swap's identifier: it is read, and it does not answer the question.
+        let (mut other, _) = two_served_txs(&coin);
+        other.logs.push(json!({
+            "address": SWAP_CONTRACT.trim_start_matches("0x"),
+            "topics": [QRC20_PAYMENT_SENT_TOPIC],
+            "data": "00".repeat(32),
+        }));
+        serve_tx(&server, &other);
+        server.set_result(GET_HISTORY, json!([history_item(&other, 0)]));
+        assert_undetermined(already_sent(&coin).await);
+        assert!(server
+            .request_params(GET_TX)
+            .contains(&json!([txid_of(&other.tx), true])));
+    });
+}

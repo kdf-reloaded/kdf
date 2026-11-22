@@ -836,10 +836,12 @@ every balance query. The tokens' `balanceOf` queries are recorded by contract.
 | `evm_hd_p2_a_token_ticker_asks_no_other_tokens_balance` | R49.32 | With another token's `balanceOf` failing, a token ticker's `account_balance`, its task form and its scan still answer, and no other token is asked |
 | `evm_hd_p2_the_activation_report_keeps_the_platform_and_every_token_and_asks_each_token_once_per_address` | R35.1.3(b) | The activation report's maps and total hold the platform and every token, and each token's `balanceOf` is asked once per address |
 
-The Trezor policy: `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens` checks the
-maps and the total of `task::account_balance::init` of a Trezor HD platform with one token; it runs in the emulator job
-and prints a skip line when no emulator is reachable. The scan and `get_new_address` under the Trezor policy are not
-covered by an emulator test. The unchanged answers of a TRON platform and of a TRC20 ticker are pinned by
+The Trezor policy: `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens` checks
+the maps and the total of `task::account_balance::init` of a Trezor HD platform with one token in the emulator job.
+In that job (`TREZOR_EMULATOR_UDP` set) an unreachable emulator fails the test; without the variable the test prints
+a skip line when no emulator is reachable. The scan under the Trezor policy is not covered by an emulator test; for
+`get_new_address` under that policy see "`task::get_new_address` by the coin's key policy" below. The unchanged
+answers of a TRON platform and of a TRC20 ticker are pinned by
 `a_trc20_ticker_answers_its_own_ticker_only_and_its_scan_finds_a_token_only_address` and
 `an_address_is_used_when_the_chain_has_its_account_or_an_enabled_token_balance_is_not_zero` in
 `mm2src/coins/eth/tron/hd_tests.rs`.
@@ -924,9 +926,10 @@ task through its entry points need no mock.
 | `the_awaiting_errors_of_the_task_framework_have_their_own_error_types`, `the_device_answers_map_to_the_hardware_vocabulary` | R49.39 item 4, R49.41 item 4 | `UnexpectedUserAction` with `expected`, `Timeout` with `{secs, nanos}`, and `HwError` `UserCancelled`, `InvalidPin`, `NoTrezorDeviceAvailable` |
 
 The seven emulator tests run in the emulator job (`cargo test -p coins --features trezor-emulator-tests
-eth_trezor_emulator`) and print a skip line when no emulator is reachable. Their node is an in-process JSON-RPC stub
-on a local port (the task runs on the executor, so the thread-local mocks cannot serve it): an EVM node, a
-Bitcoin-style node that answers an empty `listunspent`, and a node that answers every request with an error.
+eth_trezor_emulator`). In that job (`TREZOR_EMULATOR_UDP` set) an unreachable emulator fails them; without the
+variable they print a skip line. Their node is an in-process JSON-RPC stub on a local port (the task runs on the
+executor, so the thread-local mocks cannot serve it): an EVM node, a Bitcoin-style node that answers an empty
+`listunspent`, and a node that answers every request with an error.
 
 | Emulator test | Run | What it checks |
 |---|---|---|

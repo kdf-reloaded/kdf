@@ -108,6 +108,28 @@ new PRs, and the branch stays until the second PR below has landed.
 > procedure of ch.63 D63.4 (a gasless withdraw to the user's own address): it
 > gives a signed authorization and no transfer.
 
+> **Submission and settlement tracking built (2026-11-22).** The task form of
+> the withdraw (`task::withdraw::init`, `task::withdraw::status`) submits the
+> signed authorization to the provider and follows the transfer until it
+> settles, as the maintainer decided under ch.63 D63.9 (the status note after
+> it). It reports the phases `SubmittingGaslessAuthorization`,
+> `WaitingForGaslessProvider` and `WaitingForGaslessSettlement`, and its
+> result carries the provider's `trace_id` and the transaction hash as
+> `tx_hash`. The direct `withdraw` stays sign-only. The box above describes
+> the tree before this date where it says that submission is not built and
+> that the recovery procedure gives no transfer: through the task form a
+> gasless withdraw to the user's own address now moves the token.
+>
+> - **Done:** the third PR of the list above (submission and settlement
+>   tracking, ch.63 D63.6).
+> - **Future, not scheduled:** the broadcast call (`send_raw_transaction`) may
+>   later accept the signed authorization of the direct `withdraw`. A GUI could
+>   then sign, ask the user to confirm, and send; the user must confirm before
+>   the signed deadline.
+> - **Not planned now:** a check on mainnet.
+> - **Done (2026-11-22):** the lab row on the Nile test network (ch.63 T14),
+>   through the task form of `withdraw`.
+
 ## Blocker: the derived custody address is knowingly wrong
 
 > **Resolved by [Chapter 63](../reloaded-rewrite/63-tron-gasfree-fee-delegation.md)

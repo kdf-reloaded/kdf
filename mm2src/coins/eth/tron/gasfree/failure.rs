@@ -122,6 +122,9 @@ pub(crate) enum GasFreeError {
     /// The provider refused the request: a 4xx status (or envelope code) other than 401, 403 and 429.
     #[display(fmt = "GasFree provider refused the request (status {}): {}", status, message)]
     Rejected { status: u16, message: String },
+    /// The provider does not know the trace id of a trace request: status (or envelope code) 404 (D63.9 item 5).
+    #[display(fmt = "GasFree provider does not know the trace id: {}", _0)]
+    TraceNotFound(String),
     /// The provider's answer cannot be used.
     #[display(fmt = "GasFree provider answer cannot be used: {}", _0)]
     InvalidResponse(String),
@@ -139,6 +142,7 @@ impl GasFreeError {
             GasFreeError::DerivationMismatch { .. } => RpcArm::Gasless(GaslessMember::Unavailable),
             GasFreeError::DeadlineNotInFuture { .. } => RpcArm::Gasless(GaslessMember::QuoteExpired),
             GasFreeError::Rejected { .. } => RpcArm::Gasless(GaslessMember::ProviderRejected),
+            GasFreeError::TraceNotFound(_) => RpcArm::Gasless(GaslessMember::TraceNotFound),
             GasFreeError::InvalidResponse(_) => RpcArm::Gasless(GaslessMember::InvalidProviderResponse),
             GasFreeError::Node(_)
             | GasFreeError::CustodyBalance(_)
@@ -227,6 +231,10 @@ mod tests {
         assert_eq!(
             GasFreeError::InvalidResponse("r".to_owned()).rpc_arm(),
             RpcArm::Gasless(GaslessMember::InvalidProviderResponse)
+        );
+        assert_eq!(
+            GasFreeError::TraceNotFound("t".to_owned()).rpc_arm(),
+            RpcArm::Gasless(GaslessMember::TraceNotFound)
         );
         assert_eq!(
             GasFreeError::DeadlineNotInFuture { deadline: 1, now: 2 }.rpc_arm(),

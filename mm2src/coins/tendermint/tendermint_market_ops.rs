@@ -204,25 +204,12 @@ impl MarketCoinOps for TendermintCoin {
 
         let htlc_id = self.calculate_htlc_id(htlc.sender(), htlc.to(), htlc.amount(), &secret_hash);
 
-        let query = format!("claim_htlc.id='{htlc_id}'");
+        // CRD ch.18 R18.11.19 / ch.51 R91: each round takes only a successful claim of this HTLC; a failed or
+        // unrelated result is skipped and the polling goes on until the deadline.
         let coin = self.clone();
         let fut = async move {
             loop {
-                let rpc_client = try_tx_s!(coin.rpc_client().await);
-                let response = try_tx_s!(
-                    rpc_client
-                        .perform(TxSearchRequest {
-                            query: query.clone(),
-                            order_by: TendermintResultOrder::Ascending.into(),
-                            page: 1,
-                            per_page: 1,
-                            prove: false,
-                        })
-                        .await
-                );
-
-                if let Some(raw_tx) = response.txs.first() {
-                    let tx = try_tx_s!(cosmrs::Tx::from_bytes(&raw_tx.tx));
+                if let Some(tx) = try_tx_s!(coin.find_claim_of_htlc(&htlc_id).await) {
                     return Ok(TransactionEnum::CosmosTransaction(CosmosTransaction {
                         data: TxRaw {
                             body_bytes: try_tx_s!(tx.body.into_bytes()),

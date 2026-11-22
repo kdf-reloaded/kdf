@@ -171,6 +171,7 @@ solana-program-error = { version = "3", default-features = false }
 solana-pubkey = { version = "3", default-features = false, features = ["serde", "std"] }
 solana-signature = { version = "3", default-features = false, features = ["serde", "verify"] }
 solana-signer = { version = "3", default-features = false }
+solana-system-interface = { version = "2", default-features = false, features = ["bincode"] }
 solana-system-transaction = { version = "3", default-features = false }
 solana-transaction = { version = "3", default-features = false, features = ["bincode"] }
 spl-associated-token-account-interface = { version = "2", default-features = false }

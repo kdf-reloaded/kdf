@@ -622,6 +622,81 @@ pub async fn swap_kick_starts(ctx: MmArc) -> Result<HashSet<String>, String> {
     Ok(coins)
 }
 
+/// Hands a maker swap whose run lost its swap lock to the ordinary kick-start (ch.51 R5, R6, R7; ch.44 R44.9A.13):
+/// a new run of this one swap is spawned the way start-up spawns it. It loads the saved record by uuid, rebuilds the
+/// swap and takes the lock by R5 (wait one limit, retry once, abandon without an event if it is still held), and
+/// otherwise resumes the swap. No lock or registry entry is held across the hand-over.
+pub(crate) fn hand_over_maker_swap_to_kick_start(
+    ctx: MmArc,
+    uuid: Uuid,
+    maker_coin: MmCoinEnum,
+    taker_coin: MmCoinEnum,
+) {
+    info!(
+        "Handing the swap {} to the kick-start after its swap lock was lost",
+        uuid
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(move || {
+        common::block_on(run_maker_swap(
+            RunMakerSwapInput::KickStart {
+                maker_coin,
+                taker_coin,
+                swap_uuid: uuid,
+            },
+            ctx,
+        ))
+    });
+    #[cfg(target_arch = "wasm32")]
+    common::executor::spawn(async move {
+        run_maker_swap(
+            RunMakerSwapInput::KickStart {
+                maker_coin,
+                taker_coin,
+                swap_uuid: uuid,
+            },
+            ctx,
+        )
+        .await
+    });
+}
+
+/// The taker counterpart of [`hand_over_maker_swap_to_kick_start`].
+pub(crate) fn hand_over_taker_swap_to_kick_start(
+    ctx: MmArc,
+    uuid: Uuid,
+    maker_coin: MmCoinEnum,
+    taker_coin: MmCoinEnum,
+) {
+    info!(
+        "Handing the swap {} to the kick-start after its swap lock was lost",
+        uuid
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(move || {
+        common::block_on(run_taker_swap(
+            RunTakerSwapInput::KickStart {
+                maker_coin,
+                taker_coin,
+                swap_uuid: uuid,
+            },
+            ctx,
+        ))
+    });
+    #[cfg(target_arch = "wasm32")]
+    common::executor::spawn(async move {
+        run_taker_swap(
+            RunTakerSwapInput::KickStart {
+                maker_coin,
+                taker_coin,
+                swap_uuid: uuid,
+            },
+            ctx,
+        )
+        .await
+    });
+}
+
 async fn kickstart_thread_handler(ctx: MmArc, swap: SavedSwap, maker_coin_ticker: String, taker_coin_ticker: String) {
     let taker_coin = loop {
         match lp_coinfind(&ctx, &taker_coin_ticker).await {

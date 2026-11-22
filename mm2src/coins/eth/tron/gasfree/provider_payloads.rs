@@ -5,6 +5,14 @@
 //! estimate is read under both of its spellings; a lifecycle value outside the published sets, a `version` other
 //! than 1, and a hash or signature with a `0x` prefix or of the wrong length fail the decoding of the payload.
 //! A member this module does not name is ignored.
+//!
+//! The record of a transfer ([`TransferRecord`]) is read with these allowances, which the provider's published API
+//! and its answers on the Nile test network call for (§63.4.7, status note of 2026-11-22). They touch no member a
+//! decision is taken from:
+//!
+//! - the three times are taken in any form (a number, any text, `null`, absent) and are not used;
+//! - `maxFee`, `signature` and `updatedAt` may be absent or `null`, as in a trace answer;
+//! - an empty string in an optional `txn*` or `estimatedTotal*` member means the same as its absence: not yet.
 
 use super::super::TronAddress;
 use super::authorization::{check_version, parse_decimal_u256, parse_decimal_u64, PermitTransfer, SignedPermit,
@@ -63,6 +71,57 @@ fn optional_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64
     optional_integer_text(deserializer)?
         .map(|text| parse_decimal_u64(&text).map_err(D::Error::custom))
         .transpose()
+}
+
+/// An optional member that the provider leaves "empty" until the transfer is on chain (§63.4.7): absent, `null`
+/// and the empty string are all `None`; anything else is the text of a non-negative integer or of a string.
+fn empty_or_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Ok(optional_integer_text(deserializer)?.filter(|text| !text.is_empty()))
+}
+
+/// Like [`optional_u256`], with the empty string as an absent member.
+fn empty_or_u256<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<U256>, D::Error> {
+    empty_or_text(deserializer)?
+        .map(|text| parse_decimal_u256(&text).map_err(D::Error::custom))
+        .transpose()
+}
+
+/// Like [`optional_u64`], with the empty string as an absent member.
+fn empty_or_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    empty_or_text(deserializer)?
+        .map(|text| parse_decimal_u64(&text).map_err(D::Error::custom))
+        .transpose()
+}
+
+/// A time of a transfer record as the provider writes it: a number (its decimal text), any string, or nothing.
+/// The published API shows ISO 8601 text and the provider sends Unix milliseconds; the value is not used.
+fn time_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    match Json::deserialize(deserializer)? {
+        Json::Null => Ok(None),
+        Json::Number(number) => Ok(Some(number.to_string())),
+        Json::String(text) => Ok(Some(text)),
+        _ => Err(D::Error::custom("a time member is neither a number nor a string")),
+    }
+}
+
+/// The `txnHash` of a transfer record: `None` when absent, `null` or empty, else a strict [`TransactionHash`].
+fn empty_or_hash<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<TransactionHash>, D::Error> {
+    match Option::<String>::deserialize(deserializer)? {
+        Some(text) if !text.is_empty() => TransactionHash::from_text(&text).map(Some).map_err(D::Error::custom),
+        _ => Ok(None),
+    }
+}
+
+/// The `txnState` of a transfer record: `None` when absent, `null` or empty, else a value of the published set.
+fn empty_or_transaction_state<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<TransactionState>, D::Error> {
+    match Option::<String>::deserialize(deserializer)? {
+        Some(text) if !text.is_empty() => TransactionState::from_wire(&text)
+            .map(Some)
+            .ok_or_else(|| D::Error::custom("a transaction state outside the published set")),
+        _ => Ok(None),
+    }
 }
 
 /// The `version` member of a provider payload, when it is present: 1 and nothing else (R5).
@@ -233,6 +292,19 @@ pub(crate) enum TransferState {
     Failed,
 }
 
+impl TransferState {
+    /// The state as the provider writes it (§63.4.7).
+    pub(crate) fn wire_name(self) -> &'static str {
+        match self {
+            TransferState::Waiting => "WAITING",
+            TransferState::InProgress => "INPROGRESS",
+            TransferState::Confirming => "CONFIRMING",
+            TransferState::Succeed => "SUCCEED",
+            TransferState::Failed => "FAILED",
+        }
+    }
+}
+
 /// The on-chain state of a transfer's transaction (§63.4.7). A value outside the set fails the decoding (R12).
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) enum TransactionState {
@@ -252,20 +324,45 @@ pub(crate) enum TransactionState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransactionHash(pub [u8; 32]);
 
+impl TransactionHash {
+    /// The hash as 64 lower-case hex digits without `0x`: the form the `tx_hash` of a native TRON withdraw has.
+    pub(crate) fn to_hex(self) -> String { hex::encode(self.0) }
+}
+
 impl fmt::Debug for TransactionHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "TransactionHash({})", hex::encode(self.0)) }
 }
 
-impl<'de> Deserialize<'de> for TransactionHash {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
+impl TransactionHash {
+    /// The hash `text` holds: exactly 64 hex digits, no `0x`.
+    fn from_text(text: &str) -> Result<Self, &'static str> {
         if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(D::Error::custom("a transaction hash is not 64 hex digits"));
+            return Err("a transaction hash is not 64 hex digits");
         }
-        let bytes = hex::decode(&text).map_err(|_| D::Error::custom("a transaction hash is not hex"))?;
+        let bytes = hex::decode(text).map_err(|_| "a transaction hash is not hex")?;
         <[u8; 32]>::try_from(bytes.as_slice())
             .map(TransactionHash)
-            .map_err(|_| D::Error::custom("a transaction hash is not 32 bytes"))
+            .map_err(|_| "a transaction hash is not 32 bytes")
+    }
+}
+
+impl<'de> Deserialize<'de> for TransactionHash {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_text(&String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+impl TransactionState {
+    /// The state the provider writes as `text`, when it is one of the published set.
+    fn from_wire(text: &str) -> Option<Self> {
+        match text {
+            "INIT" => Some(TransactionState::Init),
+            "NOT_ON_CHAIN" => Some(TransactionState::NotOnChain),
+            "ON_CHAIN" => Some(TransactionState::OnChain),
+            "SOLIDITY" => Some(TransactionState::Solidity),
+            "ON_CHAIN_FAILED" => Some(TransactionState::OnChainFailed),
+            _ => None,
+        }
     }
 }
 
@@ -285,19 +382,25 @@ impl<'de> Deserialize<'de> for WellFormedSignature {
 }
 
 /// The provider's view of a transfer (§63.4.7): the `data` of the submit response and of the trace response.
-/// The members only the trace response carries are optional. Amounts are in the token's smallest unit; the
-/// provider's times are kept as it writes them.
+/// The members only one of the two responses carries are optional. Amounts are in the token's smallest unit; the
+/// provider's times are kept as text and not used.
+///
+/// The members the flow reads (`id`, the five addresses, `amount`, `nonce`, `state`, `txnState`, `txnHash` and a
+/// present `version`) are read strictly.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TransferRecord {
     /// The trace id.
     pub id: String,
-    /// ISO 8601 text, not parsed.
-    pub created_at: String,
-    /// ISO 8601 text, not parsed.
-    pub updated_at: String,
-    /// ISO 8601 text, not parsed.
-    pub expired_at: String,
+    /// Not parsed: ISO 8601 text or the decimal text of Unix milliseconds.
+    #[serde(default, deserialize_with = "time_text")]
+    pub created_at: Option<String>,
+    /// Like `created_at`. A trace response may lack it.
+    #[serde(default, deserialize_with = "time_text")]
+    pub updated_at: Option<String>,
+    /// Like `created_at`.
+    #[serde(default, deserialize_with = "time_text")]
+    pub expired_at: Option<String>,
     pub account_address: TronAddress,
     pub gas_free_address: TronAddress,
     pub provider_address: TronAddress,
@@ -305,10 +408,12 @@ pub(crate) struct TransferRecord {
     pub token_address: TronAddress,
     #[serde(deserialize_with = "integer_u256")]
     pub amount: U256,
-    #[serde(deserialize_with = "integer_u256")]
-    pub max_fee: U256,
-    /// Checked for its form and not kept.
-    pub signature: WellFormedSignature,
+    /// A trace response may lack it.
+    #[serde(default, deserialize_with = "optional_u256")]
+    pub max_fee: Option<U256>,
+    /// Checked for its form, when it is present, and not kept. A trace response may lack it.
+    #[serde(default)]
+    pub signature: Option<WellFormedSignature>,
     #[serde(deserialize_with = "integer_u64")]
     pub nonce: u64,
     pub state: TransferState,
@@ -320,29 +425,30 @@ pub(crate) struct TransferRecord {
     /// 1 when the member is present: another value fails the decoding (R5).
     #[serde(default, deserialize_with = "optional_version_one")]
     pub version: Option<u64>,
-    #[serde(default, deserialize_with = "optional_u256")]
+    #[serde(default, deserialize_with = "empty_or_u256")]
     pub estimated_total_fee: Option<U256>,
-    #[serde(default, deserialize_with = "optional_u256")]
+    #[serde(default, deserialize_with = "empty_or_u256")]
     pub estimated_total_cost: Option<U256>,
-    /// The transaction of the transfer, once it is on chain.
-    #[serde(default)]
+    /// The transaction of the transfer, once it is on chain. Absent, `null` or empty before that.
+    #[serde(default, deserialize_with = "empty_or_hash")]
     pub txn_hash: Option<TransactionHash>,
-    #[serde(default, deserialize_with = "optional_u64")]
+    #[serde(default, deserialize_with = "empty_or_u64")]
     pub txn_block_num: Option<u64>,
     /// Unix milliseconds.
-    #[serde(default, deserialize_with = "optional_u64")]
+    #[serde(default, deserialize_with = "empty_or_u64")]
     pub txn_block_timestamp: Option<u64>,
-    #[serde(default)]
+    /// Absent, `null` or empty before the transfer has a transaction.
+    #[serde(default, deserialize_with = "empty_or_transaction_state")]
     pub txn_state: Option<TransactionState>,
-    #[serde(default, deserialize_with = "optional_u256")]
+    #[serde(default, deserialize_with = "empty_or_u256")]
     pub txn_activate_fee: Option<U256>,
-    #[serde(default, deserialize_with = "optional_u256")]
+    #[serde(default, deserialize_with = "empty_or_u256")]
     pub txn_transfer_fee: Option<U256>,
-    #[serde(default, deserialize_with = "optional_u256")]
+    #[serde(default, deserialize_with = "empty_or_u256")]
     pub txn_total_fee: Option<U256>,
-    #[serde(default, deserialize_with = "optional_u256")]
+    #[serde(default, deserialize_with = "empty_or_u256")]
     pub txn_amount: Option<U256>,
-    #[serde(default, deserialize_with = "optional_u256")]
+    #[serde(default, deserialize_with = "empty_or_u256")]
     pub txn_total_cost: Option<U256>,
 }
 
@@ -568,24 +674,41 @@ mod tests {
         assert_eq!(record.estimated_transfer_fee, U256::from(2_000_000u64));
         assert_eq!(record.nonce, 2);
         assert_eq!(record.state, TransferState::Waiting);
-        assert_eq!(record.max_fee, U256::from(2_000u64));
-        assert_eq!(record.created_at, "2024-09-13T06:07:12.000Z");
-        assert_eq!(record.expired_at, "2024-09-13T06:12:12.000Z");
+        assert_eq!(record.max_fee, Some(U256::from(2_000u64)));
+        assert_eq!(record.created_at.as_deref(), Some("2024-09-13T06:07:12.000Z"));
+        assert_eq!(record.expired_at.as_deref(), Some("2024-09-13T06:12:12.000Z"));
         assert_eq!(record.version, None);
         assert_eq!(record.txn_hash, None);
         assert_eq!(record.txn_state, None);
         assert_eq!(record.txn_total_cost, None);
+        // The members the flow reads are required.
         for member in [
             "id",
-            "createdAt",
-            "expiredAt",
-            "maxFee",
-            "signature",
+            "accountAddress",
+            "gasFreeAddress",
+            "providerAddress",
+            "targetAddress",
+            "tokenAddress",
             "nonce",
             "state",
             "amount",
         ] {
             assert!(!decodes::<TransferRecord>(&document, member, None), "{member}");
+            assert!(
+                !decodes::<TransferRecord>(&document, member, Some(json!(null))),
+                "{member}"
+            );
+        }
+        // An empty string is not an address and not an integer.
+        for member in ["accountAddress", "targetAddress", "tokenAddress", "nonce", "amount"] {
+            assert!(
+                !decodes::<TransferRecord>(&document, member, Some(json!(""))),
+                "{member}"
+            );
+        }
+        // A present `maxFee` keeps the integer rules.
+        for bad in [json!(-1), json!(""), json!("1.5")] {
+            assert!(!decodes::<TransferRecord>(&document, "maxFee", Some(bad)));
         }
 
         // The members only a trace response carries.
@@ -616,7 +739,7 @@ mod tests {
         assert_eq!(record.txn_total_cost, Some(U256::from(3_010_000u64)));
         assert_eq!(record.version, Some(1));
         assert!(!decodes::<TransferRecord>(&document, "txnTotalCost", Some(json!(-1))));
-        assert!(!decodes::<TransferRecord>(&document, "txnBlockNum", Some(json!(""))));
+        assert!(!decodes::<TransferRecord>(&document, "txnBlockNum", Some(json!("x"))));
 
         // Both spellings of the transfer-fee estimate.
         let mut other_spelling = document.clone();
@@ -654,8 +777,11 @@ mod tests {
         }
         for unknown in ["DONE", "waiting", ""] {
             assert!(!decodes::<TransferRecord>(&document, "state", Some(json!(unknown))));
+        }
+        for unknown in ["DONE", "on_chain", " "] {
             assert!(!decodes::<TransferRecord>(&document, "txnState", Some(json!(unknown))));
         }
+        assert!(!decodes::<TransferRecord>(&document, "txnState", Some(json!(1))));
 
         // The transaction hash: 64 bare hex digits.
         let mut on_chain = document.clone();
@@ -700,5 +826,135 @@ mod tests {
         for bad in [json!(-1), json!(""), json!("-1")] {
             assert!(!decodes::<TransferRecord>(&document, "amount", Some(bad)));
         }
+    }
+
+    /// A submit answer as the provider's published API shows it: ISO times, numbers, the fee estimate without the
+    /// `d`, `signature`, and no `version`.
+    fn documented_submit_answer() -> Json {
+        json!({
+            "id": "6c3ff67e-0bf4-4c09-91ca-0c7c254b01a0",
+            "createdAt": "2024-09-10T08:11:50.822+00:00",
+            "updatedAt": "2024-09-10T08:11:50.822+00:00",
+            "accountAddress": MESSAGES[0].user,
+            "gasFreeAddress": "TUGC4eNuEgbaLotwxzzXEck1fRWru6n8ye",
+            "providerAddress": MESSAGE_SERVICE_PROVIDER,
+            "targetAddress": MESSAGES[0].receiver,
+            "tokenAddress": MESSAGES[0].token,
+            "amount": 10000,
+            "maxFee": 2000,
+            "signature": signed_first_message().sig_hex(),
+            "nonce": 2,
+            "expiredAt": "2024-09-10T08:16:50.000+00:00",
+            "state": "WAITING",
+            "estimatedActivateFee": 1000000,
+            "estimateTransferFee": 2000000
+        })
+    }
+
+    /// §63.4.7, status note of 2026-11-22: the submit answer of the published API decodes, and so does the same
+    /// answer with the times as Unix milliseconds, as the provider sends them.
+    #[test]
+    fn a_submit_answer_decodes_with_iso_times_and_with_millisecond_times() {
+        let documented = documented_submit_answer();
+        let record: TransferRecord = serde_json::from_value(documented.clone()).expect("the documented shape");
+        assert_eq!(record.created_at.as_deref(), Some("2024-09-10T08:11:50.822+00:00"));
+        assert_eq!(record.amount, U256::from(10_000u64));
+        assert_eq!(record.max_fee, Some(U256::from(2_000u64)));
+        assert_eq!(record.estimated_transfer_fee, U256::from(2_000_000u64));
+        assert_eq!(record.nonce, 2);
+        assert_eq!(record.version, None);
+        assert!(record.signature.is_some());
+
+        let mut live = documented;
+        live["createdAt"] = json!(1_795_354_473_207u64);
+        live["updatedAt"] = json!(1_795_354_473_207u64);
+        live["expiredAt"] = json!(1_795_354_773_000u64);
+        let record: TransferRecord = serde_json::from_value(live.clone()).expect("the live shape");
+        assert_eq!(record.created_at.as_deref(), Some("1795354473207"));
+        assert_eq!(record.expired_at.as_deref(), Some("1795354773000"));
+        assert_eq!(record.state, TransferState::Waiting);
+
+        // A time is taken in any form of a number or a string, and as nothing; never as another JSON type.
+        for time in [json!(null), json!(""), json!("yesterday"), json!(1.5), json!(-1)] {
+            assert!(decodes::<TransferRecord>(&live, "createdAt", Some(time)));
+        }
+        for member in ["createdAt", "updatedAt", "expiredAt"] {
+            assert!(decodes::<TransferRecord>(&live, member, None));
+            assert!(!decodes::<TransferRecord>(&live, member, Some(json!({ "at": 1 }))));
+            assert!(!decodes::<TransferRecord>(&live, member, Some(json!([1]))));
+        }
+    }
+
+    /// §63.4.7, status note of 2026-11-22: a trace answer without `signature`, `maxFee`, `updatedAt` and `version`
+    /// decodes, with the transaction members empty, `null` or absent before the transfer is on chain.
+    #[test]
+    fn a_trace_answer_decodes_without_the_submit_only_members_and_with_empty_transaction_members() {
+        const NOT_YET: [&str; 11] = [
+            "estimatedTotalFee",
+            "estimatedTotalCost",
+            "txnHash",
+            "txnBlockNum",
+            "txnBlockTimestamp",
+            "txnState",
+            "txnActivateFee",
+            "txnTransferFee",
+            "txnTotalFee",
+            "txnAmount",
+            "txnTotalCost",
+        ];
+        let mut trace = documented_submit_answer();
+        let object = trace.as_object_mut().expect("an object");
+        for member in ["signature", "maxFee", "updatedAt"] {
+            object.remove(member);
+        }
+        object.insert("estimatedTransferFee".to_owned(), json!(2000000));
+        object.remove("estimateTransferFee");
+        object.insert("state".to_owned(), json!("INPROGRESS"));
+
+        for empty in [Some(json!("")), Some(json!(null)), None] {
+            let mut document = trace.clone();
+            if let Some(empty) = &empty {
+                for member in NOT_YET {
+                    document[member] = empty.clone();
+                }
+            }
+            let record: TransferRecord = serde_json::from_value(document).expect("a trace answer");
+            assert_eq!(record.state, TransferState::InProgress);
+            assert_eq!(record.max_fee, None);
+            assert_eq!(record.signature, None);
+            assert_eq!(record.updated_at, None);
+            assert_eq!(record.version, None);
+            assert_eq!(record.txn_hash, None);
+            assert_eq!(record.txn_state, None);
+            assert_eq!(record.txn_block_num, None);
+            assert_eq!(record.txn_block_timestamp, None);
+            assert_eq!(record.estimated_total_fee, None);
+            assert_eq!(record.txn_total_cost, None);
+        }
+        // `null` for the two members a trace answer may lack.
+        assert!(decodes::<TransferRecord>(&trace, "maxFee", Some(json!(null))));
+        assert!(decodes::<TransferRecord>(&trace, "signature", Some(json!(null))));
+        // An empty string is "not yet" for the optional members only.
+        assert!(!decodes::<TransferRecord>(&trace, "signature", Some(json!(""))));
+        assert!(!decodes::<TransferRecord>(&trace, "nonce", Some(json!(""))));
+        assert!(!decodes::<TransferRecord>(
+            &trace,
+            "estimatedActivateFee",
+            Some(json!(""))
+        ));
+
+        // On chain: the members are read strictly again.
+        let mut settled = trace.clone();
+        settled["state"] = json!("SUCCEED");
+        settled["txnHash"] = json!(TXN_HASH);
+        settled["txnState"] = json!("ON_CHAIN");
+        settled["txnBlockNum"] = json!(52537691);
+        settled["txnBlockTimestamp"] = json!(1_795_354_476_000u64);
+        settled["txnTotalCost"] = json!("3010000");
+        let record: TransferRecord = serde_json::from_value(settled).expect("a settled trace answer");
+        assert_eq!(record.txn_state, Some(TransactionState::OnChain));
+        assert_eq!(record.txn_hash.map(TransactionHash::to_hex).as_deref(), Some(TXN_HASH));
+        assert_eq!(record.txn_block_timestamp, Some(1_795_354_476_000));
+        assert_eq!(record.txn_total_cost, Some(U256::from(3_010_000u64)));
     }
 }

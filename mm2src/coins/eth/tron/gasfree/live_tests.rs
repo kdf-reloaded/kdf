@@ -1,17 +1,26 @@
 //! Checks of the GasFree constants against the live controller contracts (CRD ch.63 T1, T2), through public TRON
 //! nodes. They are read-only and need no key. They run only with the `live-network-tests` feature
 //! (docs/UNIT_TESTS.md, "Tests that need public servers").
+//!
+//! One more test, [`a_nile_transfer_is_submitted_and_followed_to_its_settlement`], moves a token on the Nile test
+//! network through a GasFree provider (CRD ch.63 T14). It needs provider credentials and a funded key, reads them
+//! from the environment (docs/TEST_ENV_VARS.md) and is always ignored: it runs only when it is asked for by name
+//! with `--ignored`. No value it reads is printed or put into an assertion text.
 
 use super::super::api::TronApiClient;
 use super::super::nodes::TronNode;
 use super::super::Network;
+use super::super::TronAddress;
 use super::address_word;
-use super::authorization::{typed_data_hash, PermitTransfer, PERMIT_VERSION};
+use super::authorization::{sign_permit, typed_data_hash, PermitTransfer, PERMIT_VERSION};
+use super::binding::{gasfree_custody_address, GasFreeBinding, TronGaslessProviderRequest};
 use super::custody::{check_against_controller, read_controller_word, ControllerChecks};
 use super::test_vectors::{address, hex32, CUSTODY_VECTORS, DOMAIN_VECTORS, MESSAGES, MESSAGE_MAX_FEE,
                           MESSAGE_SERVICE_PROVIDER, USERS};
-use common::block_on;
+use super::withdraw::{submit, track, SETTLEMENT_GRACE_MS};
+use common::{block_on, now_ms};
 use ethereum_types::U256;
+use mm2_eth::keys::{KeyPair, Secret};
 use std::fmt::Display;
 use std::time::Duration;
 
@@ -111,5 +120,96 @@ fn the_live_controllers_compute_the_same_message_hash() {
             block_on(read_controller_word(&api, &network, GET_MESSAGE_HASH, &parameter))
         });
         assert_eq!(live, local);
+    }
+}
+
+/// The value of the environment variable `name`. The panic names the variable and never a value.
+fn live_setting(name: &str) -> String {
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => value,
+        _ => panic!("the environment variable {name} is not set"),
+    }
+}
+
+/// CRD ch.63 T14: one transfer on Nile, signed, submitted to the provider and followed to `SUCCEED`.
+///
+/// Reads `GASFREE_LIVE_BASE_URL`, `GASFREE_LIVE_API_KEY`, `GASFREE_LIVE_API_SECRET`,
+/// `GASFREE_LIVE_SERVICE_PROVIDER`, `GASFREE_LIVE_PRIVATE_KEY` (64 hex digits), `GASFREE_LIVE_TOKEN` (the TRC20
+/// contract), `GASFREE_LIVE_RECEIVER` and `GASFREE_LIVE_AMOUNT_UNITS` (the amount in the token's smallest unit). The
+/// custody address of the key must hold the amount and the provider's fee.
+#[test]
+#[ignore = "moves a token on Nile; needs GasFree provider credentials and a funded key in the environment"]
+fn a_nile_transfer_is_submitted_and_followed_to_its_settlement() {
+    let network = Network::Nile;
+    let object = serde_json::json!({
+        "base_url": live_setting("GASFREE_LIVE_BASE_URL"),
+        "api_key": live_setting("GASFREE_LIVE_API_KEY"),
+        "api_secret": live_setting("GASFREE_LIVE_API_SECRET"),
+        "service_provider": live_setting("GASFREE_LIVE_SERVICE_PROVIDER"),
+    });
+    let Ok(request) = serde_json::from_value::<TronGaslessProviderRequest>(object) else {
+        panic!("the provider settings are not a provider object")
+    };
+    let Ok(binding) = GasFreeBinding::from_request(&network, &request) else {
+        panic!("the provider settings are refused")
+    };
+    let key = hex::decode(live_setting("GASFREE_LIVE_PRIVATE_KEY")).unwrap_or_default();
+    let (Ok(secret), Ok(key_pair)) = (Secret::from_slice(&key), KeyPair::from_secret_slice(&key)) else {
+        panic!("GASFREE_LIVE_PRIVATE_KEY is not a private key")
+    };
+    let user = TronAddress::from_evm_address(key_pair.address());
+    let (Ok(token), Ok(receiver), Ok(value)) = (
+        TronAddress::from_base58(&live_setting("GASFREE_LIVE_TOKEN")),
+        TronAddress::from_base58(&live_setting("GASFREE_LIVE_RECEIVER")),
+        U256::from_dec_str(&live_setting("GASFREE_LIVE_AMOUNT_UNITS")),
+    ) else {
+        panic!("the token, the receiver or the amount is not usable")
+    };
+
+    // The provider's record of the account: its custody address is the derived one, and it quotes the fee.
+    let Ok(account) = block_on(binding.provider().account_info(&user)) else {
+        panic!("the provider does not answer the account call")
+    };
+    assert!(
+        account.gas_free_address == gasfree_custody_address(&network, &user),
+        "the provider reports another custody address than the derived one"
+    );
+    assert!(account.allow_submit, "an earlier transfer of the account is unsettled");
+    let Some(asset) = account.assets.iter().find(|asset| asset.token_address == token) else {
+        panic!("the provider does not list the token for the account")
+    };
+    let activation_fee = if account.active {
+        U256::zero()
+    } else {
+        asset.activate_fee
+    };
+
+    let now_s = now_ms() / 1000;
+    let deadline = now_s + 300;
+    let permit = PermitTransfer {
+        token,
+        service_provider: *binding.service_provider(),
+        user,
+        receiver,
+        value,
+        max_fee: asset.transfer_fee + activation_fee,
+        deadline,
+        nonce: account.nonce,
+    };
+    let Ok(signed) = sign_permit(&network, permit, &secret, now_s) else {
+        panic!("the authorization is not signed")
+    };
+
+    let lock = binding.sender_lock(&user);
+    let guard = block_on(lock.lock());
+    let submitted = match block_on(submit(&binding, &signed, guard, None, "the live token", &0.into())) {
+        Ok(submitted) => submitted,
+        Err(error) => panic!("the submission failed: {error}"),
+    };
+    let trace_id = submitted.trace_id.clone();
+    let bound_ms = deadline * 1000 + SETTLEMENT_GRACE_MS;
+    match block_on(track(&binding, submitted, bound_ms, None)) {
+        Ok(hash) => println!("GasFree transfer {trace_id} settled, transaction {}", hash.to_hex()),
+        Err(error) => panic!("the transfer did not settle: {error}"),
     }
 }

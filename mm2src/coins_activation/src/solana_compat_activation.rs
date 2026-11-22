@@ -8,8 +8,6 @@
 //!
 //! A coin activated through these methods sends no commitment level with its node requests, so the node's default
 //! applies (the request has no commitment member).
-//!
-//! While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` the routed methods answer as the primary ones do (T40.9).
 
 use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens, EnablePlatformCoinWithTokensError,
                                        EnablePlatformCoinWithTokensReq, TokenActivationRequest};
@@ -17,8 +15,7 @@ use crate::solana_with_tokens_activation::{SolanaWithTokensActivationRequest, So
 use crate::spl_token_activation::{resolve_spl_protocol, SplActivationRequest, SplInitResult};
 use crate::token::{enable_token_resolving, EnableTokenError};
 use coins::solana::{SolanaHdLayout, SolanaNodeUrl};
-use coins::{CoinBalance, PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken,
-            SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
+use coins::{CoinBalance, PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use serde_derive::{Deserialize, Serialize};
@@ -41,16 +38,16 @@ pub struct SolanaCompatTokenParams {
 }
 
 /// The request of `experimental::enable_solana_with_assets` (CRD ch.40 R40.2.1, R40.1A.5): members flat in `params`,
-/// unknown members ignored. `tx_history` is an optional boolean (default `false`) whose value is never used: it has
-/// no effect and never aborts the request (R40.2.5). There is no commitment member.
+/// unknown members ignored. `tx_history` is an optional boolean (default `false`): `true` starts the transaction
+/// history of the platform and its tokens (R40.6C.1); a value that is not a boolean fails request parsing. There is
+/// no commitment member.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SolanaCompatPlatformRequest {
     ticker: String,
     nodes: Vec<SolanaCompatNode>,
     tokens_params: Vec<SolanaCompatTokenParams>,
-    /// Accepted and never used (R40.2.5); a value that is not a boolean fails request parsing.
+    /// R40.6C.1: `true` starts the history; a value that is not a boolean fails request parsing.
     #[serde(default)]
-    #[allow(dead_code)]
     tx_history: bool,
     #[serde(default)]
     hd_path_layout: Option<SolanaHdLayout>,
@@ -80,6 +77,7 @@ impl SolanaCompatPlatformRequest {
             hd_path_layout: self.hd_path_layout,
             path_to_address: self.path_to_address,
             priv_key_policy: self.priv_key_policy,
+            tx_history: self.tx_history,
         }
     }
 }
@@ -128,18 +126,11 @@ impl SolanaCompatPlatformResult {
 
 /// The `experimental::enable_solana_with_assets` entry point.
 ///
-/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` the request is refused with the `PlatformCoinCreationError` of
-/// the primary surface and nothing is registered; otherwise see [`activate_solana_with_assets`].
+/// See [`activate_solana_with_assets`].
 pub async fn enable_solana_with_assets(
     ctx: MmArc,
     req: SolanaCompatPlatformRequest,
 ) -> Result<SolanaCompatPlatformResult, MmError<EnablePlatformCoinWithTokensError>> {
-    if !SOLANA_ACTIVATION_AVAILABLE {
-        return MmError::err(EnablePlatformCoinWithTokensError::PlatformCoinCreationError {
-            ticker: req.ticker,
-            error: SOLANA_NOT_AVAILABLE.to_owned(),
-        });
-    }
     activate_solana_with_assets(ctx, req).await
 }
 
@@ -204,15 +195,11 @@ impl SolanaCompatTokenResult {
 
 /// The `experimental::enable_solana_token` entry point.
 ///
-/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` the request is refused with the `Internal` error of the primary
-/// surface and nothing is registered; otherwise see [`activate_solana_token`].
+/// See [`activate_solana_token`].
 pub async fn enable_solana_token(
     ctx: MmArc,
     req: SolanaCompatTokenRequest,
 ) -> Result<SolanaCompatTokenResult, MmError<EnableTokenError>> {
-    if !SOLANA_ACTIVATION_AVAILABLE {
-        return MmError::err(EnableTokenError::Internal(SOLANA_NOT_AVAILABLE.to_owned()));
-    }
     activate_solana_token(ctx, req).await
 }
 

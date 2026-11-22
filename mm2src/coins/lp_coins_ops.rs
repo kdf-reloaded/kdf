@@ -24,13 +24,6 @@ pub fn is_wallet_only_ticker(ctx: &MmArc, ticker: &str) -> bool {
 /// other family switches. Whether a TRON coin can trade is a separate switch, [`TRON_SWAPS_AVAILABLE`].
 pub const TRON_ACTIVATION_AVAILABLE: bool = true;
 
-/// Beta switch: whether Solana (SOL, SPL tokens) coins can be activated.
-///
-/// Solana support is postponed for the current beta. While this is `false`, every activation route for the
-/// family answers [`SOLANA_NOT_AVAILABLE`] and registers nothing; the coin code stays compiled and its unit
-/// tests keep running. Set it to `true` to turn the family back on.
-pub const SOLANA_ACTIVATION_AVAILABLE: bool = false;
-
 /// Beta switch: whether Tendermint (Cosmos-family) coins and their tokens can take part in orders and swaps.
 ///
 /// Swaps for the family are postponed for the current beta. While this is `false`, every Tendermint platform
@@ -56,21 +49,6 @@ pub const TENDERMINT_SWAPS_AVAILABLE: bool = false;
 /// changed by this switch, and neither are `max_taker_vol`, `max_maker_vol` and the legacy `get_trade_fee`, which
 /// do not ask whether a coin is wallet-only. Set it to `true` only together with a TRON swap implementation.
 pub const TRON_SWAPS_AVAILABLE: bool = false;
-
-/// The refusal text of every Solana activation route while [`SOLANA_ACTIVATION_AVAILABLE`] is `false`.
-pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this build";
-
-/// The refusal text for a coin protocol whose family is switched off in this build, if it is.
-fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str> {
-    match protocol {
-        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } | CoinProtocol::SOLANATOKEN { .. }
-            if !SOLANA_ACTIVATION_AVAILABLE =>
-        {
-            Some(SOLANA_NOT_AVAILABLE)
-        },
-        _ => None,
-    }
-}
 
 /// Adds a new currency into the list of currencies configured.
 ///
@@ -128,10 +106,6 @@ async fn lp_coininit_building(
         );
     }
     let protocol: CoinProtocol = try_s!(CoinProtocol::from_conf_json(coins_en["protocol"].clone()));
-
-    if let Some(message) = unavailable_protocol_message(&protocol) {
-        return ERR!("{}", message);
-    }
 
     let coin: MmCoinEnum = match &protocol {
         CoinProtocol::UTXO => {
@@ -733,8 +707,11 @@ pub async fn my_tx_history(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
         Ok(None) => return ERR!("No such coin: {}", request.coin),
         Err(err) => return ERR!("!lp_coinfind({}): {}", request.coin, err),
     };
-    // A Solana coin or SPL token has no history yet (CRD ch.40 R40.6B.15, D40.6B.1): a structured error naming the coin.
-    if matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)) {
+    // A Solana coin or SPL token without history answers an error naming the coin (CRD ch.40 R40.6C.2); with history
+    // it is served from the list its platform's writer fills (R40.6C.3).
+    if matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_))
+        && !crate::solana::solana_history_enabled(&coin)
+    {
         return ERR!("my_tx_history is not supported for {}", request.coin);
     }
 
@@ -1346,65 +1323,12 @@ mod postponed_family_switch_tests {
     use super::*;
 
     /// Flipping a family switch is a deliberate change: this test fails when someone does, and must be updated in
-    /// the same commit that turns a family back on (and removes the refusal tests that go with it). TRON can be
-    /// activated since 2026-11-20 (CRD ch.21 D6); its swaps stay off.
+    /// the same commit. TRON can be activated since 2026-11-20 (CRD ch.21 D6) and Solana since its switch-on (CRD
+    /// ch.40 D40.4), which left no activation switch for it; the swaps of both families stay off.
     #[test]
     fn family_switches_have_their_documented_values() {
         assert!(TRON_ACTIVATION_AVAILABLE);
         assert!(!TRON_SWAPS_AVAILABLE);
-        assert!(!SOLANA_ACTIVATION_AVAILABLE);
         assert!(!TENDERMINT_SWAPS_AVAILABLE);
-        assert_eq!(SOLANA_NOT_AVAILABLE, "Solana support is not available in this build");
-    }
-
-    /// TRON is switched on: no route refuses its protocols as a family that is not available.
-    #[test]
-    fn tron_protocols_are_not_refused() {
-        let trx = CoinProtocol::TRX {
-            network: crate::eth::tron::Network::Mainnet,
-        };
-        let trc20 = CoinProtocol::TRC20 {
-            platform: "TRX".to_owned(),
-            contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned(),
-        };
-        assert_eq!(unavailable_protocol_message(&trx), None);
-        assert_eq!(unavailable_protocol_message(&trc20), None);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn solana_protocols_are_refused_while_the_switch_is_off() {
-        let spl = CoinProtocol::SPLTOKEN {
-            platform: "SOL".to_owned(),
-            token_contract_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".parse().unwrap(),
-            decimals: 6,
-        };
-        assert_eq!(
-            unavailable_protocol_message(&CoinProtocol::SOLANA),
-            Some(SOLANA_NOT_AVAILABLE)
-        );
-        assert_eq!(unavailable_protocol_message(&spl), Some(SOLANA_NOT_AVAILABLE));
-        let solana_token = CoinProtocol::from_conf_json(serde_json::json!({
-            "type": "SOLANATOKEN",
-            "protocol_data": {
-                "platform": "SOL",
-                "decimals": 6,
-                "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-            }
-        }))
-        .unwrap();
-        assert!(matches!(solana_token, CoinProtocol::SOLANATOKEN { .. }));
-        assert_eq!(unavailable_protocol_message(&solana_token), Some(SOLANA_NOT_AVAILABLE));
-    }
-
-    #[test]
-    fn other_protocols_are_not_affected() {
-        assert_eq!(unavailable_protocol_message(&CoinProtocol::UTXO), None);
-        assert_eq!(unavailable_protocol_message(&CoinProtocol::QTUM), None);
-        assert_eq!(
-            unavailable_protocol_message(&CoinProtocol::ETH { chain_id: Some(1) }),
-            None
-        );
     }
 }

@@ -363,21 +363,30 @@ fn platform_result_with_no_tokens_or_no_token_account() {
     );
 }
 
-/// T40.7, R40.2.5: `tx_history` true or false changes nothing and never aborts; a value that is not a boolean is a
+/// T40.7 and T40.6C.1 (R40.6C.1): `tx_history` never changes the activation answer and never aborts; `true` enables
+/// the history of the registered platform, `false` or absent does not; a value that is not a boolean is a
 /// request-parse failure (`InvalidRequest`, HTTP 400 at the RPC layer).
 #[test]
-fn t40_7_tx_history_changes_nothing_and_does_not_abort() {
+fn t40_7_tx_history_changes_no_answer_and_enables_the_history_only_when_true() {
     let node = node(HEALTHY);
     let mut results = Vec::new();
-    for extra in [json!({}), json!({ "tx_history": false }), json!({ "tx_history": true })] {
+    for (extra, enabled) in [
+        (json!({}), false),
+        (json!({ "tx_history": false }), false),
+        (json!({ "tx_history": true }), true),
+    ] {
         let ctx = ctx();
         let result = block_on(activate_solana_with_assets(
-            ctx,
+            ctx.clone(),
             platform_req(&[node.url()], json!([{ "ticker": "TOK-SOL" }]), extra),
         ))
         .map_err(|e| e.into_inner())
         .expect("the activation succeeds");
         results.push(serde_json::to_value(&result).expect("serializable result"));
+        assert!(
+            history_enabled(&ctx) == enabled,
+            "the history is enabled exactly when asked"
+        );
     }
     assert!(
         results.windows(2).all(|pair| pair[0] == pair[1]),
@@ -389,6 +398,44 @@ fn t40_7_tx_history_changes_nothing_and_does_not_abort() {
             serde_json::from_value::<SolanaCompatPlatformRequest>(body).is_err(),
             "a non-boolean parsed"
         );
+    }
+}
+
+/// T40.6C.1: the primary surface honors `tx_history` too, and a second activation of the same platform starts no
+/// second history (the decision is a pure rule, tested with the activation hook).
+#[test]
+fn t40_6c_1_the_primary_surface_honors_tx_history_and_a_reactivation_starts_none() {
+    use crate::solana_with_tokens_activation::starts_solana_history;
+    assert!(starts_solana_history(true, false), "asked and new: starts");
+    assert!(!starts_solana_history(false, false), "not asked: no history");
+    assert!(!starts_solana_history(true, true), "a re-activation starts none");
+    assert!(
+        !starts_solana_history(false, true),
+        "neither does it without the member"
+    );
+
+    let node = node(HEALTHY);
+    for (asked, enabled) in [(false, false), (true, true)] {
+        let ctx = self::ctx();
+        let request: EnablePlatformCoinWithTokensReq<SolanaWithTokensActivationRequest> =
+            serde_json::from_value(json!({ "ticker": "SOL", "confirmation_commitment": "finalized",
+                "client_urls": [node.url()], "spl_tokens_requests": [], "tx_history": asked }))
+            .expect("a well-formed request");
+        block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx.clone(), request))
+            .map_err(|e| e.into_inner())
+            .expect("the primary platform activates");
+        assert!(
+            history_enabled(&ctx) == enabled,
+            "the history is enabled exactly when asked"
+        );
+    }
+}
+
+/// Whether the registered platform `SOL` has its history enabled.
+fn history_enabled(ctx: &MmArc) -> bool {
+    match block_on(lp_coinfind_or_err(ctx, "SOL")).expect("registered") {
+        MmCoinEnum::SolanaCoin(coin) => coin.history.is_enabled(),
+        _ => panic!("not a Solana platform"),
     }
 }
 

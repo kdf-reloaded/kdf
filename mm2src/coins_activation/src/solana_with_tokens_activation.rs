@@ -14,8 +14,7 @@ use coins::solana::rpc_pool::solana_node_order;
 use coins::solana::spl::{TOKEN_2022_NOT_SUPPORTED, TOKEN_2022_PROGRAM_ID};
 use coins::solana::{solana_hd_derivation_path, solana_hd_secret, SolanaHdLayout};
 use coins::{coin_conf, solana_coin_with_node_order, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum,
-            PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE,
-            SOLANA_NOT_AVAILABLE};
+            PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken};
 use common::mm_number::BigDecimal;
 use crypto::{Bip44Chain, CryptoCtx, KeyPairPolicy};
 use futures::future::AbortHandle;
@@ -26,21 +25,11 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::HashMap;
 
-/// The `enable_solana_with_tokens` entry point.
-///
-/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` (Solana is postponed for the current beta) the request is
-/// refused with a `PlatformCoinCreationError` saying so, and nothing is registered. Otherwise it is the generic
-/// platform activation.
+/// The `enable_solana_with_tokens` entry point: the generic platform activation.
 pub async fn enable_solana_with_tokens(
     ctx: MmArc,
     req: EnablePlatformCoinWithTokensReq<SolanaWithTokensActivationRequest>,
 ) -> Result<SolanaWithTokensActivationResult, MmError<EnablePlatformCoinWithTokensError>> {
-    if !SOLANA_ACTIVATION_AVAILABLE {
-        return MmError::err(EnablePlatformCoinWithTokensError::PlatformCoinCreationError {
-            ticker: req.ticker,
-            error: SOLANA_NOT_AVAILABLE.to_owned(),
-        });
-    }
     enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req).await
 }
 
@@ -131,6 +120,9 @@ pub struct SolanaWithTokensActivationRequest {
     pub(crate) path_to_address: Option<Json>,
     #[serde(default)]
     pub(crate) priv_key_policy: Option<PrivKeyActivationPolicy>,
+    /// Whether the platform's transaction history runs (CRD ch.40 R40.6C.1). Default `false`.
+    #[serde(default)]
+    pub(crate) tx_history: bool,
 }
 
 fn creation_error(ticker: &str, error: impl Into<String>) -> MmError<SolanaWithTokensActivationError> {
@@ -193,8 +185,13 @@ fn hd_account_of(
 }
 
 impl TxHistory for SolanaWithTokensActivationRequest {
-    fn tx_history(&self) -> bool { false }
+    fn tx_history(&self) -> bool { self.tx_history }
 }
+
+/// Whether the activation starts the Solana history process: when `tx_history` is asked and the platform is newly
+/// activated. The re-activation of a passive platform starts none; the platform keeps the one it had (CRD ch.40
+/// R40.6C.1, ch.43 D43.1F.5 (a)).
+pub(crate) fn starts_solana_history(tx_history: bool, reactivation: bool) -> bool { tx_history && !reactivation }
 
 /// The `derivation_method` of the result (CRD ch.40 R40.1A.7): the full path under a global-HD login (the request
 /// was validated when the coin was built), `Iguana` under a single-key login and whenever the request asks for
@@ -339,6 +336,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
             KeyPairPolicy::Iguana => priv_key,
         };
         let node_order = solana_node_order(&ctx);
+        let tx_history = activation_request.tx_history;
         let platform_coin = solana_coin_with_node_order(
             &ticker,
             &platform_conf,
@@ -348,7 +346,27 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         )
         .await
         .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
+        // R40.6C.1: the history is enabled before the instance is registered, so no answer sees it half started; the
+        // writer itself starts in `on_platform_registered`.
+        if tx_history {
+            platform_coin.history.enable();
+        }
         Ok(platform_coin)
+    }
+
+    /// The Solana history needs no SQL store and also runs on the browser build, so it is started in
+    /// [`Self::on_platform_registered`] (CRD ch.40 R40.6C.1).
+    fn history_supported(&self) -> bool { false }
+
+    fn on_platform_registered(
+        ctx: &MmArc,
+        ticker: &str,
+        activation_request: &Self::ActivationRequest,
+        reactivation: bool,
+    ) {
+        if starts_solana_history(activation_request.tx_history, reactivation) {
+            coins::solana::spawn_platform_history(ctx, ticker);
+        }
     }
 
     fn record_token(&self, token: &MmCoinEnum) {
@@ -427,7 +445,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         _storage: impl TxHistoryStorage + 'static,
         _initial_balance: BigDecimal,
     ) -> AbortHandle {
-        // Solana has no transaction history yet (CRD ch.40 R40.6B.15) and `tx_history()` is `false`, so this is not
+        // The Solana history starts in `on_platform_registered` and `history_supported()` is `false`, so this is not
         // reached. Should that change, no task starts: the handle belongs to nothing and aborting it does nothing.
         let (abort_handle, _abort_registration) = AbortHandle::new_pair();
         abort_handle

@@ -87,6 +87,12 @@
 > `false`), so it still takes part in no trade (CRD ch.21 D6 and its status
 > note).
 
+> **Status (2026-11-22).** Solana can be activated again, as a wallet-only
+> coin family (`SOLANA_ACTIVATION_AVAILABLE` is removed, PR #475), so it
+> still takes part in no trade: every order and swap entry point refuses a
+> Solana coin or SPL token with the untradable-pair refusal (CRD ch.60
+> R60.6.5; ch.40 D40.4 and its status note). Item 6 and row P1 are unchanged.
+
 ## Work packages and merge order
 
 | # | Branch / PR | Content | Depends on |

@@ -289,6 +289,14 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
 > such coins on one shared EVM endpoint each cost that one read, as at the
 > reference designations R60.4.6 names (maintainer, 2026-10-28: no change).
 
+> **Pointer (2026-11-22).** [Chapter 39](39-zcash---z_coin-shielded-coin.md)
+> §39.11.5A, R39.11.5A.9, records what the reference does with a stored order
+> whose coin it would refuse in order building. The order is restored without
+> a tradability check, the maintenance pass of item 5 announces it once both
+> coins are active, and no such check runs at match time either. D39.11.5A.2
+> there holds the options for this project. The pointer is a Spec Reader
+> addition and passed the KDF Dirty Gate with that subsection on 2026-11-22.
+
 > **As-built note (2026-10-28, clean-side record).** The reconciliation of item 5
 > (`reconcile_missing_own_maker_orders`) reads without holding the order's lock
 > and applies under it. It copies the order's tickers under the lock and
