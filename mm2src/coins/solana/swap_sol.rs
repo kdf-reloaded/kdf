@@ -35,13 +35,16 @@ pub(crate) const PAYMENT_ACCOUNT_SPACE: usize = 9;
 /// The scale of a lamport amount (nine decimals).
 const LAMPORT_SCALE: i64 = 9;
 const GATE_RETRY_SECS: u64 = 15;
-/// The pages of a payment address's signatures the spend search reads at most; more is undetermined.
-const MAX_SIGNATURE_PAGES: usize = 20;
 /// The signatures a page asks for.
 const SIGNATURE_PAGE: usize = 1000;
 /// How long a validation tries again on an undetermined read, and how often (R40.6D.9).
 const VALIDATION_DEADLINE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// How long the taker's claim is retried (R40.6D.10; the chapter sets no figure).
+const CLAIM_RETRY: Duration = Duration::from_secs(3600);
+/// The maker's claim is sent only when the cluster's time is at least this many seconds before the lock time
+/// (R40.6D.10).
+const MAKER_CLAIM_MARGIN_SECS: u64 = 300;
 
 /// What the activation found about the swap program of the coin's cluster (R40.6D.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +60,8 @@ pub enum SwapProgramState {
 pub(crate) struct SwapTiming {
     pub(crate) poll: Duration,
     pub(crate) validation_deadline: Duration,
+    /// How long the taker's claim is retried while the payment account is not known to be gone.
+    pub(crate) claim_retry: Duration,
 }
 
 impl Default for SwapTiming {
@@ -64,6 +69,7 @@ impl Default for SwapTiming {
         SwapTiming {
             poll: POLL_INTERVAL,
             validation_deadline: VALIDATION_DEADLINE,
+            claim_retry: CLAIM_RETRY,
         }
     }
 }
@@ -87,6 +93,18 @@ impl Default for SolanaSwapConfig {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { mutex.lock().unwrap_or_else(|e| e.into_inner()) }
+
+/// Terms of a payment used to price a transaction; they never reach a sent transaction (the type exposes only the
+/// instructions that `fee_of` prices).
+struct PricingTerms(SolTerms);
+
+impl PricingTerms {
+    fn payment_instruction(&self, program: &Pubkey) -> Instruction { self.0.payment_instruction(program) }
+
+    fn spend_instruction(&self, program: &Pubkey) -> Instruction { self.0.spend_instruction(program, &[0u8; 32]) }
+
+    fn refund_instruction(&self, program: &Pubkey) -> Instruction { self.0.refund_instruction(program) }
+}
 
 /// A Solana wire transaction of a swap message (R40.6D.9): the bytes as they are sent and its first signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,6 +220,8 @@ enum PaymentView {
     NotFinal,
     /// The answer does not decode, or is another transaction.
     Unreadable,
+    /// The node's wire bytes for the signature are not the bytes the peer sent (R40.6D.9).
+    BytesDiffer,
     /// Included with an error.
     Failed,
     /// No instruction of the program is this payment.
@@ -219,15 +239,6 @@ enum Verdict {
     Valid,
     Invalid(String),
     Undetermined(String),
-}
-
-/// What a node's read of a payment address's history found (R40.6D.12). Two nodes' views must be equal.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SpendRead {
-    /// The newest successful claim (with the right secret) or refund of the payment, as wire bytes.
-    found: Option<(bool, Vec<u8>)>,
-    /// The payment account is gone at `finalized`.
-    account_gone: bool,
 }
 
 fn instruction_is_payment(ix: &super::swap_decode::ResolvedInstruction, program: &Pubkey, terms: &SolTerms) -> bool {
@@ -251,20 +262,27 @@ async fn read_view(node: &SolanaRpcClient, signature: &str) -> Result<SwapTxView
     decode_swap_tx(&answer, signature).map_err(|e| RpcError::transport("getTransaction", e))
 }
 
-/// The newest successful transaction of the payment address's history that `pick` accepts (R40.6D.12): signatures
-/// newest first, each transaction read once.
+/// The newest successful transaction of an address's history that `pick` accepts (R40.6D.12): signatures newest
+/// first, the listing read to its first EMPTY page (a short page does not end it) and without a page limit, each
+/// transaction read once. The listing ends at `until` (exclusive) when given. With `range` (`low`, `high`) only
+/// listed signatures whose slot lies between the two (inclusive) are read.
 async fn walk_history<T>(
     node: &SolanaRpcClient,
     address: &Pubkey,
+    until: Option<&str>,
+    range: Option<(u64, u64)>,
     pick: impl Fn(&SwapTxView) -> Option<T>,
 ) -> Result<Option<T>, RpcError> {
     let mut before: Option<String> = None;
-    for _ in 0..MAX_SIGNATURE_PAGES {
+    loop {
         let page = node
-            .get_signatures_for_address(address, before.as_deref(), SIGNATURE_PAGE)
+            .get_signatures_for_address_until(address, before.as_deref(), until, SIGNATURE_PAGE)
             .await?;
+        let Some(last) = page.last() else {
+            return Ok(None);
+        };
         for info in &page {
-            if info.err.is_some() {
+            if info.err.is_some() || range.is_some_and(|(low, high)| info.slot < low || info.slot > high) {
                 continue;
             }
             let view = read_view(node, &info.signature).await?;
@@ -275,20 +293,48 @@ async fn walk_history<T>(
                 return Ok(Some(found));
             }
         }
-        match page.last() {
-            Some(last) if page.len() >= SIGNATURE_PAGE => before = Some(last.signature.clone()),
-            _ => return Ok(None),
+        // A node that answers the same page again would never reach the empty page: a failed read.
+        if before.as_deref() == Some(last.signature.as_str()) {
+            return Err(RpcError::transport(
+                "getSignaturesForAddress",
+                "the listing does not advance",
+            ));
         }
+        before = Some(last.signature.clone());
     }
-    Err(RpcError::transport(
-        "getSignaturesForAddress",
-        "the history is longer than the search reads",
-    ))
 }
 
-async fn read_spend(node: &SolanaRpcClient, program: &Pubkey, terms: &SolTerms) -> Result<SpendRead, RpcError> {
+/// One node's read of the payment account at `finalized`: the slot it answered at and whether the account exists
+/// (R40.6D.12).
+async fn read_account_state(node: &SolanaRpcClient, payment: &Pubkey) -> Result<(u64, bool), RpcError> {
+    let (slot, account) = node.get_account_at_finalized(payment).await?;
+    Ok((slot, account.is_some()))
+}
+
+/// One node's read of the payment address's listing once the account is gone: only the signatures whose slot lies
+/// between `seen` (the last slot at which the account was seen; the payment transaction's own slot when none is
+/// recorded) and `gone` (the first slot at which it was found gone), both inclusive, are fetched, and the listing
+/// ends at the payment's own signature. The newest successful claim with the right secret, or refund, as wire bytes
+/// with `true` for a claim.
+async fn read_listing(
+    node: &SolanaRpcClient,
+    program: &Pubkey,
+    terms: &SolTerms,
+    payment_signature: &str,
+    seen: Option<u64>,
+    gone: u64,
+) -> Result<Option<(bool, Vec<u8>)>, RpcError> {
     let (payment, _) = terms.payment_address(program);
-    let found = walk_history(node, &payment, |view| {
+    let low = match seen {
+        Some(low) => low,
+        None => {
+            node.get_transaction_base64(payment_signature)
+                .await?
+                .ok_or_else(|| RpcError::transport("getTransaction", "the payment transaction is not served"))?
+                .slot
+        },
+    };
+    walk_history(node, &payment, Some(payment_signature), Some((low, gone)), |view| {
         view.instructions.iter().find_map(|ix| {
             if ix.program != *program || ix.accounts.get(2) != Some(&payment) {
                 return None;
@@ -302,15 +348,14 @@ async fn read_spend(node: &SolanaRpcClient, program: &Pubkey, terms: &SolTerms) 
             }
         })
     })
-    .await?;
-    let account_gone = node.get_account_info_finalized(&payment).await?.is_none();
-    Ok(SpendRead { found, account_gone })
+    .await
 }
 
 async fn read_payment_view(
     node: &SolanaRpcClient,
     program: &Pubkey,
     signature: &str,
+    peer_wire: &[u8],
     terms: &SolTerms,
 ) -> Result<PaymentView, RpcError> {
     let Some(answer) = node.get_transaction_base64(signature).await? else {
@@ -319,6 +364,9 @@ async fn read_payment_view(
     let Ok(view) = decode_swap_tx(&answer, signature) else {
         return Ok(PaymentView::Unreadable);
     };
+    if view.wire != peer_wire {
+        return Ok(PaymentView::BytesDiffer);
+    }
     if view.failed {
         return Ok(PaymentView::Failed);
     }
@@ -347,6 +395,9 @@ fn judge_payment(view: &PaymentView, program: &Pubkey, terms: &SolTerms) -> Verd
     match view {
         PaymentView::NotFinal => Verdict::Undetermined("the payment transaction is not final".to_owned()),
         PaymentView::Unreadable => Verdict::Invalid("the payment transaction could not be read".to_owned()),
+        PaymentView::BytesDiffer => {
+            Verdict::Invalid("the payment bytes are not the transaction the node has for the signature".to_owned())
+        },
         PaymentView::Failed => Verdict::Invalid("the payment transaction failed".to_owned()),
         PaymentView::NoMatchingInstruction => {
             Verdict::Invalid("the transaction holds no payment with the agreed terms".to_owned())
@@ -471,6 +522,15 @@ impl SolanaCoin {
         parse_swap_key(field).map_err(|e| e.into_inner().to_string())
     }
 
+    /// The counterparty's swap key from its field: a key equal to the coin's own is refused (R40.6D.5).
+    pub(crate) fn counterparty_key(&self, field: &[u8]) -> Result<Pubkey, String> {
+        let key = Self::other_key(field)?;
+        if key == self.my_pubkey() {
+            return Err("The counterparty's swap key is the coin's own key".to_owned());
+        }
+        Ok(key)
+    }
+
     /// `terms` of a payment whose wire bytes are at hand (not read from a node): the payment instruction of the
     /// program, checked against what the caller expects (R40.6D.10).
     fn terms_from_wire(
@@ -512,9 +572,12 @@ impl SolanaCoin {
         Ok(terms)
     }
 
-    /// Builds, signs and sends a transaction of `instructions` paid and signed by the coin's key (R40.6D.7). A send
-    /// that no node took keeps the signed transaction in the error.
-    async fn send_instructions(&self, instructions: Vec<Instruction>) -> Result<SolanaSwapTx, TransactionErr> {
+    /// Builds and signs a transaction of `instructions` paid and signed by the coin's key (R40.6D.7), with a recent
+    /// block hash of the node.
+    async fn sign_instructions(
+        &self,
+        instructions: &[Instruction],
+    ) -> Result<(Transaction, SolanaSwapTx), TransactionErr> {
         let plain = |e: String| TransactionErr::Plain(e);
         let hash = self
             .rpc()
@@ -522,15 +585,90 @@ impl SolanaCoin {
             .await
             .map_err(|e| plain(format!("{e}")))?;
         let payer = self.my_pubkey();
-        let message = Message::new_with_blockhash(&instructions, Some(&payer), &hash);
+        let message = Message::new_with_blockhash(instructions, Some(&payer), &hash);
         let mut tx = Transaction::new_unsigned(message);
         tx.try_sign(&[&self.key_pair], hash)
             .map_err(|_| plain("The transaction could not be signed".to_owned()))?;
         let swap_tx = SolanaSwapTx::from_signed(&tx).map_err(plain)?;
-        match crate::solana::solana_market_ops::send_signed(self, &tx).await {
+        Ok((tx, swap_tx))
+    }
+
+    /// Sends a signed transaction, preflight on. A send that no node took keeps the signed transaction in the error.
+    async fn broadcast(&self, tx: &Transaction, swap_tx: SolanaSwapTx) -> Result<SolanaSwapTx, TransactionErr> {
+        match crate::solana::solana_market_ops::send_signed(self, tx).await {
             Ok(_) => Ok(swap_tx),
             Err(e) => Err(TransactionErr::TxRecoverable(swap_tx.into(), e)),
         }
+    }
+
+    /// Builds, signs and sends a transaction of `instructions` paid and signed by the coin's key (R40.6D.7).
+    async fn send_instructions(&self, instructions: Vec<Instruction>) -> Result<SolanaSwapTx, TransactionErr> {
+        let (tx, swap_tx) = self.sign_instructions(&instructions).await?;
+        self.broadcast(&tx, swap_tx).await
+    }
+
+    /// Whether the node's simulation of the signed transaction succeeds. `Err`: the simulation could not be read.
+    async fn simulation_succeeds(&self, tx: &Transaction) -> Result<bool, String> {
+        let tx = tx.clone();
+        self.rpc()
+            .run(move |node| {
+                let tx = tx.clone();
+                async move { node.simulate_transaction(&tx).await }
+            })
+            .await
+            .map(|error| error.is_none())
+            .map_err(|e| format!("the simulation could not be read: {e}"))
+    }
+
+    /// The payment account at `finalized` by the evidence rule: `Ok(true)` present on both nodes (or the named one),
+    /// `Ok(false)` gone on both, `Err` undetermined.
+    async fn payment_account_present(&self, payment: &Pubkey) -> Result<bool, String> {
+        let payment = *payment;
+        let evidence = self.evidence_node();
+        let ((_, first), (_, second)) = self
+            .rpc()
+            .read_for_evidence(evidence.as_deref(), |node| async move {
+                read_account_state(&node, &payment).await
+            })
+            .await?;
+        if first == second {
+            Ok(first)
+        } else {
+            Err("two nodes disagree".to_owned())
+        }
+    }
+
+    /// The cluster's time (the block time of the latest finalized slot) as both evidence readings: with the named
+    /// node, one reading twice.
+    async fn cluster_time_readings(&self) -> Result<(u64, u64), String> {
+        let evidence = self.evidence_node();
+        self.rpc()
+            .read_for_evidence(evidence.as_deref(), |node| async move {
+                let slot = node.get_finalized_slot().await?;
+                let summary = node
+                    .get_block_summary(slot)
+                    .await?
+                    .ok_or_else(|| RpcError::transport("getBlock", "the finalized block is not served"))?;
+                summary
+                    .block_time
+                    .and_then(|time| u64::try_from(time).ok())
+                    .ok_or_else(|| RpcError::transport("getBlock", "the finalized block has no time"))
+            })
+            .await
+    }
+
+    /// The cluster's time for the refund gate (R40.6D.11): the EARLIER of the two readings; the gate opens only when
+    /// both readings have reached the lock time.
+    async fn cluster_time_for_refund(&self) -> Result<u64, String> {
+        let (first, second) = self.cluster_time_readings().await?;
+        Ok(first.min(second))
+    }
+
+    /// The cluster's time for the maker's claim margin (R40.6D.10 condition (c)): the LATER of the two readings; a
+    /// claim is sent only when both readings leave at least 300 s to the lock time.
+    async fn cluster_time_for_claim_margin(&self) -> Result<u64, String> {
+        let (first, second) = self.cluster_time_readings().await?;
+        Ok(first.max(second))
     }
 
     /// The payment of `terms` that is on the chain, as wire bytes: the first successful payment instruction of the
@@ -544,7 +682,7 @@ impl SolanaCoin {
         let (program, terms) = (*program, *terms);
         self.rpc()
             .run(move |node| async move {
-                walk_history(&node, &address, |view| {
+                walk_history(&node, &address, None, None, |view| {
                     view.instructions
                         .iter()
                         .any(|ix| instruction_is_payment(ix, &program, &terms))
@@ -582,15 +720,37 @@ impl SolanaCoin {
         }
         Ok(SolTerms {
             sender: mine,
-            receiver: Self::other_key(other_field)?,
+            receiver: self.counterparty_key(other_field)?,
             secret_hash: hash_32(secret_hash)?,
             lock_time: u64::from(time_lock),
             amount: exact_lamports(amount)?,
         })
     }
 
-    /// Claims the payment in `payment_wire` with `secret` (R40.6D.10); this node is the receiver.
-    pub(crate) async fn claim_payment(
+    /// The terms of the payment in `payment_wire` for a claim by this node, and the secret checked against its hash.
+    fn claim_terms(
+        &self,
+        program: &Pubkey,
+        payment_wire: &[u8],
+        time_lock: u32,
+        sender_field: &[u8],
+        secret: &[u8],
+    ) -> Result<(SolTerms, [u8; 32]), String> {
+        let sender = self.counterparty_key(sender_field)?;
+        let me = self.my_pubkey();
+        let terms = self.terms_from_wire(program, payment_wire, Some(&sender), Some(&me), time_lock)?;
+        let secret = secret_32(secret)?;
+        if sha256(&secret).to_vec() != terms.secret_hash {
+            return Err("The secret is not the payment's".to_owned());
+        }
+        Ok((terms, secret))
+    }
+
+    /// The maker's claim of the taker's payment, made with the maker's own secret (R40.6D.10). It is sent only when
+    /// (a) the payment account is present at `finalized` by the evidence rule, (c) the cluster's time is at least
+    /// 300 s before the lock time, and (b) the node's simulation of the claim succeeds; otherwise nothing is sent and
+    /// the error names the condition.
+    pub(crate) async fn claim_as_maker(
         &self,
         payment_wire: &[u8],
         time_lock: u32,
@@ -599,17 +759,97 @@ impl SolanaCoin {
     ) -> Result<SolanaSwapTx, TransactionErr> {
         let plain = TransactionErr::Plain;
         let program = self.require_program().map_err(plain)?;
-        let sender = Self::other_key(sender_field).map_err(plain)?;
-        let me = self.my_pubkey();
-        let terms = self
-            .terms_from_wire(&program, payment_wire, Some(&sender), Some(&me), time_lock)
+        let (terms, secret) = self
+            .claim_terms(&program, payment_wire, time_lock, sender_field, secret)
             .map_err(plain)?;
-        let secret = secret_32(secret).map_err(plain)?;
-        if sha256(&secret).to_vec() != terms.secret_hash {
-            return Err(plain("The secret is not the payment's".to_owned()));
+        let (payment, _) = terms.payment_address(&program);
+        match self.payment_account_present(&payment).await {
+            Ok(true) => {},
+            Ok(false) => {
+                return Err(plain(
+                    "Claim not sent, condition (a): the payment account is not present".to_owned(),
+                ))
+            },
+            Err(e) => {
+                return Err(plain(format!(
+                    "Claim not sent, condition (a): the payment account could not be established: {e}"
+                )))
+            },
         }
-        self.send_instructions(vec![terms.spend_instruction(&program, &secret)])
-            .await
+        match self.cluster_time_for_claim_margin().await {
+            Ok(time)
+                if terms
+                    .lock_time
+                    .checked_sub(time)
+                    .is_some_and(|left| left >= MAKER_CLAIM_MARGIN_SECS) => {},
+            Ok(_) => {
+                return Err(plain(
+                    "Claim not sent, condition (c): fewer than 300 seconds remain to the lock time".to_owned(),
+                ))
+            },
+            Err(e) => {
+                return Err(plain(format!(
+                    "Claim not sent, condition (c): the cluster time could not be established: {e}"
+                )))
+            },
+        }
+        let (tx, swap_tx) = self
+            .sign_instructions(&[terms.spend_instruction(&program, &secret)])
+            .await?;
+        match self.simulation_succeeds(&tx).await {
+            Ok(true) => {},
+            Ok(false) => {
+                return Err(plain(
+                    "Claim not sent, condition (b): the simulation of the claim failed".to_owned(),
+                ))
+            },
+            Err(e) => return Err(plain(format!("Claim not sent, condition (b): {e}"))),
+        }
+        self.broadcast(&tx, swap_tx).await
+    }
+
+    /// The taker's claim of the maker's payment, made with a secret already on the chain (R40.6D.10). It is sent
+    /// unless the payment account is known to be gone at `finalized` (an undetermined read does not hold it back),
+    /// after a successful simulation, before or after the lock time, and retried until the account is known to be
+    /// gone or the retry time is out.
+    pub(crate) async fn claim_as_taker(
+        &self,
+        payment_wire: &[u8],
+        time_lock: u32,
+        sender_field: &[u8],
+        secret: &[u8],
+    ) -> Result<SolanaSwapTx, TransactionErr> {
+        let plain = TransactionErr::Plain;
+        let program = self.require_program().map_err(plain)?;
+        let (terms, secret) = self
+            .claim_terms(&program, payment_wire, time_lock, sender_field, secret)
+            .map_err(plain)?;
+        let (payment, _) = terms.payment_address(&program);
+        let timing = self.timing();
+        let deadline = now_ms().saturating_add(u64::try_from(timing.claim_retry.as_millis()).unwrap_or(u64::MAX));
+        loop {
+            if let Ok(false) = self.payment_account_present(&payment).await {
+                return Err(plain("Claim not sent: the payment account is gone".to_owned()));
+            }
+            let attempt = match self
+                .sign_instructions(&[terms.spend_instruction(&program, &secret)])
+                .await
+            {
+                Err(e) => e,
+                Ok((tx, swap_tx)) => match self.simulation_succeeds(&tx).await {
+                    Ok(true) => match self.broadcast(&tx, swap_tx).await {
+                        Ok(sent) => return Ok(sent),
+                        Err(e) => e,
+                    },
+                    Ok(false) => plain("Claim not sent: the simulation of the claim failed".to_owned()),
+                    Err(e) => plain(format!("Claim not sent: {e}")),
+                },
+            };
+            if now_ms() >= deadline {
+                return Err(attempt);
+            }
+            Timer::sleep(timing.poll.as_secs_f64()).await;
+        }
     }
 
     /// Refunds this node's own payment in `payment_wire` (R40.6D.10); this node is the sender. The refund gate is the
@@ -623,7 +863,7 @@ impl SolanaCoin {
     ) -> Result<SolanaSwapTx, TransactionErr> {
         let plain = TransactionErr::Plain;
         let program = self.require_program().map_err(plain)?;
-        let receiver = Self::other_key(receiver_field).map_err(plain)?;
+        let receiver = self.counterparty_key(receiver_field).map_err(plain)?;
         let me = self.my_pubkey();
         let terms = self
             .terms_from_wire(&program, payment_wire, Some(&me), Some(&receiver), time_lock)
@@ -643,13 +883,19 @@ impl SolanaCoin {
         time_lock: u32,
         sender_field: &[u8],
         receiver_field: &[u8],
+        counterparty_is_sender: bool,
         secret_hash: &[u8],
         amount: &BigDecimal,
     ) -> Result<(), String> {
         let program = self.require_program()?;
+        let (sender, receiver) = if counterparty_is_sender {
+            (self.counterparty_key(sender_field)?, Self::other_key(receiver_field)?)
+        } else {
+            (Self::other_key(sender_field)?, self.counterparty_key(receiver_field)?)
+        };
         let terms = SolTerms {
-            sender: Self::other_key(sender_field)?,
-            receiver: Self::other_key(receiver_field)?,
+            sender,
+            receiver,
             secret_hash: hash_32(secret_hash)?,
             lock_time: u64::from(time_lock),
             amount: exact_lamports(amount)?,
@@ -665,7 +911,7 @@ impl SolanaCoin {
                     .rpc()
                     .read_for_evidence(evidence.as_deref(), |node| {
                         let signature = signature.clone();
-                        async move { read_payment_view(&node, &program, &signature, &terms).await }
+                        async move { read_payment_view(&node, &program, &signature, wire, &terms).await }
                     })
                     .await;
                 match reads {
@@ -688,6 +934,9 @@ impl SolanaCoin {
     }
 
     /// The spend or refund of the payment of `terms` (R40.6D.12), with the two-node agreement of R40.6D.16.
+    /// `payment_signature` is the payment's own signature (the listing's end and, without `seen`, the lower slot
+    /// bound); `seen` is the last slot at which the payment account was seen. Besides the answer, the slot at which
+    /// the account was seen when it still exists (the next call's `seen`).
     ///
     /// # Errors
     ///
@@ -696,32 +945,54 @@ impl SolanaCoin {
         &self,
         program: &Pubkey,
         terms: &SolTerms,
-    ) -> Result<Option<FoundSwapTxSpend>, String> {
+        payment_signature: &str,
+        seen: Option<u64>,
+    ) -> Result<(Option<FoundSwapTxSpend>, Option<u64>), String> {
         let (program, terms) = (*program, *terms);
+        let (payment, _) = terms.payment_address(&program);
         let evidence = self.evidence_node();
+        let undetermined = |e: String| format!("The spend of the payment could not be established: {e}");
+        // Round one, the account: while it exists (two nodes or the named node agreeing) the answer is "not spent"
+        // and no listed transaction is read.
+        let ((slot_a, present_a), (slot_b, present_b)) = self
+            .rpc()
+            .read_for_evidence(evidence.as_deref(), |node| async move {
+                read_account_state(&node, &payment).await
+            })
+            .await
+            .map_err(undetermined)?;
+        if present_a != present_b {
+            return Err(undetermined("two nodes disagree".to_owned()));
+        }
+        if present_a {
+            // The lower of the two slots is a slot at which both nodes saw the account.
+            return Ok((None, Some(slot_a.min(slot_b))));
+        }
+        // Round two, the listing, once the account is gone: the later of the two slots is the upper bound.
+        let gone = slot_a.max(slot_b);
         let (first, second) = self
             .rpc()
             .read_for_evidence(evidence.as_deref(), |node| async move {
-                read_spend(&node, &program, &terms).await
+                read_listing(&node, &program, &terms, payment_signature, seen, gone).await
             })
             .await
-            .map_err(|e| format!("The spend of the payment could not be established: {e}"))?;
+            .map_err(undetermined)?;
         if first != second {
-            return Err("The spend of the payment could not be established: two nodes disagree".to_owned());
+            return Err(undetermined("two nodes disagree".to_owned()));
         }
         match first {
-            SpendRead {
-                found: Some((claimed, wire)),
-                account_gone: true,
-            } => {
+            Some((claimed, wire)) => {
                 let tx = SolanaSwapTx::from_wire(&wire)?;
-                Ok(Some(if claimed {
-                    FoundSwapTxSpend::Spent(tx.into())
-                } else {
-                    FoundSwapTxSpend::Refunded(tx.into())
-                }))
+                Ok((
+                    Some(if claimed {
+                        FoundSwapTxSpend::Spent(tx.into())
+                    } else {
+                        FoundSwapTxSpend::Refunded(tx.into())
+                    }),
+                    None,
+                ))
             },
-            _ => Ok(None),
+            None => Ok((None, None)),
         }
     }
 
@@ -737,12 +1008,27 @@ impl SolanaCoin {
         if hash_32(secret_hash)? != terms.secret_hash {
             return Err("The secret hash is not the payment's".to_owned());
         }
-        self.search_spend(&program, &terms).await
+        let signature = first_signature_of(payment_wire)?;
+        self.search_spend(&program, &terms, &signature, None)
+            .await
+            .map(|(found, _)| found)
     }
 
-    /// Waits for the spend of the payment in `payment_wire` until `wait_until` (seconds).
+    /// Waits for the spend of the payment in `payment_wire` until `wait_until` (seconds), reading the payment account
+    /// at `finalized` on every round, keeping the last slot at which it was seen, and fetching only the signatures
+    /// between that slot and the slot at which it is gone (R40.6D.12).
+    ///
+    /// The answer is the transaction that spent the payment, whether a claim or a refund, exactly as the other coins'
+    /// `wait_for_tx_spend` answers whatever spent the output. The only legacy caller is the taker's wait for the spend
+    /// of its own payment (`taker_swap.rs`, `wait_for_tx_spend`): it passes the answer to `spend_secret`, and a spend
+    /// that carries no secret is an extraction error, which ends the swap (`TakerPaymentWaitForSpendFailed`, then
+    /// `Finish`) by the exit of CRD ch.51 R30 as the status note of 2026-11-22 under R30 states for the wait for the
+    /// spend. A refunded payment has nothing left to refund, so the exit is the right one; ending the wait with an
+    /// error instead would send the taker into a refund of a payment that is already gone. The maker's looks go
+    /// through `search_for_swap_tx_spend_*`, which tell a claim from a refund.
     pub(crate) async fn wait_for_spend(&self, payment_wire: &[u8], wait_until: u64) -> Result<TransactionEnum, String> {
         let program = self.require_program()?;
+        let payment_signature = first_signature_of(payment_wire)?;
         let instructions = top_level_instructions(payment_wire)?;
         let terms = instructions
             .iter()
@@ -762,11 +1048,13 @@ impl SolanaCoin {
                 _ => None,
             })
             .ok_or_else(|| "The transaction holds no payment of the swap program".to_owned())?;
+        let mut seen: Option<u64> = None;
         let poll = self.timing().poll;
         loop {
-            match self.search_spend(&program, &terms).await {
-                Ok(Some(FoundSwapTxSpend::Spent(tx) | FoundSwapTxSpend::Refunded(tx))) => return Ok(tx),
-                Ok(None) | Err(_) => {},
+            match self.search_spend(&program, &terms, &payment_signature, seen).await {
+                Ok((Some(FoundSwapTxSpend::Spent(tx) | FoundSwapTxSpend::Refunded(tx)), _)) => return Ok(tx),
+                Ok((None, seen_now)) => seen = seen_now.or(seen),
+                Err(_) => {},
             }
             if now_ms() / 1000 > wait_until {
                 return Err("Waited too long for the spend of the payment".to_owned());
@@ -827,31 +1115,9 @@ impl SolanaCoin {
     /// The refund gate (R40.6D.11): the cluster's time, the block time of the latest finalized slot, read from two
     /// nodes (R40.6D.16). Refund only when both times have reached the lock; otherwise wait. A failed read waits.
     pub(crate) async fn refund_gate(&self, locktime: u64) -> CanRefundHtlc {
-        let evidence = self.evidence_node();
-        let reads = self
-            .rpc()
-            .read_for_evidence(evidence.as_deref(), |node| async move {
-                let slot = node.get_finalized_slot().await?;
-                let summary = node
-                    .get_block_summary(slot)
-                    .await?
-                    .ok_or_else(|| RpcError::transport("getBlock", "the finalized block is not served"))?;
-                let time = summary
-                    .block_time
-                    .and_then(|time| u64::try_from(time).ok())
-                    .ok_or_else(|| RpcError::transport("getBlock", "the finalized block has no time"))?;
-                Ok(time)
-            })
-            .await;
-        match reads {
-            Ok((first, second)) => {
-                let earlier = first.min(second);
-                if earlier >= locktime {
-                    CanRefundHtlc::CanRefundNow
-                } else {
-                    CanRefundHtlc::HaveToWait(locktime - earlier)
-                }
-            },
+        match self.cluster_time_for_refund().await {
+            Ok(time) if time >= locktime => CanRefundHtlc::CanRefundNow,
+            Ok(time) => CanRefundHtlc::HaveToWait(locktime - time),
             Err(_) => CanRefundHtlc::HaveToWait(GATE_RETRY_SECS),
         }
     }
@@ -925,7 +1191,7 @@ impl SolanaCoin {
             32 => Pubkey::new_from_array(
                 <[u8; 32]>::try_from(args.expected_sender).map_err(|_| "The sender key is not 32 bytes".to_owned())?,
             ),
-            _ => Self::other_key(args.expected_sender)?,
+            _ => self.counterparty_key(args.expected_sender)?,
         };
         let destination = Pubkey::new_from_array(
             <[u8; 32]>::try_from(args.fee_addr).map_err(|_| "The fee address is not 32 bytes".to_owned())?,
@@ -989,15 +1255,15 @@ impl SolanaCoin {
             .map_err(|e| format!("The fee could not be read: {e}"))
     }
 
-    /// A payment, claim or refund of dummy terms of this coin's key, for pricing.
-    fn dummy_terms(&self) -> SolTerms {
-        SolTerms {
+    /// Terms for pricing only: the type has no way into a sent transaction.
+    fn pricing_terms(&self) -> PricingTerms {
+        PricingTerms(SolTerms {
             sender: self.my_pubkey(),
-            receiver: self.my_pubkey(),
+            receiver: Pubkey::new_from_array([1u8; 32]),
             secret_hash: [0u8; 32],
             lock_time: 0,
             amount: 1,
-        }
+        })
     }
 
     fn sol_fee(&self, lamports: u64) -> TradeFee {
@@ -1011,7 +1277,7 @@ impl SolanaCoin {
     /// The payment's fee in lamports and the rent it deposits.
     async fn payment_fee_and_rent(&self, program: &Pubkey) -> Result<(u64, u64), String> {
         let fee = self
-            .fee_of(vec![self.dummy_terms().payment_instruction(program)])
+            .fee_of(vec![self.pricing_terms().payment_instruction(program)])
             .await?;
         let rent = self
             .rpc()
@@ -1031,8 +1297,9 @@ impl SolanaCoin {
     /// The receiver's fee answer (R40.6D.14): the claim's transaction fee.
     pub(crate) async fn sol_receiver_trade_fee(&self) -> Result<TradeFee, String> {
         let program = self.require_program()?;
-        let terms = self.dummy_terms();
-        let fee = self.fee_of(vec![terms.spend_instruction(&program, &[0u8; 32])]).await?;
+        let fee = self
+            .fee_of(vec![self.pricing_terms().spend_instruction(&program)])
+            .await?;
         Ok(self.sol_fee(fee))
     }
 
@@ -1054,13 +1321,13 @@ impl SolanaCoin {
         let overflow = || "The admission figure overflows".to_owned();
         match side {
             SwapSide::Receiver => {
-                self.fee_of(vec![self.dummy_terms().spend_instruction(&program, &[0u8; 32])])
+                self.fee_of(vec![self.pricing_terms().spend_instruction(&program)])
                     .await
             },
             SwapSide::Sender { taker_fee } => {
                 let (fee, rent) = self.payment_fee_and_rent(&program).await?;
                 let refund = self
-                    .fee_of(vec![self.dummy_terms().refund_instruction(&program)])
+                    .fee_of(vec![self.pricing_terms().refund_instruction(&program)])
                     .await?;
                 let mut total = fee
                     .checked_add(rent)

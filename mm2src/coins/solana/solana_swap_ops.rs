@@ -74,7 +74,7 @@ impl SwapOps for SolanaCoin {
         let coin = self.clone();
         let (payment, taker_pub, secret) = (taker_payment_tx.to_vec(), taker_pub.to_vec(), secret.to_vec());
         let fut = async move {
-            coin.claim_payment(&payment, time_lock, &taker_pub, &secret)
+            coin.claim_as_maker(&payment, time_lock, &taker_pub, &secret)
                 .await
                 .map(TransactionEnum::from)
         };
@@ -93,7 +93,7 @@ impl SwapOps for SolanaCoin {
         let coin = self.clone();
         let (payment, maker_pub, secret) = (maker_payment_tx.to_vec(), maker_pub.to_vec(), secret.to_vec());
         let fut = async move {
-            coin.claim_payment(&payment, time_lock, &maker_pub, &secret)
+            coin.claim_as_taker(&payment, time_lock, &maker_pub, &secret)
                 .await
                 .map(TransactionEnum::from)
         };
@@ -169,6 +169,7 @@ impl SwapOps for SolanaCoin {
                 input.time_lock,
                 &input.maker_pub,
                 &input.taker_pub,
+                true,
                 &input.secret_hash,
                 &input.amount,
             )
@@ -186,6 +187,7 @@ impl SwapOps for SolanaCoin {
                 input.time_lock,
                 &input.taker_pub,
                 &input.maker_pub,
+                true,
                 &input.secret_hash,
                 &input.amount,
             )
@@ -313,7 +315,14 @@ impl SwapOps for SolanaCoin {
     }
 
     fn validate_other_pubkey(&self, raw_pubkey: &[u8]) -> MmResult<(), crate::HtlcPubkeyError> {
-        swap_sol::parse_swap_key(raw_pubkey).map(|_| ())
+        let key = swap_sol::parse_swap_key(raw_pubkey)?;
+        if key == self.key_pair.pubkey() {
+            return MmError::err(crate::HtlcPubkeyError::NotOnCurve(
+                "ed25519",
+                "the key is the coin's own key".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// A volume that is not a whole number of lamports is refused (CRD ch.40 R40.6D.6).

@@ -206,13 +206,25 @@ struct World {
     block_time: Option<i64>,
     block_height: u64,
     fail: HashSet<String>,
+    /// The slot the node answers account reads at (its finalized slot).
+    context_slot: u64,
+    /// The most entries a listing page holds, whatever `limit` asks; 0 is no cap.
+    page_cap: usize,
+    /// The error `simulateTransaction` answers; `None`: the simulation succeeds.
+    simulate_err: Option<Json>,
 }
+
+/// A slot after every captured transaction.
+const FINALIZED_SLOT: u64 = 523_686_000;
+/// The slot of an entry whose transaction the fixtures do not hold (between the payment and the finalized slot).
+const MID_SLOT: u64 = 523_685_300;
 
 fn fixture_world() -> Arc<Mutex<World>> {
     let fx = fixtures();
     let mut world = World {
         block_time: Some(1_795_000_000),
         block_height: 1_000_000,
+        context_slot: FINALIZED_SLOT,
         ..World::default()
     };
     for (signature, answer) in fx["transactions"].as_object().expect("transactions") {
@@ -222,7 +234,14 @@ fn fixture_world() -> Arc<Mutex<World>> {
 }
 
 fn sig_entry(signature: &str, failed: bool) -> Json {
-    json!({ "signature": signature, "slot": 1, "err": if failed { json!({"InstructionError": [0, "Custom"]}) } else { Json::Null }, "blockTime": 1 })
+    let slot = fixtures()["transactions"][signature]["slot"]
+        .as_u64()
+        .unwrap_or(MID_SLOT);
+    sig_entry_at(signature, slot, failed)
+}
+
+fn sig_entry_at(signature: &str, slot: u64, failed: bool) -> Json {
+    json!({ "signature": signature, "slot": slot, "err": if failed { json!({"InstructionError": [0, "Custom"]}) } else { Json::Null }, "blockTime": 1 })
 }
 
 fn node_over(world: Arc<Mutex<World>>) -> Stub {
@@ -240,13 +259,29 @@ fn node_over(world: Arc<Mutex<World>>) -> Stub {
                     .cloned()
                     .unwrap_or(Json::Null),
             ),
-            "getSignaturesForAddress" => Answer::Result(Json::Array(
-                world
+            "getSignaturesForAddress" => {
+                let mut list = world
                     .signatures
                     .get(params[0].as_str().unwrap_or_default())
                     .cloned()
-                    .unwrap_or_default(),
-            )),
+                    .unwrap_or_default();
+                if let Some(until) = params[1]["until"].as_str() {
+                    if let Some(at) = list.iter().position(|e| e["signature"] == until) {
+                        list.truncate(at);
+                    }
+                }
+                if let Some(before) = params[1]["before"].as_str() {
+                    if let Some(at) = list.iter().position(|e| e["signature"] == before) {
+                        list = list.split_off(at + 1);
+                    }
+                }
+                let mut limit = params[1]["limit"].as_u64().unwrap_or(1000) as usize;
+                if world.page_cap > 0 {
+                    limit = limit.min(world.page_cap);
+                }
+                list.truncate(limit);
+                Answer::Result(Json::Array(list))
+            },
             "getAccountInfo" => {
                 let value = match world.accounts.get(params[0].as_str().unwrap_or_default()) {
                     None => Json::Null,
@@ -259,7 +294,7 @@ fn node_over(world: Arc<Mutex<World>>) -> Stub {
                             "data": [base64::encode(&data), "base64"], "rentEpoch": 0, "space": acct.data.len() })
                     },
                 };
-                Answer::Result(json!({ "context": { "slot": 1 }, "value": value }))
+                Answer::Result(json!({ "context": { "slot": world.context_slot }, "value": value }))
             },
             "getMinimumBalanceForRentExemption" => {
                 Answer::Result(json!((128 + params[0].as_u64().unwrap_or_default()) * RENT_PER_BYTE))
@@ -271,6 +306,9 @@ fn node_over(world: Arc<Mutex<World>>) -> Stub {
             },
             "getLatestBlockhash" => Answer::Result(json!({ "context": { "slot": 1 },
                 "value": { "blockhash": "11111111111111111111111111111111", "lastValidBlockHeight": 100 } })),
+            "simulateTransaction" => {
+                Answer::Result(json!({ "context": { "slot": 1 }, "value": { "err": world.simulate_err, "logs": [] } }))
+            },
             "getFeeForMessage" => Answer::Result(json!({ "context": { "slot": 1 }, "value": 5000 })),
             "sendTransaction" => {
                 let wire = base64::decode(params[0].as_str().unwrap_or_default()).unwrap_or_default();
@@ -288,6 +326,7 @@ fn quick() -> SwapTiming {
     SwapTiming {
         poll: Duration::from_millis(10),
         validation_deadline: Duration::from_millis(250),
+        claim_retry: Duration::from_millis(250),
     }
 }
 
@@ -610,7 +649,15 @@ fn t40_6d_4_the_wire_form_of_the_key() {
         wire[..32] == me.to_bytes() && wire[32] == 0,
         "the 32-byte key then one zero byte"
     );
-    assert!(coin.validate_other_pubkey(&wire).is_ok(), "the own form is accepted");
+    assert!(
+        coin.validate_other_pubkey(&wire).is_err(),
+        "the own key is not a counterparty's"
+    );
+    let other = generate_key_pair_from_iguana_seed("another party".to_owned()).pubkey();
+    assert!(
+        coin.validate_other_pubkey(&swap_key_field(&other)).is_ok(),
+        "another party's wire form is accepted"
+    );
     assert!(parse_swap_key(&wire).expect("parses") == me, "the key is read back");
 }
 
@@ -907,30 +954,39 @@ fn t40_6d_7_not_final_failed_missing_account_and_short_vault_are_refused() {
 }
 
 #[test]
-fn t40_6d_7_only_the_nodes_transaction_counts_not_the_peers_bytes() {
+fn t40_6d_7_a_doctored_body_under_a_true_signature_is_refused() {
     let (_, stub, world, terms) = valid_world();
     let second = node_over(world.clone());
     let coin = coin_over(vec![stub.url.clone(), second.url.clone()]);
-    // Altered: the peer's bytes keep the first signature but carry another instruction data byte; the node's own
-    // transaction for that signature is the captured one, and it is what counts.
+    let validate_bytes = |peer: Vec<u8>| {
+        block_on(
+            coin.validate_maker_payment(ValidatePaymentInput {
+                payment_tx: peer,
+                time_lock: terms.lock_time as u32,
+                taker_pub: field(&terms.receiver),
+                maker_pub: field(&terms.sender),
+                secret_hash: terms.secret_hash.to_vec(),
+                amount: lamports(terms.amount),
+                swap_contract_address: None,
+                try_spv_proof_until: 0,
+                confirmations: 1,
+            })
+            .compat(),
+        )
+    };
+    assert!(
+        validate_bytes(wire_of(PAYMENT_1)).is_ok(),
+        "the node's own bytes are valid"
+    );
+    // Altered: the peer's bytes keep the first signature but carry another instruction data byte; the node's
+    // transaction for that signature is the captured one, and the bytes differ from it.
     let mut peer = wire_of(PAYMENT_1);
     let last = peer.len() - 1;
     peer[last] ^= 0xff;
-    let result = block_on(
-        coin.validate_maker_payment(ValidatePaymentInput {
-            payment_tx: peer,
-            time_lock: terms.lock_time as u32,
-            taker_pub: field(&terms.receiver),
-            maker_pub: field(&terms.sender),
-            secret_hash: terms.secret_hash.to_vec(),
-            amount: lamports(terms.amount),
-            swap_contract_address: None,
-            try_spv_proof_until: 0,
-            confirmations: 1,
-        })
-        .compat(),
+    assert!(
+        validate_bytes(peer).is_err(),
+        "bytes that differ from the node's for the signature are refused"
     );
-    assert!(result.is_ok(), "the node's transaction for the signature decides");
 }
 
 #[test]
@@ -1160,11 +1216,12 @@ fn t40_6d_9_a_wrong_secret_a_failed_claim_and_look_alikes_are_none() {
         .expect("world")
         .signatures
         .insert(address.to_string(), vec![sig_entry(CLAIM_1, false)]);
-    let found = block_on(coin.search_spend(&program(), &other_amount)).expect("determined");
+    let (found, _) = block_on(coin.search_spend(&program(), &other_amount, PAYMENT_1, None)).expect("determined");
     assert!(found.is_none(), "a claim of another payment address is neither");
 
     // An instruction of another program with the same data and accounts.
-    let found = block_on(coin.search_spend(&key("11111111111111111111111111111112"), &terms)).expect("determined");
+    let (found, _) = block_on(coin.search_spend(&key("11111111111111111111111111111112"), &terms, PAYMENT_1, None))
+        .expect("determined");
     assert!(
         found.is_none(),
         "a look-alike instruction of another program is neither"
@@ -1203,7 +1260,7 @@ fn t40_6d_9_a_claim_that_is_an_inner_instruction_gives_the_secret() {
     // addresses (readonly).
     let program_index = message.account_keys.len();
     let answer = json!({
-        "slot": 1, "blockTime": 1,
+        "slot": MID_SLOT, "blockTime": 1,
         "transaction": [base64::encode(&wire), "base64"],
         "meta": { "err": null, "fee": 5000, "preBalances": vec![0u64; program_index + 1],
             "postBalances": vec![0u64; program_index + 1],
@@ -1421,7 +1478,7 @@ fn validate_fee_of(
     block_on(
         coin.validate_fee(ValidateFeeArgs {
             fee_tx: &tx,
-            expected_sender: &swap_key_field(&coin.key_pair.pubkey()),
+            expected_sender: &swap_key_field(&generate_key_pair_from_iguana_seed("a taker".to_owned()).pubkey()),
             fee_addr: &FEE_ADDRESS,
             dex_fee: &dex_fee,
             min_block_number: min_block,
@@ -1434,7 +1491,7 @@ fn validate_fee_of(
 #[test]
 fn t40_6d_10_the_fee_validation_checks_amount_sender_destination_memo_and_height() {
     let (coin, _stub, world) = one_node_coin();
-    let payer = generate_key_pair_from_iguana_seed("solana swap tests".to_owned());
+    let payer = generate_key_pair_from_iguana_seed("a taker".to_owned());
     let to = Pubkey::new_from_array(FEE_ADDRESS);
     let good = || fee_answer(&payer, &to, 7_800_000, UUID_TEXT, false);
     assert!(
@@ -1599,7 +1656,7 @@ fn t40_6d_13_two_agreeing_nodes_a_disagreement_and_one_answer() {
         .signatures
         .insert(PAYMENT_ADDRESS_1.to_owned(), vec![sig_entry(CLAIM_1, false)]);
     assert!(
-        block_on(coin.search_spend(&program(), &terms)).is_err(),
+        block_on(coin.search_spend(&program(), &terms, PAYMENT_1, None)).is_err(),
         "the search is undetermined on one answer"
     );
 }
@@ -1748,15 +1805,15 @@ fn t40_6d_9_the_transaction_type_round_trips_and_the_spend_wait_returns_the_clai
     assert!(found.tx_hex() == wire_of(CLAIM_1), "the claim transaction is returned");
 }
 
-#[test]
-fn t40_6d_5_a_claim_and_a_refund_are_built_from_the_payment_and_signed_by_the_coin() {
-    // The coin is the receiver of a hand-built payment (the captured receiver's key is not the coin's).
-    let (coin, stub, _) = one_node_coin();
+/// A payment to this coin by the captured sender, as unsigned wire bytes (hand-built: the captured receiver's key is
+/// not the coin's), with the captured claim's secret.
+fn claim_fixture(coin: &SolanaCoin) -> (SolTerms, Vec<u8>, [u8; 32]) {
     let me = coin.key_pair.pubkey();
+    let captured = captured_terms(PAYMENT_1);
     let terms = SolTerms {
-        sender: captured_terms(PAYMENT_1).sender,
+        sender: captured.sender,
         receiver: me,
-        secret_hash: captured_terms(PAYMENT_1).secret_hash,
+        secret_hash: captured.secret_hash,
         lock_time: 1_795_021_693,
         amount: 1_000_000,
     };
@@ -1767,60 +1824,278 @@ fn t40_6d_5_a_claim_and_a_refund_are_built_from_the_payment_and_signed_by_the_co
     let wire = bincode::serialize(&payment_tx).expect("serializes");
     let (_, claim_data) = captured_instruction(CLAIM_1);
     let secret: [u8; 32] = claim_data[8..40].try_into().expect("a secret");
-    let claimed = block_on(
-        coin.send_taker_spends_maker_payment(
-            &wire,
-            terms.lock_time as u32,
-            &field(&terms.sender),
-            &secret,
-            &[],
-            &None,
-        )
-        .compat(),
-    )
-    .expect("sent");
-    let TransactionEnum::SolanaTransaction(claimed) = claimed else {
-        panic!("a Solana transaction")
-    };
-    let instructions = top_level_instructions(&claimed.tx_hex()).expect("decodes");
-    assert!(
-        instructions
-            .iter()
-            .any(|ix| ix.data == terms.spend_instruction(&program(), &secret).data),
-        "the claim instruction is sent"
+    (terms, wire, secret)
+}
+
+fn claim_world(coin_terms: &SolTerms) -> Arc<Mutex<World>> {
+    let world = fixture_world();
+    let (address, _) = coin_terms.payment_address(&program());
+    paid(
+        &world,
+        &address.to_string(),
+        coin_terms.amount + rent(PAYMENT_ACCOUNT_SPACE),
     );
+    world
+}
+
+fn maker_claim(
+    coin: &SolanaCoin,
+    terms: &SolTerms,
+    wire: &[u8],
+    secret: &[u8; 32],
+) -> Result<TransactionEnum, TransactionErr> {
+    block_on(
+        coin.send_maker_spends_taker_payment(wire, terms.lock_time as u32, &field(&terms.sender), secret, &[], &None)
+            .compat(),
+    )
+}
+
+fn taker_claim(
+    coin: &SolanaCoin,
+    terms: &SolTerms,
+    wire: &[u8],
+    secret: &[u8; 32],
+) -> Result<TransactionEnum, TransactionErr> {
+    block_on(
+        coin.send_taker_spends_maker_payment(wire, terms.lock_time as u32, &field(&terms.sender), secret, &[], &None)
+            .compat(),
+    )
+}
+
+fn error_text(result: Result<TransactionEnum, TransactionErr>) -> String {
+    match result {
+        Err(e) => e.get_plain_text_format(),
+        Ok(_) => panic!("an error"),
+    }
+}
+
+#[test]
+fn t40_6d_10_both_claims_are_sent_with_the_claim_instruction_when_all_is_well() {
+    let (probe, _stub, _) = one_node_coin();
+    let (terms, wire, secret) = claim_fixture(&probe);
+    let world = claim_world(&terms);
+    let (coin, a, _b) = two_agreeing(&world);
+    for claim in [maker_claim, taker_claim] {
+        let before = a.count("sendTransaction");
+        let sent = claim(&coin, &terms, &wire, &secret).expect("sent");
+        let TransactionEnum::SolanaTransaction(sent) = sent else {
+            panic!("a Solana transaction")
+        };
+        assert!(
+            top_level_instructions(&sent.tx_hex())
+                .expect("decodes")
+                .iter()
+                .any(|ix| ix.data == terms.spend_instruction(&program(), &secret).data),
+            "the claim instruction is sent"
+        );
+        assert!(a.count("sendTransaction") == before + 1, "one transaction was sent");
+    }
+    assert!(a.count("simulateTransaction") == 2, "each claim was simulated first");
     // A secret that does not hash to the payment's hash is not sent.
-    let before = stub.count("sendTransaction");
+    let before = a.count("sendTransaction");
     assert!(
-        block_on(
-            coin.send_taker_spends_maker_payment(
-                &wire,
-                terms.lock_time as u32,
-                &field(&terms.sender),
-                &[3u8; 32],
-                &[],
-                &None
-            )
-            .compat()
-        )
-        .is_err(),
+        maker_claim(&coin, &terms, &wire, &[3u8; 32]).is_err(),
         "a wrong secret is refused"
     );
-    assert!(stub.count("sendTransaction") == before, "nothing was sent");
+    assert!(a.count("sendTransaction") == before, "nothing was sent");
+}
 
-    // The refund is of the coin's own payment.
-    let mine = SolTerms {
-        sender: me,
-        receiver: terms.receiver,
+#[test]
+fn t40_6d_10_the_makers_claim_is_not_sent_without_its_three_conditions() {
+    let (probe, _stub, _) = one_node_coin();
+    let (terms, wire, secret) = claim_fixture(&probe);
+
+    // (a) The account is gone.
+    let world = claim_world(&terms);
+    let (address, _) = terms.payment_address(&program());
+    world.lock().expect("world").accounts.remove(&address.to_string());
+    let (coin, a, _b) = two_agreeing(&world);
+    let text = error_text(maker_claim(&coin, &terms, &wire, &secret));
+    assert!(text.contains("(a)"), "the error names condition (a)");
+    assert!(
+        a.count("sendTransaction") == 0,
+        "nothing was sent with the account gone"
+    );
+
+    // (a) The read is undetermined (one node only): the maker's claim is held back.
+    let world = claim_world(&terms);
+    let node = node_over(world.clone());
+    let one = coin_over(vec![node.url.clone()]);
+    assert!(
+        error_text(maker_claim(&one, &terms, &wire, &secret)).contains("(a)"),
+        "an undetermined read holds it back"
+    );
+    assert!(node.count("sendTransaction") == 0, "nothing was sent");
+
+    // (b) The simulation fails.
+    let world = claim_world(&terms);
+    world.lock().expect("world").simulate_err = Some(json!({ "InstructionError": [0, "Custom"] }));
+    let (coin, a, _b) = two_agreeing(&world);
+    assert!(
+        error_text(maker_claim(&coin, &terms, &wire, &secret)).contains("(b)"),
+        "the error names condition (b)"
+    );
+    assert!(
+        a.count("simulateTransaction") == 1 && a.count("sendTransaction") == 0,
+        "simulated, not sent"
+    );
+
+    // (c) Fewer than 300 seconds to the lock: 299 refuses, 300 sends.
+    let world = claim_world(&terms);
+    world.lock().expect("world").block_time = Some(terms.lock_time as i64 - 299);
+    let (coin, a, _b) = two_agreeing(&world);
+    assert!(
+        error_text(maker_claim(&coin, &terms, &wire, &secret)).contains("(c)"),
+        "the error names condition (c)"
+    );
+    assert!(a.count("sendTransaction") == 0, "nothing was sent under 300 seconds");
+    world.lock().expect("world").block_time = Some(terms.lock_time as i64 - 300);
+    assert!(
+        maker_claim(&coin, &terms, &wire, &secret).is_ok(),
+        "300 seconds before the lock is enough"
+    );
+    world.lock().expect("world").block_time = Some(terms.lock_time as i64 + 1);
+    assert!(
+        maker_claim(&coin, &terms, &wire, &secret).is_err(),
+        "after the lock the maker's claim is not sent"
+    );
+}
+
+/// A world whose finalized block time is `time` and whose payment account of `terms` exists.
+fn timed_claim_world(terms: &SolTerms, time: i64) -> Arc<Mutex<World>> {
+    let world = claim_world(terms);
+    world.lock().expect("world").block_time = Some(time);
+    world
+}
+
+#[test]
+fn t40_6d_10_the_claim_margin_uses_the_later_reading_and_the_gate_the_earlier() {
+    let (probe, _stub, _) = one_node_coin();
+    let (terms, wire, secret) = claim_fixture(&probe);
+    let t = 1_795_000_000i64;
+    // Two nodes read T and T + 10; the lock is T + 305: the later reading leaves 295 s.
+    let lock = (t + 305) as u64;
+    let terms = SolTerms {
+        lock_time: lock,
         ..terms
     };
-    let own = Transaction::new_unsigned(Message::new(&[mine.payment_instruction(&program())], Some(&me)));
+    let payment_tx = Transaction::new_unsigned(Message::new(
+        &[terms.payment_instruction(&program())],
+        Some(&terms.sender),
+    ));
+    let wire = {
+        let _ = wire;
+        bincode::serialize(&payment_tx).expect("serializes")
+    };
+    let (coin, a, _b) = two_node_coin(timed_claim_world(&terms, t), timed_claim_world(&terms, t + 10));
+    assert!(
+        error_text(maker_claim(&coin, &terms, &wire, &secret)).contains("(c)"),
+        "the later reading leaves 295 s, so condition (c) refuses"
+    );
+    assert!(a.count("sendTransaction") == 0, "nothing was sent");
+    // The refund gate waits from the earlier reading T.
+    assert!(
+        matches!(gate(&coin, lock), CanRefundHtlc::HaveToWait(305)),
+        "the gate's waiting time is computed from T"
+    );
+    // With the lock one second later both readings leave 300 s or more.
+    let terms = SolTerms {
+        lock_time: lock + 5,
+        ..terms
+    };
+    let payment_tx = Transaction::new_unsigned(Message::new(
+        &[terms.payment_instruction(&program())],
+        Some(&terms.sender),
+    ));
+    let wire = bincode::serialize(&payment_tx).expect("serializes");
+    let (coin, _a, _b) = two_node_coin(timed_claim_world(&terms, t), timed_claim_world(&terms, t + 10));
+    assert!(
+        maker_claim(&coin, &terms, &wire, &secret).is_ok(),
+        "300 s from the later reading is enough"
+    );
+}
+
+#[test]
+fn t40_6d_10_the_takers_claim_goes_out_unless_the_account_is_known_to_be_gone() {
+    let (probe, _stub, _) = one_node_coin();
+    let (terms, wire, secret) = claim_fixture(&probe);
+
+    // After the lock time, with the account present: sent.
+    let world = claim_world(&terms);
+    world.lock().expect("world").block_time = Some(terms.lock_time as i64 + 10_000);
+    let (coin, a, _b) = two_agreeing(&world);
+    assert!(
+        taker_claim(&coin, &terms, &wire, &secret).is_ok(),
+        "no 300 second condition applies"
+    );
+    assert!(a.count("sendTransaction") == 1, "one transaction was sent");
+
+    // An undetermined read (one node only) does not hold it back.
+    let world = claim_world(&terms);
+    let node = node_over(world.clone());
+    let one = coin_over(vec![node.url.clone()]);
+    assert!(
+        taker_claim(&one, &terms, &wire, &secret).is_ok(),
+        "an undetermined read still lets the claim go out"
+    );
+    assert!(node.count("sendTransaction") == 1, "one transaction was sent");
+
+    // A disagreement (one node has the account, the other does not) does not hold it back either.
+    let present = claim_world(&terms);
+    let gone = fixture_world();
+    let (coin, a, _b) = two_node_coin(present, gone);
+    assert!(
+        taker_claim(&coin, &terms, &wire, &secret).is_ok(),
+        "a disagreement still lets the claim go out"
+    );
+    assert!(a.count("sendTransaction") == 1, "one transaction was sent");
+
+    // Known to be gone (both nodes): nothing is sent.
+    let world = fixture_world();
+    let (coin, a, _b) = two_agreeing(&world);
+    assert!(
+        error_text(taker_claim(&coin, &terms, &wire, &secret)).contains("gone"),
+        "the error says the account is gone"
+    );
+    assert!(
+        a.count("sendTransaction") == 0,
+        "nothing was sent with the account gone"
+    );
+}
+
+#[test]
+fn t40_6d_10_the_takers_claim_is_retried_after_a_failed_simulation() {
+    let (probe, _stub, _) = one_node_coin();
+    let (terms, wire, secret) = claim_fixture(&probe);
+    let world = claim_world(&terms);
+    world.lock().expect("world").simulate_err = Some(json!({ "InstructionError": [0, "Custom"] }));
+    let (coin, a, _b) = two_agreeing(&world);
+    assert!(
+        taker_claim(&coin, &terms, &wire, &secret).is_err(),
+        "a claim that never simulates is not sent"
+    );
+    assert!(a.count("simulateTransaction") > 1, "it was retried");
+    assert!(a.count("sendTransaction") == 0, "nothing was sent");
+}
+
+#[test]
+fn t40_6d_5_a_refund_is_built_from_the_payment_and_signed_by_the_coin() {
+    let (coin, _stub, _) = one_node_coin();
+    let me = coin.key_pair.pubkey();
+    let terms = SolTerms {
+        sender: me,
+        receiver: captured_terms(PAYMENT_1).receiver,
+        secret_hash: captured_terms(PAYMENT_1).secret_hash,
+        lock_time: 1_795_021_693,
+        amount: 1_000_000,
+    };
+    let own = Transaction::new_unsigned(Message::new(&[terms.payment_instruction(&program())], Some(&me)));
     let refunded = block_on(
         coin.send_maker_refunds_payment(
             &bincode::serialize(&own).expect("serializes"),
-            mine.lock_time as u32,
-            &field(&mine.receiver),
-            &mine.secret_hash,
+            terms.lock_time as u32,
+            &field(&terms.receiver),
+            &terms.secret_hash,
             &[],
             &None,
         )
@@ -1834,7 +2109,170 @@ fn t40_6d_5_a_claim_and_a_refund_are_built_from_the_payment_and_signed_by_the_co
         top_level_instructions(&refunded.tx_hex())
             .expect("decodes")
             .iter()
-            .any(|ix| ix.data == mine.refund_instruction(&program()).data),
+            .any(|ix| ix.data == terms.refund_instruction(&program()).data),
         "the refund instruction is sent"
+    );
+}
+
+#[test]
+fn t40_6d_5_a_counterparty_key_equal_to_the_coins_own_is_refused() {
+    let (coin, stub, _) = one_node_coin();
+    let own = field(&coin.key_pair.pubkey());
+    assert!(
+        matches!(
+            coin.validate_other_pubkey(&own).map_err(|e| e.into_inner()),
+            Err(HtlcPubkeyError::NotOnCurve(..))
+        ),
+        "the negotiation refuses the own key"
+    );
+    let result = block_on(
+        coin.send_maker_payment(1_795_000_000, &own, &own, &[7u8; 32], lamports(1_000_000), &None)
+            .compat(),
+    );
+    assert!(result.is_err(), "a payment to the own key is not sent");
+    let (terms, wire, secret) = claim_fixture(&coin);
+    let own_sender = SolTerms {
+        sender: coin.key_pair.pubkey(),
+        ..terms
+    };
+    assert!(
+        maker_claim(&coin, &own_sender, &wire, &secret).is_err(),
+        "a claim of an own-key payment is refused"
+    );
+    assert!(stub.count("sendTransaction") == 0, "nothing was sent");
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// R40.6D.12: the bounded spend search
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Hand-built listing entries of transactions the fixtures do not hold, at `slot`.
+fn unrelated(count: usize, slot: u64, tag: &str) -> Vec<Json> {
+    (0..count)
+        .map(|i| sig_entry_at(&format!("{tag}{i}"), slot + i as u64, false))
+        .collect()
+}
+
+#[test]
+fn t40_6d_9_a_listing_with_many_unrelated_entries_still_gives_the_secret_and_only_the_range_is_fetched() {
+    let world = fixture_world();
+    let terms = captured_terms(PAYMENT_1);
+    // Hand-built entries around the captured claim: 30 newer than the account-gone slot and 30 older than the
+    // payment's slot. The payment's own entry ends the listing.
+    let mut list = unrelated(30, FINALIZED_SLOT + 10, "newer");
+    list.push(sig_entry(CLAIM_1, false));
+    list.extend(unrelated(30, 1_000, "older"));
+    list.push(sig_entry(PAYMENT_1, false));
+    world
+        .lock()
+        .expect("world")
+        .signatures
+        .insert(PAYMENT_ADDRESS_1.to_owned(), list);
+    let (coin, a, b) = two_agreeing(&world);
+    match spend_search(&coin, PAYMENT_1, &terms).expect("determined") {
+        Some(FoundSwapTxSpend::Spent(tx)) => assert!(tx.tx_hex() == wire_of(CLAIM_1), "the claim is found"),
+        _ => panic!("a claim is found"),
+    }
+    for node in [&a, &b] {
+        let fetched: HashSet<String> = node
+            .params_of("getTransaction")
+            .iter()
+            .map(|p| p[0].as_str().expect("a signature").to_owned())
+            .collect();
+        assert!(
+            fetched == HashSet::from([PAYMENT_1.to_owned(), CLAIM_1.to_owned()]),
+            "only the payment (its slot is the lower bound) and the in-range claim are fetched"
+        );
+        assert!(
+            node.params_of("getSignaturesForAddress")
+                .iter()
+                .all(|p| p[1]["until"] == PAYMENT_1),
+            "the listing ends at the payment's own signature"
+        );
+    }
+}
+
+#[test]
+fn t40_6d_9_a_node_serving_short_pages_is_read_to_its_empty_page() {
+    let world = fixture_world();
+    let terms = captured_terms(PAYMENT_1);
+    // Three entries out of range, two per page: pages of 2, 1 and then the empty one. No claim is in the listing.
+    let list = unrelated(3, FINALIZED_SLOT + 10, "newer");
+    let last = list[2]["signature"].as_str().expect("a signature").to_owned();
+    world
+        .lock()
+        .expect("world")
+        .signatures
+        .insert(PAYMENT_ADDRESS_1.to_owned(), list);
+    world.lock().expect("world").page_cap = 2;
+    let (coin, a, _b) = two_agreeing(&world);
+    assert!(
+        spend_search(&coin, PAYMENT_1, &terms).expect("determined").is_none(),
+        "no claim is in the listing"
+    );
+    let calls = a.params_of("getSignaturesForAddress");
+    assert!(calls.len() == 3, "the short page of one entry did not end the listing");
+    assert!(
+        calls[2][1]["before"] == last.as_str(),
+        "the last call asked for what follows the last entry"
+    );
+}
+
+#[test]
+fn t40_6d_9_the_wait_keeps_the_slot_the_account_was_seen_at_as_the_lower_bound() {
+    let world = fixture_world();
+    let terms = captured_terms(PAYMENT_1);
+    let wire = wire_of(PAYMENT_1);
+    // The account exists, so no history is read and no transaction is fetched.
+    paid(&world, PAYMENT_ADDRESS_1, terms.amount + rent(PAYMENT_ACCOUNT_SPACE));
+    let (coin, a, _b) = two_agreeing(&world);
+    assert!(
+        block_on(coin.wait_for_tx_spend(&wire, now_ms() / 1000, 0, &None).compat()).is_err(),
+        "an unspent payment ends the wait at its deadline"
+    );
+    assert!(
+        a.count("getSignaturesForAddress") == 0 && a.count("getTransaction") == 0,
+        "nothing is listed or fetched"
+    );
+    // The account goes; the claim is found in [seen, gone] and the payment's own transaction is not fetched.
+    world.lock().expect("world").accounts.remove(PAYMENT_ADDRESS_1);
+    world.lock().expect("world").context_slot = FINALIZED_SLOT + 50;
+    world
+        .lock()
+        .expect("world")
+        .signatures
+        .insert(PAYMENT_ADDRESS_1.to_owned(), vec![
+            sig_entry(CLAIM_1, false),
+            sig_entry(PAYMENT_1, false),
+        ]);
+    let found = block_on(coin.wait_for_tx_spend(&wire, now_ms() / 1000 + 30, 0, &None).compat()).expect("the claim");
+    assert!(found.tx_hex() == wire_of(CLAIM_1), "the claim transaction is returned");
+}
+
+#[test]
+fn t40_6d_9_the_wait_answers_with_a_refund_when_the_payment_was_refunded() {
+    let world = fixture_world();
+    world
+        .lock()
+        .expect("world")
+        .signatures
+        .insert(PAYMENT_ADDRESS_2.to_owned(), vec![
+            sig_entry(REFUND_2, false),
+            sig_entry(PAYMENT_2, false),
+        ]);
+    let (coin, _a, _b) = two_agreeing(&world);
+    let found = block_on(
+        coin.wait_for_tx_spend(&wire_of(PAYMENT_2), now_ms() / 1000 + 30, 0, &None)
+            .compat(),
+    )
+    .expect("the refund");
+    assert!(
+        found.tx_hex() == wire_of(REFUND_2),
+        "the spend that is a refund is returned, as the other coins do"
+    );
+    assert!(
+        coin.extract_secret(&captured_terms(PAYMENT_2).secret_hash, &found.tx_hex())
+            .is_err(),
+        "it carries no secret, so the taker's extraction ends the swap"
     );
 }

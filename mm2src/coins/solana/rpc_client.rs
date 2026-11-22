@@ -284,6 +284,21 @@ impl SolanaRpcClient {
         Signature::from_str(&raw).map_err(|e| RpcError::decode("sendTransaction", e.to_string(), raw.as_bytes()))
     }
 
+    /// `simulateTransaction` of the signed transaction `tx` (CRD ch.40 R40.6D.10): `None` when the simulation
+    /// succeeds, the node's error value when it fails.
+    pub async fn simulate_transaction(&self, tx: &Transaction) -> Result<Option<Json>, RpcError> {
+        let serialised =
+            bincode::serialize(tx).map_err(|e| RpcError::decode("simulateTransaction", e.to_string(), &[]))?;
+        let encoded = base64::encode(&serialised);
+        let resp: ContextResponse<SimulationValue> = self
+            .call(
+                "simulateTransaction",
+                self.params(vec![json!(encoded)], encoding_config("base64"), "commitment"),
+            )
+            .await?;
+        Ok(resp.value.err)
+    }
+
     /// `getTokenAccountsByOwner` — list of `{ pubkey, account }` for
     /// every token account owned by `owner` matching `filter`.
     pub async fn get_token_accounts_by_owner(
@@ -361,11 +376,27 @@ impl SolanaRpcClient {
         before: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SignatureInfo>, RpcError> {
+        self.get_signatures_for_address_until(address, before, None, limit)
+            .await
+    }
+
+    /// [`Self::get_signatures_for_address`] that ends at the signature `until` (exclusive): the listing holds only
+    /// what is newer than it (CRD ch.40 R40.6D.12).
+    pub async fn get_signatures_for_address_until(
+        &self,
+        address: &Pubkey,
+        before: Option<&str>,
+        until: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SignatureInfo>, RpcError> {
         let mut config = Map::new();
         config.insert("limit".to_owned(), json!(limit));
         config.insert("commitment".to_owned(), json!("finalized"));
         if let Some(before) = before {
             config.insert("before".to_owned(), json!(before));
+        }
+        if let Some(until) = until {
+            config.insert("until".to_owned(), json!(until));
         }
         self.call(
             "getSignaturesForAddress",
@@ -390,6 +421,12 @@ impl SolanaRpcClient {
     /// `getAccountInfo` at commitment `finalized` (whatever the client's own level is), encoding `base64` (CRD ch.40
     /// R40.6D.2, R40.6D.9): the whole account, or `None` when it does not exist.
     pub async fn get_account_info_finalized(&self, address: &Pubkey) -> Result<Option<FullAccount>, RpcError> {
+        Ok(self.account_info_finalized(address, None).await?.1)
+    }
+
+    /// [`Self::get_account_info_finalized`] with the slot the node answered at (its `context.slot`): the slot at
+    /// which the account was seen, or at which it was found gone (CRD ch.40 R40.6D.12).
+    pub async fn get_account_at_finalized(&self, address: &Pubkey) -> Result<(u64, Option<FullAccount>), RpcError> {
         self.account_info_finalized(address, None).await
     }
 
@@ -400,14 +437,14 @@ impl SolanaRpcClient {
         address: &Pubkey,
         length: usize,
     ) -> Result<Option<FullAccount>, RpcError> {
-        self.account_info_finalized(address, Some(length)).await
+        Ok(self.account_info_finalized(address, Some(length)).await?.1)
     }
 
     async fn account_info_finalized(
         &self,
         address: &Pubkey,
         slice: Option<usize>,
-    ) -> Result<Option<FullAccount>, RpcError> {
+    ) -> Result<(u64, Option<FullAccount>), RpcError> {
         let mut config = encoding_config("base64");
         config.insert("commitment".to_owned(), json!("finalized"));
         if let Some(length) = slice {
@@ -419,7 +456,14 @@ impl SolanaRpcClient {
                 Json::Array(vec![json!(address.to_string()), Json::Object(config)]),
             )
             .await?;
-        let Some(value) = resp.value else { return Ok(None) };
+        let slot = resp
+            .context
+            .as_ref()
+            .and_then(|context| context["slot"].as_u64())
+            .ok_or_else(|| RpcError::decode("getAccountInfo", "the answer has no slot", &[]))?;
+        let Some(value) = resp.value else {
+            return Ok((slot, None));
+        };
         let owner = Pubkey::from_str(&value.owner)
             .map_err(|e| RpcError::decode("getAccountInfo", format!("{e:?}"), value.owner.as_bytes()))?;
         let (encoded, encoding) = value.data;
@@ -432,12 +476,15 @@ impl SolanaRpcClient {
         }
         let data = base64::decode(&encoded)
             .map_err(|_| RpcError::decode("getAccountInfo", "the account data is not base64", &[]))?;
-        Ok(Some(FullAccount {
-            lamports: value.lamports,
-            owner,
-            executable: value.executable,
-            data,
-        }))
+        Ok((
+            slot,
+            Some(FullAccount {
+                lamports: value.lamports,
+                owner,
+                executable: value.executable,
+                data,
+            }),
+        ))
     }
 
     /// `getSlot` at commitment `finalized`: the slot of the latest finalized block (CRD ch.40 R40.6D.11).
@@ -534,6 +581,13 @@ pub struct FullAccount {
     pub owner: Pubkey,
     pub executable: bool,
     pub data: Vec<u8>,
+}
+
+/// The member of a `simulateTransaction` value that is read.
+#[derive(Debug, Deserialize)]
+struct SimulationValue {
+    #[serde(default)]
+    err: Option<Json>,
 }
 
 /// The one member of a `getAccountInfo` value that `get_account_owner` reads.
