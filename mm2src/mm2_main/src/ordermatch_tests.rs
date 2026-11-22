@@ -8073,6 +8073,173 @@ mod tendermint_saved_orders {
 
         std::fs::remove_dir_all(&dbdir).ok();
     }
+
+    /// The coins configuration of the startup tests with a Lightning coin, the Solana platform coin and one token
+    /// in each of the two token forms added. The entries are read for their `protocol.type` only.
+    fn conf_with_untradable_families() -> Json {
+        let mut coins_conf = conf();
+        coins_conf.as_array_mut().unwrap().extend([
+            json::json!({"coin":"DOC-lightning","mm2":1,"decimals":11,"protocol":{"type":"LIGHTNING","protocol_data":{
+                "platform":"DOC","network":"testnet","confirmations":{"inbound":{"default":3},"outbound":{"default":3}}}}}),
+            json::json!({"coin":"SOL","mm2":1,"protocol":{"type":"SOLANA","protocol_data":{}}}),
+            json::json!({"coin":"USDC-SOL","mm2":1,"protocol":{"type":"SOLANATOKEN","protocol_data":{
+                "platform":"SOL","decimals":6,"mint_address":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "program_id":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}}),
+            json::json!({"coin":"USDC-SPL","mm2":1,"protocol":{"type":"SPLTOKEN","protocol_data":{
+                "platform":"SOL","token_contract_address":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "decimals":6}}}),
+        ]);
+        coins_conf
+    }
+
+    /// Saves the given orders, runs the kick-start and checks that only the `plain` DOC/MARTY orders are restored
+    /// and left in the storage. Returns the context for further checks.
+    fn kick_start_keeps_only_plain(
+        dbdir: &std::path::Path,
+        makers: &[&MakerOrder],
+        takers: &[&TakerOrder],
+        plain: &MakerOrder,
+        plain_taker: &TakerOrder,
+    ) -> MmArc {
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json::json!({ "coins": conf_with_untradable_families(), "dbdir": dbdir.to_str().unwrap() }))
+            .into_mm_arc();
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+        for order in makers.iter().copied().chain([plain]) {
+            block_on(save_my_new_maker_order(ctx.clone(), order)).unwrap();
+        }
+        for order in takers.iter().copied().chain([plain_taker]) {
+            block_on(save_my_new_taker_order(ctx.clone(), order)).unwrap();
+        }
+
+        let coins = block_on(orders_kick_start(&ctx)).unwrap();
+
+        // The coins needed for the kick-start come from the kept orders alone.
+        assert_eq!(
+            coins,
+            ["DOC", "MARTY"].iter().map(|c| c.to_string()).collect::<HashSet<_>>()
+        );
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let loaded = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
+        assert_eq!(loaded.keys().copied().collect::<Vec<_>>(), vec![plain.uuid]);
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert_eq!(taker_orders.keys().copied().collect::<Vec<_>>(), vec![
+            plain_taker.request.uuid
+        ]);
+        drop(taker_orders);
+
+        // Only the kept orders are left in the storage.
+        let storage = MyOrdersStorage::new(ctx.clone());
+        let saved: Vec<_> = block_on(storage.load_active_maker_orders())
+            .unwrap()
+            .into_iter()
+            .map(|o| o.uuid)
+            .collect();
+        assert_eq!(saved, vec![plain.uuid]);
+        let saved: Vec<_> = block_on(storage.load_active_taker_orders())
+            .unwrap()
+            .into_iter()
+            .map(|o| o.request.uuid)
+            .collect();
+        assert_eq!(saved, vec![plain_taker.request.uuid]);
+        ctx
+    }
+
+    /// CRD ch.60 R60.2.3, R60.6.5: a saved maker or taker order that names a Lightning coin (by the coins-config
+    /// protocol, on either side) is cancelled at startup, as order creation refuses the pair; an unrelated order
+    /// is kept.
+    #[test]
+    fn saved_orders_with_a_lightning_coin_are_cancelled_at_startup() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-lightning-saved-orders-{}", Uuid::new_v4()));
+        let lightning_base = maker("DOC-lightning", "MARTY");
+        let lightning_rel = maker("MARTY", "DOC-lightning");
+        let lightning_taker_base = taker("DOC-lightning", "MARTY");
+        let lightning_taker_rel = taker("MARTY", "DOC-lightning");
+        let plain = maker("DOC", "MARTY");
+        let plain_taker = taker("DOC", "MARTY");
+        let ctx = kick_start_keeps_only_plain(
+            &dbdir,
+            &[&lightning_base, &lightning_rel],
+            &[&lightning_taker_base, &lightning_taker_rel],
+            &plain,
+            &plain_taker,
+        );
+
+        // The log line names the order, the pair and the family; a kept order produces none.
+        assert_eq!(
+            swaps_off_order_cancel_message(&ctx, "maker", &lightning_base.uuid, "DOC-lightning", "MARTY").unwrap(),
+            format!(
+                "Cancelled saved maker order {} (DOC-lightning/MARTY): Lightning swaps are not available in this build",
+                lightning_base.uuid
+            )
+        );
+        assert_eq!(
+            swaps_off_order_cancel_message(
+                &ctx,
+                "taker",
+                &lightning_taker_rel.request.uuid,
+                "MARTY",
+                "DOC-lightning"
+            )
+            .unwrap(),
+            format!(
+                "Cancelled saved taker order {} (MARTY/DOC-lightning): Lightning swaps are not available in this build",
+                lightning_taker_rel.request.uuid
+            )
+        );
+        assert!(swaps_off_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
+
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+
+    /// CRD ch.60 R60.2.3, R60.6.5: a saved maker or taker order that names the Solana platform coin or a Solana
+    /// token of either configuration form (by the coins-config protocol, on either side) is cancelled at startup,
+    /// as order creation refuses the pair; an unrelated order is kept.
+    #[test]
+    fn saved_orders_with_a_solana_coin_are_cancelled_at_startup() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-solana-saved-orders-{}", Uuid::new_v4()));
+        let sol_base = maker("SOL", "DOC");
+        let sol_rel = maker("DOC", "SOL");
+        let token_base = maker("USDC-SOL", "DOC");
+        let spl_rel = maker("DOC", "USDC-SPL");
+        let sol_taker = taker("MARTY", "SOL");
+        let token_taker = taker("DOC", "USDC-SOL");
+        let spl_taker = taker("USDC-SPL", "DOC");
+        let plain = maker("DOC", "MARTY");
+        let plain_taker = taker("DOC", "MARTY");
+        let ctx = kick_start_keeps_only_plain(
+            &dbdir,
+            &[&sol_base, &sol_rel, &token_base, &spl_rel],
+            &[&sol_taker, &token_taker, &spl_taker],
+            &plain,
+            &plain_taker,
+        );
+
+        // The log line names the order, the pair and the family, one family name for the platform coin and both
+        // token forms; a kept order produces none.
+        for (base, rel) in [
+            ("SOL", "DOC"),
+            ("DOC", "SOL"),
+            ("USDC-SOL", "DOC"),
+            ("DOC", "USDC-SOL"),
+            ("USDC-SPL", "DOC"),
+            ("DOC", "USDC-SPL"),
+        ] {
+            for kind in ["maker", "taker"] {
+                assert_eq!(
+                    swaps_off_order_cancel_message(&ctx, kind, &plain.uuid, base, rel).unwrap(),
+                    format!(
+                        "Cancelled saved {kind} order {} ({base}/{rel}): Solana swaps are not available in this build",
+                        plain.uuid
+                    )
+                );
+            }
+        }
+        assert!(swaps_off_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
+
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
 }
 
 // CRD ch.32 R-T3b tests: queue order under concurrency (T-T4) and reads that never run ahead of

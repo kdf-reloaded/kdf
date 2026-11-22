@@ -526,6 +526,20 @@ Solana request shall terminate abnormally.
 > places also refuse a pair whose swap key and paying key do not agree
 > ([chapter 05](05-hd-wallet-support.md) §5.12B R36–R38).
 
+> *Status note (2026-11-22), saved orders at startup (clean-side, not
+> corpus-sourced).* The refusal of R60.2.3 and of this rule also covers an
+> order saved earlier. At startup Reloaded cancels, with a log line, a
+> saved maker or taker order that names a Lightning coin, the Solana
+> platform coin or a Solana token on either side, instead of restoring it
+> to the order book, for the same reason as the refusal at order creation:
+> the pair cannot trade, so every match of the restored order would fail.
+> No coin is active at that moment, so the coin's coins-config protocol
+> type decides: `LIGHTNING` for Lightning; `SOLANA`, `SPLTOKEN` and
+> `SOLANATOKEN` for Solana. These two families have no build switch and
+> are cancelled unconditionally; saved Tendermint and TRON orders are
+> cancelled the same way while their swaps are switched off
+> ([Chapter 21](21-tron-integration.md), the status note at R21.10B.9).
+
 **R60.6.6** *Minimum transaction amount is frozen parity data.* For every
 family that can swap, reloaded's minimum transaction amount shall equal
 the reference's (§60.3). Changing it for any such family is a wire change
@@ -1152,3 +1166,7 @@ the bound value satisfies.
   session that never read the corpus, from the maintainer's decision of
   2026-11-08 (option (A)) and this chapter's own rules. They take no
   forbidden-class input and need no Dirty Gate pass.
+- *Status note added 2026-11-22, clean side.* The status note under
+  R60.6.5 on saved orders at startup records this repository's own
+  behavior. It was written by a context that never read the forbidden
+  corpus, takes no forbidden-class input and needs no Dirty Gate pass.

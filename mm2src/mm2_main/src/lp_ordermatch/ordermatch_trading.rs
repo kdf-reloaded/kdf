@@ -3787,9 +3787,11 @@ pub struct HistoricalOrder {
 
 /// The log line for a saved order that must be cancelled at startup because it involves a coin of a family whose
 /// swaps are switched off in this build; `None` when the order is kept. The families are Tendermint (platform coin
-/// or token) while [`coins::TENDERMINT_SWAPS_AVAILABLE`] is `false`, and TRON (TRX or TRC20) while
-/// [`coins::TRON_SWAPS_AVAILABLE`] is `false` (CRD ch.21 R-D1). The coins configuration decides, so the coins do
-/// not have to be activated yet.
+/// or token) while [`coins::TENDERMINT_SWAPS_AVAILABLE`] is `false`, TRON (TRX or TRC20) while
+/// [`coins::TRON_SWAPS_AVAILABLE`] is `false` (CRD ch.21 R-D1), and, with no switch, the two families that order
+/// creation refuses through `untradable_coin_ticker`: Lightning, and Solana (platform coin or token in either
+/// configuration form) (CRD ch.60 R60.2.3, R60.6.5). The coins configuration decides, so the coins do not have to
+/// be activated yet.
 pub(super) fn swaps_off_order_cancel_message(
     ctx: &MmArc,
     kind: &str,
@@ -3800,6 +3802,8 @@ pub(super) fn swaps_off_order_cancel_message(
     let family_switched_off = |ticker: &str| match coin_conf(ctx, ticker)["protocol"]["type"].as_str() {
         Some("TENDERMINT" | "TENDERMINTTOKEN") if !coins::TENDERMINT_SWAPS_AVAILABLE => Some("Tendermint"),
         Some("TRX" | "TRC20") if !coins::TRON_SWAPS_AVAILABLE => Some("TRON"),
+        Some("LIGHTNING") => Some("Lightning"),
+        Some("SOLANA" | "SPLTOKEN" | "SOLANATOKEN") => Some("Solana"),
         _ => None,
     };
     let family = family_switched_off(base).or_else(|| family_switched_off(rel))?;

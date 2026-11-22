@@ -963,6 +963,10 @@ the previous version used. The safe way:
   and the mint's decimals for a token, for example `1.000000000` or `-1.500000`. The values are unchanged;
   single figures such as `total_amount` and `fee_amount` stay without trailing zeros. Detail: PR #456;
   CRD ch.40 R40.2A.4, D40.2A.1.
+- **Saved orders with a Lightning or Solana coin are cancelled at startup.** An order saved earlier that names a
+  Lightning coin, SOL or a Solana token is cancelled at startup with a line in the log, as orders of other coin
+  families without swaps already are. It used to return to the order book, where every match would fail.
+  Detail: CRD ch.60 R60.6.5.
 
 #### QTUM and QRC20
 
