@@ -2688,6 +2688,16 @@ parameter as an EVM coin's is (R35.6.7); the draft has neither, and R35.6.8
 binds `Legacy` as the initial value. Chapter 36 D36.4 (field and level names)
 is decided together with this item.
 
+> **Pointer (2026-11-22, KDF Spec Reader, round 0.5.0-23; gate status as
+> chapter 51 §51.6E states).** The legacy swap operations of an EVM coin are
+> not part of this chapter. Their reference behavior is recorded in
+> [chapter 51](51-legacy-v1-swap-state-machine.md) §51.6E: R86 (the secret
+> is read from the claim transaction's call input only and is not compared
+> with the secret hash), R87 (a spend or a refund is found through the swap
+> contract's `ReceiverSpent` and `SenderRefunded` logs, in windows of the
+> coin's `logs_block_range`, without reading the receipt) and R88 (refund
+> eligibility by the local clock).
+
 ## 35.9 Provenance Footer
 
 - *Inputs:* the published Komodo DeFi Framework API reference (the
@@ -2922,3 +2932,9 @@ is decided together with this item.
   (the two GasFree members with TRON switched on) corrects the switch value
   the note before it names. It rests on chapter 21 D6 and on this
   repository's code. No cleared sentence was edited.
+- *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
+  before §35.9.* It names chapter 51 §51.6E (R86, R87, R88) and summarizes
+  what those rules record; its reference content is that of its target and
+  is judged with it. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
+  findings**, as recorded in chapter 51 §51.16. No cleared sentence was
+  edited.
