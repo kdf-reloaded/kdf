@@ -866,6 +866,13 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   writes `null`: Reloaded omits an absent memo in every withdraw result outside the Tendermint family. A client that
   needs the selector has it in its own request. No peer sees the result, so no switch exists. CRD ch.63 §63.8A,
   D63.8.
+- **A swap database migrated beyond state 15 is refused at start-up.** When the highest migration state in `MM2.db` is
+  above the highest state the build knows (15 in both), KDF Reloaded stops at start-up with an error that names both
+  numbers. GLEEC KDF starts, changes nothing and uses the database as a state-15 database without a warning. No
+  released version of either records a state above 15; two unreleased reference development branches each record a
+  different state 16, so that value identifies no layout. The refusal is compatible with GLEEC KDF: a database KDF
+  Reloaded leaves at state 15 is fully migrated for both. No switch exists; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.44 R44.9A.1 to R44.9A.5.
 
 ### Removed / disabled in KDF Reloaded
 

@@ -8,7 +8,8 @@ pub mod my_orders;
 
 use crate::CREATE_MY_SWAPS_TABLE;
 use common::log::{debug, error, info};
-use db_common::sqlite::rusqlite::{params_from_iter, Result as SqlResult};
+use db_common::sqlite::rusqlite::{params_from_iter, Error as SqlError, Result as SqlResult};
+use derive_more::Display;
 use mm2_core::mm_ctx::MmArc;
 
 use my_swaps::{fill_my_swaps_from_json_statements, mark_finished_swaps_from_json_statements};
@@ -68,6 +69,25 @@ const CREATE_STATS_SWAPS_GLEEC_STATE_15_TABLE: &str = "CREATE TABLE stats_swaps 
     taker_version VARCHAR(255)
 );";
 
+/// The error of the swap database start-up: a SQLite failure, or a database written by a newer version.
+#[derive(Debug, Display)]
+pub enum DbInitError {
+    #[display(fmt = "{}", _0)]
+    Sql(SqlError),
+    /// The highest ledger state is above the highest state this build records (CRD ch.44 R44.9A.5).
+    #[display(
+        fmt = "The swap database (MM2.db) was written by a newer version: its migration state is {}, this build \
+               knows up to state {}. Use that newer version, or move MM2.db aside (keep it) to start with a new one.",
+        found,
+        known
+    )]
+    NewerThanBuild { found: i64, known: i64 },
+}
+
+impl From<SqlError> for DbInitError {
+    fn from(e: SqlError) -> Self { DbInitError::Sql(e) }
+}
+
 fn get_current_migration(ctx: &MmArc) -> SqlResult<i64> {
     let conn = ctx.sqlite_connection();
     conn.query_row(SELECT_MIGRATION, [], |row| row.get(0))
@@ -86,7 +106,7 @@ fn table_has_column(ctx: &MmArc, table: &str, column: &str) -> SqlResult<bool> {
     Ok(false)
 }
 
-pub async fn init_and_migrate_db(ctx: &MmArc) -> SqlResult<()> {
+pub async fn init_and_migrate_db(ctx: &MmArc) -> Result<(), DbInitError> {
     info!("Checking the current SQLite migration");
     match get_current_migration(ctx) {
         Ok(current_migration) => {
@@ -398,6 +418,10 @@ async fn repair_legacy_reloaded_schema(ctx: &MmArc, current_migration: i64) -> S
     Ok(Some(15))
 }
 
+/// The highest ledger state this build records (CRD ch.44 R44.2.3, R44.9A.5): the interchange baseline.
+/// `statements_for_migration` has a step for every state below it and none for it.
+const LATEST_MIGRATION_STATE: i64 = 15;
+
 async fn statements_for_migration(ctx: &MmArc, current_migration: i64) -> Option<Vec<(&'static str, Vec<String>)>> {
     match current_migration {
         1 => Some(migration_1(ctx).await),
@@ -418,10 +442,18 @@ async fn statements_for_migration(ctx: &MmArc, current_migration: i64) -> Option
     }
 }
 
-pub async fn migrate_sqlite_database(ctx: &MmArc, mut current_migration: i64) -> SqlResult<()> {
+pub async fn migrate_sqlite_database(ctx: &MmArc, mut current_migration: i64) -> Result<(), DbInitError> {
     info!("migrate_sqlite_database, current migration {}", current_migration);
     if let Some(repaired_migration) = repair_legacy_reloaded_schema(ctx, current_migration).await? {
         current_migration = repaired_migration;
+    }
+    // A ledger above the highest known state is refused before any statement runs; nothing is
+    // written, lowered or removed (CRD ch.44 R44.9A.5).
+    if current_migration > LATEST_MIGRATION_STATE {
+        return Err(DbInitError::NewerThanBuild {
+            found: current_migration,
+            known: LATEST_MIGRATION_STATE,
+        });
     }
     while let Some(statements_with_params) = statements_for_migration(ctx, current_migration).await {
         // `statements_for_migration` locks the [`MmCtx::sqlite_connection`] mutex,
@@ -630,6 +662,64 @@ mod tests {
             ("maker_version".into(), "VARCHAR(255)".into()),
             ("taker_version".into(), "VARCHAR(255)".into()),
         ]);
+    }
+
+    fn seed_ledger(ctx: &MmArc, rows: std::ops::RangeInclusive<i64>) {
+        let conn = ctx.sqlite_connection();
+        conn.execute_batch("CREATE TABLE migration (current_migration INTEGER NOT_NULL UNIQUE);")
+            .unwrap();
+        for row in rows {
+            conn.execute(INSERT_MIGRATION, [row]).unwrap();
+        }
+    }
+
+    #[test]
+    fn latest_migration_state_matches_statements_for_migration() {
+        let ctx = setup_test_ctx();
+        assert!(block_on(statements_for_migration(&ctx, LATEST_MIGRATION_STATE - 1)).is_some());
+        assert!(block_on(statements_for_migration(&ctx, LATEST_MIGRATION_STATE)).is_none());
+    }
+
+    #[test]
+    fn ledger_at_state_15_starts_without_new_row() {
+        let ctx = setup_test_ctx();
+        block_on(init_and_migrate_db(&ctx)).unwrap();
+        block_on(init_and_migrate_db(&ctx)).unwrap();
+
+        assert_eq!(migration_rows(&ctx), (1..=15).collect::<Vec<i64>>());
+    }
+
+    #[test]
+    fn ledger_above_known_state_is_refused_and_left_unchanged() {
+        let ctx = setup_test_ctx();
+        block_on(init_and_migrate_db(&ctx)).unwrap();
+        ctx.sqlite_connection().execute(INSERT_MIGRATION, [16]).unwrap();
+        let my_swaps_before = table_column_specs(&ctx, "my_swaps");
+        let stats_swaps_before = table_column_specs(&ctx, "stats_swaps");
+
+        let err = block_on(init_and_migrate_db(&ctx)).unwrap_err();
+        assert!(matches!(err, DbInitError::NewerThanBuild { found: 16, known: 15 }));
+        let message = err.to_string();
+        assert!(
+            message.contains("state is 16") && message.contains("up to state 15"),
+            "{message}"
+        );
+
+        assert_eq!(migration_rows(&ctx), (1..=16).collect::<Vec<i64>>());
+        assert_eq!(table_column_specs(&ctx, "my_swaps"), my_swaps_before);
+        assert_eq!(table_column_specs(&ctx, "stats_swaps"), stats_swaps_before);
+    }
+
+    #[test]
+    fn ledger_above_known_state_runs_no_migration_statement() {
+        let ctx = setup_test_ctx();
+        seed_ledger(&ctx, 1..=16);
+
+        let err = block_on(migrate_sqlite_database(&ctx, 16)).unwrap_err();
+        assert!(matches!(err, DbInitError::NewerThanBuild { found: 16, known: 15 }));
+        assert_eq!(migration_rows(&ctx), (1..=16).collect::<Vec<i64>>());
+        // No table was created by a migration statement.
+        assert!(table_column_specs(&ctx, "my_swaps").is_empty());
     }
 
     #[test]
