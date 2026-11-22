@@ -874,7 +874,6 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   Reloaded leaves at state 15 is fully migrated for both. No switch exists; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.44 R44.9A.1 to R44.9A.5.
 
-
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.
