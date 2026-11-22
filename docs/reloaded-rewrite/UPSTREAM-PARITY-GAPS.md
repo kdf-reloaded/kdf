@@ -290,6 +290,8 @@ preimage/conversion flows.
   rejection of ch. 55 R55.4.7. Solana is wallet-only: market and swap
   operations stay refused (ch. 60 R60.6.5), and history is still open
   (ch. 40 D40.1).
+  *Status 2026-11-22 (history):* SOL and SPL transaction history is built
+  (PR #494; ch. 40 §40.6C), Reloaded's own design: the reference has none.
 - [ ] **Activation compatibility surface (decided 2026-10-11, deferred).**
   Reloaded's `enable_solana_with_tokens` / `enable_spl` stay the primary
   activation surface. The reference's `experimental::enable_solana_with_assets`

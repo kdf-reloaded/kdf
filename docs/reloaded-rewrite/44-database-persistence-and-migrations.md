@@ -750,6 +750,40 @@ with a reference build, the following hold.
 > reference's behavior; it is not a divergence. This repository's start-up
 > behavior for a ledger above state `15` was not examined in this round.
 
+> **Reloaded status update (2026-11-22, Reloaded-original; informative).**
+> With PR #480 the native build writes a saved swap, its statistics copy and a
+> saved order through a temporary file in the same directory, named `<file
+> name>.<process id>.<counter>.tmp` (extension `tmp`, R44.9A.13 item 1), and
+> renames it over the record. Beyond the reference (R44.9A.12) it forces the
+> temporary file to stable storage before the rename and, on Unix, the
+> directory after it; if only the directory sync fails, the save succeeds with
+> a warning, because the record is already replaced. On Windows a rename
+> refused because another process holds the file is retried briefly. The
+> temporary name is unique per write, so two writers of one record never share
+> it; a leftover from an interrupted write is therefore not overwritten by a
+> later save, and both implementations' directory reads ignore it (R44.9A.11).
+> Browser builds save each record in one object-store transaction.
+>
+> The same PR fences the swap lock between RELOADED runners (R44.9A.13 items 2
+> to 5). The content of `<uuid>.lock` keeps the R44.9A.7 form. A new lock is
+> created by linking a fully written temporary file to the lock name, which
+> fails if the name exists, so no reader sees an empty lock (on a file system
+> without hard links the earlier create-then-write is used, and a new lock is
+> empty for a moment); a refresh and a take-over write through a temporary
+> file and a rename (gap 1 of the code-quality finding). The runner keeps the
+> value it wrote last in memory; before each refresh it reads the file, and a
+> missing file, a different value, content that is not text, or refreshing
+> that has failed for longer than 40 seconds makes the lock lost: the run is
+> stopped where it stands, like an abrupt stop, starts no further step and
+> leaves the file (gap 3), and the swap is handed to the kick-start of a saved
+> swap, which takes the lock by chapter 51 R5; if the lock file keeps being
+> removed, the swap is resumed from its record after each loss. A late refresh
+> that finds its own value continues with a warning. After a take-over the
+> file is read back once, which narrows gap 2 between RELOADED runners; two of
+> them that take a stale lock within the same second write the same value and
+> are not told apart. Against a reference build on the same directory the
+> timestamp rule of R44.9A.8 remains the only protection (item 5).
+
 ### 44.9A.5 Tests
 
 T44.9A.1 *Lock content form.* After RELOADED takes a swap lock and after each
@@ -870,6 +904,10 @@ section, the highest ledger value is still `15` (R44.9.5).
   shingles); the repository's clean-room gate tool was not applicable because
   the additions embed no code blocks. *Measure:* 0.00, on the
   discretionary-expression basis.
+- *Clean-side addition of 2026-11-22 (PR #480):* the Reloaded status update
+  under R44.9A.13. It is Reloaded-original, rests only on this repository's own
+  write code and the cleared text of §44.9A, and changes no sentence of the
+  chapter.
 - *Clean-side addition of 2026-11-22 (PR #486):* the Reloaded status update
   under R44.9A.5. It is Reloaded-original, rests only on this repository's own
   start-up code and the cleared text of §44.9A, and changes no sentence of the

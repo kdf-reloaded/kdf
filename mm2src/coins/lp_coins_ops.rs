@@ -707,8 +707,11 @@ pub async fn my_tx_history(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
         Ok(None) => return ERR!("No such coin: {}", request.coin),
         Err(err) => return ERR!("!lp_coinfind({}): {}", request.coin, err),
     };
-    // A Solana coin or SPL token has no history yet (CRD ch.40 R40.6B.15, D40.6B.1): a structured error naming the coin.
-    if matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)) {
+    // A Solana coin or SPL token without history answers an error naming the coin (CRD ch.40 R40.6C.2); with history
+    // it is served from the list its platform's writer fills (R40.6C.3).
+    if matches!(coin, MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_))
+        && !crate::solana::solana_history_enabled(&coin)
+    {
         return ERR!("my_tx_history is not supported for {}", request.coin);
     }
 

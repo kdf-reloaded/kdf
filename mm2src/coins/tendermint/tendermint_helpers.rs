@@ -34,6 +34,10 @@ use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::time::Duration;
 
+/// Results per page and the page cap of the claim search (CRD ch.18 R18.11.16).
+const CLAIM_SEARCH_PER_PAGE: u8 = 100;
+const CLAIM_SEARCH_MAX_PAGES: u32 = 10;
+
 // ————————————————————————————————————————————————————————————————
 // TendermintCommons trait
 // ————————————————————————————————————————————————————————————————
@@ -811,6 +815,76 @@ impl TendermintCoin {
         Ok(QueryHtlcResponse::decode(htlc_type, response.value.as_slice())?)
     }
 
+    /// Finds the oldest successful claim of the HTLC `htlc_id` (CRD ch.18 R18.11.16 and R18.11.19, ch.51 R91).
+    ///
+    /// The transactions are searched by the event `claim_htlc.id='<id>'`, oldest first, `CLAIM_SEARCH_PER_PAGE` results
+    /// asked per page. The results are read until they are exhausted (an empty page, or as many received as
+    /// `total_count`, whatever page size the node serves) or `CLAIM_SEARCH_MAX_PAGES` pages are read (a `warn!` naming
+    /// the HTLC id is logged when the cap is hit with results left). A result is the claim only when its result code is
+    /// 0 and one of its messages (every message is examined, not only the first) has the claim type URL of this coin's
+    /// dialect, decodes as a claim message and carries the id of this HTLC. The type URL is checked before the value is
+    /// decoded, because the protobuf decoding of another message's value can succeed loosely. The id is the upper-case
+    /// hex of the HTLC id; it is compared without regard to the letter case. A result that does not pass is skipped,
+    /// never taken as the claim. The secret is not read here.
+    pub(super) async fn find_claim_of_htlc(
+        &self,
+        htlc_id: &str,
+    ) -> MmResult<Option<cosmrs::Tx>, TendermintCoinRpcError> {
+        use super::htlc::ClaimHtlcProto;
+
+        let htlc_type = HtlcType::from_str(&self.protocol_info.account_prefix).map_err(|_| {
+            TendermintCoinRpcError::UnexpectedAccountType {
+                prefix: self.protocol_info.account_prefix.clone(),
+            }
+        })?;
+        let claim_type_url = htlc_type.claim_msg_type_url();
+        let query = format!("claim_htlc.id='{htlc_id}'");
+        let rpc_client = self.rpc_client().await?;
+
+        let mut received: u64 = 0;
+        for page in 1..=CLAIM_SEARCH_MAX_PAGES {
+            let response = rpc_client
+                .perform(TxSearchRequest {
+                    query: query.clone(),
+                    order_by: TendermintResultOrder::Ascending.into(),
+                    page,
+                    per_page: CLAIM_SEARCH_PER_PAGE,
+                    prove: false,
+                })
+                .await
+                .map_to_mm(TendermintCoinRpcError::from)?;
+
+            for raw_tx in &response.txs {
+                if raw_tx.tx_result.code != cosmrs::tendermint::abci::Code::Ok {
+                    continue;
+                }
+                let tx = match cosmrs::Tx::from_bytes(&raw_tx.tx) {
+                    Ok(tx) => tx,
+                    Err(_) => continue,
+                };
+                let is_claim = tx.body.messages.iter().any(|message| {
+                    message.type_url == claim_type_url
+                        && ClaimHtlcProto::decode(htlc_type, message.value.as_slice())
+                            .ok()
+                            .and_then(|proto| ClaimHtlcMsg::try_from(proto).ok())
+                            .map_or(false, |claim| claim.id().eq_ignore_ascii_case(htlc_id))
+                });
+                if is_claim {
+                    return Ok(Some(tx));
+                }
+            }
+
+            // Count what was received, not what was asked: a node may serve fewer results per page.
+            received += response.txs.len() as u64;
+            if response.txs.is_empty() || received >= u64::from(response.total_count) {
+                return Ok(None);
+            }
+        }
+
+        warn!("Claim search of the HTLC {htlc_id} stopped after {CLAIM_SEARCH_MAX_PAGES} pages with results left");
+        Ok(None)
+    }
+
     // ————————————————————————————————————————————————————————————
     // Search for swap tx spend (used by SwapOps)
     // ————————————————————————————————————————————————————————————
@@ -849,27 +923,10 @@ impl TendermintCoin {
         match htlc_state {
             HTLC_STATE_OPEN => Ok(None),
             HTLC_STATE_COMPLETED => {
-                let query = format!("claim_htlc.id='{htlc_id}'");
-                let request = TxSearchRequest {
-                    query,
-                    order_by: TendermintResultOrder::Ascending.into(),
-                    page: 1,
-                    per_page: 1,
-                    prove: false,
-                };
-
-                let response = self
-                    .rpc_client()
-                    .await
-                    .map_mm_err()?
-                    .perform(request)
-                    .await
-                    .map_to_mm(TendermintCoinRpcError::from)
-                    .map_mm_err()?;
-
-                match response.txs.first() {
-                    Some(raw_tx) => {
-                        let tx = cosmrs::Tx::from_bytes(&raw_tx.tx)?;
+                // CRD ch.18 R18.11.16 / ch.51 R91: the spend is the successful claim of this HTLC, not any
+                // transaction the search returns.
+                match self.find_claim_of_htlc(&htlc_id).await.map_mm_err()? {
+                    Some(tx) => {
                         let tx = TransactionEnum::CosmosTransaction(CosmosTransaction {
                             data: TxRaw {
                                 body_bytes: tx.body.into_bytes()?,

@@ -498,9 +498,10 @@ fn token_method_node_failure_is_a_transport_error() {
 }
 
 /// T40.6B.21: `tx_history: true` in the platform request does not fail parsing; activation goes on to the no-node
-/// `PlatformCoinCreationError`, which shows that the member was ignored, not refused.
+/// `PlatformCoinCreationError`, which shows that the member was not refused (since §40.6C it enables the history,
+/// T40.6C.1, once a platform is built).
 #[test]
-fn t40_6b_21_tx_history_true_is_ignored_on_the_platform_method() {
+fn t40_6b_21_tx_history_true_is_not_refused_on_the_platform_method() {
     let ctx = ctx_with(vec![platform_entry()]);
     let req = platform_request(None, &[], json!({ "tx_history": true }));
     let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req)).unwrap_err();

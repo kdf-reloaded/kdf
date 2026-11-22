@@ -12,6 +12,7 @@
 ///
 /// The watcher carries **precomputed** spend/refund transactions so it never
 /// needs the taker's private key.
+use crate::mm2::lp_swap::taker_swap::spend_secret;
 use crate::mm2::lp_swap::SwapsContext;
 use coins::{lp_coinfind, MmCoinEnum};
 use common::executor::Timer;
@@ -315,7 +316,7 @@ impl State for WaitForTakerPaymentSpend {
             {
                 Ok(Some(coins::FoundSwapTxSpend::Spent(spend_tx))) => {
                     info!("Watcher {}: taker payment was spent, extracting secret", ctx.data.uuid);
-                    match ctx.taker_coin.extract_secret(&ctx.data.secret_hash, &spend_tx.tx_hex()) {
+                    match spend_secret(&ctx.taker_coin, &ctx.data.secret_hash, &spend_tx.tx_hex()).await {
                         Ok(secret) => {
                             return Self::change_state(SpendMakerPayment { secret });
                         },

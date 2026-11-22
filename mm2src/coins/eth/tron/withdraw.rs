@@ -17,8 +17,11 @@
 //!    hex-encoded protobuf as `tx_hex`. The txid is the hash.
 //!
 //! A request may select the fee rail (CRD ch.63 §63.3.4, §63.8): `native` (the flow above, also when the member is
-//! absent), `gasless` (the sign-only rail of [`gasfree::withdraw`](super::gasfree::withdraw), which needs no TRX)
-//! or `auto` (the flow above first, the gasless rail only when the flow above cannot be funded).
+//! absent), `gasless` (the rail of [`gasfree::withdraw`](super::gasfree::withdraw), which needs no TRX) or `auto`
+//! (the flow above first, the gasless rail only when the flow above cannot be funded). The gasless rail signs an
+//! off-chain authorization. For the direct method that is the whole withdraw; for a task
+//! ([`withdraw_tron_with_progress`]) the rail also submits the authorization to the provider and follows the
+//! transfer until it settles (CRD ch.63 D63.9).
 //!
 //! # Invariants
 //!
@@ -130,13 +133,32 @@ fn is_funding_failure(error: &WithdrawError) -> bool {
 /// reverts: the token contract refuses the transfer, and nothing is signed (CRD ch.21 R21.10B.13 and its finding).
 ///
 /// From the gasless rail: the errors of [`gasless_rail::GaslessRail::run`], and `Gasless`/`Unavailable` for a
-/// coin the rail does not serve (CRD ch.63 §63.9).
+/// coin the rail does not serve (CRD ch.63 §63.9). This entry point makes no submit and no trace request, so it
+/// raises none of the errors of the submission.
 pub(crate) async fn withdraw_tron(coin: EthCoin, req: WithdrawRequest, sender: EvmWithdrawSender) -> WithdrawResult {
     withdraw_tron_with_progress(coin, req, sender, None).await
 }
 
 /// [`withdraw_tron`] for the task that `progress` is the handle of: the gasless rail reports its phases to it (CRD
-/// ch.63 §63.3.6).
+/// ch.63 §63.3.6) and, with a handle, submits the signed authorization to the provider and follows the transfer
+/// until it settles (CRD ch.63 §63.8B, D63.9).
+///
+/// # Errors
+///
+/// Those of [`withdraw_tron`]. With a handle, the gasless rail also raises (CRD ch.63 D63.9):
+///
+/// - `Gasless`/`QuoteExpired` when the signed deadline has passed before the submit request; nothing is sent;
+/// - `Gasless`/`ProviderRejected` when the provider refuses the submission, and when it reports the transfer as
+///   failed;
+/// - `Gasless`/`InvalidProviderResponse` when the answer to the submission differs from what was signed or names
+///   no usable trace id, when a trace answer cannot be used, and for a settled transfer without a transaction
+///   hash;
+/// - `Gasless`/`TraceNotFound` when the provider does not know the trace id;
+/// - [`WithdrawError::Transport`] when the provider cannot be reached for the submission, and when the transfer
+///   has not settled 120 seconds after the signed deadline: its outcome is then unknown.
+///
+/// Every error after the submission names the provider's trace id in its text. None of them leads to the native
+/// rail.
 pub(crate) async fn withdraw_tron_with_progress(
     coin: EthCoin,
     req: WithdrawRequest,

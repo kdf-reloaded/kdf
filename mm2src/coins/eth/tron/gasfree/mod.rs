@@ -11,7 +11,8 @@
 //! - [`binding`]: the provider binding of a platform coin and the `gasless` block of a token coin as an activation
 //!   gives them (§63.3.1, §63.3.2), and the custody address a report shows (§63.3.3, R18);
 //! - [`failure`]: the error type of the group and its collapse onto the withdraw RPC's arms (§63.9);
-//! - [`withdraw`]: the gasless rail of a TRC20 withdraw, sign-only (§63.8 steps 2 to 5, §63.8A).
+//! - [`withdraw`]: the gasless rail of a TRC20 withdraw (§63.8 steps 2 to 5, §63.8A): sign-only on the direct
+//!   method; on the task route it also submits the authorization and follows it until it settles (§63.8B, D63.9).
 //!
 //! # Invariants
 //!
@@ -20,8 +21,7 @@
 //! - The provider credentials and the raw bytes of a signature never reach a log line, an error text or a `Debug`
 //!   rendering (R9).
 
-// The withdraw rail is sign-only: the submit and trace payloads and the supported-token call have no caller until
-// the submission flow exists (D63.6).
+// The supported-token call and some members of the provider's payloads have no caller.
 #![allow(dead_code)]
 
 pub(crate) mod authorization;

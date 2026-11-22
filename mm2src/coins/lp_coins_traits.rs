@@ -211,17 +211,24 @@ pub trait SwapOps {
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String>;
 
+    /// The secret of `secret_hash` read from the transaction that spent the payment (CRD ch.51 §51.6E). The
+    /// answer is a value that passes the secret-hash rule, or an error.
+    ///
+    /// The default is [`SwapOps::extract_secret`] followed by that rule. A coin that needs its node to read
+    /// the secret overrides it.
+    async fn extract_secret_from_spend(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        let secret = self.extract_secret(secret_hash, spend_tx)?;
+        crypto::secret_hash_algo::ensure_secret_matches_hash(secret, secret_hash)
+    }
+
     /// Whether the refund transaction can be sent now
     /// For example: there are no additional conditions for ETH, but for some UTXO coins we should wait for
     /// locktime < MTP
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
-        let now = now_ms() / 1000;
-        let result = if now > locktime {
-            CanRefundHtlc::CanRefundNow
-        } else {
-            CanRefundHtlc::HaveToWait(locktime - now + 1)
-        };
-        Box::new(futures01::future::ok(result))
+        Box::new(futures01::future::ok(wall_clock_refund_eligibility(
+            now_ms() / 1000,
+            locktime,
+        )))
     }
 
     /// CRD ch.39 R39.5.13. When the refund broadcast of this coin was rejected with `rejection` (the plain
@@ -860,5 +867,15 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
             try_s!(handler.on_connected(address.clone()))
         }
         Ok(())
+    }
+}
+
+/// The wall-clock refund rule (CRD ch.51 §51.6E R88 item 1): refundable once `now` is strictly past the lock
+/// time, otherwise a wait of the difference plus one second, uncapped.
+pub(crate) fn wall_clock_refund_eligibility(now: u64, locktime: u64) -> CanRefundHtlc {
+    if now > locktime {
+        CanRefundHtlc::CanRefundNow
+    } else {
+        CanRefundHtlc::HaveToWait(locktime - now + 1)
     }
 }

@@ -2,6 +2,7 @@ use super::*;
 use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
 use crate::utxo::rpc_clients::UnspentInfo;
 use crate::utxo::utxo_tests::tqtum_test_servers;
+use crate::CanRefundHtlc;
 use crate::TxFeeDetails;
 use bigdecimal::Zero;
 use chain::OutPoint;
@@ -1657,4 +1658,24 @@ fn r89_precheck_finds_the_swap_call_without_receipts() {
         &ExpectedSwapEvent::SenderRefunded,
         &R89_SWAP_ID
     ));
+}
+
+fn qrc20_refund_gate_answer(mtp: u32, locktime: u64) -> CanRefundHtlc {
+    Qrc20Coin::get_current_mtp.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(mtp))));
+    let (_ctx, coin) = qrc20_coin_for_test(&[1; 32], None);
+    block_on(coin.can_refund_htlc(locktime).compat()).unwrap()
+}
+
+#[test]
+fn qrc20_refund_gate_waits_while_the_qtum_mtp_is_below_the_lock_time() {
+    let locktime = now_ms() / 1000 - 7200;
+    let answer = qrc20_refund_gate_answer((locktime - 10) as u32, locktime);
+    assert!(matches!(answer, CanRefundHtlc::HaveToWait(11)));
+}
+
+#[test]
+fn qrc20_refund_gate_opens_when_the_qtum_mtp_is_past_the_lock_time() {
+    let locktime = now_ms() / 1000 - 7200;
+    let answer = qrc20_refund_gate_answer((locktime + 10) as u32, locktime);
+    assert!(matches!(answer, CanRefundHtlc::CanRefundNow));
 }

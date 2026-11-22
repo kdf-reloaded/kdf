@@ -353,6 +353,52 @@ impl SolanaRpcClient {
         }
     }
 
+    /// `getSignaturesForAddress` at commitment `finalized` (whatever the client's own level is): up to `limit`
+    /// signatures that involve `address`, newest first, older than `before` when given (CRD ch.40 R40.6C.4).
+    pub async fn get_signatures_for_address(
+        &self,
+        address: &Pubkey,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SignatureInfo>, RpcError> {
+        let mut config = Map::new();
+        config.insert("limit".to_owned(), json!(limit));
+        config.insert("commitment".to_owned(), json!("finalized"));
+        if let Some(before) = before {
+            config.insert("before".to_owned(), json!(before));
+        }
+        self.call(
+            "getSignaturesForAddress",
+            Json::Array(vec![json!(address.to_string()), Json::Object(config)]),
+        )
+        .await
+    }
+
+    /// `getTransaction` at commitment `finalized`, encoding `base64`, `maxSupportedTransactionVersion` 0 (CRD ch.40
+    /// R40.6C.4). `None`: the node has no such finalized transaction.
+    pub async fn get_transaction_base64(&self, signature: &str) -> Result<Option<ConfirmedTransaction>, RpcError> {
+        let mut config = encoding_config("base64");
+        config.insert("commitment".to_owned(), json!("finalized"));
+        config.insert("maxSupportedTransactionVersion".to_owned(), json!(0));
+        self.call(
+            "getTransaction",
+            Json::Array(vec![json!(signature), Json::Object(config)]),
+        )
+        .await
+    }
+
+    /// `getBlock` of `slot` at commitment `finalized`, with `transactionDetails` `none` and `rewards` false: the
+    /// block's height and time only (CRD ch.40 R40.6C.4). `None`: the node has no such block.
+    pub async fn get_block_summary(&self, slot: u64) -> Result<Option<BlockSummary>, RpcError> {
+        let mut config = Map::new();
+        config.insert("transactionDetails".to_owned(), json!("none"));
+        config.insert("rewards".to_owned(), json!(false));
+        config.insert("commitment".to_owned(), json!("finalized"));
+        config.insert("maxSupportedTransactionVersion".to_owned(), json!(0));
+        self.call("getBlock", Json::Array(vec![json!(slot), Json::Object(config)]))
+            .await
+    }
+
     /// The `params` array of a request: `head`, then the config object when it has any member. The commitment level
     /// is added to the config under `commitment_key` when the client has one; a client without one sends no
     /// commitment member at all.
@@ -445,6 +491,97 @@ pub struct TokenAmount {
     pub ui_amount: Option<f64>,
     #[serde(default)]
     pub ui_amount_string: Option<String>,
+}
+
+/// One entry of a `getSignaturesForAddress` answer (CRD ch.40 R40.6C.4).
+#[derive(Clone, Debug, Deserialize)]
+pub struct SignatureInfo {
+    pub signature: String,
+    pub slot: u64,
+    /// Not used by the history (a failed transaction is read like the others, R40.6C.10); kept for the shape.
+    #[allow(dead_code)]
+    pub err: Option<Json>,
+}
+
+/// A `getTransaction` answer in `base64` encoding (CRD ch.40 R40.6C.4).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmedTransaction {
+    pub slot: u64,
+    #[serde(default)]
+    pub block_time: Option<i64>,
+    /// `[<base64 of the wire bytes>, "base64"]`.
+    pub transaction: (String, String),
+    pub meta: Option<TransactionMeta>,
+}
+
+/// The `meta` of a transaction. The members a node may leave out (or null) for a transaction that has none of them
+/// are optional; the balances and the fee are always there.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionMeta {
+    pub err: Option<Json>,
+    pub fee: u64,
+    pub pre_balances: Vec<u64>,
+    pub post_balances: Vec<u64>,
+    #[serde(default)]
+    pub pre_token_balances: Option<Vec<TokenBalanceEntry>>,
+    #[serde(default)]
+    pub post_token_balances: Option<Vec<TokenBalanceEntry>>,
+    #[serde(default)]
+    pub inner_instructions: Option<Vec<InnerInstructions>>,
+    #[serde(default)]
+    pub loaded_addresses: Option<LoadedAddresses>,
+}
+
+/// One entry of `preTokenBalances` / `postTokenBalances`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenBalanceEntry {
+    pub account_index: usize,
+    pub mint: String,
+    /// The wallet that owns the token account; older transactions may not carry it.
+    #[serde(default)]
+    pub owner: Option<String>,
+    pub ui_token_amount: TokenBalanceAmount,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TokenBalanceAmount {
+    /// The raw amount in the token's smallest units, a decimal string.
+    pub amount: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct InnerInstructions {
+    pub index: usize,
+    pub instructions: Vec<InnerInstruction>,
+}
+
+/// An inner instruction in its compiled form (`base64` encoding): `data` is base58.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InnerInstruction {
+    pub program_id_index: usize,
+    pub accounts: Vec<usize>,
+    pub data: String,
+}
+
+/// The addresses a version-0 transaction loaded from address lookup tables.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LoadedAddresses {
+    #[serde(default)]
+    pub writable: Vec<String>,
+    #[serde(default)]
+    pub readonly: Vec<String>,
+}
+
+/// A `getBlock` answer without transactions and rewards.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockSummary {
+    #[serde(default)]
+    pub block_height: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

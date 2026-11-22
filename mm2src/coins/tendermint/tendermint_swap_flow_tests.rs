@@ -1310,6 +1310,252 @@ fn tm_flow_search_for_swap_tx_spend_of_a_nucleus_htlc_uses_the_nucleus_query() {
 }
 
 // ---------------------------------------------------------------------------
+// The claim search takes only a successful claim of this HTLC (ch.51 R91, ch.18 R18.11.16 / R18.11.19)
+// ---------------------------------------------------------------------------
+
+/// A signed transaction of the given messages whose memo tells it from the others.
+fn memo_tx(fx: &Fixture, chain: Chain, payloads: Vec<Any>, memo: &str) -> Vec<u8> {
+    signed_tx_with(&fx.coin, chain, payloads, memo)
+}
+
+/// The claim message of the HTLC `id`.
+fn claim_any_of(fx: &Fixture, id: &str) -> Any {
+    fx.coin
+        .gen_claim_htlc_tx(id.to_owned(), &PREIMAGE)
+        .expect("a claim-HTLC message")
+        .msg_payload
+}
+
+/// The memo of the transaction a search or wait reports as the spend.
+fn spend_memo(found: Option<FoundSwapTxSpend>) -> String {
+    match found {
+        Some(FoundSwapTxSpend::Spent(TransactionEnum::CosmosTransaction(spend))) => {
+            cosmrs::proto::cosmos::tx::v1beta1::TxBody::decode(spend.data.body_bytes.as_slice())
+                .expect("a transaction body")
+                .memo
+        },
+        other => panic!("expected a spend, got {:?}", other),
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_skips_a_failed_claim_and_takes_the_successful_one() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let good = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "good");
+        script_htlc(&fx, chain, &id, STATE_COMPLETED, vec![(failed, 5), (good, 0)]);
+
+        // The claim found is the successful one, and the secret extracted from it is the preimage.
+        match search_my(&fx, &payment).expect("the search succeeds") {
+            Some(FoundSwapTxSpend::Spent(TransactionEnum::CosmosTransaction(spend))) => {
+                let memo = cosmrs::proto::cosmos::tx::v1beta1::TxBody::decode(spend.data.body_bytes.as_slice())
+                    .expect("a transaction body")
+                    .memo;
+                assert_eq!(memo, "good");
+                let secret = fx.coin.extract_secret(&secret_hash(), &spend.data.encode_to_vec());
+                assert_eq!(secret, Ok(PREIMAGE.to_vec()));
+            },
+            other => panic!("expected the claim as the spend, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_finds_the_claim_in_a_later_message() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let peer = account(chain, &pubkey(&PEER_KEY));
+        let send = msg_send_any(&fx.coin.account_id, &peer, vec![coin_proto(chain.denom(), 1)]);
+        let tx = memo_tx(&fx, chain, vec![send, claim_any_of(&fx, &id)], "second");
+        script_htlc(&fx, chain, &id, STATE_COMPLETED, vec![(tx, 0)]);
+
+        let found = search_my(&fx, &payment).expect("the search succeeds");
+        assert_eq!(spend_memo(found), "second");
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_skips_the_successful_claim_of_another_htlc() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let other = memo_tx(&fx, chain, vec![claim_any_of(&fx, &"ABCD".repeat(16))], "other");
+        let ours = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "ours");
+        script_htlc(&fx, chain, &id, STATE_COMPLETED, vec![(other, 0), (ours, 0)]);
+
+        let found = search_my(&fx, &payment).expect("the search succeeds");
+        assert_eq!(spend_memo(found), "ours");
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_with_only_failed_or_unrelated_results_is_not_found() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let other = memo_tx(&fx, chain, vec![claim_any_of(&fx, &"ABCD".repeat(16))], "other");
+        script_htlc(&fx, chain, &id, STATE_COMPLETED, vec![(failed, 5), (other, 0)]);
+
+        let err = search_my(&fx, &payment).expect_err("no successful claim of this HTLC");
+        assert!(err.contains("ClaimHtlcTxNotFound"), "unexpected error: {err}");
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_does_not_take_a_message_of_another_type() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let claim = claim_any_of(&fx, &id);
+        // The value decodes as a claim of our id, the type URL is not the claim type of this dialect: one is
+        // an unrelated type, the other is the claim type of the other dialect.
+        let other_dialect = match chain {
+            Chain::Iris => Chain::Nucleus,
+            Chain::Nucleus => Chain::Iris,
+        };
+        for type_url in ["/other.module.MsgSomething", other_dialect.claim_type_url()] {
+            let disguised = Any {
+                type_url: type_url.to_owned(),
+                value: claim.value.clone(),
+            };
+            let tx = memo_tx(&fx, chain, vec![disguised], "disguised");
+            script_htlc(&fx, chain, &id, STATE_COMPLETED, vec![(tx, 0)]);
+
+            let err = search_my(&fx, &payment).expect_err("the message is not a claim of this dialect");
+            assert!(err.contains("ClaimHtlcTxNotFound"), "unexpected error: {err}");
+        }
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_pages_through_the_results() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let good = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "page two");
+        let page_one: Vec<(Vec<u8>, u32)> = (0..100).map(|_| (failed.clone(), 5)).collect();
+        let page_two = vec![(good, 0)];
+        let htlc_id = id.clone();
+        fx.node.answer(move |method, params| match method {
+            "abci_query" if params["path"] == chain.query_path() => Some(htlc_answer(chain, &htlc_id, STATE_COMPLETED)),
+            "tx_search" => {
+                let page = params["page"]
+                    .as_str()
+                    .and_then(|p| p.parse::<u64>().ok())
+                    .or_else(|| params["page"].as_u64());
+                let mut reply = match page {
+                    Some(1) => search_reply(&page_one),
+                    _ => search_reply(&page_two),
+                };
+                reply["total_count"] = json!("101");
+                Some(reply)
+            },
+            _ => None,
+        });
+
+        let found = search_my(&fx, &payment).expect("the search succeeds");
+        assert_eq!(spend_memo(found), "page two");
+        let searches = fx.node.requests("tx_search");
+        assert_eq!(searches.len(), 2);
+        for search in &searches {
+            assert_eq!(search["per_page"].as_str(), Some("100"));
+            assert_eq!(search["order_by"].as_str(), Some("asc"));
+        }
+    }
+}
+
+/// Scripts a node that serves at most `served` results per page of `all`, with the given `total_count`; a page
+/// past the end is empty.
+fn script_paged_node(fx: &Fixture, chain: Chain, id: &str, all: Vec<(Vec<u8>, u32)>, served: usize, total: &str) {
+    let htlc_id = id.to_owned();
+    let total = total.to_owned();
+    fx.node.answer(move |method, params| match method {
+        "abci_query" if params["path"] == chain.query_path() => Some(htlc_answer(chain, &htlc_id, STATE_COMPLETED)),
+        "tx_search" => {
+            let page = params["page"]
+                .as_str()
+                .and_then(|p| p.parse::<usize>().ok())
+                .or_else(|| params["page"].as_u64().map(|p| p as usize))
+                .unwrap_or(1);
+            let start = ((page - 1) * served).min(all.len());
+            let end = (start + served).min(all.len());
+            let mut reply = search_reply(&all[start..end]);
+            reply["total_count"] = json!(total);
+            Some(reply)
+        },
+        _ => None,
+    });
+}
+
+#[test]
+fn tm_flow_claim_search_counts_what_it_received_when_the_node_serves_smaller_pages() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let good = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "page two");
+        let mut all: Vec<(Vec<u8>, u32)> = (0..44).map(|_| (failed.clone(), 5)).collect();
+        all.push((good, 0));
+        script_paged_node(&fx, chain, &id, all, 30, "45");
+
+        let found = search_my(&fx, &payment).expect("the search succeeds");
+        assert_eq!(spend_memo(found), "page two");
+        assert_eq!(fx.node.requests("tx_search").len(), 2);
+    }
+}
+
+#[test]
+fn tm_flow_claim_search_stops_at_the_page_cap() {
+    // The fixture does not capture logs, so the warning text is not asserted.
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let all: Vec<(Vec<u8>, u32)> = (0..2000).map(|_| (failed.clone(), 5)).collect();
+        script_paged_node(&fx, chain, &id, all, 100, "5000");
+
+        let err = search_my(&fx, &payment).expect_err("no successful claim within the cap");
+        assert!(err.contains("ClaimHtlcTxNotFound"), "unexpected error: {err}");
+        assert_eq!(fx.node.requests("tx_search").len(), 10);
+    }
+}
+
+#[test]
+fn tm_flow_wait_for_tx_spend_keeps_polling_past_a_failed_claim() {
+    // The first round only holds a failed claim, the second the successful one (the node answers by the number
+    // of searches it has had).
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let (payment, id) = own_payment(&fx, chain);
+        let failed = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "failed");
+        let good = memo_tx(&fx, chain, vec![claim_any_of(&fx, &id)], "second round");
+        let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        fx.node.answer(move |method, _| match method {
+            "tx_search" => {
+                let round = rounds.fetch_add(1, Ordering::SeqCst);
+                Some(if round == 0 {
+                    search_reply(&[(failed.clone(), 5)])
+                } else {
+                    search_reply(&[(good.clone(), 0)])
+                })
+            },
+            _ => None,
+        });
+
+        let wait_until = common::now_ms() / 1000 + 600;
+        let spend = common::block_on(fx.coin.wait_for_tx_spend(&payment, wait_until, 0, &None).compat())
+            .expect("the claim is found");
+        assert_eq!(spend_memo(Some(FoundSwapTxSpend::Spent(spend))), "second round");
+        assert_eq!(fx.node.requests("tx_search").len(), 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // send_taker_refunds_payment / send_maker_refunds_payment (§18.3.1)
 // ---------------------------------------------------------------------------
 
@@ -1428,6 +1674,47 @@ fn tm_flow_wait_for_confirmations_fails_on_an_error_status() {
     let err = common::block_on(fx.coin.wait_for_confirmations(&tx, 1, false, wait_until, 1).compat())
         .expect_err("the transaction failed on the chain");
     assert!(err.contains("Got error code: '5'"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// extract_secret: every message, checked against the secret hash (CRD ch.51 §51.6E R91)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tm_flow_extract_secret_examines_every_message_and_checks_the_hash() {
+    for chain in Chain::BOTH {
+        let fx = fixture(chain);
+        let claim = |secret: &[u8]| {
+            ClaimHtlcMsg::new(
+                chain.htlc_type(),
+                "ABCD".repeat(16),
+                fx.coin.account_id.clone(),
+                hex::encode(secret),
+            )
+            .to_any()
+            .expect("a claim-HTLC message")
+        };
+        let other = Any {
+            type_url: "/some.other.Msg".to_owned(),
+            value: vec![1, 2, 3],
+        };
+
+        // The claim is the second message.
+        let tx = signed_tx_with(&fx.coin, chain, vec![other.clone(), claim(&PREIMAGE)], "");
+        assert_eq!(fx.coin.extract_secret(&secret_hash(), &tx), Ok(PREIMAGE.to_vec()));
+
+        // A claim whose secret does not match the hash is no secret.
+        let tx = signed_tx_with(&fx.coin, chain, vec![claim(&[0x45; 32])], "");
+        let err = fx
+            .coin
+            .extract_secret(&secret_hash(), &tx)
+            .expect_err("the secret does not match");
+        assert!(err.contains("1 messages"), "{err}");
+
+        // Two claims, only the second matches.
+        let tx = signed_tx_with(&fx.coin, chain, vec![claim(&[0x45; 32]), claim(&PREIMAGE)], "");
+        assert_eq!(fx.coin.extract_secret(&secret_hash(), &tx), Ok(PREIMAGE.to_vec()));
+    }
 }
 
 // ---------------------------------------------------------------------------

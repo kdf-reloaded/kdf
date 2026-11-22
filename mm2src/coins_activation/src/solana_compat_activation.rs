@@ -38,16 +38,16 @@ pub struct SolanaCompatTokenParams {
 }
 
 /// The request of `experimental::enable_solana_with_assets` (CRD ch.40 R40.2.1, R40.1A.5): members flat in `params`,
-/// unknown members ignored. `tx_history` is an optional boolean (default `false`) whose value is never used: it has
-/// no effect and never aborts the request (R40.2.5). There is no commitment member.
+/// unknown members ignored. `tx_history` is an optional boolean (default `false`): `true` starts the transaction
+/// history of the platform and its tokens (R40.6C.1); a value that is not a boolean fails request parsing. There is
+/// no commitment member.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SolanaCompatPlatformRequest {
     ticker: String,
     nodes: Vec<SolanaCompatNode>,
     tokens_params: Vec<SolanaCompatTokenParams>,
-    /// Accepted and never used (R40.2.5); a value that is not a boolean fails request parsing.
+    /// R40.6C.1: `true` starts the history; a value that is not a boolean fails request parsing.
     #[serde(default)]
-    #[allow(dead_code)]
     tx_history: bool,
     #[serde(default)]
     hd_path_layout: Option<SolanaHdLayout>,
@@ -77,6 +77,7 @@ impl SolanaCompatPlatformRequest {
             hd_path_layout: self.hd_path_layout,
             path_to_address: self.path_to_address,
             priv_key_policy: self.priv_key_policy,
+            tx_history: self.tx_history,
         }
     }
 }

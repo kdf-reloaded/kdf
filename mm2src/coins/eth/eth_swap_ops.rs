@@ -1,6 +1,8 @@
 //! SwapOps and WatcherOps trait implementations for EthCoin.
 
 use super::*;
+use crate::utxo::utxo_common::capped_refund_wait;
+use crate::{wall_clock_refund_eligibility, CanRefundHtlc};
 
 #[async_trait]
 impl SwapOps for EthCoin {
@@ -327,6 +329,7 @@ impl SwapOps for EthCoin {
                 current_block = from_block;
             }
 
+            let search_from_block = from_block;
             let mut from_block = from_block;
 
             loop {
@@ -360,12 +363,30 @@ impl SwapOps for EthCoin {
                             try_s!(assert_send_future(provider.get_transaction_by_hash(event_hash)).await);
                         match transaction {
                             Some(t) => break Ok(Some(try_s!(signed_tx_from_alloy_tx(t)).into())),
-                            None => break Ok(None),
+                            // CRD ch.39 R39.11.5A.6, D39.11.5A.1 (a): an event without its transaction does
+                            // not show that no payment exists.
+                            None => {
+                                break ERR!(
+                                    "Undetermined whether the payment was sent: a payment event was found in \
+                                     block range {} to {}, but the node does not return its transaction {:#x}",
+                                    from_block,
+                                    to_block,
+                                    event_hash
+                                )
+                            },
                         }
                     },
                     None => {
                         if to_block >= current_block {
-                            break Ok(None);
+                            // CRD ch.39 R39.11.5A.4, D39.11.5A.1 (a): this point is reached only with a
+                            // contract state other than `Uninitialized` (checked above), so a search that
+                            // ends without the event contradicts the state.
+                            break ERR!(
+                                "Undetermined whether the payment was sent: the swap contract reports a \
+                                 payment for this swap, but no payment event was found in blocks {} to {}",
+                                search_from_block,
+                                current_block
+                            );
                         }
                         from_block = to_block + 1;
                     },
@@ -405,20 +426,79 @@ impl SwapOps for EthCoin {
             .await
     }
 
-    fn extract_secret(&self, _secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+    fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
         let unverified: UnverifiedTransaction = try_s!(rlp::decode(spend_tx));
-        let function = try_s!(SWAP_CONTRACT.function("receiverSpend"));
-        let tokens = try_s!(function.decode_input(&unverified.data[4..]));
-        if tokens.len() < 3 {
-            return ERR!("Invalid arguments in 'receiverSpend' call: {:?}", tokens);
+        match secret_of_claim_call(&unverified.data, secret_hash)? {
+            Some(secret) => Ok(secret),
+            None => ERR!("The call input of the spend is not a 'receiverSpend' call with the secret of the swap"),
         }
-        match &tokens[2] {
-            Token::FixedBytes(secret) => Ok(secret.to_vec()),
-            _ => ERR!(
-                "Expected secret to be fixed bytes, decoded function data is {:?}",
-                tokens
+    }
+
+    /// CRD ch.51 §51.6E R86: the call input first, then the `secret` word of the `ReceiverSpent` logs of the
+    /// transaction's receipt. A value is the secret only when it passes the secret-hash rule.
+    async fn extract_secret_from_spend(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        use crate::eth::alloy_compat::assert_send_future;
+        use alloy::providers::Provider;
+
+        let unverified: UnverifiedTransaction = try_s!(rlp::decode(spend_tx));
+        if let Some(secret) = secret_of_claim_call(&unverified.data, secret_hash)? {
+            return Ok(secret);
+        }
+
+        let spend_hash = unverified.hash();
+        let provider = self.alloy_provider();
+        let alloy_hash = alloy::primitives::B256::from_slice(&spend_hash.0);
+        let receipt = match assert_send_future(provider.get_transaction_receipt(alloy_hash)).await {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => {
+                return ERR!(
+                    "The node returned no receipt for the spend transaction {:02x}",
+                    spend_hash
+                )
+            },
+            Err(e) => {
+                return ERR!(
+                    "Error {} on getting the receipt of the spend transaction {:02x}",
+                    e,
+                    spend_hash
+                )
+            },
+        };
+        let logs: Vec<(Option<Vec<u8>>, Vec<u8>)> = receipt
+            .logs()
+            .iter()
+            .map(|log| {
+                (
+                    log.topics().first().map(|topic| topic.as_slice().to_vec()),
+                    log.data().data.to_vec(),
+                )
+            })
+            .collect();
+        match secret_of_spent_logs(&logs, secret_hash)? {
+            Some(secret) => Ok(secret),
+            None => ERR!(
+                "Neither the call input nor the logs of the spend transaction {:02x} carry the secret of the swap",
+                spend_hash
             ),
         }
+    }
+
+    /// The Tron family keeps the wall-clock rule, with no chain read (CRD ch.51 §51.6E R92 item 3). Every other
+    /// EVM coin reads the latest block's timestamp once the local clock is past the lock time
+    /// (CRD ch.51 §51.6E R88). A failed read, or a block without a timestamp, is an error.
+    fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        let fut = async move {
+            let now = now_ms() / 1000;
+            if self.is_tron_family() {
+                return Ok(wall_clock_refund_eligibility(now, locktime));
+            }
+            if now < locktime {
+                return Ok(evm_refund_eligibility(now, locktime, None));
+            }
+            let tip_ts = self.latest_block_timestamp().await?;
+            Ok(evm_refund_eligibility(now, locktime, Some(tip_ts)))
+        };
+        Box::new(fut.boxed().compat())
     }
 
     fn negotiate_swap_contract_addr(
@@ -485,3 +565,266 @@ impl SwapOps for EthCoin {
 
 #[async_trait]
 impl WatcherOps for EthCoin {}
+
+impl EthCoin {
+    /// The timestamp of the latest block, read through the coin's node failover.
+    async fn latest_block_timestamp(&self) -> Result<u64, String> {
+        use crate::eth::alloy_compat::assert_send_future;
+        use alloy::eips::BlockNumberOrTag;
+        use alloy::providers::Provider;
+        use std::future::IntoFuture;
+
+        let provider = self.alloy_provider();
+        match assert_send_future(provider.get_block_by_number(BlockNumberOrTag::Latest).into_future()).await {
+            Ok(Some(block)) => Ok(block.header.timestamp),
+            Ok(None) => ERR!("The node returned no latest block"),
+            Err(e) => ERR!("Error {} on getting the latest block", e),
+        }
+    }
+}
+
+/// The longest wait, in seconds, after the latest block's timestamp has not passed the lock time while the
+/// local clock has: the node is behind, so the stage asks again soon.
+pub(crate) const EVM_TIP_RECHECK_MAX_SECS: u64 = 60;
+
+/// The refund gate of an EVM coin (CRD ch.51 §51.6E R88): while the local clock `now` has not passed the
+/// lock time the answer is a wait of at most one hour and no chain read is needed. Afterwards the latest
+/// block's timestamp `tip_ts` must be past the lock time; otherwise (no timestamp read, or the tip at or
+/// before the lock time) the answer is a wait of at most [`EVM_TIP_RECHECK_MAX_SECS`].
+pub(crate) fn evm_refund_eligibility(now: u64, locktime: u64, tip_ts: Option<u64>) -> CanRefundHtlc {
+    if now < locktime {
+        return capped_refund_wait(locktime - now + 1);
+    }
+    match tip_ts {
+        Some(tip_ts) if tip_ts > locktime => CanRefundHtlc::CanRefundNow,
+        Some(tip_ts) => CanRefundHtlc::HaveToWait((locktime - tip_ts + 1).min(EVM_TIP_RECHECK_MAX_SECS)),
+        None => CanRefundHtlc::HaveToWait(EVM_TIP_RECHECK_MAX_SECS),
+    }
+}
+
+#[cfg(test)]
+mod refund_gate_tests {
+    use super::*;
+
+    #[test]
+    fn the_tron_family_rule_is_the_wall_clock_rule_around_the_lock_time() {
+        // `can_refund_htlc` answers a Tron-family coin with `wall_clock_refund_eligibility` and no chain read;
+        // the trait default is the same function.
+        let lock = 5000;
+        assert!(matches!(
+            wall_clock_refund_eligibility(lock - 1, lock),
+            CanRefundHtlc::HaveToWait(2)
+        ));
+        assert!(matches!(
+            wall_clock_refund_eligibility(lock, lock),
+            CanRefundHtlc::HaveToWait(1)
+        ));
+        assert!(matches!(
+            wall_clock_refund_eligibility(lock + 1, lock),
+            CanRefundHtlc::CanRefundNow
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_before_the_lock_time_on_the_local_clock() {
+        assert!(matches!(
+            evm_refund_eligibility(1000, 1100, None),
+            CanRefundHtlc::HaveToWait(101)
+        ));
+        assert!(matches!(
+            evm_refund_eligibility(1000, 100_000, None),
+            CanRefundHtlc::HaveToWait(3600)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_while_the_tip_is_not_past_the_lock_time() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(1000)),
+            CanRefundHtlc::HaveToWait(1)
+        ));
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(990)),
+            CanRefundHtlc::HaveToWait(11)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_opens_when_the_tip_is_past_the_lock_time() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(1001)),
+            CanRefundHtlc::CanRefundNow
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_caps_the_wait_when_the_tip_is_far_behind() {
+        assert!(matches!(
+            evm_refund_eligibility(1_000_000, 100_000, Some(1000)),
+            CanRefundHtlc::HaveToWait(60)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_the_gap_when_the_tip_is_10_s_behind() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(990)),
+            CanRefundHtlc::HaveToWait(11)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_without_a_tip_timestamp() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, None),
+            CanRefundHtlc::HaveToWait(60)
+        ));
+    }
+}
+
+/// The secret of `secret_hash` in the call input of a spend: the third argument of a `receiverSpend` call, when
+/// it passes the secret-hash rule (CRD ch.51 §51.6E R86). `Ok(None)` when the input is not such a call.
+///
+/// # Errors
+///
+/// `secret_hash` has an unsupported width.
+fn secret_of_claim_call(input: &[u8], secret_hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let function = try_s!(SWAP_CONTRACT.function("receiverSpend"));
+    let Some((selector, args)) = input.split_at_checked(4) else {
+        return Ok(None);
+    };
+    if selector != function.short_signature() {
+        return Ok(None);
+    }
+    let Ok(tokens) = function.decode_input(args) else {
+        return Ok(None);
+    };
+    match tokens.get(2) {
+        Some(Token::FixedBytes(secret)) => {
+            crypto::secret_hash_algo::secret_matches_hash(secret, secret_hash).map(|ok| ok.then(|| secret.clone()))
+        },
+        _ => Ok(None),
+    }
+}
+
+/// The first `secret` word of a `ReceiverSpent(bytes32 id, bytes32 secret)` log that passes the secret-hash rule
+/// (CRD ch.51 §51.6E R86). Each log is its first topic and its data; only a log whose first topic is the
+/// event's signature and whose data is the two words id and secret counts.
+///
+/// # Errors
+///
+/// `secret_hash` has an unsupported width.
+fn secret_of_spent_logs(logs: &[(Option<Vec<u8>>, Vec<u8>)], secret_hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let event_topic = try_s!(SWAP_CONTRACT.event("ReceiverSpent")).signature();
+    for (topic, data) in logs {
+        if topic.as_deref() != Some(event_topic.as_bytes()) || data.len() != 64 {
+            continue;
+        }
+        let secret = &data[32..];
+        if crypto::secret_hash_algo::secret_matches_hash(secret, secret_hash)? {
+            return Ok(Some(secret.to_vec()));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod extract_secret_tests {
+    use super::*;
+    use crypto::secret_hash_algo::SecretHashAlgo;
+
+    const SECRET: [u8; 32] = [0x44; 32];
+
+    fn claim_input(function: &str, secret: &[u8]) -> Vec<u8> {
+        SWAP_CONTRACT
+            .function(function)
+            .unwrap()
+            .encode_input(&[
+                Token::FixedBytes(vec![0x11; 32]),
+                Token::Uint(1000.into()),
+                Token::FixedBytes(secret.to_vec()),
+                Token::Address(Address::from_low_u64_be(1)),
+                Token::Address(Address::from_low_u64_be(2)),
+            ])
+            .unwrap()
+    }
+
+    fn secret_hash() -> Vec<u8> { SecretHashAlgo::DHASH160.hash_secret(&SECRET) }
+
+    fn spent_topic() -> Vec<u8> {
+        SWAP_CONTRACT
+            .event("ReceiverSpent")
+            .unwrap()
+            .signature()
+            .as_bytes()
+            .to_vec()
+    }
+
+    fn spent_data(secret: &[u8]) -> Vec<u8> { [&[0x11u8; 32][..], secret].concat() }
+
+    #[test]
+    fn claim_call_with_the_matching_secret_gives_the_secret() {
+        let input = claim_input("receiverSpend", &SECRET);
+        assert_eq!(secret_of_claim_call(&input, &secret_hash()), Ok(Some(SECRET.to_vec())));
+    }
+
+    #[test]
+    fn claim_call_with_another_secret_is_no_candidate() {
+        let input = claim_input("receiverSpend", &[0x45; 32]);
+        assert_eq!(secret_of_claim_call(&input, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn call_of_another_selector_with_the_same_layout_is_no_candidate() {
+        // Only the `receiverSpend` selector marks a claim, whatever the argument words hold.
+        let mut input = claim_input("receiverSpend", &SECRET);
+        input[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(secret_of_claim_call(&input, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn call_input_shorter_than_a_selector_is_no_candidate() {
+        for len in 0..4 {
+            assert_eq!(secret_of_claim_call(&vec![0xed; len], &secret_hash()), Ok(None));
+        }
+    }
+
+    #[test]
+    fn claim_call_with_a_wrong_hash_width_is_an_error() {
+        let input = claim_input("receiverSpend", &SECRET);
+        assert!(secret_of_claim_call(&input, &[0u8; 19]).is_err());
+    }
+
+    #[test]
+    fn spent_log_with_the_matching_secret_gives_the_secret() {
+        let logs = vec![(Some(spent_topic()), spent_data(&SECRET))];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(Some(SECRET.to_vec())));
+    }
+
+    #[test]
+    fn spent_log_with_another_secret_is_no_candidate() {
+        let logs = vec![(Some(spent_topic()), spent_data(&[0x45; 32]))];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn log_of_another_topic_is_ignored() {
+        let logs = vec![(Some(vec![0x99; 32]), spent_data(&SECRET)), (None, spent_data(&SECRET))];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn spent_log_with_data_of_another_size_is_ignored() {
+        let logs = vec![(Some(spent_topic()), SECRET.to_vec())];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(None));
+    }
+
+    #[test]
+    fn the_first_matching_log_wins() {
+        let logs = vec![
+            (Some(spent_topic()), spent_data(&[0x45; 32])),
+            (Some(spent_topic()), spent_data(&SECRET)),
+        ];
+        assert_eq!(secret_of_spent_logs(&logs, &secret_hash()), Ok(Some(SECRET.to_vec())));
+    }
+}

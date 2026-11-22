@@ -86,6 +86,15 @@ Submission and settlement tracking are deferred work (D63.6).
 > Tron derivation rule dictates it, that is stated explicitly and
 > distinguished from the discretionary Rust shape around it.
 
+> *Status note (2026-11-22, Reloaded-original; takes no reference input),
+> submission and tracking.* The one-sentence claim and this summary say that
+> today's withdraw is sign-only and that submission and settlement tracking
+> are deferred. That now describes the direct `withdraw` method only. The task
+> form of the withdraw (`task::withdraw::init` and `task::withdraw::status`)
+> submits the signed authorization to the provider and follows the transfer
+> until it settles. The decision and the flow as built are recorded in the
+> status note after D63.9 (§63.8B).
+
 ## 63.1 Baseline Verification
 
 Tron GasFree fee delegation is a **post-2022** feature. It is
@@ -467,6 +476,19 @@ Whether Reloaded adopts these exact values is decision D63.2
 > exists (D63.6). Until then a token at the custody address moves only when
 > the caller submits the authorization to the provider.
 
+> *Status note (2026-11-22, Reloaded-original; takes no reference input),
+> the submission flow.* Three statements of the notes above and of §63.3.1
+> hold for the direct `withdraw` method only since the task route submits
+> (the status note after D63.9, §63.8B):
+>
+> - `SubmittingGaslessAuthorization`, `WaitingForGaslessProvider` and
+>   `WaitingForGaslessSettlement` are part of the status vocabulary and are
+>   reported by the task route, in the wire forms of R33;
+> - the fee details' `trace_id` is the provider's id of the transfer in the
+>   result of the task route, and `null` in the result of the direct method;
+> - `status_poll_interval_ms` (§63.3.1) is the time between two trace
+>   requests of the task route.
+
 ## 63.4 GasFree Provider REST API (dictated interop)
 
 The provider API is an external, public REST service. The
@@ -593,6 +615,33 @@ an invalid provider response (§63.9.1), not a parsed one.
 > numbers or decimal strings, and a client MUST accept both forms;
 > a negative or empty value is rejected. A signature or transaction
 > hash carrying a `0x` prefix, or of the wrong length, is rejected.
+
+> *Status note (2026-11-22, Reloaded-original; takes no reference input), the
+> transfer record as the provider sends it.* Sources: the provider's public
+> developer documentation (§63.14) and a live test on the Nile test network,
+> both of 2026-11-22. They disagree on the times, and the documentation's
+> trace answer has fewer members than its submit answer, so the implementation
+> reads the record of a submit or trace answer as follows:
+>
+> - *Times.* The documentation shows `createdAt`, `updatedAt` and `expiredAt`
+>   as ISO 8601 text; the live provider sends them as integers, Unix
+>   milliseconds. They are accepted as a number, as any text, as `null` and
+>   when absent, and nothing is decided from them.
+> - *Members a trace answer may lack.* `maxFee`, `signature`, `updatedAt` and
+>   `version` may be absent (or `null`). Where one is present its rule holds:
+>   an integer, 130 hexadecimal digits, the version 1.
+> - *Not yet on chain.* The documentation calls the `txn*` members empty
+>   until the transfer is on chain. For `txnHash`, `txnState`, the other
+>   `txn*` members, `estimatedTotalFee` and `estimatedTotalCost`, an absent
+>   member, `null` and the empty string all mean "not yet".
+> - *Unchanged.* The members the flow reads keep the strict rules above: `id`,
+>   the five addresses, `amount`, `nonce`, `state`, and a present `txnState`,
+>   `txnHash` and `version`. A required integer member is still rejected when
+>   it is empty or negative.
+> - *A decoding error names the member.* The text of an
+>   `InvalidProviderResponse` for a `data` that does not decode starts with
+>   the path of the member, as `data.createdAt`; it never repeats the value
+>   of a signature member.
 
 ## 63.5 GasFree Custody-Address Derivation -- Tron `CREATE2` (dictated interop)
 
@@ -989,6 +1038,21 @@ observable and is not bound.
 > the flow that D63.6 defers takes no reference input beyond §63.4 and
 > R31-R33. §63.8B passed the KDF Dirty Gate on 2026-11-21.
 
+> *Status note (2026-11-22, Reloaded-original; takes no reference input),
+> submission and settlement on the task route.* "Not yet done: submission and
+> settlement" above, and the sentences of this section and of §63.8A that say
+> nothing is submitted, describe the direct `withdraw` method. On the task
+> route the withdraw goes on after step 5: it submits the authorization and
+> follows the transfer (the status note after D63.9, §63.8B). There the
+> lock of step 3 is held until the provider answered the submission, so a
+> second gasless withdraw of the same address reads the provider's nonce only
+> after the first one was submitted. The terminal payload of
+> `task::withdraw::status` is the result of §63.8A with the fee details'
+> `trace_id` filled and a top-level `tx_hash`, where R25 and R34 record, for
+> the reference row, a payload without either; it still has no `tx_hex`. T15
+> and T16 are tested in that form for the task route. The deviation is
+> recorded in `RELOADED_VS_GLEEC.md`.
+
 ## 63.8A The Sign-Only Result: Members Around the Signed Authorization
 
 *(Added 2026-11-19 by the KDF Spec Reader; reference facts at the
@@ -1329,6 +1393,104 @@ D63.9. **The submission flow in Reloaded (for the maintainer; open;
     documentation, §63.14, first); cancellation; what is recorded and
     logged; whether a trace method exists outside the withdraw.
 
+    *Status note (2026-11-22, Reloaded-original; takes no reference input),
+    the decision and the flow as built.* Decided by the maintainer on
+    2026-11-21 and 2026-11-22: the seven points above are taken as written,
+    and the items left open are decided as follows.
+
+    - *Which call submits.* Only the task route submits and tracks:
+      `task::withdraw::init` starts the flow and `task::withdraw::status`
+      reports it. The direct `withdraw` method stays sign-only: it answers
+      the result of §63.8A unchanged, with `trace_id` `null`, and makes no
+      submit and no trace request. `send_raw_transaction` is unchanged (R30).
+      Under `auto` the task route submits too, once it has turned to the
+      gasless rail (R16).
+    - *Phases.* After `FetchingGaslessQuote` and
+      `SigningGaslessAuthorization` the task reports
+      `SubmittingGaslessAuthorization` just before the submit request. Then
+      each answer of the provider, the submit answer included, sets the
+      phase: `WaitingForGaslessProvider` while `state` is `WAITING` or
+      `INPROGRESS` and the answer names no `txnHash`, with `provider_state`
+      the `state` as the provider writes it; `WaitingForGaslessSettlement`
+      when `state` is `CONFIRMING`, or when an answer that is not final
+      names a `txnHash`. The wire forms are those of R33. `tx_hash`, there
+      and in the result, is the provider's `txnHash` as 64 lower-case
+      hexadecimal digits without `0x`, the form of the `tx_hash` of a native
+      TRON withdraw of this repository.
+    - *Settled.* The transfer is finished when `state` is `SUCCEED`. The
+      task's `Ok` payload is the result of §63.8A (D63.8 (a)) with the fee
+      details' `trace_id` set to the `id` of the submit answer (item 6) and
+      with a top-level `tx_hash`; it has no `tx_hex`. A `SUCCEED` answer
+      without a `txnHash` is `InvalidProviderResponse` (502).
+    - *Failure endings.* `state` `FAILED`, or `txnState` `ON_CHAIN_FAILED`,
+      in any answer ends the task with `Gasless`/`ProviderRejected` (502).
+    - *Wait bound (item 7).* The provider is asked for the transfer every
+      `status_poll_interval_ms` (§63.3.1; 3 000 ms by default). Two trace
+      requests of one transfer are at least 1 000 ms apart, also after a
+      failed one: a configured interval below that, zero included, is
+      accepted at activation and raised where it is used. The floor is this
+      repository's choice. No trace
+      request is made at or after the signed `deadline` plus 120 seconds.
+      Reaching that bound ends the task with the shared `Transport` arm; its
+      text says that the outcome of the transfer is unknown.
+    - *`requestId` and retries.* Each submit carries a fresh version-4 UUID
+      as its `requestId`. The submit is one request and is never repeated:
+      after a failed connection, a timeout or a 5xx answer no further
+      request follows (T18). A trace request that fails with a failed
+      connection, a timeout, a 5xx or a 429 is logged, and the next one is
+      made after the interval, until the bound. A 404 of the trace request,
+      as the HTTP status or as the envelope `code`, is `TraceNotFound` (404)
+      and ends the task (item 5). Any other failure of a trace request ends
+      the task as §63.9.3 maps it. A 404 of the submit request stays
+      `ProviderRejected` (502).
+    - *A submission with an unknown outcome.* When the submit request may
+      have reached the provider and no usable answer came back (a failed
+      connection, a timeout, a 5xx answer, an answer that does not decode
+      or that fails the comparison below), the provider may have accepted
+      the transfer, and a second withdraw would sign a new authorization
+      with the next nonce. The error keeps the arm §63.9.3 gives it, its
+      text ends with the advice to check the balance and the history of
+      the GasFree address before trying again, and one WARN log line names
+      the coin, the sender, the receiver, the amount and the `requestId`. A
+      refusal before the request (`QuoteExpired` included) and a 4xx answer
+      of the provider carry no such advice.
+    - *Lock (item 1).* The lock of §63.8 step 3 is held from before the
+      controller check until the provider's answer to the submit request is
+      in, or that request has failed. It is not held during the wait.
+    - *Submit payload and answer (items 2 and 3).* The payload of §63.4.6 is
+      written from the signed authorization itself, with `version` 1. The
+      answer's `nonce`, `version` (when the answer carries the member),
+      `accountAddress`, `targetAddress`, `tokenAddress` and `amount` are
+      compared with the signed `nonce`, the version 1, `user`, `receiver`,
+      `token` and `value`. A difference, and an `id` that is not a UUID, is
+      `InvalidProviderResponse` (502), and nothing is traced.
+    - *`QuoteExpired` (item 4).* When the signed `deadline` is not after the
+      current time at the moment the submit request is about to be sent, the
+      task ends with `QuoteExpired` (400) and nothing is sent.
+    - *Cancel.* `task::withdraw::cancel` before the submit request is sent
+      stops everything; nothing reaches the provider. After it is sent, a
+      cancel only stops the waiting: the transfer may still complete. A
+      cancel, or a stop of the node, while the status is
+      `SubmittingGaslessAuthorization` leaves the outcome unknown: the
+      request may or may not have reached the provider. One INFO log line,
+      written just before the request is sent, names the coin, the sender,
+      the receiver, the amount and the `requestId` and so identifies the
+      submission.
+    - *Records.* Log lines at the INFO level: one just before the submit
+      request is sent (see *Cancel*), one when the provider's
+      answer to the submission is in (coin, trace id, sender, receiver,
+      amount), one when the wait ends (trace id, the outcome, and the
+      transaction hash when it is known). None carries a signature or a
+      credential (R9). Nothing is written to a store, and `my_tx_history`
+      gains no row.
+    - *No trace method.* No RPC traces a `trace_id` outside the withdraw.
+    - *Errors after the submission.* Every error that ends the task after
+      the provider answered the submission names the trace id in its text,
+      so that the transfer can be looked up at the provider. No failure of
+      the submission or of the wait leads to the native rail, whatever
+      `fallback_to_native` says: none is a deterministic unavailability
+      (§63.8 step 6).
+
 T18. **Client attempts and pre-send refusals.** Against a loopback
     provider: a submit and a trace are one request each; a failed
     connection, a timeout and a 5xx answer are followed by exactly as
@@ -1337,6 +1499,14 @@ T18. **Client attempts and pre-send refusals.** Against a loopback
     `version` other than 1 and a trace identifier that is not a UUID
     are refused with no request made to the provider.
 
+    *Status note (2026-11-22), T18.* The tests exist under the decision of
+    D63.9 (no further request): for the provider client in
+    `coins/eth/tron/gasfree/provider.rs` (the `t18_` tests: one request each,
+    a 5xx answer, a timeout and a closed connection for submit and for trace,
+    the two refusals with no request made), and through the task route in
+    `coins/eth/tron/gasfree/withdraw_tests.rs`
+    (`t18_a_failed_submission_is_not_repeated_by_the_task`).
+
 T19. **Phase wire form.** If Reloaded reports the three phases, the
     task status carries them in the forms of R33: the bare string for
     `SubmittingGaslessAuthorization`; `trace_id` and `provider_state`
@@ -1344,10 +1514,26 @@ T19. **Phase wire form.** If Reloaded reports the three phases, the
     string and `tx_hash` as a string or `null`, never omitted, for
     `WaitingForGaslessSettlement`.
 
+    *Status note (2026-11-22), T19.* The test exists
+    (`coins/eth/tron/gasfree/withdraw_tests.rs`,
+    `t19_the_submission_phases_have_their_wire_forms`); the flow tests of the
+    same file check the phases as `task::withdraw::status` reports them, in
+    their order.
+
 T20. **Trace 404 (conditional on D63.9 item 5).** A 404 from the
     trace request, as an HTTP status and as an envelope `code`,
     reaches the caller as `Gasless`/`TraceNotFound` with HTTP 404,
     and a 404 from the submit request stays `ProviderRejected` (502).
+
+    *Status note (2026-11-22), T20.* The tests exist: for the provider
+    client in `coins/eth/tron/gasfree/provider.rs`
+    (`t20_a_404_is_the_unknown_trace_for_the_trace_request_only`) and through
+    the task route in `coins/eth/tron/gasfree/withdraw_tests.rs`
+    (`t20_a_trace_404_is_trace_not_found_and_a_submit_404_is_a_rejection`).
+    The other flow tests of D63.9 are in the same file, after the heading
+    that names D63.9: the phases and the result, the failure endings, the
+    answer comparison, the expired deadline, the wait bound, a failed trace
+    request, the lock and the cancel.
 
 ## 63.9 Error Taxonomy and Status Codes
 
@@ -1787,6 +1973,15 @@ T14. **Nile end-to-end (lab row; deferred with D63.6).** A
     smoke test of the header-bearing transport. No end-to-end test
     exists at the reference row.
 
+    *Status note (2026-11-22).* Settlement tracking exists on the task route
+    (the status note after D63.9). An ignored test that signs, submits and
+    follows one transfer on Nile, with the credentials and the key taken from
+    the environment, is in `coins/eth/tron/gasfree/live_tests.rs`. The lab row
+    passed on 2026-11-22 through `task::withdraw::init` on the Nile test
+    network: the three phases in order, the final result with `trace_id` and
+    `tx_hash`, and the transfer settled on chain. The browser-target smoke test
+    stays open.
+
 T17. **Controller check (R29) (Reloaded-original, 2026-11-19).** A
     match is confirmed and reused for 10 minutes; after that, or after a
     restart, the controller is read again; a mismatch refuses with
@@ -1813,6 +2008,14 @@ D63.6. **Submission and settlement tracking.** Wire the signed
     *Status note (2026-11-21).* The reference row implements none of this
     flow; §63.8B (R30-R35) records what it has and what it leaves open, and
     D63.9 lists the points Reloaded decides.
+
+    *Status note (2026-11-22, Reloaded-original; takes no reference input).*
+    Submission and settlement tracking exist on the task route only
+    (`task::withdraw::init` and `task::withdraw::status`), as the status note
+    after D63.9 (§63.8B) records. The direct `withdraw` method stays
+    sign-only. What stays deferred: any use of the signed authorization of the
+    direct method by another RPC. (The lab row of T14 on the Nile test network
+    passed on 2026-11-22; see the status note after T14.)
 
 D63.7. **Return path for tokens held at the custody address
     (Reloaded-only deferral).** What is deferred is a way for the
@@ -1860,6 +2063,14 @@ D63.7. **Return path for tokens held at the custody address
     not hand it to the provider. A residue below the provider's fee cannot be
     returned this way. What is owed for a provider that no longer answers
     stays deferred.
+
+    *Status note (2026-11-22, Reloaded-original; takes no reference input),
+    the recovery procedure with submission.* The note above says that the node
+    does not hand the authorization to the provider. Through the task form of
+    the withdraw it now does: `task::withdraw::init` with the same parameters
+    as the request above submits the authorization and follows the transfer
+    until it settles (the status note after D63.9, §63.8B). The direct method
+    shown above still answers the sign-only result.
 
 ### 63.12A Decisions for the maintainer (Reloaded-only; take no reference input; resolved 2026-11-09)
 
@@ -2151,3 +2362,15 @@ V2. The baseline withdraw request has no fee-rail selector and no
   repository's clean-room gate tool was not run because the additions
   embed no code blocks. *Measure:* 0.02, on the discretionary-expression
   basis (dictated-interop and public-surface tokens excluded).
+- *Additions of 2026-11-22 (submission and tracking on the task route):* the
+  status notes dated 2026-11-22 after §63.0, after §63.3.6, before §63.8A,
+  after D63.9, after T18, T19 and T20, after D63.6, after D63.7 and after T14
+  are Reloaded-original, clean side: they record the maintainer's decision
+  under D63.9 and the submission flow as built, and take no reference input.
+  No cleared sentence was edited.
+- *Addition of 2026-11-22 (the transfer record as the provider sends it):* the
+  status note of this date after §63.4.7 is Reloaded-original, clean side. Its
+  inputs are the provider's public developer documentation (chapter 01 R3,
+  §63.14) and an observation of the provider's answers on the Nile test
+  network (a public-network observation), both of 2026-11-22; it takes no
+  reference input. No cleared sentence was edited.

@@ -217,7 +217,8 @@ pub struct GasFreeBinding {
     provider: GasFreeProvider,
     /// The fee-paying provider, the `serviceProvider` of every authorization (§63.6).
     service_provider: TronAddress,
-    /// The settlement poll interval, in milliseconds (R20). It takes effect with the submission flow (D63.6).
+    /// The settlement poll interval, in milliseconds (R20): how long the task route waits between two trace
+    /// requests (D63.9).
     status_poll_interval_ms: u64,
     /// The confirmations of this platform's custody addresses by the controller contract (R29).
     checks: ControllerChecks,
@@ -278,12 +279,16 @@ impl GasFreeBinding {
     /// The fee-paying provider, the `serviceProvider` of every authorization (§63.6).
     pub(crate) fn service_provider(&self) -> &TronAddress { &self.service_provider }
 
+    /// The settlement poll interval, in milliseconds (R20).
+    pub(crate) fn status_poll_interval_ms(&self) -> u64 { self.status_poll_interval_ms }
+
     /// The controller confirmations of this platform (R29): the ones the reports use.
     pub(crate) fn controller_checks(&self) -> &ControllerChecks { &self.checks }
 
     /// The lock of the sending address `sender` (§63.8 step 3). While its guard is held, no other gasless withdraw
     /// of this platform quotes or signs for the same address, so two authorizations are never signed over one
-    /// reading of the provider's nonce by this node at the same time.
+    /// reading of the provider's nonce by this node at the same time. The task route holds it until the provider
+    /// answered the submission (D63.9 item 1).
     pub(crate) fn sender_lock(&self, sender: &TronAddress) -> Arc<AsyncMutex<()>> {
         self.sender_locks
             .lock()
