@@ -968,7 +968,7 @@ the previous version used. The safe way:
   is not matched, and one line in the log names it. This covers wallet-only coins, Lightning, Solana, and
   Tendermint and TRON while their swaps are off. Before, a saved Lightning or Solana order returned to the order
   book and every match failed, and a saved Tendermint or TRON order was cancelled. The operator can still cancel
-  such an order with `cancel_order`. Detail: CRD ch.60 R60.6.5.
+  such an order with `cancel_order`. Detail: PR #485; CRD ch.60 R60.6.5.
 
 #### QTUM and QRC20
 
