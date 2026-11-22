@@ -1063,7 +1063,7 @@ the previous version used. The safe way:
 #### Legacy swaps
 
 - **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
-  refund of a swap payment (UTXO coins, BCH, Qtum, SLP tokens), it now reads the input of the spending transaction
+  refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
   CRD ch.51, status note of 2026-11-22 after R31a.
 
@@ -1152,6 +1152,7 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the

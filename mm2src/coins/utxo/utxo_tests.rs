@@ -15511,24 +15511,21 @@ mod swap_spend_by_consumed_input_tests {
         assert_eq!(kind_of(&found), "refunded");
     }
 
-    /// Input 0 is shaped like the refund path while the swap input, the second one, is a claim: the first
-    /// input decided "refunded" before, the consumed input decides "spent".
+    /// Input 0 is shaped like the refund path while the swap input, the second one, is a claim: the input
+    /// that spends the payment output decides, so the result is "spent".
     #[test]
     fn first_input_shaped_like_the_other_branch_does_not_decide() {
         let payment = payment_tx();
         let tx = spend_tx(&payment, 1, claim_script_sig(), refund_script_sig());
-        let found = found_swap_spend(info(tx.clone(), 1), TxHashAlgo::DSHA256).unwrap();
+        let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
         assert_eq!(kind_of(&found), "spent");
-        // The same transaction read at its first input is what the old code did.
-        let old = found_swap_spend(info(tx, 0), TxHashAlgo::DSHA256).unwrap();
-        assert_eq!(kind_of(&old), "refunded");
 
         let tx = spend_tx(&payment, 1, refund_script_sig(), claim_script_sig());
         let found = found_swap_spend(info(tx, 1), TxHashAlgo::DSHA256).unwrap();
         assert_eq!(kind_of(&found), "refunded");
     }
 
-    /// Input 0 has no swap instruction at all: the old code returned an error, the answer is the swap input's.
+    /// Input 0 has no swap instruction at all; the result comes from the input that spends the payment output.
     #[test]
     fn first_input_without_swap_instruction_is_not_an_error() {
         let payment = payment_tx();
@@ -15616,7 +15613,7 @@ mod swap_spend_by_consumed_input_tests {
         assert_eq!(kind_of(&found), "spent");
     }
 
-    /// The native producer reports the index of the input that consumes the requested outpoint, not input 0.
+    /// The native producer reports the index of the input that consumes the requested outpoint.
     #[test]
     fn native_find_output_spend_reports_the_consuming_input_index() {
         let payment = payment_tx();
