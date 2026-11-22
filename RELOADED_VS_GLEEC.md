@@ -866,6 +866,22 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   writes `null`: Reloaded omits an absent memo in every withdraw result outside the Tendermint family. A client that
   needs the selector has it in its own request. No peer sees the result, so no switch exists. CRD ch.63 §63.8A,
   D63.8.
+
+- **The task form of a gasless TRON withdraw submits the transfer and follows it until it settles.** No released
+  GLEEC KDF version that the CRD records carries GasFree; in the reference's open, unmerged draft (as of 2026-05-04,
+  CRD ch.63 §63.8B) no RPC submits a signed authorization to the provider and none asks the provider about a
+  transfer: the direct `withdraw` and `task::withdraw::*` both end at the signed authorization, and the three task
+  phases for a submission are declared and never reported. In Reloaded the direct `withdraw` answers as the draft
+  does (sign-only). `task::withdraw::init` goes further: it submits the authorization once, reports
+  `SubmittingGaslessAuthorization`, `WaitingForGaslessProvider` and `WaitingForGaslessSettlement`, and asks the
+  provider every `status_poll_interval_ms` until the transfer is settled or 120 seconds have passed since the
+  signed deadline. Its final answer is the sign-only result with the provider's `trace_id` in the fee details and a
+  top-level `tx_hash` (the provider's transaction); the draft's task answer has `trace_id` `null` and no `tx_hash`.
+  The errors `QuoteExpired` and `TraceNotFound`, which the draft declares and never raises, are raised: the first
+  when the signed deadline has passed before the submission is sent, the second for a 404 of the provider's trace
+  request. A client that wants the draft's behavior uses the direct `withdraw`. No peer sees any of this, so no
+  switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.63 §63.8B (R30 to
+  R35, D63.9 and its status note).
 - **A swap database migrated beyond state 15 is refused at start-up.** When the highest migration state in `MM2.db` is
   above the highest state the build knows (15 in both), KDF Reloaded stops at start-up with an error that names both
   numbers. GLEEC KDF starts, changes nothing and uses the database as a state-15 database without a warning. No
@@ -958,11 +974,12 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   form and no order; Reloaded refuses one check earlier, and its text names the
   wallet-only ticker. No switch exists: the build constant
   `TRON_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false` (CRD ch.21 R-D1,
-  R21.10B.9, R21.B3). Gasless TRC20 transfers through GasFree are signed but
-  not submitted yet: the provider setting of the activation, the
-  `gasfree_address` of the reports and the gasless withdraw are available, and
-  that withdraw returns a signed authorization the node does not hand to the
-  provider (CRD ch.63 §63.3.1 to §63.3.6, §63.8A).
+  R21.10B.9, R21.B3). Gasless TRC20 transfers through GasFree are available:
+  the provider setting of the activation, the `gasfree_address` of the
+  reports and the gasless withdraw. The direct `withdraw` returns a signed
+  authorization the node does not hand to the provider; the task form
+  submits it and follows the transfer (CRD ch.63 §63.3.1 to §63.3.6, §63.8A,
+  §63.8B).
 - **A TRON coin answers "not supported" for the EVM-only methods.**
   `get_raw_transaction`, `sign_raw_transaction`,
   `get_eth_estimated_fee_per_gas`, `stream::fee_estimator::enable`,

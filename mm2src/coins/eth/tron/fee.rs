@@ -421,8 +421,8 @@ pub struct TronGaslessFeeDetails {
     /// The highest fee the signed authorization accepts (its `maxFee`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_max_fee: Option<BigDecimal>,
-    /// The provider's id of the submitted transfer. Always present; `null` while the authorization is signed
-    /// only and not submitted (CRD ch.63 D63.6).
+    /// The provider's id of the submitted transfer. Always present; `null` in the sign-only result of the direct
+    /// `withdraw` method, which submits nothing (CRD ch.63 §63.8A, D63.9 item 6).
     #[serde(default)]
     pub trace_id: Option<String>,
 }

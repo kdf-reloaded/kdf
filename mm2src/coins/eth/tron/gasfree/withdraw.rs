@@ -1,8 +1,13 @@
-//! The gasless rail of a TRC20 withdraw (CRD ch.63 §63.7, §63.8 steps 2 to 5, §63.8A, §63.9, R29).
+//! The gasless rail of a TRC20 withdraw (CRD ch.63 §63.7, §63.8 steps 2 to 5, §63.8A, §63.8B, §63.9, R29).
 //!
-//! The rail is sign-only: it reads the provider's account record, decides whether the transfer may proceed, signs
-//! the `PermitTransfer` authorization and returns it as the withdraw result. It sends nothing to the provider and
-//! nothing to the chain (D63.6).
+//! The rail reads the provider's account record, decides whether the transfer may proceed and signs the
+//! `PermitTransfer` authorization. What follows depends on the route (D63.9):
+//!
+//! - The direct `withdraw` method is sign-only: the signed authorization is the withdraw result (§63.8A). Nothing
+//!   is sent to the provider and nothing to the chain.
+//! - The task route (`task::withdraw::init`, the caller that passes a task handle) submits the authorization to
+//!   the provider ([`submit`]) and follows the transfer until it settles ([`track`]). Its result is the same
+//!   result with the provider's trace id in the fee details and the transaction hash as `tx_hash`.
 //!
 //! The rail selection (`native`, `gasless`, `auto`) and the fallback to the native rail live in
 //! [`super::super::withdraw`]; this module answers whether the rail applies to a coin ([`resolve`]) and runs it
@@ -18,6 +23,14 @@
 //!   256-bit integer in the token's smallest unit.
 //! - Nothing is signed after a refusal, and nothing is signed before the controller check and the preflight
 //!   passed under the sender's lock.
+//! - The sender's lock is held until the signature on the direct method, and until the provider answered the
+//!   submission (or the submission failed) on the task route. It is never held while the rail waits for the
+//!   settlement.
+//! - The submission is one request and is never repeated. Each submission carries a fresh version-4 UUID as its
+//!   `requestId`. No request reaches the provider for an authorization whose deadline has passed.
+//! - A failure after the submission never counts as an unavailability of the rail: the native rail does not run
+//!   after it. Its text names the trace id.
+//! - Every wait is bounded: no trace request is made at or after the bound [`track`] is given.
 //! - No error text and no log line of this module carries a provider credential or a signature (R9). A failure of
 //!   the provider exchange that the withdraw RPC reports through its shared transport arm has one fixed text
 //!   there; its kind goes to the log only (§63.9.3).
@@ -25,25 +38,43 @@
 use super::super::api::TronApiClient;
 use super::super::fee::{GaslessFeeMethod, GaslessProviderName, TronGaslessFeeDetails};
 use super::super::TronAddress;
-use super::authorization::{sign_permit, GasFreeRelayPayload, PermitTransfer};
+use super::authorization::{sign_permit, GasFreeRelayPayload, PermitTransfer, SignedPermit, PERMIT_VERSION};
 use super::binding::{CoinGasFree, GasFreeBinding};
 use super::custody::{check_against_controller, custody_token_balance};
-use super::failure::{GasFreeError, GaslessMember, RpcArm};
+use super::failure::{sanitize_provider_text, GasFreeError, GaslessMember, RpcArm};
 use super::preflight::{decide, CustodyBalance, PreflightDecision, PreflightIncomplete, Quote, Refusal};
+use super::provider_payloads::{SubmitRequest, TransactionHash, TransactionState, TransferRecord, TransferState};
 use crate::eth::{u256_to_big_decimal, wei_from_big_decimal, EthCoin, EthCoinType, EvmWithdrawSender};
 use crate::rpc_command::init_withdraw::{WithdrawInProgressStatus, WithdrawTaskHandle};
 use crate::{GaslessWithdrawError, TransactionDetails, UnsignedTransaction, WithdrawError, WithdrawRequest};
 use bigdecimal::BigDecimal;
-use common::log::warn;
-use common::now_ms;
+use common::executor::Timer;
+use common::log::{info, warn};
+use common::{new_uuid, now_ms};
 use ethereum_types::U256;
+use futures::lock::MutexGuard as AsyncMutexGuard;
+use uuid::Uuid;
 
 /// How long a signed authorization stays valid when the request does not say, in seconds (§63.8 step 3, R20).
 pub(crate) const DEFAULT_DEADLINE_SECONDS: u64 = 300;
 
+/// How long after the signed deadline the task route still asks the provider for the transfer, in milliseconds
+/// (D63.9 item 7).
+pub(crate) const SETTLEMENT_GRACE_MS: u64 = 120_000;
+
 /// The text the withdraw RPC shows for every provider failure of its shared transport arm (§63.9.3): a caller
 /// cannot tell the kinds apart there.
 const PROVIDER_TRANSPORT_TEXT: &str = "The GasFree provider could not be reached or did not serve the request";
+
+/// The shortest time between two trace requests of one transfer, in milliseconds. A configured
+/// `status_poll_interval_ms` below it, zero included, is raised to it where the interval is used; the activation
+/// accepts the value as it is.
+pub(crate) const MIN_POLL_INTERVAL_MS: u64 = 1_000;
+
+/// The sentence the error of a submission with an unknown outcome ends with (D63.9): the request may have reached
+/// the provider, and a second withdraw would sign a new authorization.
+const MAYBE_ACCEPTED_TEXT: &str = ". The provider may have accepted the transfer; check the GasFree address balance \
+                                   and its history before trying again";
 
 /// The gasless terms of a withdraw request (§63.3.4), read and checked before anything else is done (§63.9.4).
 #[derive(Clone, Debug, PartialEq)]
@@ -223,9 +254,16 @@ impl GaslessRail {
     }
 
     /// Runs the rail for a transfer of `request.amount` of `coin` from `sender` to `receiver` (§63.8 steps 3 to
-    /// 5): under the sender's lock, the controller check (R29), the preflight (§63.7), the fee cap, the signature;
-    /// then the sign-only result (§63.8A). `progress` is the handle of the task that runs the withdraw, if a task
-    /// does.
+    /// 5): under the sender's lock, the controller check (R29), the preflight (§63.7), the fee cap, the signature.
+    ///
+    /// `progress` is the handle of the task that runs the withdraw, if a task does, and it selects what follows
+    /// the signature (D63.9):
+    ///
+    /// - `None`, the direct method: the sign-only result (§63.8A). No submit and no trace request is made.
+    /// - `Some`, the task route: the authorization is submitted ([`submit`]) and the transfer is followed until
+    ///   it settles or [`SETTLEMENT_GRACE_MS`] after the signed deadline ([`track`]). The result is the sign-only
+    ///   result with the trace id in the fee details and the transaction hash as `tx_hash`. One INFO line is
+    ///   logged when the provider took the submission and one when the wait ended.
     ///
     /// # Errors
     ///
@@ -240,7 +278,9 @@ impl GaslessRail {
     ///   [`FailureClass::Deterministic`]);
     /// - `Gasless`/`PendingTransfer`, `MaxFeeExceeded`, `QuoteExpired`, `ProviderRejected` and
     ///   `InvalidProviderResponse`, [`WithdrawError::Transport`] and [`WithdrawError::InternalError`] as §63.9.2
-    ///   and §63.9.3 map them.
+    ///   and §63.9.3 map them;
+    /// - on the task route also the errors of [`submit`] and [`track`]. None of them has a class other than
+    ///   [`FailureClass::Other`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run(
         &self,
@@ -268,11 +308,12 @@ impl GaslessRail {
             None => None,
         };
 
-        report_progress(progress, WithdrawInProgressStatus::FetchingGaslessQuote)?;
+        report_progress(progress, WithdrawInProgressStatus::FetchingGaslessQuote).map_err(RailFailure::other)?;
 
-        // From here to the signature nothing else quotes or signs for this address on this platform.
+        // From here to the signature, and on the task route to the provider's answer to the submission, nothing
+        // else quotes or signs for this address on this platform.
         let lock = binding.sender_lock(sender);
-        let _guard = lock.lock().await;
+        let guard = lock.lock().await;
 
         // R29: the derived custody address, confirmed by the controller contract now or within the last 10 minutes.
         let custody = check_against_controller(api, binding.controller_checks(), binding.network(), sender)
@@ -303,7 +344,7 @@ impl GaslessRail {
             return Err(RailFailure::other(gasless_error(GaslessMember::MaxFeeExceeded, text)));
         }
 
-        report_progress(progress, WithdrawInProgressStatus::SigningGaslessAuthorization)?;
+        report_progress(progress, WithdrawInProgressStatus::SigningGaslessAuthorization).map_err(RailFailure::other)?;
 
         let now_s = now_ms() / 1000;
         let deadline = now_s.checked_add(terms.deadline_seconds).ok_or_else(|| {
@@ -330,7 +371,51 @@ impl GaslessRail {
             sign_permit(binding.network(), permit, secret, now_s).map_err(|e| RailFailure::other(collapse(e)))?;
         let payload = GasFreeRelayPayload::new(binding.network(), signed, now_s);
 
-        sign_only_result(coin, sender, receiver, request, &quote, cap, payload, now_s).map_err(RailFailure::other)
+        if progress.is_none() {
+            // The direct method signs only (§63.8A).
+            return rail_result(coin, sender, receiver, request, &quote, cap, payload, now_s, None)
+                .map_err(RailFailure::other);
+        }
+
+        let submitted = submit(
+            binding,
+            &payload.signed_authorization,
+            guard,
+            progress,
+            &coin.ticker,
+            &request.amount,
+        )
+        .await
+        .map_err(RailFailure::other)?;
+        let trace_id = submitted.trace_id.clone();
+        info!(
+            "GasFree transfer submitted: coin {}, trace id {}, from {}, to {}, amount {}",
+            coin.ticker,
+            trace_id,
+            sender.to_base58(),
+            receiver.to_base58(),
+            request.amount
+        );
+
+        let bound_ms = deadline.saturating_mul(1000).saturating_add(SETTLEMENT_GRACE_MS);
+        let outcome = track(binding, submitted, bound_ms, progress).await;
+        match &outcome {
+            Ok(hash) => info!("GasFree transfer {}: settled, transaction {}", trace_id, hash.to_hex()),
+            Err(error) => info!("GasFree transfer {}: not settled: {}", trace_id, error),
+        }
+        let hash = outcome.map_err(RailFailure::other)?;
+        rail_result(
+            coin,
+            sender,
+            receiver,
+            request,
+            &quote,
+            cap,
+            payload,
+            now_s,
+            Some((&trace_id, hash)),
+        )
+        .map_err(RailFailure::other)
     }
 
     /// The preflight of §63.7: the provider's account record and, only when the decision needs it, the token
@@ -418,12 +503,288 @@ impl GaslessRail {
 }
 
 /// Tells the task that runs the withdraw, if one does, that the rail entered `status` (§63.3.6).
-fn report_progress(progress: Option<&WithdrawTaskHandle>, status: WithdrawInProgressStatus) -> Result<(), RailFailure> {
+fn report_progress(
+    progress: Option<&WithdrawTaskHandle>,
+    status: WithdrawInProgressStatus,
+) -> Result<(), WithdrawError> {
     match progress {
         Some(handle) => handle
             .update_in_progress_status(status)
-            .map_err(|e| RailFailure::other(WithdrawError::from(e.into_inner()))),
+            .map_err(|e| WithdrawError::from(e.into_inner())),
         None => Ok(()),
+    }
+}
+
+/// A transfer the provider took: its trace id, a UUID, and the provider's record of it in the answer to the
+/// submission.
+pub(crate) struct Submitted {
+    pub(crate) trace_id: String,
+    record: TransferRecord,
+}
+
+/// Submits `signed` to the provider of `binding` (§63.4.6, D63.9): the phase `SubmittingGaslessAuthorization`,
+/// then one request with a fresh version-4 UUID as its `requestId`, never repeated. Every member of the request
+/// is the member of `signed`.
+///
+/// `guard` is the guard of the sender's lock (§63.8 step 3). It is released when the provider's answer is in or
+/// the request failed, and when this function returns early (D63.9 item 1). `coin` and `amount` (in token units)
+/// are for the log lines.
+///
+/// One INFO line is written just before the request is sent, with the coin, the sender, the receiver, the amount
+/// and the `requestId`: a task that is cancelled, or a node that stops, while the request is under way leaves the
+/// outcome unknown, and that line identifies the submission.
+///
+/// The outcome is unknown when the request may have reached the provider and no usable answer came back: a failed
+/// connection (one that failed before anything was sent is not told apart), a timeout, a 5xx answer, an answer
+/// that does not decode, and an answer that fails the checks below. The provider may then have accepted the
+/// transfer. One WARN line says so, with the coin, the sender, the receiver, the amount and the `requestId`, and
+/// the error text ends with the advice to check the GasFree address before trying again. A refusal before the
+/// request, and a 4xx answer of the provider, are not such a case.
+///
+/// # Errors
+///
+/// - `Gasless`/`QuoteExpired` when the deadline of `signed` has passed; no request is made (D63.9 item 4).
+/// - The collapse of §63.9.3 for a failed request: `Gasless`/`ProviderRejected` (a 404 included),
+///   `Gasless`/`InvalidProviderResponse`, [`WithdrawError::Transport`], [`WithdrawError::InternalError`].
+/// - `Gasless`/`InvalidProviderResponse` when the answer's `nonce`, `version`, `accountAddress`, `targetAddress`,
+///   `tokenAddress` or `amount` is not what was signed (D63.9 item 3), and when its `id` is not a UUID. The text
+///   names the `id`.
+pub(crate) async fn submit(
+    binding: &GasFreeBinding,
+    signed: &SignedPermit,
+    guard: AsyncMutexGuard<'_, ()>,
+    progress: Option<&WithdrawTaskHandle>,
+    coin: &str,
+    amount: &BigDecimal,
+) -> Result<Submitted, WithdrawError> {
+    report_progress(progress, WithdrawInProgressStatus::SubmittingGaslessAuthorization)?;
+
+    let permit = signed.permit();
+    let now_s = now_ms() / 1000;
+    if permit.deadline <= now_s {
+        return Err(gasless_error(
+            GaslessMember::QuoteExpired,
+            format!(
+                "the signed authorization was valid until {} and it is {} now; nothing was sent to the provider",
+                permit.deadline, now_s
+            ),
+        ));
+    }
+    let request_id = new_uuid().to_string();
+    let request = SubmitRequest::new(signed.clone(), Some(&request_id)).map_err(WithdrawError::InternalError)?;
+
+    // Whatever ends the task from here on, the log says that this submission was sent.
+    info!(
+        "GasFree submission is being sent: coin {}, from {}, to {}, amount {}, request id {}",
+        coin,
+        permit.user.to_base58(),
+        permit.receiver.to_base58(),
+        amount,
+        request_id
+    );
+    let answer = binding.provider().submit(&request).await;
+    // The provider's nonce moves with a submission only, and this one has been answered or has failed.
+    drop(guard);
+    let warn_unknown_outcome = || {
+        warn!(
+            "GasFree submission with an unknown outcome, the provider may have accepted the transfer: coin {}, \
+             from {}, to {}, amount {}, request id {}",
+            coin,
+            permit.user.to_base58(),
+            permit.receiver.to_base58(),
+            amount,
+            request_id
+        )
+    };
+    let record = match answer {
+        Ok(record) => record,
+        // The request may have reached the provider, and no usable answer came back.
+        Err(
+            error @ (GasFreeError::Transport(_)
+            | GasFreeError::Timeout(_)
+            | GasFreeError::ProviderFailed { .. }
+            | GasFreeError::InvalidResponse(_)),
+        ) => {
+            warn_unknown_outcome();
+            return Err(collapse_noted(error, MAYBE_ACCEPTED_TEXT));
+        },
+        // Nothing was sent, or the provider refused the request.
+        Err(error) => return Err(collapse(error)),
+    };
+
+    // The provider's id is its own text: it is shown only when it is the UUID a trace request needs.
+    let shown_id = sanitize_provider_text(&record.id);
+    if let Some(member) = submit_answer_difference(&record, permit) {
+        warn_unknown_outcome();
+        return Err(gasless_error(
+            GaslessMember::InvalidProviderResponse,
+            format!(
+                "the provider's answer to the submission carries another {member} than the signed authorization; \
+                 its trace id is {shown_id}{MAYBE_ACCEPTED_TEXT}"
+            ),
+        ));
+    }
+    if Uuid::parse_str(&record.id).is_err() {
+        warn_unknown_outcome();
+        return Err(gasless_error(
+            GaslessMember::InvalidProviderResponse,
+            format!(
+                "the provider's answer to the submission carries the trace id {shown_id}, which is not a \
+                 UUID{MAYBE_ACCEPTED_TEXT}"
+            ),
+        ));
+    }
+    Ok(Submitted {
+        trace_id: record.id.clone(),
+        record,
+    })
+}
+
+/// The first member of the provider's answer to a submission that is not what `permit` says (D63.9 item 3), by
+/// its name in the answer. `version` is compared when the answer carries it.
+fn submit_answer_difference(record: &TransferRecord, permit: &PermitTransfer) -> Option<&'static str> {
+    if record.nonce != permit.nonce {
+        return Some("nonce");
+    }
+    if record.version.is_some_and(|version| version != PERMIT_VERSION) {
+        return Some("version");
+    }
+    if record.account_address != permit.user {
+        return Some("accountAddress");
+    }
+    if record.target_address != permit.receiver {
+        return Some("targetAddress");
+    }
+    if record.token_address != permit.token {
+        return Some("tokenAddress");
+    }
+    if record.amount != permit.value {
+        return Some("amount");
+    }
+    None
+}
+
+/// Follows a submitted transfer until it settles (D63.9), starting with the provider's answer to the submission
+/// and asking for its record every `status_poll_interval_ms` of `binding`, at least [`MIN_POLL_INTERVAL_MS`]
+/// apart. Each record is read as follows:
+///
+/// - `state` `FAILED`, or `txnState` `ON_CHAIN_FAILED`: the transfer failed;
+/// - else `state` `SUCCEED`: the transfer is settled, and its `txnHash` is returned;
+/// - else `state` `CONFIRMING`, or a `txnHash`: the phase `WaitingForGaslessSettlement`;
+/// - else (`WAITING`, `INPROGRESS`): the phase `WaitingForGaslessProvider`, with the `state` as the provider
+///   writes it.
+///
+/// A trace request that fails with a failed connection, a timeout, a 5xx or a 429 is logged and the next one is
+/// made after the interval. No trace request is made at or after `bound_ms` (Unix milliseconds).
+///
+/// # Errors
+///
+/// Each text names the trace id.
+///
+/// - `Gasless`/`ProviderRejected` for a failed transfer.
+/// - `Gasless`/`InvalidProviderResponse` for a settled transfer without a `txnHash`, and for a trace answer that
+///   cannot be used.
+/// - `Gasless`/`TraceNotFound` when the provider does not know the trace id (D63.9 item 5).
+/// - [`WithdrawError::Transport`] when `bound_ms` is reached: the outcome of the transfer is unknown. Also for a
+///   trace request the provider refuses with 401 or 403.
+/// - [`WithdrawError::InternalError`] for a trace request that could not be formed.
+/// - The error of the task's status update, when the task is gone.
+pub(crate) async fn track(
+    binding: &GasFreeBinding,
+    submitted: Submitted,
+    bound_ms: u64,
+    progress: Option<&WithdrawTaskHandle>,
+) -> Result<TransactionHash, WithdrawError> {
+    let Submitted { trace_id, mut record } = submitted;
+    loop {
+        let tx_hash = record.txn_hash.map(TransactionHash::to_hex);
+        if record.state == TransferState::Failed || record.txn_state == Some(TransactionState::OnChainFailed) {
+            let transaction = match &tx_hash {
+                Some(hash) => format!(", transaction {hash}"),
+                None => String::new(),
+            };
+            return Err(gasless_error(
+                GaslessMember::ProviderRejected,
+                format!(
+                    "the provider reports the transfer with the trace id {trace_id} as failed (state {}{transaction})",
+                    record.state.wire_name()
+                ),
+            ));
+        }
+        if record.state == TransferState::Succeed {
+            return record.txn_hash.ok_or_else(|| {
+                gasless_error(
+                    GaslessMember::InvalidProviderResponse,
+                    format!(
+                        "the provider reports the transfer with the trace id {trace_id} as settled and names no \
+                         transaction"
+                    ),
+                )
+            });
+        }
+        let phase = if record.state == TransferState::Confirming || tx_hash.is_some() {
+            WithdrawInProgressStatus::WaitingForGaslessSettlement {
+                trace_id: trace_id.clone(),
+                tx_hash,
+            }
+        } else {
+            WithdrawInProgressStatus::WaitingForGaslessProvider {
+                trace_id: trace_id.clone(),
+                provider_state: record.state.wire_name().to_owned(),
+            }
+        };
+        report_progress(progress, phase)?;
+        record = next_record(binding, &trace_id, bound_ms).await?;
+    }
+}
+
+/// The next record of the transfer `trace_id` the provider answers with: one trace request per poll interval,
+/// until one is answered or `bound_ms` is reached. See [`track`].
+async fn next_record(binding: &GasFreeBinding, trace_id: &str, bound_ms: u64) -> Result<TransferRecord, WithdrawError> {
+    loop {
+        let wait_ms = binding
+            .status_poll_interval_ms()
+            .max(MIN_POLL_INTERVAL_MS)
+            .min(bound_ms.saturating_sub(now_ms()))
+            .min(u64::from(u32::MAX));
+        Timer::sleep_ms(wait_ms as u32).await;
+        if now_ms() >= bound_ms {
+            return Err(WithdrawError::Transport(format!(
+                "the GasFree transfer with the trace id {trace_id} was submitted and the provider has not reported \
+                 it as settled by the end of the wait; its outcome is unknown"
+            )));
+        }
+        match binding.provider().trace(trace_id).await {
+            Ok(record) => return Ok(record),
+            Err(
+                error @ (GasFreeError::Transport(_)
+                | GasFreeError::Timeout(_)
+                | GasFreeError::ProviderFailed { .. }
+                | GasFreeError::RateLimited),
+            ) => {
+                warn!(
+                    "GasFree transfer {}: a trace request failed, asking again: {}",
+                    trace_id, error
+                );
+            },
+            Err(error) => {
+                let note = format!(" (the transfer was submitted; its trace id is {trace_id})");
+                return Err(collapse_noted(error, &note));
+            },
+        }
+    }
+}
+
+/// [`collapse`] for a failure of a submit or trace request, with `note` at the end of the text.
+fn collapse_noted(error: GasFreeError, note: &str) -> WithdrawError {
+    let note = |text: &str| format!("{text}{note}");
+    match error.rpc_arm() {
+        RpcArm::Gasless(member) => gasless_error(member, note(&error.to_string())),
+        RpcArm::Transport => {
+            warn!("GasFree provider failure: {}", error);
+            WithdrawError::Transport(note(PROVIDER_TRANSPORT_TEXT))
+        },
+        RpcArm::InternalError | RpcArm::NotSufficientBalance => WithdrawError::InternalError(note(&error.to_string())),
     }
 }
 
@@ -432,11 +793,15 @@ fn token_amount(units: U256, decimals: u8) -> Result<BigDecimal, WithdrawError> 
     u256_to_big_decimal(units, decimals).map_err(|e| WithdrawError::from(e.into_inner()))
 }
 
-/// The sign-only result of the rail (§63.8 step 5, §63.8A R25 to R28, D63.8 (a)): the shared members of a
-/// withdraw result with the payload's members beside them, the gasless fee details, and neither `tx_hex` nor
-/// `tx_hash`.
+/// The result of the rail (§63.8 step 5, §63.8A R25 to R28, D63.8 (a)): the shared members of a withdraw result
+/// with the payload's members beside them and the gasless fee details, without `tx_hex`.
+///
+/// `settled` is `None` for the sign-only result: the fee details' `trace_id` is `null` and there is no `tx_hash`.
+/// For a transfer the task route followed to its settlement it is the provider's trace id and the hash of the
+/// transaction: the fee details carry the first, and `tx_hash` is the second in the form a native TRON withdraw
+/// writes it (D63.9 item 6).
 #[allow(clippy::too_many_arguments)]
-fn sign_only_result(
+fn rail_result(
     coin: &EthCoin,
     sender: &TronAddress,
     receiver: &TronAddress,
@@ -445,6 +810,7 @@ fn sign_only_result(
     signed_max_fee: U256,
     payload: GasFreeRelayPayload,
     created_at: u64,
+    settled: Option<(&str, TransactionHash)>,
 ) -> Result<TransactionDetails, WithdrawError> {
     let decimals = coin.decimals;
     let total_token_fee = token_amount(quote.total_fee, decimals)?;
@@ -457,8 +823,8 @@ fn sign_only_result(
         activation_fee: token_amount(quote.activation_fee, decimals)?,
         total_token_fee: total_token_fee.clone(),
         signed_max_fee: Some(token_amount(signed_max_fee, decimals)?),
-        // Nothing is submitted, so the provider has given no trace id (D63.6).
-        trace_id: None,
+        // The provider gives a trace id with its answer to a submission; the sign-only result has none.
+        trace_id: settled.map(|(trace_id, _)| trace_id.to_owned()),
     };
 
     let amount = request.amount.clone();
@@ -467,10 +833,11 @@ fn sign_only_result(
     let received_by_me: BigDecimal = if receiver == sender { amount.clone() } else { 0.into() };
 
     Ok(TransactionDetails {
-        // The result carries no transaction: the two members are omitted from its serialized form (R25).
+        // The result carries no transaction of this node: `tx_hex` is omitted from its serialized form, and so
+        // is `tx_hash` unless the provider's transaction is known (R25, D63.9).
         tx_hex: Vec::new().into(),
         tx_json: None,
-        tx_hash: String::new(),
+        tx_hash: settled.map_or_else(String::new, |(_, hash)| hash.to_hex()),
         from: vec![sender.to_base58()],
         to: vec![receiver.to_base58()],
         total_amount: amount,
