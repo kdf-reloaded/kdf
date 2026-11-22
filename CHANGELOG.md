@@ -706,6 +706,12 @@ the previous version used. The safe way:
   raw-transaction signing request used to sign such a transaction anyway, and Radiant rejected it. It now
   answers with a signing error that names the output index and the case. Withdrawals and swaps never build
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
+- **The log tells when QTUM and its QRC20 tokens open, share and close a set of Electrum connections.** One INFO
+  line is written when a set is created (naming the instance that created it), one each time another instance
+  reuses it, and one when the last instance lets go of it and it closes. Each line names the platform (for example
+  `QTUM`) and the servers as `host:port` only, without the protocol or any user name, password, path or query of a
+  server entry. No line is written per request or on a timer. Detail: PR #INFOPR; CRD ch.38 status note of
+  2026-11-22 after D38.6.4Q.1.
 
 #### ZEC
 
@@ -1101,6 +1107,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
+  lines for a shared QTUM Electrum client, in PR #INFOPR.
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
   confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
   PR #461; step 3, the lab row, is listed there.
