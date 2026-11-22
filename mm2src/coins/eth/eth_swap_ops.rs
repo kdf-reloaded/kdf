@@ -523,16 +523,22 @@ impl EthCoin {
     }
 }
 
+/// The longest wait, in seconds, after the latest block's timestamp has not passed the lock time while the
+/// local clock has: the node is behind, so the stage asks again soon.
+pub(crate) const EVM_TIP_RECHECK_MAX_SECS: u64 = 60;
+
 /// The refund gate of an EVM coin (CRD ch.51 §51.6E R88): while the local clock `now` has not passed the
-/// lock time the answer is a wait and no chain read is needed; afterwards the latest block's timestamp
-/// `tip_ts` must be past the lock time. A wait is capped at one hour.
+/// lock time the answer is a wait of at most one hour and no chain read is needed. Afterwards the latest
+/// block's timestamp `tip_ts` must be past the lock time; otherwise (no timestamp read, or the tip at or
+/// before the lock time) the answer is a wait of at most [`EVM_TIP_RECHECK_MAX_SECS`].
 pub(crate) fn evm_refund_eligibility(now: u64, locktime: u64, tip_ts: Option<u64>) -> CanRefundHtlc {
     if now < locktime {
         return capped_refund_wait(locktime - now + 1);
     }
     match tip_ts {
-        Some(tip_ts) if tip_ts <= locktime => capped_refund_wait(locktime - tip_ts + 1),
-        _ => CanRefundHtlc::CanRefundNow,
+        Some(tip_ts) if tip_ts > locktime => CanRefundHtlc::CanRefundNow,
+        Some(tip_ts) => CanRefundHtlc::HaveToWait((locktime - tip_ts + 1).min(EVM_TIP_RECHECK_MAX_SECS)),
+        None => CanRefundHtlc::HaveToWait(EVM_TIP_RECHECK_MAX_SECS),
     }
 }
 
@@ -595,7 +601,23 @@ mod refund_gate_tests {
     fn evm_refund_gate_caps_the_wait_when_the_tip_is_far_behind() {
         assert!(matches!(
             evm_refund_eligibility(1_000_000, 100_000, Some(1000)),
-            CanRefundHtlc::HaveToWait(3600)
+            CanRefundHtlc::HaveToWait(60)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_the_gap_when_the_tip_is_10_s_behind() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, Some(990)),
+            CanRefundHtlc::HaveToWait(11)
+        ));
+    }
+
+    #[test]
+    fn evm_refund_gate_waits_without_a_tip_timestamp() {
+        assert!(matches!(
+            evm_refund_eligibility(2000, 1000, None),
+            CanRefundHtlc::HaveToWait(60)
         ));
     }
 }

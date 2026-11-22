@@ -876,12 +876,13 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.44 R44.9A.1 to R44.9A.5.
 - **The refund gate of SLP, QRC20, ETH and ERC20 swap payments reads the chain's time.** KDF Reloaded judges whether
   such a payment can be refunded now by the chain: an SLP token by the median time past of BCH, a QRC20 token by that
-  of QTUM, an ETH or ERC20 coin by the latest block's timestamp once the local clock is past the lock time; a wait is
-  at most an hour at a time. GLEEC KDF's rule for each coin family is recorded in CRD ch.51 §51.6E R88. A refund can
-  therefore start later than on GLEEC KDF (for an SLP token up to about an hour); no message and no transaction a
-  peer validates changes, so no switch exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
-  Plan [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 3 (PR #490); CRD
-  ch.51, status note of 2026-11-22 after §51.6E R92.
+  of QTUM, an ETH or ERC20 coin by the latest block's timestamp once the local clock is past the lock time (then a
+  wait is at most a minute at a time). GLEEC KDF's rule for each coin family is recorded in CRD ch.51 §51.6E R88. A
+  refund can therefore start later than on GLEEC KDF (for an SLP token up to about an hour); no message and no
+  transaction a peer validates changes, so no switch exists; row in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). Plan
+  [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 3 (PR #490); CRD ch.51,
+  status note of 2026-11-22 after §51.6E R92.
 
 ### Removed / disabled in KDF Reloaded
 

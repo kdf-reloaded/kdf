@@ -1461,22 +1461,22 @@ payment transaction. The two rows are identical.
    item 5.
 
 > **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
-> of 2026-11-22).** Reloaded answers "can this payment be refunded now" from
-> the chain's time for three families that R88 item 2 records under the
-> general rule. An SLP token answers with its platform coin's rule (R88
-> item 3). A QRC20 token answers with the QTUM base coin's rule: the payment
-> is refundable once the QTUM chain's median time past is past the lock time.
-> An ETH or ERC20 coin waits on the local clock as in R88 item 1 until the
-> lock time, then reads the latest block's timestamp: the payment is
-> refundable when that timestamp is past the lock time; otherwise the answer
-> is to wait for the difference plus one second, at most 3600 seconds. A
-> failed read is an error, which the refund stages of R18 and R31 retry. The
-> Tron-VM form of the EVM family, which R92 item 3 leaves outside §51.6E,
-> keeps its current rule; Tendermint, Sia and the shielded coin keep the
-> rules R88 records. Reloaded's manual recovery does not ask this answer: it
-> has its own gate (the local clock past the lock time plus 3700 seconds,
-> and for the shielded coin the chain's median time past), which is
-> unchanged, as is the clock check before a refund. No message and no
+> of 2026-11-22).** Reloaded answers "can this payment be refunded now" from the
+> chain's time for three families that R88 item 2 records under the general
+> rule. An SLP token answers with its platform coin's rule (R88 item 3). A QRC20
+> token answers with the QTUM base coin's rule: the payment is refundable once
+> the QTUM chain's median time past is past the lock time. An ETH or ERC20 coin
+> waits on the local clock until the lock time, at most 3600 seconds at a time,
+> then reads the latest block's timestamp: the payment is refundable when that
+> timestamp is past the lock time; otherwise the answer is to wait for the
+> difference plus one second, at most 60 seconds, so that a node that lags
+> behind is asked again soon. A failed read is an error, which the refund stages
+> of R18 and R31 retry. The Tron-VM form of the EVM family, which R92 item 3
+> leaves outside §51.6E, keeps its current rule; Tendermint, Sia and the
+> shielded coin keep the rules R88 records. Reloaded's manual recovery does not
+> ask this answer: it has its own gate (the local clock past the lock time plus
+> 3700 seconds, and for the shielded coin the chain's median time past), which
+> is unchanged, as is the clock check before a refund. No message and no
 > transaction a peer validates changes, which §51.6E permits.
 
 ## 51.7 Bound Message Contract
