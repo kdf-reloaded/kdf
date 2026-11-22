@@ -1807,8 +1807,11 @@ answer.
    and item 4 does not refuse the coin.
 7. *Two nodes are two hosts.* The two nodes of R100 are two distinct hosts.
    Entries of the coin's node list that name the same host (for example its TCP
-   and its SSL port) are one node. Hosts run by the same operator count as two
-   nodes, and no warning is given for them.
+   and its SSL port) are one node. Whether two entries name the same host is
+   judged by the host part of each address as written, compared without regard
+   to letter case and without name resolution, so two names of one machine
+   count as two nodes. Hosts run by the same operator count as two nodes, and
+   no warning is given for them.
 8. *No outvoting.* Each attempt of a read takes its own pair of answers. When
    the two disagree, the attempt is undetermined (item 3), and a later attempt
    needs a new pair that agrees; answers of different attempts are not
