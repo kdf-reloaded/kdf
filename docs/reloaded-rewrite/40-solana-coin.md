@@ -2235,7 +2235,8 @@ lamport; one smallest unit of the token).
 R40.6D.9, R40.6D.11 and R40.6D.12 follow chapter 51 R100 (§51.6G): before a
 refund step or a secret step they must agree between two nodes of the coin's
 pool, or come from the one node the activation names in `swap_evidence_node`; a
-disagreement or fewer than two answers is undetermined, and the node waits.
+disagreement or fewer than two answers is undetermined, and so is a named node
+that does not answer (no other node is taken in its place); the node then waits.
 
 **R40.6D.17 (limits).** A cluster without a deployed program has no tradable
 Solana coin. The program is unaudited (R40.6D.1). The counterparty of a Solana
