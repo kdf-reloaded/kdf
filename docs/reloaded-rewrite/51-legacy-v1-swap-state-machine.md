@@ -1748,6 +1748,42 @@ and both `Negotiated` events show the maker's primary address for that coin.
 With a taker fallback the maker does not know, the taker ends with
 `NegotiateFailed` after the maker's negative acknowledgement.
 
+## 51.6G Bound Agreement of the Chain Reads a Swap Step Rests On
+
+> **Status (Reloaded-original; maintainer decision of 2026-11-22).** This
+> section records no claim about the reference implementation, which has no
+> such rule. It is an operator's choice of trust: it governs only which chain
+> answers a node acts on, and it has no compatibility effect, since no message
+> and no transaction a peer validates changes. It edits no sentence of this
+> chapter.
+
+**R100.** *The chain reads behind a refund or a claim must agree.* Before a
+swap takes a refund step, or a step that uses the swap's secret, the chain
+reads that step rests on (the counterparty's payment state, the claim and the
+secret read from it, and the chain time of the refund gate) MUST agree between
+two nodes of the coin's node pool.
+
+1. *A node the operator trusts.* An operator MAY instead name one node to trust
+   through the optional activation field `swap_evidence_node`. The field holds
+   one node address, which MUST also be in the coin's node list. With the field
+   set, that node's answer alone is taken.
+2. *Undetermined.* When the nodes disagree, or fewer than two answer (with the
+   field set: when the named node does not answer; no other node and no single
+   other answer is taken in its place), the read is undetermined. The step
+   waits, and it MUST NOT refund or claim on an undetermined read.
+3. *Adoption.* Coin families adopt R100 as their swap code is built, TRON and
+   Solana first. For every other family it becomes binding with the v0.6 swap
+   engine; until then that family's reads are as the other rules of this
+   chapter state.
+
+**T42.** *Agreement of the reads (R100).* For a coin of a family that has
+adopted R100, over two scripted nodes: answers that agree let the refund step
+and the claim go on; answers that differ, and a single answering node, leave
+the step waiting with no refund and no claim; with `swap_evidence_node` naming
+one of the nodes, that node's answer alone is taken, and when it does not
+answer the step waits; a `swap_evidence_node` outside the coin's node list is
+not accepted.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -3503,3 +3539,8 @@ reference rows alike.
   base; the repository's clean-room gate tool was not applicable because the
   additions embed no code blocks. *Measure:* 0.03, on the
   discretionary-expression basis.
+- *Clean-side addition of 2026-11-22:* §51.6G (R100, T42), the agreement of
+  the chain reads a refund or a claim rests on, with the optional activation
+  field `swap_evidence_node`. It is Reloaded-original, records only the
+  maintainer's decision of 2026-11-22, takes no reference input and no
+  forbidden-class input, and changes no sentence of the chapter.
