@@ -1801,6 +1801,22 @@ answer.
    at placement and at the swap start, with a reason that names
    `swap_evidence_node`.
 5. *Scope.* R100 applies to every coin family.
+6. *The operator's own daemon.* A coin activated in native mode reads its chain
+   through the operator's own full-node daemon (native RPC); that daemon counts
+   as the node the operator trusts (item 2), no `swap_evidence_node` is needed,
+   and item 4 does not refuse the coin.
+7. *Two nodes are two hosts.* The two nodes of R100 are two distinct hosts.
+   Entries of the coin's node list that name the same host (for example its TCP
+   and its SSL port) are one node. Hosts run by the same operator count as two
+   nodes, and no warning is given for them.
+8. *No outvoting.* Each attempt of a read takes its own pair of answers. When
+   the two disagree, the attempt is undetermined (item 3), and a later attempt
+   needs a new pair that agrees; answers of different attempts are not
+   combined, and a disagreement is not outvoted by further answers.
+9. *Swaps already running.* A swap that is running when its coin stops meeting
+   item 4 follows R100 as well: its reads are undetermined and wait (item 3),
+   and the node logs how to fix it, by adding a second node to the coin's node
+   list or by setting `swap_evidence_node`.
 
 **T42.** *Agreement of the reads (R100).* Over two scripted nodes: answers that
 agree by item 1 let the refund step and the step that uses the secret go on
@@ -1812,6 +1828,14 @@ nodes, that node's answer alone is taken, and when it does not answer the step
 waits; a `swap_evidence_node` outside the coin's node list is not accepted; a
 coin with one node and no `swap_evidence_node` is refused at order placement
 and at the swap start.
+
+**T43.** *Refinements of R100 (items 6 to 9).* A coin read through the
+operator's own daemon starts swaps and takes that daemon's answer alone; a node
+list whose two entries name one host (TCP and SSL) counts as one node and is
+refused by item 4; two hosts of one operator count as two nodes, with no
+warning; after a disagreement, one further agreeing answer does not decide, and
+a new agreeing pair does; a running swap whose coin loses its second node waits
+and logs the two ways to fix it.
 
 ## 51.7 Bound Message Contract
 
@@ -3578,3 +3602,8 @@ reference rows alike.
   field `swap_evidence_node`. It is Reloaded-original, records only the
   maintainer's decisions of 2026-11-22, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-22, a second one:* R100 items 6 to 9 and
+  T43, the maintainer's refinements of 2026-11-22 (the operator's own daemon,
+  two hosts, no outvoting, swaps already running). Reloaded-original; no
+  reference input and no forbidden-class input; no sentence of the chapter is
+  changed.
