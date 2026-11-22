@@ -484,8 +484,9 @@ pub struct Transaction {
     /// produced this transaction: the original bytes and the identifier that reader computed. See
     /// [`OpaqueTx`]. `None` for everything the parser of this module reads or a signer builds.
     pub opaque: Option<OpaqueTx>,
-    /// The extra payload of a Dash-layout special transaction (R38.6.10.5): `None` for every other transaction,
-    /// `Some` (possibly empty) for a special one. The payload is kept and written back, not interpreted.
+    /// The extra payload of a Dash-layout special transaction (R38.6.10.5): `None` for every other transaction and
+    /// for a special-shaped one with nothing after its lock time, `Some` (possibly empty) when bytes follow the
+    /// lock time. The payload is kept and written back, not interpreted.
     pub extra_payload: Option<Bytes>,
 }
 
@@ -691,7 +692,8 @@ pub enum TxType {
 }
 
 /// A transaction qualifies as a Dash-layout special transaction (R38.6.10.5) when the top bit of its leading word is
-/// clear, its version (low 16 bits) is 3 or higher and its type (high 16 bits) is not 0.
+/// clear, its version (low 16 bits) is 3 or higher and its type (high 16 bits) is not 0. Such a transaction with
+/// nothing after its lock time is read without a payload (`extra_payload == None`).
 fn is_special_header(header: i32) -> bool { header >= 0 && (header & 0xFFFF) >= 3 && (header >> 16) != 0 }
 
 /// Decodes a transaction under the given `tx_type` hint. Used directly by
@@ -751,7 +753,7 @@ pub fn deserialize_tx<T: io::Read>(reader: &mut Reader<T>, tx_type: TxType) -> R
 
     let lock_time = reader.read()?;
 
-    let extra_payload = if special {
+    let extra_payload = if special && !reader.is_finished() {
         let len: u64 = reader.read::<CompactInteger>()?.into();
         let mut payload = Vec::new();
         reader.by_ref().take(len).read_to_end(&mut payload)?;
@@ -1129,7 +1131,6 @@ mod tests {
         let mut cases = Vec::new();
         cases.push(full[..full.len() - 1].to_vec()); // one payload byte missing
         cases.push(full[..payload_start].to_vec()); // prefix, no payload
-        cases.push(full[..payload_start - 1].to_vec()); // cut right after the lock time
         let mut lying = full[..payload_start - 1].to_vec();
         lying.extend_from_slice(&[0xfd, 0xff, 0xff]); // claims 65535 bytes
         lying.extend_from_slice(&full[payload_start..]);
@@ -1145,5 +1146,51 @@ mod tests {
             assert!(deserialize::<_, Transaction>(bytes.as_slice()).is_err(), "case {i}");
         }
         assert!(deserialize::<_, Transaction>(full.as_slice()).is_ok());
+    }
+
+    /// R38.6.10.2: a special-shaped transaction with nothing after its lock time is read without a payload and
+    /// written back byte-exact.
+    #[test]
+    fn special_transaction_cut_after_lock_time_reads_without_payload() {
+        let full = fixture(include_str!("test_data/dash_2576170_type9_assetunlock.hex"));
+        let payload_start = full.len() - 145;
+        let bytes = full[..payload_start - 1].to_vec();
+        for tx_type in [TxType::StandardWithWitness, TxType::PosWithNTime, TxType::Zcash] {
+            let tx = deserialize_tx(&mut Reader::from_read(bytes.as_slice()), tx_type).unwrap();
+            assert_eq!(tx.extra_payload, None);
+            assert_eq!(serialize(&tx).to_vec(), bytes);
+            assert_eq!(tx.hash(), dhash256(&bytes));
+        }
+        let tx: Transaction = deserialize(bytes.as_slice()).unwrap();
+        assert_eq!(tx.extra_payload, None);
+        assert_eq!(serialize(&tx).to_vec(), bytes);
+        assert_eq!(tx.hash(), dhash256(&bytes));
+    }
+
+    /// A non-Dash transaction whose version word has the special shape, with nothing after the lock time, reads
+    /// as an ordinary transaction and round-trips byte-exact.
+    #[test]
+    fn special_shaped_version_without_payload_round_trips() {
+        let mut b = 0x0001_0003u32.to_le_bytes().to_vec();
+        b.push(0x01);
+        b.extend_from_slice(&[0x22; 32]);
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.push(0x00);
+        b.extend_from_slice(&0xffff_fffeu32.to_le_bytes());
+        b.push(0x01);
+        b.extend_from_slice(&5000u64.to_le_bytes());
+        b.extend_from_slice(&[0x02, 0x51, 0x51]);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let check = |tx: Transaction| {
+            assert_eq!(tx.version, 0x0001_0003);
+            assert_eq!(tx.extra_payload, None);
+            assert_eq!((tx.inputs.len(), tx.outputs.len()), (1, 1));
+            assert_eq!(tx.outputs[0].value, 5000);
+            assert_eq!(serialize(&tx).to_vec(), b);
+        };
+        for tx_type in [TxType::StandardWithWitness, TxType::PosWithNTime, TxType::Zcash] {
+            check(deserialize_tx(&mut Reader::from_read(b.as_slice()), tx_type).unwrap());
+        }
+        check(deserialize::<_, Transaction>(b.as_slice()).unwrap());
     }
 }
