@@ -4430,6 +4430,33 @@ reuse (item 3) write nothing, and an instance that lets go while others still
 hold the client writes nothing. No line is written per request or on a
 timer. Every other coin writes none of these lines.
 
+*Status note (2026-11-22, clean side; defect fix).* In this tree a shared
+client keeps the subscriptions of item 6 and of the D38.6.4Q.3 status note
+per instance as follows.
+
+1. *Removal.* An instance is remembered for a subscription before its
+   request is sent, so a disable while the request waits for its answer
+   removes it, and the answer adds nothing back. A removed instance stays
+   retired on the client: a later request of it, from a handle that outlived
+   the removal, sends nothing and is remembered nowhere. This costs one entry
+   per removed instance for the life of the client.
+2. *Placed over the current session.* A request of an instance that
+   remembers the subscription sends nothing only while the subscription is
+   placed over the current session. When placing it again over a newer
+   session failed, the next request of that instance sends it. The placing
+   again itself is not retried (D38.6.4Q.3 status note, item 2). It leaves
+   a subscription that has a request in flight over the current session to
+   that request; when that request fails and the subscription is still
+   remembered, the placing again is asked for once more.
+3. *One request at a time.* An instance has at most one request in flight
+   per subscription and session; another request of the same instance
+   meanwhile sends nothing and is answered as placed, even when the request
+   in flight then fails. A request without an answer holds this only until
+   it is answered, its call ends at the request time limits of the client,
+   or its caller drops it; it then counts as failed.
+4. *First placement.* A subscription whose first placement for an instance
+   failed or was dropped is not remembered for that instance.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -6646,6 +6673,13 @@ R38.8.6 **Tests (two-direction, observable).**
   that never read the forbidden corpus, from the maintainer's decision and
   this repository's code. It takes no forbidden-class input, so chapter 01
   R38 is not engaged and no gate pass is required.
+- *Defect fix (2026-11-22), clean side -- status note after the D38.6.4Q.1
+  status note (subscriptions of a shared client: a removal while a request
+  waits, a removed instance's later request, placement over the current
+  session, one request at a time).* Written by a session that never read the
+  forbidden corpus, from this repository's code and its tests. It takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.
 - *Pointer added 2026-11-22, KDF Spec Reader, round 0.5.0-23 -- the pointer
   at the end of §38.6.4Q.* It names chapter 51 §51.6E (R88, R89, R90) and
   summarizes what those rules record; its reference content is that of its

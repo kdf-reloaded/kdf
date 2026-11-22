@@ -3047,6 +3047,9 @@ fn t38_6_4q_7_contract_event_subscription_of_the_balance_stream_leaves_the_rest_
         let (outcome, ()) = futures::join!(pending, rest);
         assert!(matches!(outcome, futures::future::Either::Right(_)), "no answer came");
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        // A caller that gives up drops its request: the abandoned request ends there, and the next request of the same
+        // owner for the same key is sent (while it is in flight it would block it, P8).
+        drop(outcome);
 
         // An answer: the request succeeds and the subscription is remembered.
         server.set_reply_delay(EVENT_SUBSCRIBE, Duration::ZERO);
@@ -3335,6 +3338,812 @@ fn t38_6_4q_1_a_contract_event_subscription_remembered_by_two_tokens_survives_th
         reconnect_all(&server).await;
         Timer::sleep(3.).await;
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+    });
+}
+
+// ---- P8: what a removed instance's streamer and a failed placement leave on the shared client ----
+//
+// The balance streamer lives in `mm2_main` and cannot be started from here. These tests make the calls its set-up makes
+// on the shared client (`subscribe_scripthash` for QTUM, `blockchain_contract_event_subscribe` for a token, and the
+// `watch_scripthash` wake registration), keep the removed coin's handle alive as the streamer does until it has seen
+// its shutdown, and read its balance as the streamer's next pass does.
+//
+// The observables: `script_hash_owners` and `contract_event_subscriptions` (test-only accessors of the client's
+// remembered subscriptions) and the stub's request counters.
+
+/// The `address`, `contract` and `topic` a token's balance stream subscribes to.
+fn event_arguments(token: &Qrc20Coin) -> (rpc::v1::types::H160, rpc::v1::types::H160) {
+    (
+        contract_addr_into_rpc_format(&token.my_addr_as_contract_addr().unwrap()),
+        contract_addr_into_rpc_format(&token.contract_address),
+    )
+}
+
+/// Waits for a wake signal that a notification delivered to a watcher of `watch_scripthash`.
+async fn woken(wake_rx: &mut futures::channel::mpsc::UnboundedReceiver<String>) {
+    use futures::StreamExt;
+    let wake = Box::pin(wake_rx.next());
+    match futures::future::select(wake, Box::pin(Timer::sleep(10.))).await {
+        futures::future::Either::Left((Some(_), _)) => (),
+        _ => panic!("no notification woke the watcher"),
+    }
+}
+
+/// QTUM and a token are active on one client, both with a streamer that has made its set-up subscriptions; then one of
+/// them is removed. Afterwards the removed coin's streamer makes its next pass (a balance read) and a notification for
+/// every watched script arrives. The client holds nothing of the removed owner, the other owner's subscriptions are
+/// unchanged, and the stub receives no subscription request.
+async fn streamers_after_the_removal_of(remove_qtum: bool) {
+    let env = family_env();
+    let server = family_stub().await;
+    let qtum = init_qtum(&env, &[&server]).await;
+    let token = init_token_named(&env, TICKER, &[&server], false).await;
+    wait_until("the session", 10., || server.open_connections() == 1).await;
+    let client = electrum_client_of(&token);
+    let (qtum_owner, token_owner) = (
+        AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner,
+        token.utxo.electrum_owner,
+    );
+    let (address, contract) = event_arguments(&token);
+
+    // The set-up of QTUM's streamer: its script hashes. The set-up of the token's streamer: the contract event. The
+    // token's history collector would watch a script hash of the token as well.
+    for hash in ["a8a1", "b8b2"] {
+        client.subscribe_scripthash(qtum_owner, hash.to_owned()).await.unwrap();
+    }
+    client
+        .subscribe_scripthash(token_owner, "b8b2".to_owned())
+        .await
+        .unwrap();
+    client
+        .subscribe_scripthash(token_owner, "c8c3".to_owned())
+        .await
+        .unwrap();
+    client
+        .blockchain_contract_event_subscribe(token_owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+        .compat()
+        .await
+        .unwrap();
+    let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<String>();
+    for hash in ["a8a1", "b8b2", "c8c3"] {
+        crate::utxo::rpc_clients::watch_scripthash(hash.to_owned(), wake_tx.clone());
+    }
+    let owners = |hash: &str| client.script_hash_owners(hash);
+    let set = |owners: &[crate::utxo::rpc_clients::ElectrumOwner]| {
+        Some(owners.iter().copied().collect::<std::collections::HashSet<_>>())
+    };
+
+    // The removal; the streamer of the removed coin still holds the coin.
+    let (kept_owner, removed_owner) = if remove_qtum {
+        (token_owner, qtum_owner)
+    } else {
+        (qtum_owner, token_owner)
+    };
+    let removed = if remove_qtum { QTUM_TICKER } else { TICKER };
+    disable_coin(&env.ctx, removed).await.unwrap();
+    let (subscribes, events) = (server.requests(SCRIPTHASH_SUBSCRIBE), server.requests(EVENT_SUBSCRIBE));
+    let expected = |hash: &str| {
+        let remembered_by_kept = match hash {
+            "a8a1" => qtum_owner == kept_owner,
+            "c8c3" => token_owner == kept_owner,
+            _ => true,
+        };
+        remembered_by_kept.then_some(kept_owner)
+    };
+    let check = || {
+        for hash in ["a8a1", "b8b2", "c8c3"] {
+            assert_eq!(owners(hash), expected(hash).and_then(|o| set(&[o])), "{hash}");
+        }
+        // The token's contract event stays with the token.
+        assert_eq!(client.contract_event_subscriptions(), usize::from(remove_qtum));
+    };
+    check();
+
+    // The next pass of the removed coin's streamer, and a notification for every script and the event, as the server
+    // sends them to whoever watches.
+    let _ = completes_within("the removed coin's balance read", 15., async {
+        if remove_qtum {
+            qtum.my_balance().compat().await.map(|_| ())
+        } else {
+            token.my_balance().compat().await.map(|_| ())
+        }
+    })
+    .await;
+    for hash in ["a8a1", "b8b2", "c8c3"] {
+        server.notify(SCRIPTHASH_SUBSCRIBE, json!([hash, "status"]));
+    }
+    server.notify(
+        EVENT_SUBSCRIBE,
+        json!([format!("{address:#x}"), format!("{contract:#x}"), QRC20_TRANSFER_TOPIC]),
+    );
+    woken(&mut wake_rx).await;
+    Timer::sleep(2.).await;
+    assert_eq!(
+        server.requests(SCRIPTHASH_SUBSCRIBE),
+        subscribes,
+        "no new script-hash request"
+    );
+    assert_eq!(
+        server.requests(EVENT_SUBSCRIBE),
+        events,
+        "no new contract-event request"
+    );
+    check();
+    assert_ne!(removed_owner, kept_owner);
+
+    // A reconnect places what the client still remembers, for the kept owner alone.
+    let placed_before = server.request_params(SCRIPTHASH_SUBSCRIBE).len();
+    reconnect_all(&server).await;
+    Timer::sleep(3.).await;
+    let placed_again = server.request_params(SCRIPTHASH_SUBSCRIBE)[placed_before..].to_vec();
+    let mut wanted: Vec<Json> = ["a8a1", "b8b2", "c8c3"]
+        .iter()
+        .filter(|hash| expected(hash).is_some())
+        .map(|hash| json!([hash]))
+        .collect();
+    let mut placed_sorted = placed_again.clone();
+    wanted.sort_by_key(|v| v.to_string());
+    placed_sorted.sort_by_key(|v| v.to_string());
+    assert_eq!(placed_sorted, wanted, "{placed_again:?}");
+    assert_eq!(
+        server.requests(EVENT_SUBSCRIBE),
+        events + usize::from(remove_qtum),
+        "the contract event is placed again only while its token is active"
+    );
+    drop((qtum, token));
+}
+
+/// D38.6.4Q.1 status note, item 6 (P8 A): a token is disabled while its streamer still holds it. Its next pass and the
+/// notifications that arrive afterwards add none of its subscriptions back; QTUM's are unchanged.
+#[test]
+fn t38_6_4q_1_the_streamer_of_a_disabled_token_adds_nothing_to_the_shared_client() {
+    block_on(streamers_after_the_removal_of(false));
+}
+
+/// As above for QTUM removed while a token keeps the shared client.
+#[test]
+fn t38_6_4q_1_the_streamer_of_a_disabled_qtum_adds_nothing_to_the_shared_client() {
+    block_on(streamers_after_the_removal_of(true));
+}
+
+/// D38.6.4Q.1 status note, item 6 (P8 A): a notification for a script the removed instance watched, arriving right
+/// after its removal, wakes whoever still watches it and subscribes nothing: the removed owner does not come back.
+#[test]
+fn t38_6_4q_1_a_notification_right_after_the_removal_adds_nothing_back() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let _qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = electrum_client_of(&token);
+        let token_owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        client
+            .subscribe_scripthash(token_owner, "d8d4".to_owned())
+            .await
+            .unwrap();
+        client
+            .blockchain_contract_event_subscribe(token_owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await
+            .unwrap();
+        let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<String>();
+        crate::utxo::rpc_clients::watch_scripthash("d8d4".to_owned(), wake_tx);
+
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        let (subscribes, events) = (server.requests(SCRIPTHASH_SUBSCRIBE), server.requests(EVENT_SUBSCRIBE));
+        server.notify(SCRIPTHASH_SUBSCRIBE, json!(["d8d4", "status"]));
+        woken(&mut wake_rx).await;
+        Timer::sleep(2.).await;
+        assert_eq!(client.script_hash_owners("d8d4"), None);
+        assert_eq!(client.contract_event_subscriptions(), 0);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), subscribes);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), events);
+        drop(token);
+    });
+}
+
+/// D38.6.4Q.1 status note, item 6 (P8 A): a subscription that a streamer's set-up has sent and not yet seen answered
+/// when its instance is removed. The set-up is not interrupted by the removal (the streamer sees its shutdown only
+/// in its loop), so its answer arrives after the client forgot the owner. After the answer the client holds nothing of
+/// the removed owner.
+#[test]
+fn t38_6_4q_1_a_subscription_in_flight_when_its_instance_is_removed_is_not_remembered() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let _qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = electrum_client_of(&token);
+        let token_owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+
+        server.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::from_secs(2));
+        server.set_reply_delay(EVENT_SUBSCRIBE, Duration::from_secs(2));
+        // Both requests are in flight when the removal runs.
+        let hash_setup = async {
+            client
+                .subscribe_scripthash(token_owner, "e8e5".to_owned())
+                .await
+                .unwrap();
+        };
+        let event_setup = async {
+            client
+                .blockchain_contract_event_subscribe(token_owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+                .await
+                .unwrap();
+        };
+        let removal = async {
+            wait_until("both requests to be sent", 10., || {
+                server.requests(SCRIPTHASH_SUBSCRIBE) == 1 && server.requests(EVENT_SUBSCRIBE) == 1
+            })
+            .await;
+            disable_coin(&env.ctx, TICKER).await.unwrap();
+        };
+        futures::join!(hash_setup, event_setup, removal);
+        Timer::sleep(1.).await;
+        assert_eq!(
+            client.script_hash_owners("e8e5"),
+            None,
+            "the removed owner came back with the answer"
+        );
+        assert_eq!(client.contract_event_subscriptions(), 0);
+        drop(token);
+    });
+}
+
+/// D38.6.4Q.3 status note and P8 B: a contract-event subscription whose first placement failed is not remembered, so a
+/// later request of the same owner for the same key is sent to the server again and is placed.
+#[test]
+fn t38_6_4q_1_a_contract_event_subscription_that_failed_at_its_first_placement_is_sent_again() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        let subscribe = || {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+
+        server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+        assert!(subscribe().await.is_err());
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+        assert_eq!(client.contract_event_subscriptions(), 0);
+
+        server.clear_error(EVENT_SUBSCRIBE);
+        subscribe().await.unwrap();
+        assert_eq!(
+            server.requests(EVENT_SUBSCRIBE),
+            2,
+            "sent again, not answered as already subscribed"
+        );
+        assert_eq!(client.contract_event_subscriptions(), 1);
+        // Now it is placed: a further request of the same owner sends nothing.
+        subscribe().await.unwrap();
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        drop(token);
+    });
+}
+
+/// The same for the script-hash subscription of a failed first placement (P8 B, as far as the stub lets it be seen).
+#[test]
+fn t38_6_4q_1_a_script_hash_subscription_that_failed_at_its_first_placement_is_sent_again() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let client = qtum_client_of(&qtum);
+        let owner = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+
+        server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+        assert!(client.subscribe_scripthash(owner, "f8f6".to_owned()).await.is_err());
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+        assert_eq!(client.script_hash_owners("f8f6"), None);
+
+        server.clear_error(SCRIPTHASH_SUBSCRIBE);
+        client.subscribe_scripthash(owner, "f8f6".to_owned()).await.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        client.subscribe_scripthash(owner, "f8f6".to_owned()).await.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+    });
+}
+
+/// D38.6.4Q.3 status note item 2 and P8 B: the subscription was placed, a reconnect follows, and its placement over the
+/// new session fails (an error answer). It is not asked again in a loop, but a later request of the same owner for the
+/// same key is sent to the server again, because the server holds no such subscription for the new session.
+#[test]
+fn t38_6_4q_1_a_contract_event_subscription_whose_placement_failed_after_a_reconnect_is_sent_again() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        let subscribe = || {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+
+        subscribe().await.unwrap();
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+
+        // The reconnect: the placement over the new session is answered with an error.
+        server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+        reconnect_all(&server).await;
+        wait_until("the placement over the new session", 10., || {
+            server.requests(EVENT_SUBSCRIBE) == 2
+        })
+        .await;
+        Timer::sleep(2.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2, "not asked again in a loop");
+
+        // A later request of the same owner for the same key reaches the server.
+        server.clear_error(EVENT_SUBSCRIBE);
+        subscribe().await.unwrap();
+        assert_eq!(
+            server.requests(EVENT_SUBSCRIBE),
+            3,
+            "answered as already subscribed although the server holds no subscription"
+        );
+        drop(token);
+    });
+}
+
+/// P8 B for a script hash: the placement over the new session after a reconnect fails, and the next request of the
+/// same owner is sent and placed.
+#[test]
+fn t38_6_4q_1_a_script_hash_subscription_whose_placement_failed_after_a_reconnect_is_sent_again() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let client = qtum_client_of(&qtum);
+        let owner = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+
+        client.subscribe_scripthash(owner, "a9a1".to_owned()).await.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+
+        // The error stays: the placement over the new session fails (the pool repeats a failed script-hash pass).
+        server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+        reconnect_all(&server).await;
+        wait_until("the placement over the new session", 10., || {
+            server.requests(SCRIPTHASH_SUBSCRIBE) >= 2
+        })
+        .await;
+
+        // The request of the same owner is sent, not answered as already subscribed: it reaches the failing server
+        // and fails with its answer. The owner stays remembered, so later reconnects place the hash again.
+        let error = client.subscribe_scripthash(owner, "a9a1".to_owned()).await.unwrap_err();
+        assert!(error.contains("stub subscribe error"), "{error}");
+        assert!(client.script_hash_owners("a9a1").is_some());
+
+        // Once the server answers, the next request places it, and the one after sends nothing.
+        server.clear_error(SCRIPTHASH_SUBSCRIBE);
+        Timer::sleep(3.).await;
+        client.subscribe_scripthash(owner, "a9a1".to_owned()).await.unwrap();
+        let placed = server.requests(SCRIPTHASH_SUBSCRIBE);
+        client.subscribe_scripthash(owner, "a9a1".to_owned()).await.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), placed);
+    });
+}
+
+/// The guard of D38.6.4Q.1 item 6 holds while a subscription is placed in the current session, also after a reconnect
+/// whose placement succeeded: a request of the same owner sends nothing.
+#[test]
+fn t38_6_4q_1_a_subscription_placed_again_after_a_reconnect_is_not_sent_by_the_next_request() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        let subscribe = || {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+
+        subscribe().await.unwrap();
+        client.subscribe_scripthash(owner, "b9b2".to_owned()).await.unwrap();
+        reconnect_all(&server).await;
+        wait_until("both placed again", 10., || {
+            server.requests(EVENT_SUBSCRIBE) == 2 && server.requests(SCRIPTHASH_SUBSCRIBE) == 2
+        })
+        .await;
+        Timer::sleep(1.).await;
+        subscribe().await.unwrap();
+        client.subscribe_scripthash(owner, "b9b2".to_owned()).await.unwrap();
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        drop(token);
+    });
+}
+
+/// P8 A, the stale handle: the removal has completed, and only then does a handle of the removed instance subscribe
+/// (a streamer set-up that found the coin before the removal). Nothing is sent and nothing is remembered; after a
+/// reconnect only the remaining owner's subscriptions are placed.
+#[test]
+fn t38_6_4q_1_a_stale_handle_of_a_removed_instance_subscribes_nothing_after_the_removal() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        let client = electrum_client_of(&token);
+        let (qtum_owner, token_owner) = (
+            AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner,
+            token.utxo.electrum_owner,
+        );
+        let (address, contract) = event_arguments(&token);
+        client
+            .subscribe_scripthash(qtum_owner, "a7a1".to_owned())
+            .await
+            .unwrap();
+
+        disable_coin(&env.ctx, TICKER).await.unwrap();
+        let (subscribes, events) = (server.requests(SCRIPTHASH_SUBSCRIBE), server.requests(EVENT_SUBSCRIBE));
+        // The stale handle (it still holds the token) makes its set-up calls.
+        client
+            .subscribe_scripthash(token_owner, "a7a1".to_owned())
+            .await
+            .unwrap();
+        client
+            .subscribe_scripthash(token_owner, "c7c3".to_owned())
+            .await
+            .unwrap();
+        client
+            .blockchain_contract_event_subscribe(token_owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await
+            .unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), subscribes);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), events);
+        assert_eq!(client.script_hash_owners("c7c3"), None);
+        assert_eq!(
+            client.script_hash_owners("a7a1"),
+            Some(std::collections::HashSet::from([qtum_owner]))
+        );
+        assert_eq!(client.contract_event_subscriptions(), 0);
+
+        let placed_before = server.request_params(SCRIPTHASH_SUBSCRIBE).len();
+        reconnect_all(&server).await;
+        Timer::sleep(3.).await;
+        assert_eq!(server.request_params(SCRIPTHASH_SUBSCRIBE)[placed_before..].to_vec(), [
+            json!(["a7a1"])
+        ]);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), events);
+        drop((token, qtum));
+    });
+}
+
+/// P8 at most one request for each owner, key and session: two concurrent requests of one owner for one key send one
+/// request. When it succeeds the subscription is placed and remembered; when it fails the owner is not remembered, and
+/// a later request sends.
+#[test]
+fn t38_6_4q_1_two_concurrent_requests_of_one_owner_for_one_key_send_one_request() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        let event = || {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+
+        // Success: one request, placed and remembered.
+        server.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::from_secs(1));
+        server.set_reply_delay(EVENT_SUBSCRIBE, Duration::from_secs(1));
+        let (first, second) = futures::join!(
+            client.subscribe_scripthash(owner, "d7d4".to_owned()),
+            client.subscribe_scripthash(owner, "d7d4".to_owned())
+        );
+        first.unwrap();
+        second.unwrap();
+        let (a, b) = futures::join!(event(), event());
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+        assert!(client.script_hash_owners("d7d4").is_some());
+        assert_eq!(client.contract_event_subscriptions(), 1);
+        // Placed: a later request sends nothing.
+        client.subscribe_scripthash(owner, "d7d4".to_owned()).await.unwrap();
+        event().await.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+
+        // Failure, on keys that were not placed: one request, the owner is not remembered, a later request sends.
+        server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+        let (first, second) = futures::join!(
+            client.subscribe_scripthash(owner, "e7e5".to_owned()),
+            client.subscribe_scripthash(owner, "e7e5".to_owned())
+        );
+        // The first request failed; the second sent nothing and says so with Ok.
+        assert!(first.is_err());
+        second.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        assert_eq!(client.script_hash_owners("e7e5"), None);
+        server.clear_error(SCRIPTHASH_SUBSCRIBE);
+        client.subscribe_scripthash(owner, "e7e5".to_owned()).await.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+        assert!(client.script_hash_owners("e7e5").is_some());
+        drop(token);
+    });
+}
+
+/// P8: a request that gets no answer blocks a second request of the same owner for the same key (nothing is sent), and
+/// only until the first one ends at the end of its call's time budget; then it has settled as a failed placement, the
+/// owner is not remembered, and the next request is sent. The first request is given a short call budget so that the
+/// test does not wait for the pool's 20 s request timeout (the pool's timings are not configurable from here).
+#[test]
+fn t38_6_4q_1_a_request_without_an_answer_blocks_the_same_owner_only_until_its_budget_ends() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        let budget = Duration::from_secs(2);
+        server.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::from_secs(3_600));
+        server.set_reply_delay(EVENT_SUBSCRIBE, Duration::from_secs(3_600));
+
+        // The script hash.
+        let first = with_call_budget(budget, client.subscribe_scripthash(owner, "f7f6".to_owned()));
+        let second = async {
+            wait_until("the first request to be sent", 10., || {
+                server.requests(SCRIPTHASH_SUBSCRIBE) == 1
+            })
+            .await;
+            // While the first waits, the second sends nothing.
+            client.subscribe_scripthash(owner, "f7f6".to_owned()).await.unwrap();
+            assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+        };
+        let (first, ()) = futures::join!(first, second);
+        assert!(
+            first.is_err(),
+            "the first request ends without an answer when its budget is used up"
+        );
+        assert_eq!(client.script_hash_owners("f7f6"), None);
+        // The first request has ended: the next one is sent.
+        let third = with_call_budget(budget, client.subscribe_scripthash(owner, "f7f6".to_owned())).await;
+        assert!(third.is_err());
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+
+        // The contract event.
+        let event = || {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+        let first = with_call_budget(budget, event());
+        let second = async {
+            wait_until("the first request to be sent", 10., || {
+                server.requests(EVENT_SUBSCRIBE) == 1
+            })
+            .await;
+            event().await.unwrap();
+            assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+        };
+        let (first, ()) = futures::join!(first, second);
+        assert!(first.is_err());
+        assert_eq!(client.contract_event_subscriptions(), 0);
+        let third = with_call_budget(budget, event()).await;
+        assert!(third.is_err());
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        drop(token);
+    });
+}
+
+/// P8 F1, script hashes. A subscription of owner A is remembered but its placement over the current session failed (the
+/// pool's pass). A request R of `requester` (A itself, or a new owner B with A remaining) is in flight when the pass
+/// comes round again and leaves the key to it; R then fails. R's failure asks for a pass, which places the key over the
+/// current session without a new request of any owner.
+async fn failed_request_after_a_skipping_pass_script_hash(new_owner: bool) {
+    let env = family_env();
+    let server = family_stub().await;
+    let qtum = init_qtum(&env, &[&server]).await;
+    let token = init_token_named(&env, TICKER, &[&server], false).await;
+    wait_until("the session", 10., || server.open_connections() == 1).await;
+    let client = electrum_client_of(&token);
+    let owner_a = token.utxo.electrum_owner;
+    let owner_b = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+    let requester = if new_owner { owner_b } else { owner_a };
+
+    client.subscribe_scripthash(owner_a, "a6a1".to_owned()).await.unwrap();
+    assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+    // The reconnect: the placement over the new session fails.
+    server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+    reconnect_all(&server).await;
+    wait_until("the failing placement", 10., || {
+        server.requests(SCRIPTHASH_SUBSCRIBE) == 2
+    })
+    .await;
+
+    // R is in flight (and will fail with the error answer decided now) while the pool's repeat comes round.
+    server.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::from_millis(2_500));
+    let request = client.subscribe_scripthash(requester, "a6a1".to_owned());
+    let watcher = async {
+        wait_until("R to be sent", 10., || server.requests(SCRIPTHASH_SUBSCRIBE) == 3).await;
+        // A pass comes round while R is in flight: it skips the key (and marks the skip) and sends nothing.
+        assert!(client.resubscribe_watched_scripthashes().await);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+        server.clear_error(SCRIPTHASH_SUBSCRIBE);
+        // The pool's own repeat runs while R is in flight and sends nothing either.
+        Timer::sleep(1.6).await;
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+    };
+    let (outcome, ()) = futures::join!(request, watcher);
+    assert!(outcome.is_err());
+    // R's failure asks for a pass; it places the key (the owners that remain remember it).
+    wait_until("the placement asked for by the failure", 15., || {
+        server.requests(SCRIPTHASH_SUBSCRIBE) == 4
+    })
+    .await;
+    Timer::sleep(3.).await;
+    assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 4, "placed once, nothing repeats");
+    assert_eq!(
+        client.script_hash_owners("a6a1"),
+        Some(std::collections::HashSet::from([owner_a]))
+    );
+    // It is placed over the current session: a request of its owner sends nothing.
+    client.subscribe_scripthash(owner_a, "a6a1".to_owned()).await.unwrap();
+    assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 4);
+    drop((qtum, token));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_the_remembered_owner_after_a_skipping_pass_asks_for_the_script_hash_placement() {
+    block_on(failed_request_after_a_skipping_pass_script_hash(false));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_a_new_owner_after_a_skipping_pass_asks_for_the_script_hash_placement() {
+    block_on(failed_request_after_a_skipping_pass_script_hash(true));
+}
+
+/// P8 F1, contract events: the same two shapes. The pool's pass has gone by (once for the session) before R is sent, so
+/// the test asks for a pass itself while R is in flight, and that pass skips the subscription. After R's failure one
+/// more pass is asked for. When `pass_succeeds` it places the subscription; when the server still refuses it, it is not repeated.
+async fn failed_request_after_a_skipping_pass_contract_event(new_owner: bool, pass_succeeds: bool) {
+    let env = family_env();
+    let server = family_stub().await;
+    let qtum = init_qtum(&env, &[&server]).await;
+    let token = init_token_named(&env, TICKER, &[&server], false).await;
+    wait_until("the session", 10., || server.open_connections() == 1).await;
+    let client = electrum_client_of(&token);
+    let owner_a = token.utxo.electrum_owner;
+    let owner_b = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+    let requester = if new_owner { owner_b } else { owner_a };
+    let (address, contract) = event_arguments(&token);
+    let subscribe = |owner| {
+        client
+            .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+            .compat()
+    };
+
+    subscribe(owner_a).await.unwrap();
+    assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+    // The reconnect: the one placement over the new session fails.
+    server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+    reconnect_all(&server).await;
+    wait_until("the failing placement", 10., || server.requests(EVENT_SUBSCRIBE) == 2).await;
+    Timer::sleep(1.).await;
+
+    // R is in flight and will fail with the error answer decided now.
+    server.set_reply_delay(EVENT_SUBSCRIBE, Duration::from_millis(1_500));
+    let request = subscribe(requester);
+    let watcher = async {
+        wait_until("R to be sent", 10., || server.requests(EVENT_SUBSCRIBE) == 3).await;
+        // A pass is asked for while R is in flight: it skips the subscription (and marks the skip), sending nothing.
+        client.resubscribe_watched_contract_events().await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+        if pass_succeeds {
+            server.clear_error(EVENT_SUBSCRIBE);
+        }
+    };
+    let (outcome, ()) = futures::join!(request, watcher);
+    assert!(outcome.is_err());
+    // R's failure asks for the pass: one placement, over the current session, by no owner's request.
+    wait_until("the placement asked for by the failure", 15., || {
+        server.requests(EVENT_SUBSCRIBE) == 4
+    })
+    .await;
+    Timer::sleep(3.).await;
+    assert_eq!(server.requests(EVENT_SUBSCRIBE), 4, "asked once, not repeated");
+    assert_eq!(client.contract_event_subscriptions(), 1);
+    if pass_succeeds {
+        server.set_reply_delay(EVENT_SUBSCRIBE, Duration::ZERO);
+        subscribe(owner_a).await.unwrap();
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 4, "placed over this session");
+    }
+    drop((qtum, token));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_the_remembered_owner_after_a_skipping_pass_asks_for_the_contract_event_placement() {
+    block_on(failed_request_after_a_skipping_pass_contract_event(false, true));
+}
+
+#[test]
+fn t38_6_4q_1_a_failed_request_of_a_new_owner_after_a_skipping_pass_asks_for_the_contract_event_placement() {
+    block_on(failed_request_after_a_skipping_pass_contract_event(true, true));
+}
+
+#[test]
+fn t38_6_4q_1_the_pass_a_failed_request_asked_for_is_not_repeated_when_the_contract_event_is_refused_again() {
+    block_on(failed_request_after_a_skipping_pass_contract_event(false, false));
+}
+
+/// P8 F1, narrowed: a refused request of the remembered owner asks for no pass when no pass skipped the key. The
+/// subscription is unplaced after a manual failed re-placement (which the pool does not repeat), and the owner's
+/// request is refused too: the stub sees no placement beyond the two requests.
+#[test]
+fn t38_6_4q_1_a_refused_script_hash_request_asks_for_no_pass_when_no_pass_skipped_it() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let qtum = init_qtum(&env, &[&server]).await;
+        let client = qtum_client_of(&qtum);
+        let owner = AsRef::<UtxoCoinFields>::as_ref(&qtum).electrum_owner;
+        // The session has settled: no pass of the pool is pending that could place the key by itself.
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        Timer::sleep(2.).await;
+        client.subscribe_scripthash(owner, "b5b2".to_owned()).await.unwrap();
+        server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+        assert!(!client.resubscribe_watched_scripthashes().await);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        // The owner is refused too.
+        assert!(client.subscribe_scripthash(owner, "b5b2".to_owned()).await.is_err());
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3, "no pass was asked for");
+        assert!(client.script_hash_owners("b5b2").is_some());
+    });
+}
+
+#[test]
+fn t38_6_4q_1_a_refused_contract_event_request_asks_for_no_pass_when_no_pass_skipped_it() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        let subscribe = || {
+            client
+                .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+                .compat()
+        };
+        // The session has settled: no pass of the pool is pending.
+        wait_until("the session", 10., || server.open_connections() == 1).await;
+        Timer::sleep(2.).await;
+        subscribe().await.unwrap();
+        server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
+        client.resubscribe_watched_contract_events().await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        assert!(subscribe().await.is_err());
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
+        Timer::sleep(3.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 3, "no pass was asked for");
+        assert_eq!(client.contract_event_subscriptions(), 1);
+        drop(token);
     });
 }
 
