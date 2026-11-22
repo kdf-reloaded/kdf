@@ -14,6 +14,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
 or undo, and every change that needs a step from you.
 
+- **A new swap needs two nodes of the coin that agree, or one node you name as trusted.** Before a swap refunds, or
+  uses the swap's secret, the chain reads that step rests on (the other side's payment, whether a payment was
+  claimed, refunded or not spent, and the chain time of the refund) must agree between two nodes of the coin. Two
+  ports of one host are one node; two hosts of one operator are two nodes. A coin in native mode is served by your
+  own daemon and needs nothing.
+  - *What changes:* a coin with fewer than two distinct hosts in its server or node list, and no
+    `swap_evidence_node`, starts no new swap: `setprice`, `buy`, `sell` and the swap start refuse it with a
+    reason that names `swap_evidence_node`. A swap that is already running when you upgrade keeps running, but a
+    step whose reads do not agree, or that has too few answers, waits and logs how to fix it; it never refunds or
+    claims on such a read.
+  - *What to do:* list a server on a second host in the activation request, or set the new activation field
+    `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
+    not answer, the step waits; no other node is asked in its place.
+  - *Coin families covered:* none yet. The rule is switched on family by family as each family's chain reads move
+    onto it, and this list grows with them.
+  - Detail: PR #NNN; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
   instead of running on a database layout it does not know. No released version of KDF Reloaded or GLEEC KDF records
@@ -184,6 +200,12 @@ the previous version used. The safe way:
 
 #### RPC interface
 
+- **New optional activation field `swap_evidence_node`.** It names one node of the coin's own list as the node whose
+  answer alone a swap acts on (see the breaking change about two nodes above). Every coin family that can swap
+  accepts it: UTXO, BCH and SLP, QTUM and QRC20, EVM and ERC20, ZHTLC, Sia and Tendermint, in the legacy and in the
+  task-based activation methods. A value that names no entry of the coin's list is refused with the `error_type`
+  `SwapEvidenceNodeNotInList`, whose data and message name the ticker and the node as host and port only. Detail: PR
+  #NNN; CRD ch.51 §51.6G R100 item 2.
 - **The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized`, and takes
   `force_disable`.** A platform coin (an EVM, BCH, Tendermint, Solana or standard UTXO coin) that has at least one
   active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens

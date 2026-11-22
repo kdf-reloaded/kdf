@@ -1813,6 +1813,37 @@ waits; a `swap_evidence_node` outside the coin's node list is not accepted; a
 coin with one node and no `swap_evidence_node` is refused at order placement
 and at the swap start.
 
+*Status note (2026-11-22, clean side; maintainer decisions LFV, LFX, LFY, LGA,
+LFZ and decisions within the lane). The shared core of R100.* It changes no
+sentence above.
+
+1. *Nodes.* A node is a distinct host name, compared without case; two ports or
+   two schemes of one host are one node, and two hosts of one operator are two.
+2. *The field.* `swap_evidence_node` matches a list entry with the same host
+   and, when the field names a port, the same port. An activation error
+   `SwapEvidenceNodeNotInList` names the ticker and the node as host and port
+   only, never a scheme, path, query or credential.
+3. *Per family.* UTXO, BCH and QTUM over Electrum count the configured servers.
+   In native mode the coin's own daemon is trusted without the field (LFX); a
+   field equal to the daemon's address is accepted, any other value refused. A
+   QRC20 token takes its platform's policy, and the field is part of the shared
+   QTUM client's key. An SLP token takes its platform's policy, but has too few
+   nodes while its `bchd_urls` hold fewer than two hosts. EVM counts the nodes
+   that passed the activation probe; the field may name a configured node that
+   failed it, which is then a trusted node that does not answer. ZHTLC counts
+   `light_wallet_d_servers`, and the field must be one of them. Sia has one node
+   and starts swaps only with the field naming it (LGA). Tendermint counts its
+   RPC nodes. A token of a platform takes the platform's policy.
+4. *Adoption.* Each family switches to R100 through one table in the code once
+   its reads ask two nodes; until then its coins keep today's reads and are not
+   refused at admission. A release-gate test fails while any family that can
+   swap has not switched; 0.5.0 is not tagged before it passes (LFV).
+5. *Asking two nodes.* An attempt asks nodes of distinct hosts in list order
+   until two have answered, and decides only when those two agree; a third node
+   never outvotes them, and the next attempt asks a pair again (LGA). An answer
+   that proves itself, such as a secret whose hash matches, is taken alone
+   (LFU).
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -3578,3 +3609,8 @@ reference rows alike.
   field `swap_evidence_node`. It is Reloaded-original, records only the
   maintainer's decisions of 2026-11-22, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-22 (PR #NNN):* the status note after T42,
+  the shared core of R100: nodes, the field, the policy per family, adoption
+  and the release gate, and asking two nodes. It records maintainer decisions
+  and decisions within the lane, takes no reference input, and changes no
+  sentence of the chapter.
