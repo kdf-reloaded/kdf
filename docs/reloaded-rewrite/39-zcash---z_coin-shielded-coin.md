@@ -8067,6 +8067,22 @@ check, and log that once per order; (b) cancel it at start-up with a named
 reason; (c) do as the reference does. Recommendation: (a), with the same check
 at match time.
 
+> **Status note (2026-11-22, this repository; not corpus-sourced).** The
+> maintainer decided both on 2026-11-22. D39.11.5A.1: option (a). PR #489
+> makes the four reads of R39.11.5A.4, R39.11.5A.6, R39.11.5A.7 (state
+> present, nothing found) and R39.11.5A.8 (failed request) answer an error
+> that names the condition and calls the answer undetermined, so the payment
+> step fails under R39.11.19 and nothing is broadcast. The manual recovery of
+> R39.11.22, which asks the same query, gets the same error in these cases. A
+> node whose state read is ahead of its log index now gives this error where
+> it gave "not sent"; for a swap resumed at the payment step that is what the
+> bounded retry of the same decision round is for, recorded here when it is
+> built. The rest of R39.11.5A.2 to R39.11.5A.8 is unchanged; the EVM request
+> sizing stays that of chapter 17. D39.11.5A.2: option (a), built by PR #485,
+> with its rule in [chapter 60](60-trading-floors-and-refusal-contract.md)
+> R60.6.5. The status note above, which says nothing is implemented, records
+> the state before these decisions.
+
 **D39.11.5A.3** *A payment in the mempool at restart.* The reference answers
 "not sent" for an EVM or QRC20 payment that is broadcast but not mined
 (R39.11.5A.3, R39.11.5A.7). Whether this project should also look at its own
@@ -9548,3 +9564,8 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   repository against its clean-room re-implementation of the V1 swap contract,
   `mm2src/mm2_test_helpers/for_tests/EtomicSwap.sol`, whose two payment
   functions refuse an identifier that is already in use.
+- *Status note added 2026-11-22 -- after D39.11.5A.2.* Reloaded-original,
+  clean side: it records the maintainer's choice of option (a) for
+  D39.11.5A.1 and D39.11.5A.2 and this repository's code (PRs #489 and #485),
+  takes no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.

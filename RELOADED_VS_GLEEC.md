@@ -875,6 +875,14 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   different state 16, so that value identifies no layout. The refusal is compatible with GLEEC KDF: a database KDF
   Reloaded leaves at state 15 is fully migrated for both. No switch exists; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.44 R44.9A.1 to R44.9A.5.
+- **An undetermined already-sent read stops the payment instead of counting as "not sent".** Before a legacy
+  swap sends its payment it asks the paying coin whether that payment already exists. Where GLEEC KDF answers
+  "not sent" without evidence, KDF Reloaded answers an error that names the condition, and the payment step fails
+  without a broadcast: an EVM or QRC20 contract reports a payment for the swap but no payment event or matching
+  transaction is found, an EVM node returns a payment event but not its transaction, or the request for a Sia HTLC
+  address's events fails. The manual recovery gets the same error. No switch: the reference's answer can lead to a
+  second payment. Row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.39 §39.11.5A,
+  D39.11.5A.1; PR #489.
 
 ### Removed / disabled in KDF Reloaded
 
