@@ -185,17 +185,17 @@ the previous version used. The safe way:
 #### RPC interface
 
 - **`task::get_new_address::init`, `::status`, `::user_action` and `::cancel` make the next address of an HD account
-  as a task, by the coin's key policy.** The request is `coin`, `account_id`, an optional `chain` (default `External`)
-  and an optional `gap_limit`. It is served for standard UTXO coins, QTUM, EVM coins and ERC-20 tokens, TRX and TRC20
-  tokens, and Siacoin; init answers only `NoSuchCoin` and `Internal`, and every other condition (also a coin kind it
-  does not serve, `CoinIsActivatedNotWithHDWallet`) shows in the task's `Error` status. Before it derives an address
-  the task runs the gap check: when the last `gap_limit` known addresses of the chain are all unused it ends with
-  `EmptyAddressesLimitReached` and the `gap_limit` (the wallet's gap limit when the request names none). The direct
-  `get_new_address` is unchanged and runs no gap check.
+  as a task, by the coin's key policy.** The request is `coin`, `account_id`, an optional `chain` (default
+  `External`) and an optional `gap_limit`. It is served for standard UTXO coins, QTUM, EVM coins and ERC-20 tokens,
+  TRX and TRC20 tokens, and Siacoin; init answers only `NoSuchCoin` and `Internal`, and every other condition (also a
+  coin kind it does not serve, `CoinIsActivatedNotWithHDWallet`) shows in the task's `Error` status. Before it
+  derives an address the task runs the gap check: when the last `gap_limit` known addresses of the chain are all
+  unused it ends with `EmptyAddressesLimitReached` and the `gap_limit` (the wallet's gap limit when the request names
+  none). The direct `get_new_address` is unchanged and runs no gap check.
   - *Software keys:* the task derives, records and queries without any device state, also when a hardware wallet is
-    connected beside a software login; its states are `Preparing` and `RequestingAccountBalance`, and it ends with the
-    same `{"new_address": ...}` answer as `get_new_address`. A TRX or TRC20 ticker completes this way, and so does a
-    Siacoin.
+    connected beside a software login; its states are `Preparing` and `RequestingAccountBalance`, and it ends with
+    the same `{"new_address": ...}` answer as `get_new_address`. A TRX or TRC20 ticker completes this way, and so
+    does a Siacoin.
   - *Hardware wallet (Trezor) keys:* the task needs the connected device (`HwContextNotInitialized` when none is
     connected, `FoundUnexpectedDevice` for another device than the coin was activated with), asks the device to show
     the address, and reports `{"ConfirmAddress": {"expected_address": "<address>"}}` while the device waits for the
@@ -204,13 +204,13 @@ the previous version used. The safe way:
     `DeviceAddressMismatch` and `{expected_address, device_address}` and records nothing; the comparison you make on
     the device's screen is the check that matters.
   - *Differences from GLEEC KDF:* GLEEC KDF runs this task on the device path only, so with software keys it ends
-    with `HwContextNotInitialized`; and it ends a device mismatch with `Internal`, accepts the `Internal` chain for EVM
-    coins, and has a scripthash-subscription step that has no counterpart here. The `Internal` chain is refused for
-    EVM and TRON coins with `InvalidBip44Chain`; UTXO and QTUM accept it.
+    with `HwContextNotInitialized`; and it ends a device mismatch with `Internal`, accepts the `Internal` chain for
+    EVM coins, and has a scripthash-subscription step that has no counterpart here. The `Internal` chain is refused
+    for EVM and TRON coins with `InvalidBip44Chain`; UTXO and QTUM accept it.
   - *No rollback:* an address whose balance query fails stays known, as with `get_new_address`; cancelling the task
     during the balance query does the same, and cancelling it before the device confirmed records nothing.
-  Detail: CRD ch.49 §49.2.3 (the status note "the task form of `get_new_address` (as built)"), ch.05 R54; the
-  maintainer decided on 2026-11-22 on the divergences.
+  Detail: PR #491; CRD ch.49 §49.2.3 (the status note "the task form of `get_new_address` (as built)"), ch.05 R54;
+  the maintainer decided on 2026-11-22 on the divergences.
 - **The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized`, and takes
   `force_disable`.** A platform coin (an EVM, BCH, Tendermint, Solana or standard UTXO coin) that has at least one
   active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens

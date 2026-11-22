@@ -880,18 +880,20 @@ The UTXO tests, module `hd_accounts_at_index_tests` of `utxo_tests.rs`:
 the coin's ticker, including the pages that list no address. QTUM and Sia answer `account_balance` through the same
 shared routine and have no test of their own.
 
-## `task::get_new_address` by the coin's key policy (30 tests, plus 2 emulator tests)
+## `task::get_new_address` by the coin's key policy (30 tests, plus 7 emulator tests)
 
-Location: `mm2src/coins/rpc_command/init_get_new_address.rs` (module `tests`, 6 tests: the request, the wire forms of the
-states and of the new errors, the mapping of the task framework's errors and of the device's answers),
+Location: `mm2src/coins/rpc_command/init_get_new_address.rs` (module `tests`, 6 tests: the request, the wire forms
+of the states and of the new errors, the mapping of the task framework's errors and of the device's answers),
 `mm2src/coins/utxo/utxo_tests.rs` (module `hd_accounts_at_index_tests`, names start with `leb_`, 14 tests),
 `mm2src/coins_activation/src/evm_hd_p4_tests.rs` (8 tests), one test each in
-`mm2src/coins_activation/src/eth_with_tokens_activation/tron/tests.rs` and `mm2src/coins_activation/src/sia_activation.rs`, and
-two emulator tests in `mm2src/coins/eth/eth_trezor_emulator_tests.rs`. CRD: chapter 49 R49.38 to R49.43 and T49.36 to
-T49.38 (as the status notes of 2026-11-22 in §49.2.3 record), chapter 05 R54 and R58a. Run with
-`cargo test -p coins --lib -- leb_ init_get_new_address` and `cargo test -p coins_activation --lib -- evm_hd_p4
-get_new_address_task`. The UTXO tests drive the steps of the task directly (the node mocks of that module are
-thread-local, the task runs on the executor); the tests that start the task through its entry points need no mock.
+`mm2src/coins_activation/src/eth_with_tokens_activation/tron/tests.rs` and
+`mm2src/coins_activation/src/sia_activation.rs`, and seven emulator tests in
+`mm2src/coins/eth/eth_trezor_emulator_tests.rs`. CRD: chapter 49 R49.38 to R49.43 and T49.36 to T49.38 (as the status
+notes of 2026-11-22 in §49.2.3 record), chapter 05 R54 and R58a. Run with
+`cargo test -p coins --lib -- leb_ init_get_new_address` and
+`cargo test -p coins_activation --lib -- evm_hd_p4 get_new_address_task`. The UTXO tests drive the steps of the task
+directly (the node mocks of that module are thread-local, the task runs on the executor); the tests that start the
+task through its entry points need no mock.
 
 | Test | Rule | What it checks |
 |------|------|----------------|
@@ -921,10 +923,34 @@ thread-local, the task runs on the executor); the tests that start the task thro
 | `a_device_address_mismatch_is_a_typed_request_error_naming_both_addresses`, `the_gap_check_refusal_carries_the_limit` | R49.39 item 3, decision 4 | The wire form and HTTP 400 of `DeviceAddressMismatch` and `EmptyAddressesLimitReached` |
 | `the_awaiting_errors_of_the_task_framework_have_their_own_error_types`, `the_device_answers_map_to_the_hardware_vocabulary` | R49.39 item 4, R49.41 item 4 | `UnexpectedUserAction` with `expected`, `Timeout` with `{secs, nanos}`, and `HwError` `UserCancelled`, `InvalidPin`, `NoTrezorDeviceAvailable` |
 
-The two emulator tests (`emulator_trezor_get_new_address_shows_the_address_and_records_it_after_the_button`,
-`emulator_trezor_get_new_address_cancel_while_the_address_is_shown_records_nothing`; T49.37 for an EVM platform) run
-in the emulator job and print a skip line when no emulator is reachable. A rejection on the device, a device of another
-seed and a UTXO coin under the Trezor policy are not covered by an emulator test.
+The seven emulator tests run in the emulator job (`cargo test -p coins --features trezor-emulator-tests
+eth_trezor_emulator`) and print a skip line when no emulator is reachable. Their node is an in-process JSON-RPC stub
+on a local port (the task runs on the executor, so the thread-local mocks cannot serve it): an EVM node, a
+Bitcoin-style node that answers an empty `listunspent`, and a node that answers every request with an error.
+
+| Emulator test | Run | What it checks |
+|---|---|---|
+| `emulator_trezor_get_new_address_shows_the_address_and_records_it_after_the_button` | T49.37, EVM platform | `ConfirmAddress` carries the EIP-55 address of the later result; the count is unchanged until the press and raised by one after it |
+| `emulator_trezor_get_new_address_utxo_shows_the_address_and_records_it_after_the_button` | T49.37, UTXO (`KMD`) | The same for a Komodo address; the device request (`trezor_coin`, script type) is right because the address the device shows is the one the daemon derived; the balance map is `KMD` with zeros |
+| `emulator_trezor_get_new_address_cancel_while_the_address_is_shown_records_nothing` | T49.37 (cancel), EVM | The cancel answers success, the task is gone, the count is unchanged and the next task offers the same address |
+| `emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled` | T49.38 (rejection), EVM | The controller presses "no" while the address is shown: `HwError` `UserCancelled`, count unchanged |
+| `emulator_trezor_get_new_address_another_seed_is_found_unexpected_device` | T49.38 (other seed), EVM | The emulator is wiped and loaded with another seed: `HwError` `FoundUnexpectedDevice` (R58a) before the address is shown, count unchanged; needs `TREZOR_EMULATOR_UDP` |
+| `emulator_trezor_get_new_address_another_passphrase_is_a_device_address_mismatch` | T49.38 (mismatch), EVM | Passphrase protection on; the first passphrase request (the identity check) is answered with the activation's passphrase, the second (the address request) with another one: `DeviceAddressMismatch` naming both addresses, count unchanged |
+| `emulator_trezor_get_new_address_a_failing_balance_query_leaves_the_address_known` | T49.38 (failing balance), EVM | The node fails the balance read after the press: `Transport`, count raised by one |
+
+Coverage map of the runs of T49.37 and T49.38 (emulator test, unit test with mocks, or open):
+
+| Run | Emulator test | Unit test with mocks | Open (by hand on a Trezor) |
+|---|---|---|---|
+| T49.37 status and press, EVM platform | `..._shows_the_address_and_records_it_after_the_button` | the wire form of `ConfirmAddress` (`the_in_progress_values_have_the_wire_form_of_the_contract`) | the address in full on the device's screen |
+| T49.37 status and press, UTXO | `..._utxo_shows_the_address_and_records_it_after_the_button` | `leb_r4942_the_device_request_of_a_utxo_coin` (device name, script type) | the same screen check |
+| T49.37 cancel while shown | `..._cancel_while_the_address_is_shown_records_nothing` (EVM) | none | none |
+| T49.38 rejection on the device | `..._refused_on_the_device_is_user_cancelled` (EVM) | `the_device_answers_map_to_the_hardware_vocabulary` (the mapping) | the press on the model's own buttons (the emulator is driven through its debug link) |
+| T49.38 another seed | `..._another_seed_is_found_unexpected_device` (EVM) | `leb_a_replaced_device_ends_the_trezor_policy_task_with_found_unexpected_device` (UTXO) | none |
+| T49.38 another passphrase (mismatch) | `..._another_passphrase_is_a_device_address_mismatch` (EVM) | `a_device_address_mismatch_is_a_typed_request_error_naming_both_addresses` (the wire form) | none |
+| T49.38 failing balance after the confirmation | `..._a_failing_balance_query_leaves_the_address_known` (EVM) | `leb_a_failing_balance_query_leaves_the_address_known`, `evm_hd_p4_a_failing_balance_query_leaves_the_address_known` | none |
+
+The emulator tests share the prefix `emulator_trezor_get_new_address` (shown as `...` above).
 
 ## EVM HD address methods and ERC-20 `from` (10 tests)
 
