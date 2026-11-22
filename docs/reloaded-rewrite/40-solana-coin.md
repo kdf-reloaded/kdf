@@ -1693,8 +1693,8 @@ R40.6B.16 holds meanwhile.
 > 2026-11-22 to build the swap client to the public program of F40.6B.5 and to
 > deploy that program for Reloaded on devnet and mainnet, immutable, after a
 > clean review of its source, a reproducible build matched to the devnet program
-> and a license check (§40.6D, PR #501). The dex fee goes to the Solana address of
-> the network's ed25519 dex-fee key; an SPL fee creates the fee owner's token
+> and a license check (§40.6D, PR #501). The dex fee goes to the Solana address
+> of the network's ed25519 dex-fee key; an SPL fee creates the fee owner's token
 > account when it is missing; the minimum trading volume stays 0.00777.
 
 ### 40.6B.10 Acceptance tests
