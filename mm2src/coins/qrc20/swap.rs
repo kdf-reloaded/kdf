@@ -1,5 +1,6 @@
 use super::history::TransferHistoryBuilder;
 use super::*;
+use common::log::debug;
 use script_pubkey::{extract_contract_addr_from_script, extract_contract_call_from_script, is_contract_call};
 
 /// `erc20Payment` call details consist of values obtained from [`TransactionOutput::script_pubkey`] and [`TxReceipt::logs`].
@@ -233,7 +234,13 @@ impl Qrc20Coin {
             return ERR!("'erc20Payment' was not confirmed yet. Please wait for at least one confirmation");
         }
 
-        let Erc20PaymentDetails { swap_id, receiver, .. } = try_s!(self.erc20_payment_details_from_tx(&tx).await);
+        let Erc20PaymentDetails {
+            swap_id,
+            receiver,
+            sender,
+            swap_contract_address,
+            ..
+        } = try_s!(self.erc20_payment_details_from_tx(&tx).await);
         let expected_swap_id = qrc20_swap_id(time_lock, &secret_hash);
         if expected_swap_id != swap_id {
             return ERR!("Unexpected swap_id {}", hex::encode(swap_id));
@@ -243,20 +250,29 @@ impl Qrc20Coin {
 
         // First try to find a 'receiverSpend' contract call.
         let spend_txs = try_s!(self.receiver_spend_transactions(receiver, search_from_block).await);
-        let found = spend_txs
-            .into_iter()
-            .find(|tx| find_receiver_spend_with_swap_id_and_secret_hash(tx, &expected_swap_id, &secret_hash).is_some());
+        let expected_spend = ExpectedSwapEvent::ReceiverSpent {
+            secret_hash: &secret_hash,
+        };
+        let found = try_s!(
+            self.find_bound_swap_event_tx(spend_txs, &expected_spend, &expected_swap_id, &swap_contract_address)
+                .await
+        );
         if let Some(spent_tx) = found {
             return Ok(Some(FoundSwapTxSpend::Spent(TransactionEnum::UtxoTx(spent_tx))));
         }
 
-        // Else try to find a 'senderRefund' contract call.
-        let my_address = try_s!(self.utxo.derivation_method.iguana_or_err()).clone();
-        let sender = try_s!(qtum::contract_addr_from_utxo_addr(my_address));
+        // Else try to find a 'senderRefund' contract call. CRD ch.51 §51.6E R89: the refund returns the tokens to the
+        // payment's sender, so the candidates come from the sender's history, whoever of the two sides the node is.
         let refund_txs = try_s!(self.sender_refund_transactions(sender, search_from_block).await);
-        let found = refund_txs.into_iter().find(|tx| {
-            find_swap_contract_call_with_swap_id(MutContractCallType::SenderRefund, tx, &expected_swap_id).is_some()
-        });
+        let found = try_s!(
+            self.find_bound_swap_event_tx(
+                refund_txs,
+                &ExpectedSwapEvent::SenderRefunded,
+                &expected_swap_id,
+                &swap_contract_address
+            )
+            .await
+        );
         if let Some(refunded_tx) = found {
             return Ok(Some(FoundSwapTxSpend::Refunded(TransactionEnum::UtxoTx(refunded_tx))));
         }
@@ -328,19 +344,23 @@ impl Qrc20Coin {
             swap_id,
             receiver,
             secret_hash,
+            swap_contract_address,
             ..
         } = try_s!(self.erc20_payment_details_from_tx(&tx).await);
 
         loop {
             // Try to find a 'receiverSpend' contract call.
             let spend_txs = try_s!(self.receiver_spend_transactions(receiver, from_block).await);
-            let found = spend_txs
-                .into_iter()
-                .find(|tx| find_receiver_spend_with_swap_id_and_secret_hash(tx, &swap_id, &secret_hash).is_some())
-                .map(TransactionEnum::UtxoTx);
+            let expected_spend = ExpectedSwapEvent::ReceiverSpent {
+                secret_hash: &secret_hash,
+            };
+            let found = try_s!(
+                self.find_bound_swap_event_tx(spend_txs, &expected_spend, &swap_id, &swap_contract_address)
+                    .await
+            );
 
             if let Some(spent_tx) = found {
-                return Ok(spent_tx);
+                return Ok(TransactionEnum::UtxoTx(spent_tx));
             }
 
             if now_ms() / 1000 > wait_until {
@@ -828,6 +848,26 @@ impl Qrc20Coin {
         }
         Ok(txs)
     }
+
+    /// The first candidate transaction that is the spend (refund) of the swap `swap_id`: its matched call is bound to
+    /// its own receipt by [`bound_swap_event_output`] (CRD ch.51 §51.6E R89). A candidate that fails is skipped.
+    async fn find_bound_swap_event_tx(
+        &self,
+        candidates: Vec<UtxoTx>,
+        expected: &ExpectedSwapEvent<'_>,
+        swap_id: &[u8],
+        swap_contract: &H160,
+    ) -> Result<Option<UtxoTx>, String> {
+        for candidate in candidates {
+            let tx_hash: H256Json = candidate.hash().reversed().into();
+            let receipts = try_s!(self.utxo.rpc_client.get_transaction_receipts(&tx_hash).compat().await);
+            match bound_swap_event_output(&candidate, &receipts, expected, swap_id, swap_contract) {
+                Ok(_) => return Ok(Some(candidate)),
+                Err(reason) => debug!("Skip the tx {:?} as {}: {}", tx_hash, expected.name(), reason),
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Get `Transfer` events details from [`TxReceipt::logs`].
@@ -941,39 +981,149 @@ pub fn receiver_spend_call_details_from_script_pubkey(script_pubkey: &Script) ->
     })
 }
 
-fn find_receiver_spend_with_swap_id_and_secret_hash(
-    tx: &UtxoTx,
-    expected_swap_id: &[u8],
-    expected_secret_hash: &[u8],
-) -> Option<usize> {
-    for (output_idx, output) in tx.outputs.iter().enumerate() {
-        let script_pubkey: Script = output.script_pubkey.clone().into();
-        let ReceiverSpendDetails { swap_id, secret, .. } =
-            match receiver_spend_call_details_from_script_pubkey(&script_pubkey) {
-                Ok(details) => details,
-                Err(_) => {
-                    // try to obtain the details from the next output
-                    continue;
-                },
-            };
+/// The swap event a spend or a refund candidate has to carry, with what the matched call has to carry.
+pub(super) enum ExpectedSwapEvent<'a> {
+    /// A `receiverSpend` call whose secret hashes to `secret_hash`; the event is `ReceiverSpent`.
+    ReceiverSpent { secret_hash: &'a [u8] },
+    /// A `senderRefund` call; the event is `SenderRefunded`.
+    SenderRefunded,
+}
 
-        if swap_id != expected_swap_id {
-            continue;
+impl ExpectedSwapEvent<'_> {
+    fn topic(&self) -> &'static str {
+        match self {
+            ExpectedSwapEvent::ReceiverSpent { .. } => QRC20_RECEIVER_SPENT_TOPIC,
+            ExpectedSwapEvent::SenderRefunded => QRC20_SENDER_REFUNDED_TOPIC,
         }
-
-        let secret_hash = &*dhash160(&secret);
-        if secret_hash != expected_secret_hash {
-            warn!(
-                "invalid 'dhash160(secret)' {:?}, expected {:?}",
-                secret_hash, expected_secret_hash
-            );
-            continue;
-        }
-
-        return Some(output_idx);
     }
 
-    None
+    fn name(&self) -> &'static str {
+        match self {
+            ExpectedSwapEvent::ReceiverSpent { .. } => "receiverSpend",
+            ExpectedSwapEvent::SenderRefunded => "senderRefund",
+        }
+    }
+
+    /// The swap id of the call in `script_pubkey` when it is the expected call with the expected secret hash.
+    fn call_swap_id(&self, script_pubkey: &Script) -> Result<Vec<u8>, String> {
+        match self {
+            ExpectedSwapEvent::ReceiverSpent { secret_hash } => {
+                let ReceiverSpendDetails { swap_id, secret, .. } =
+                    receiver_spend_call_details_from_script_pubkey(script_pubkey)?;
+                let actual_secret_hash = &*dhash160(&secret);
+                if actual_secret_hash != *secret_hash {
+                    return ERR!(
+                        "invalid 'dhash160(secret)' {:?}, expected {:?}",
+                        actual_secret_hash,
+                        secret_hash
+                    );
+                }
+                Ok(swap_id)
+            },
+            ExpectedSwapEvent::SenderRefunded => {
+                if !is_contract_call(script_pubkey) {
+                    return ERR!("Expected 'senderRefund' contract call");
+                }
+                let contract_call_bytes = try_s!(extract_contract_call_from_script(script_pubkey));
+                match try_s!(MutContractCallType::from_script_pubkey(&contract_call_bytes)) {
+                    Some(MutContractCallType::SenderRefund) => (),
+                    _ => return ERR!("Expected 'senderRefund' contract call"),
+                }
+                let function = try_s!(eth::SWAP_CONTRACT.function("senderRefund"));
+                let decoded = try_s!(function.decode_input(&contract_call_bytes[4..]));
+                match decoded.into_iter().next() {
+                    Some(Token::FixedBytes(id)) => Ok(id),
+                    Some(token) => ERR!("'swap_id' arg is invalid, found {:?}", token),
+                    None => ERR!("Couldn't find 'swap_id' in senderRefund call"),
+                }
+            },
+        }
+    }
+}
+
+/// Whether `log` is the swap event of `expected`, emitted by `swap_contract` for the swap `swap_id`. The data of
+/// both events starts with the swap id.
+fn is_bound_swap_event_log(
+    expected: &ExpectedSwapEvent<'_>,
+    swap_id: &[u8],
+    swap_contract: &H160,
+    log: &LogEntry,
+) -> bool {
+    if !is_swap_event_log(expected.topic(), log) {
+        return false;
+    }
+    if !matches!(log.parse_address(), Ok(emitter) if emitter == *swap_contract) {
+        return false;
+    }
+    let data = log.data.strip_prefix("0x").unwrap_or(&log.data);
+    matches!(hex::decode(data), Ok(data) if data.starts_with(swap_id))
+}
+
+/// The index of the first output of `tx` that is the call of `expected` for the swap `swap_id` and is bound to its own
+/// receipt (CRD ch.51 §51.6E R89): the call is made to `swap_contract`, the receipt of that very output is not
+/// excepted, and holds the event of `expected` emitted by `swap_contract`. The error lists why each output that holds
+/// the expected call was refused.
+pub(super) fn bound_swap_event_output(
+    tx: &UtxoTx,
+    receipts: &[TxReceipt],
+    expected: &ExpectedSwapEvent<'_>,
+    swap_id: &[u8],
+    swap_contract: &H160,
+) -> Result<usize, String> {
+    let mut reasons = Vec::new();
+    for (output_idx, output) in tx.outputs.iter().enumerate() {
+        let script_pubkey: Script = output.script_pubkey.clone().into();
+        match expected.call_swap_id(&script_pubkey) {
+            Ok(id) if id == swap_id => (),
+            // not the expected call of this swap
+            _ => continue,
+        }
+
+        let called_contract = match extract_contract_addr_from_script(&script_pubkey) {
+            Ok(addr) => addr,
+            Err(e) => {
+                reasons.push(format!("output {}: {}", output_idx, e));
+                continue;
+            },
+        };
+        if called_contract != *swap_contract {
+            reasons.push(format!(
+                "output {}: the call is made to {:#02x}, expected the swap contract {:#02x}",
+                output_idx, called_contract, swap_contract
+            ));
+            continue;
+        }
+
+        let receipt = match receipts.iter().find(|r| r.output_index == output_idx as u64) {
+            Some(receipt) => receipt,
+            None => {
+                reasons.push(format!("output {}: no receipt of the output", output_idx));
+                continue;
+            },
+        };
+        if let Err(e) = check_if_contract_call_completed(receipt) {
+            reasons.push(format!("output {}: {}", output_idx, e));
+            continue;
+        }
+        if !receipt
+            .log
+            .iter()
+            .any(|log| is_bound_swap_event_log(expected, swap_id, swap_contract, log))
+        {
+            reasons.push(format!(
+                "output {}: the receipt holds no event of the swap emitted by the swap contract",
+                output_idx
+            ));
+            continue;
+        }
+
+        return Ok(output_idx);
+    }
+
+    if reasons.is_empty() {
+        return ERR!("no '{}' call of the swap in the transaction", expected.name());
+    }
+    Err(reasons.join("; "))
 }
 
 fn find_swap_contract_call_with_swap_id(

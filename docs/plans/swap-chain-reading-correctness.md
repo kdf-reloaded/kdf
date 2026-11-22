@@ -2,7 +2,8 @@
 
 **Status:** planning — **Last reviewed:** 2026-11-22
 
-**CRD:** ch.51 (dated status notes). Reloaded-original, clean side.
+**CRD:** ch.51 (dated status notes; the reference record of the coin families is §51.6E). Reloaded-original,
+clean side.
 
 Hardening area: the correctness of the chain reads the legacy (v1) swap path makes. Four steps, one PR each.
 
@@ -11,7 +12,8 @@ Hardening area: the correctness of the chain reads the legacy (v1) swap path mak
 1. A found spend of a UTXO swap payment is read from the input that spends the payment — PR #481.
 2. To follow.
 3. To follow.
-4. To follow.
+4. A QRC20 spend or refund counts only when its contract call succeeded and its event belongs to that call; refunds
+   are looked for in the history of the payment's sender — PR (to follow).
 
 ## Decisions
 

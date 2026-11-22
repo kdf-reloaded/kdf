@@ -1137,6 +1137,10 @@ the previous version used. The safe way:
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
   CRD ch.51, status note of 2026-11-22 after R31a.
+- **A QRC20 swap's spend or refund is recognized only from its own successful contract call.** The search ties the
+  swap event to the contract call it belongs to, requires that call to the swap contract to have succeeded, and
+  looks for a refund in the history of the payment's sender, so a refund of the other side's payment is found too.
+  Detail: PR (to follow); CRD ch.51, status note of 2026-11-22 after §51.6E R92.
 
 ### Tests
 
@@ -1224,6 +1228,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — new: step 1 in PR #481.
+- [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 4 in PR (to follow).
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the

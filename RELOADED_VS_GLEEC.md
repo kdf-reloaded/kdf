@@ -873,6 +873,15 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   different state 16, so that value identifies no layout. The refusal is compatible with GLEEC KDF: a database KDF
   Reloaded leaves at state 15 is fully migrated for both. No switch exists; row in
   [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.44 R44.9A.1 to R44.9A.5.
+- **A QRC20 swap's spend or refund is recognized only from its own successful contract call.** KDF Reloaded takes a
+  transaction as the spend (refund) of a QRC20 swap payment only when the `receiverSpend` (`senderRefund`) call of
+  the swap goes to the swap contract the payment used and the receipt of that same output reports no exception and
+  holds the swap contract's `ReceiverSpent` (`SenderRefunded`) event for the swap id; it looks for a refund in the
+  history of the payment's sender, so a refund of the other side's payment is found as well. GLEEC KDF's search is
+  recorded in CRD ch.51 §51.6E R89. No message and no transaction a peer validates changes, so no switch exists; row
+  in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). Plan
+  [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 4 (PR to follow); CRD ch.51,
+  status note of 2026-11-22 after §51.6E R92.
 
 ### Removed / disabled in KDF Reloaded
 
