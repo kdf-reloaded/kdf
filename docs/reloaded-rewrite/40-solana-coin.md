@@ -2232,7 +2232,7 @@ every SPL token (§40.6A); the minimum transaction amounts are those of S3 (one
 lamport; one smallest unit of the token).
 
 **R40.6D.16 (evidence for the refund and secret steps).** The reads behind
-R40.6D.9, R40.6D.11 and R40.6D.12 follow chapter 51 RULE-ID-PENDING: before a
+R40.6D.9, R40.6D.11 and R40.6D.12 follow chapter 51 R100 (§51.6G): before a
 refund step or a secret step they must agree between two nodes of the coin's
 pool, or come from the one node the activation names in `swap_evidence_node`; a
 disagreement or fewer than two answers is undetermined, and the node waits.
