@@ -911,8 +911,10 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   them with a typed "not supported" error before any request to a node; an
   EVM coin is unchanged. GLEEC KDF fails five of these methods for a TRON
   coin as well, without a node request: `trade_preimage` with the same
-  error, the other four with other error types (for example `Transport`,
-  HTTP 502, from `get_raw_transaction`). With a gas-fee provider it answers
+  error, the legacy `get_trade_fee` with the same legacy error body and
+  another text, the other three with other error types (for example
+  `Transport`, HTTP 502, from `get_raw_transaction`). With a gas-fee
+  provider it answers
   `get_eth_estimated_fee_per_gas` with Ethereum's fees under the TRON ticker;
   it also accepts `stream::fee_estimator::enable`, and the stream then
   reports errors or Ethereum's fees. Not answering another chain's fees for a

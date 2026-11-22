@@ -2155,11 +2155,11 @@ a single flag.
     before this date.
 
   The fee estimate with a gas-fee provider and the fee stream are
-  deliberate divergences, by a project-team ruling of 2026-11-22: a
-  TRON ticker is not answered with another chain's fees, and a stream
-  that can only report errors is not started. The other differences are
-  in the error token of a call that fails on both sides. All of them are
-  local, no peer sees them, and no compatibility switch exists
+  deliberate divergences, by the maintainer's decision of 2026-11-22: a
+  TRON ticker is not answered with another chain's fees, and a stream that
+  can only report errors is not started. The other differences are in the
+  error token of a call that fails on both sides. All of them are local,
+  no peer sees them, and no compatibility switch exists
   (`docs/COMPAT_SWITCHES.md`, "The default-side rule", arm 2).
 
   The parity rows of that block are restated for Reloaded:
@@ -2167,13 +2167,16 @@ a single flag.
   - T21.10B.19: `get_raw_transaction` answers `NotImplemented`, HTTP
     501; `get_token_info` with an `ERC20` protocol on the TRX platform
     answers `UnsupportedTokenProtocol`, HTTP 400, for both address
-    forms; `get_eth_estimated_fee_per_gas` with `Simple` answers
+    forms (by the order of the checks: the address is read after the
+    refusal); `get_eth_estimated_fee_per_gas` with `Simple` answers
     `CoinNotSupported`, HTTP 501; the legacy `get_trade_fee` answers the
     legacy error body. The stub's count does not change.
   - T21.10B.20: `sign_raw_transaction` answers `NotImplemented`, HTTP
-    501, at once, for each of the three requests. The stub's count does
-    not change and no answer carries a transaction.
-  - T21.10B.21: unchanged; Reloaded gives the same answers.
+    501, at once, for each of the three requests (by the order of the
+    checks: the refusal comes before the request members are read). The
+    stub's count does not change and no answer carries a transaction.
+  - T21.10B.21: unchanged; Reloaded gives the same answers (the unit
+    tests call the coin's fee methods; the RPC status is not asserted).
   - T21.10B.22: `stream::fee_estimator::enable` for TRX answers
     `NotSupportedFor`, HTTP 501, no stream is started, and the stub
     receives no request.
