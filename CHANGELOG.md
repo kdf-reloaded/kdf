@@ -478,8 +478,8 @@ the previous version used. The safe way:
   was signed (`InvalidProviderResponse`), when the provider reports the transfer as failed (`ProviderRejected`) or
   does not know its trace id (`TraceNotFound`), and when the transfer has not settled 120 seconds after the
   authorization's deadline (`Transport`; the outcome is then unknown). Every error after the submission names the
-  trace id, so the transfer can be looked up at the provider. `task::withdraw::cancel` before the submission stops it;
-  after the submission it only stops the waiting, and the transfer may still complete. A cancel, or a stop of the
+  trace id, so the transfer can be looked up at the provider. `task::withdraw::cancel` before the submission stops
+  it; after the submission it only stops the waiting, and the transfer may still complete. A cancel, or a stop of the
   node, while the status is `SubmittingGaslessAuthorization` leaves the outcome unknown; a log line written when the
   submission is sent carries its request id, which identifies it.
   *The direct `withdraw`* only signs: its answer holds the signed authorization and the fee in the token instead of

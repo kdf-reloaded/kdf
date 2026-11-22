@@ -665,7 +665,8 @@ fn submit_answer_difference(record: &TransferRecord, permit: &PermitTransfer) ->
 }
 
 /// Follows a submitted transfer until it settles (D63.9), starting with the provider's answer to the submission
-/// and asking for its record every `status_poll_interval_ms` of `binding`, at least [`MIN_POLL_INTERVAL_MS`] apart. Each record is read as follows:
+/// and asking for its record every `status_poll_interval_ms` of `binding`, at least [`MIN_POLL_INTERVAL_MS`]
+/// apart. Each record is read as follows:
 ///
 /// - `state` `FAILED`, or `txnState` `ON_CHAIN_FAILED`: the transfer failed;
 /// - else `state` `SUCCEED`: the transfer is settled, and its `txnHash` is returned;
