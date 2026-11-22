@@ -555,7 +555,7 @@ has not been established.
 > contract state is read at, and its answers when the state and the events
 > disagree. The reference's wait for a payment's spend is still not established.
 > The pointer changes no rule of this section. It is a Spec Reader addition and
-> a candidate until the KDF Dirty Gate passes it with that subsection.
+> passed the KDF Dirty Gate with that subsection on 2026-11-22.
 
 ---
 

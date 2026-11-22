@@ -340,8 +340,8 @@ querying walletd for the relevant address event(s).
 > sent", an empty list likewise, and otherwise the first event decides.
 > D39.11.5A.1 there asks whether this project classifies the failed request as
 > undetermined instead, as R-S8 already requires for the spend search. The
-> pointer is a Spec Reader addition and a candidate until the KDF Dirty Gate
-> passes it with that subsection.
+> pointer is a Spec Reader addition and passed the KDF Dirty Gate with that
+> subsection on 2026-11-22.
 
 **R-S8 (swap-spend search).** The swap-spend search operations MUST
 distinguish three outcomes, not two: a payment spent via the revealed

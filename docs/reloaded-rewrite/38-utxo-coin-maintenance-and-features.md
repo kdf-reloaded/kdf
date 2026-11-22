@@ -4817,8 +4817,8 @@ token's swap paths were read only for the set of methods they send
 > §39.11.5A, R39.11.5A.7, records the reference's QRC20 already-sent query:
 > the state call, the transfer-history and receipt reads, and its "not sent"
 > answer when the contract state says the payment exists but no matching
-> transaction is found. The pointer is a Spec Reader addition and a candidate
-> until the KDF Dirty Gate passes it with that subsection.
+> transaction is found. The pointer is a Spec Reader addition and passed the
+> KDF Dirty Gate with that subsection on 2026-11-22.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change

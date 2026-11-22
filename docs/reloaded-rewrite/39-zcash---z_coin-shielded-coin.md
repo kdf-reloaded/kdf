@@ -7871,9 +7871,9 @@ are not affected.
 > names; no private implementation expression. It adds to R39.11.18 and
 > R39.11.19 and edits no cleared sentence. It sits in this chapter because
 > R39.11.18 and R39.11.19, the rules it completes, are here; its subject is not
-> the shielded coin. *Dirty Gate clearance:* not recorded yet; this subsection is
-> a candidate until the gate passes it. Every rule is *informative; reference
-> fact* unless marked otherwise.
+> the shielded coin. *Dirty Gate clearance:* PASS on 2026-11-22, measure 0.02,
+> no findings (chapter 01 R40; attestation in the provenance footer). Every rule
+> is *informative; reference fact* unless marked otherwise.
 
 **R39.11.5A.1** *The payment step is the same for every coin family and for a
 restored swap (completes R39.11.19; binding; parity).* The already-sent query,
@@ -9504,8 +9504,9 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   the status note of 2026-11-22, D39.11.5A.1 -- D39.11.5A.3 and T39.11.5A.1 --
   T39.11.5A.6), and the pointers of the same date after chapter 17 R17.8.4,
   chapter 20 R-S7, chapter 38 §38.6.4Q and chapter 60 R60.4.6; no other text of
-  this chapter or of those chapters was changed.* **KDF Dirty Gate: not
-  recorded yet; the addition is a candidate until the gate passes it.**
+  this chapter or of those chapters was changed.* **KDF Dirty Gate: PASS on
+  2026-11-22, measure 0.02, no findings** (chapter 01 R40; the attestation
+  closes this item).
   *Inputs:* (1) the forbidden corpus at the rows `v2.6.0-beta` and
   `v3.0.0-beta` of chapter 02 §2.15A, read read-only from the tags themselves,
   with the row `main (as of 2026-10-07)` compared against `v3.0.0-beta` by tree
@@ -9526,3 +9527,24 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   the acceptance rows are original to this subsection. No row was added to
   chapter 02 §2.15A: every state read already had one. *Scope of the edit:*
   additions only; no sentence that the Dirty Gate cleared is edited.
+  *Dirty Gate clearance (chapter 01 T1, R40):* PASS, 2026-11-22, measure 0.02,
+  no findings, in a single pass; the chapter 02 §2.15A rows `v2.6.0-beta`,
+  `v3.0.0-beta` and `main (as of 2026-10-07)` were verified. *Extent:* the
+  payment step of both roles of the legacy swap; the already-sent query of the
+  EVM, QRC20 and Sia coins; the loading of stored orders, the periodic
+  maintenance and the wallet-only refusal in order matching; at the row
+  `v3.0.0-beta` (six source files, in part) with the same regions at the row
+  `v2.6.0-beta`, and the row `main (as of 2026-10-07)` by tree difference; on
+  the candidate side, all 307 added lines, searched for tokens and phrases
+  against both tags. Not read in full: the QRC20 history helper, the handling
+  of a request at match time, and the wallet-only answers of the Tendermint
+  and Solana coins. *Method:* reading plus a mechanical pattern search
+  (repository-wide search and the difference between the tags); the
+  repository's clean-room gate tool was not applicable because the additions
+  embed no code blocks. *Measure:* 0.02, on the discretionary-expression
+  basis.
+  *Citation (clean side, added at the clearance on 2026-11-22):* the rule of
+  input (2) that a payment needs an unused identifier can be checked in this
+  repository against its clean-room re-implementation of the V1 swap contract,
+  `mm2src/mm2_test_helpers/for_tests/EtomicSwap.sol`, whose two payment
+  functions refuse an identifier that is already in use.

@@ -295,8 +295,7 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
 > a tradability check, the maintenance pass of item 5 announces it once both
 > coins are active, and no such check runs at match time either. D39.11.5A.2
 > there holds the options for this project. The pointer is a Spec Reader
-> addition and a candidate until the KDF Dirty Gate passes it with that
-> subsection.
+> addition and passed the KDF Dirty Gate with that subsection on 2026-11-22.
 
 > **As-built note (2026-10-28, clean-side record).** The reconciliation of item 5
 > (`reconcile_missing_own_maker_orders`) reads without holding the order's lock
