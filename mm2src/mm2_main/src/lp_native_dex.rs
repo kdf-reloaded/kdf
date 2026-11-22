@@ -150,7 +150,7 @@ pub enum MmInitError {
     /// The swap database ledger is above the highest state this build knows (CRD ch.44 R44.9A.5).
     #[display(
         fmt = "The swap database (MM2.db) was written by a newer version: its migration state is {}, this build \
-               knows up to state {}. Use that newer version, or move MM2.db away to start with a new one.",
+               knows up to state {}. Use that newer version, or move MM2.db aside (keep it) to start with a new one.",
         found,
         known
     )]

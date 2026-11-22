@@ -19,8 +19,10 @@ or undo, and every change that needs a step from you.
   instead of running on a database layout it does not know. No released version of KDF Reloaded or GLEEC KDF records
   a state above 15, so this matters only when a node goes back from a later version, or from an unreleased
   development build, that migrated the database further.
-  - *What to do:* start the version that migrated the database, or move `MM2.db` aside (do not delete it) to start
-    with a new one; the saved swap files are kept and imported again.
+  - *What to do:* start the version that migrated the database, or move `MM2.db` aside (keep it) to start with a new
+    one. The legacy swaps and their statistics are imported again from their saved files; data kept only in the
+    database, namely swaps of the newer swap protocol, the order history and the node statistics, stays in the file
+    you moved aside.
   - Detail: PR #486; CRD ch.44 R44.2.3 and §44.9A R44.9A.5.
 - **The shielded (ARRR, Pirate) wallet database is migrated irreversibly on the first start of this version, and an
   older build cannot open the migrated database.** The Zcash libraries were upgraded (see "Changed"), and the new
