@@ -1880,6 +1880,60 @@ fn tx_details_prev_output_index_out_of_range_is_an_error() {
     );
 }
 
+/// CRD ch.38 T38.6.10.3: the history row of a Dash-layout special transaction carries the chain's txid as its
+/// hash and internal id (the payload is part of the hashed bytes). The row is built by `tx_details_by_hash` from
+/// the bytes the backend serves.
+#[test]
+fn special_transaction_history_row_carries_the_chain_txid() {
+    let fixtures = [
+        (
+            include_str!("../../kdf_chain/src/test_data/dash_2576221_type5_cbtx.hex"),
+            "82efdfbb4adb79d9c590cd83c316acb8c40d51c975a519733ff2d420d469e7ed",
+        ),
+        (
+            include_str!("../../kdf_chain/src/test_data/dash_2576170_type9_assetunlock.hex"),
+            "0bfefcc1c944d1a0c885a1de834d7587c4069d944b6b28e9c2e16b80a07a3cc4",
+        ),
+    ];
+    for (hex_text, txid) in fixtures {
+        let raw = BytesJson::from(hex::decode(hex_text.trim()).unwrap());
+        NativeClient::get_verbose_transaction.mock_safe(move |_coin, _txid| {
+            let verbose = RpcTransaction {
+                hex: raw.clone(),
+                txid: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                hash: None,
+                size: Default::default(),
+                vsize: Default::default(),
+                version: 3,
+                locktime: 0,
+                vin: vec![],
+                vout: vec![],
+                blockhash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                confirmations: 1,
+                rawconfirmations: None,
+                time: 1,
+                blocktime: 1,
+                height: Some(101),
+            };
+            MockResult::Return(Box::new(futures01::future::ok(verbose)))
+        });
+        let client = NativeClient(Arc::new(NativeClientImpl::default()));
+        let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+            UtxoRpcClientEnum::Native(client),
+            None,
+            false,
+        ));
+        let mut input_transactions = HistoryUtxoTxMap::default();
+        let details = block_on(coin.tx_details_by_hash(&[0u8; 32], &mut input_transactions)).unwrap();
+        assert_eq!(
+            details.internal_id,
+            BytesJson::from(hex::decode(txid).unwrap()),
+            "{txid}"
+        );
+        assert_eq!(details.tx_hash, txid);
+    }
+}
+
 #[test]
 fn kmd_rewards_prev_output_index_out_of_range_is_an_error() {
     let (spending_tx, mut input_transactions) = spend_of_a_missing_output();

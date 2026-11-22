@@ -5648,6 +5648,28 @@ produce. The payload is not interpreted.
 > also refuse bytes left over after a complete reading is a wider question,
 > left to the orchestrator.
 
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer
+> decision of 2026-11-21).** R38.6.10.5 is built. The shared transaction
+> reader treats a transaction as special when its leading word has the top bit
+> clear, a version of 3 or higher in the low 16 bits and a type other than 0 in
+> the high 16 bits. For such a transaction, in every reading path, it reads no
+> time field, takes an empty input list as an empty input list rather than as a
+> witness marker, and reads the compact-size-prefixed payload after the lock
+> time into a field of its own. The writer puts the payload back after the lock
+> time with its prefix, so the computed identifier, and with it the identifier
+> of a history row, is the chain's transaction id. A payload whose prefix claims
+> more bytes than remain, or a special transaction that ends at its lock time,
+> is refused in every path. The whole leading word is kept as the version, so
+> the type is the high 16 bits of it; nothing interprets the payload, and no
+> special transaction is built. Leftover bytes after a complete reading are
+> still not refused in general (the finding above stays open on that point).
+> Tests: T38.6.10.1 with a DASH coinbase (type 5), provider registration (type
+> 1), asset unlock (type 9, no inputs, one output), a version-3 type-0
+> transaction and a Kerrigan Sapling transaction (type 10, no transparent
+> inputs, one output), all from the public chains; T38.6.10.2 to T38.6.10.4 as
+> stated. A DASH quorum commitment (type 6, no inputs and no outputs) is also
+> read with its payload and the chain's identifier by the shared reader.
+
 **R38.6.10.6** *Kerrigan headers are not this section's subject.* How the
 reference reads Kerrigan's headers, the median-time-past and the HTLC
 lock-times is recorded in chapter 37 §37.5.11.
@@ -6577,3 +6599,10 @@ R38.8.6 **Tests (two-direction, observable).**
   project's own reads of public LCC Electrum servers and this repository's
   code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Maintainer decision (2026-11-21), clean side -- status note after the
+  code-quality finding under R38.6.10.5 (the Dash-layout special-transaction
+  reader as built).* Written by a session that never read the forbidden
+  corpus, from the maintainer's decision, the cleared section, the published
+  Dash special-transaction format, public DASH and Kerrigan chain data and
+  this repository's code. It takes no forbidden-class input, so chapter 01
+  R38 is not engaged and no gate pass is required.

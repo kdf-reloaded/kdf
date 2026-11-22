@@ -411,6 +411,7 @@ impl SlpToken {
             sapling_v5: unsigned.sapling_v5,
             orchard: unsigned.orchard,
             opaque: None,
+            extra_payload: None,
         };
 
         let _broadcast = self

@@ -825,6 +825,13 @@ the previous version used. The safe way:
 
 #### Transaction history
 
+- **DASH and Kerrigan history rows of special transactions carry the chain's transaction id.** A DASH coinbase
+  payout, a masternode provider transaction, a Platform withdrawal (asset unlock) or a Kerrigan Sapling transaction
+  carries an extra payload after its lock time. The node ignored that payload, so it computed an identifier the chain
+  does not know and showed it as the history row's `tx_hash` and `internal_id`. The payload is now read and kept,
+  and the identifier is the chain's. A special transaction whose payload is cut short is refused as malformed instead
+  of being read without it. Ordinary transactions are unchanged. Detail: PR #NNN; CRD ch.38 R38.6.10.5.
+
 - **The history of a UTXO coin says which transactions it skipped.** A transaction the node cannot read is left out of
   the history, as before, and tried again on the next pass. Until now nothing said so: the history reached `Finished`
   as if it were complete. `sync_status` now lists each skipped transaction in
