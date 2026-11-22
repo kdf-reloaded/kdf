@@ -114,7 +114,7 @@ specifications unless a reference question below changes them.
 | S11a | CRD ch. 40 §40.6D: Solana and SPL in the legacy swap protocol, Reloaded's own design on the public program's recorded interface (maintainer decisions of 2026-11-22) | in progress, PR #501 |
 | S11b | SOL legs: the program check at activation (R40.6D.2), contract field, keys, amounts in whole units, payment, validation, claim and refund, refund gate, spend search and secret, dex fee with its memo, trade-fee answers and admission, the evidence rule (R40.6D.3 to R40.6D.16) | in progress, PR #503 (stacked on PR #501) |
 | S11c | SPL legs: the same for tokens, with the vault, the receiver's token account and the SPL dex fee | after S11b |
-| S11d | Switch-on per coins entry that names a program (R40.6D.2), the SHA-256 pair rule (R40.6D.4), preimages and floors; devnet swaps between two Reloaded nodes (both roles, claim and refund, a restart mid-swap) before it is marked ready; a mainnet check with RIN once S11-D0 has deployed the program | after S11c |
+| S11d | Switch-on per coins entry that names a program (R40.6D.2), the SHA-256 pair rule (R40.6D.4), the whole-unit volume check at order placement and both swap starts (R40.6D.6), admission (R40.6D.14) including chapter 51 R100's refusal of a swap when the coin's pool has fewer than two nodes and no evidence node is named, preimages and floors; devnet swaps between two Reloaded nodes (both roles, claim and refund, a restart mid-swap) before it is marked ready; a mainnet check with RIN once S11-D0 has deployed the program | after S11c |
 
 ## Open points
 
