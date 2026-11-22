@@ -817,15 +817,15 @@ impl TendermintCoin {
 
     /// Finds the oldest successful claim of the HTLC `htlc_id` (CRD ch.18 R18.11.16 and R18.11.19, ch.51 R91).
     ///
-    /// The transactions are searched by the event `claim_htlc.id='<id>'`, oldest first, `CLAIM_SEARCH_PER_PAGE`
-    /// results asked per page. The results are read until they are exhausted (an empty page, or as many received
-    /// as `total_count`, whatever page size the node serves) or `CLAIM_SEARCH_MAX_PAGES` pages are read (a `warn!`
-    /// naming the HTLC id is logged when the cap is hit with results left). A result is the claim only when its result code is 0 and one of its messages
-    /// (every message is examined, not only the first) has the claim type URL of this coin's dialect, decodes as a
-    /// claim message and carries the id of this HTLC. The type URL is checked before the value is decoded, because
-    /// the protobuf decoding of another message's value can succeed loosely. The id is the upper-case hex of the
-    /// HTLC id; it is compared without regard to the letter case. A result that does not pass is skipped, never
-    /// taken as the claim. The secret is not read here.
+    /// The transactions are searched by the event `claim_htlc.id='<id>'`, oldest first, `CLAIM_SEARCH_PER_PAGE` results
+    /// asked per page. The results are read until they are exhausted (an empty page, or as many received as
+    /// `total_count`, whatever page size the node serves) or `CLAIM_SEARCH_MAX_PAGES` pages are read (a `warn!` naming
+    /// the HTLC id is logged when the cap is hit with results left). A result is the claim only when its result code is
+    /// 0 and one of its messages (every message is examined, not only the first) has the claim type URL of this coin's
+    /// dialect, decodes as a claim message and carries the id of this HTLC. The type URL is checked before the value is
+    /// decoded, because the protobuf decoding of another message's value can succeed loosely. The id is the upper-case
+    /// hex of the HTLC id; it is compared without regard to the letter case. A result that does not pass is skipped,
+    /// never taken as the claim. The secret is not read here.
     pub(super) async fn find_claim_of_htlc(
         &self,
         htlc_id: &str,
