@@ -1062,11 +1062,10 @@ the previous version used. The safe way:
 
 #### Legacy swaps
 
-- **A spend of a UTXO swap payment is read from the input that spends it.** When the node looked for the claim or
-  refund of a swap payment (UTXO coins, BCH, Qtum, SLP tokens), it judged the spending transaction by its first
-  input. A claim or refund that put another input first could be taken for the other branch, or not read at all.
-  The node now reads the input that spends the payment. The same applies to the search of a version-2 swap's funding
-  transaction. Detail: PR #481; CRD ch.51, status note of 2026-11-22 after R31a.
+- **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
+  refund of a swap payment (UTXO coins, BCH, Qtum, SLP tokens), it now reads the input of the spending transaction
+  that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
+  CRD ch.51, status note of 2026-11-22 after R31a.
 
 ### Tests
 

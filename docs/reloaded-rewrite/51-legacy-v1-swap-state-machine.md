@@ -584,17 +584,15 @@ locktime.
 > fourth confirmation, and the taker's looks did not find that spend until
 > hours after the maker payment's locktime.
 
-> **Status note (2026-11-22, Reloaded-original, clean side; maintainer
-> decision of 2026-11-22).** For a coin whose swap payment is a script output
-> (the UTXO family: standard UTXO coins, BCH, Qtum, SLP tokens and the
-> transparent side of the shielded coins), a found spend of the payment is
-> classified as a spend or a refund by the script of the input that spends the
-> payment's output, never by the first input of the spending transaction. This
+> **Status note (2026-11-22, Reloaded-original, clean side; maintainer decision
+> of 2026-11-22).** For a coin whose swap payment is a script output (the UTXO
+> family: standard UTXO coins, BCH, Qtum, SLP tokens and the transparent side of
+> the shielded coins), a found spend of the payment is classified as a spend or
+> a refund by the script of the input that spends the payment's output. This
 > holds for every search this chapter names (R31a with the search on every
 > server, R82, R83 and R84) and for the swap's other searches of the same
 > payment. A spend whose spending input carries neither form is an error that
-> names the input. The reason is a review finding: a spend that puts another
-> input first could be misread as the other branch or not be read at all.
+> names the input.
 
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
