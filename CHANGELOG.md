@@ -707,6 +707,12 @@ the previous version used. The safe way:
   raw-transaction signing request used to sign such a transaction anyway, and Radiant rejected it. It now
   answers with a signing error that names the output index and the case. Withdrawals and swaps never build
   such outputs and are not affected, and no other coin is affected. Detail: PR #381; CRD ch.58 R58.3.3, D5.
+- **The log tells when QTUM and its QRC20 tokens open, share and close a set of Electrum connections.** One INFO
+  line is written when a set is created (naming the instance that created it), one each time another instance
+  reuses it, and one when the last instance lets go of it and it closes. Each line names the platform (for example
+  `QTUM`) and the servers as `host:port` only, without the protocol or any user name, password, path or query of a
+  server entry. No line is written per request or on a timer. Detail: PR #476; CRD ch.38 status note of
+  2026-11-22 after D38.6.4Q.1.
 
 #### ZEC
 
@@ -764,6 +770,11 @@ the previous version used. The safe way:
 - **`get_new_address` on an EVM coin answers the full address instead of a shortened one.** The address came back
   abbreviated (the first and last digits with dots between them), which cannot be used. It is now the full
   checksummed `0x` address, as in every other HD answer. Detail: PR #438; CRD ch.35 R35.1.3, ch.49 R49.33.
+- **An operation that a Lightning coin does not support answers an error instead of stopping the process.** The swap
+  operations, the trade-fee estimates, the waits for a confirmation or a spend and the transaction decoding of a
+  Lightning coin aborted the node when they were reached; each now answers an error. Orders and trade previews with
+  a Lightning coin were already refused. The public key of a Lightning coin, which `get_private_keys` reads, is its
+  node id. Detail: PR #479.
 
 #### WalletConnect
 
@@ -1059,6 +1070,9 @@ the previous version used. The safe way:
 
 ### Tests
 
+- **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
+  network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
+  Detail: PR #479.
 - **The browser tests run again locally.** `wasm-pack test --firefox --headless mm2src/<crate>` finds and
   runs the tests of the browser build again; before, the test runner found none ("no tests to run!"),
   because the locked test library was far older than the locked `wasm-bindgen`. The test library is
@@ -1139,6 +1153,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
+  lines for a shared QTUM Electrum client, in PR #476.
 - [`swap-confirmation-wait-failover`](docs/plans/swap-confirmation-wait-failover.md) — new: steps 1 and 2 (the
   confirmation wait leaves an out-of-date or erroring Electrum server; the refund chain's look asks every server) in
   PR #461; step 3, the lab row, is listed there.

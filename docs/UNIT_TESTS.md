@@ -32,6 +32,10 @@ cargo test -p mm2_p2p --features application --lib t4a_
 cargo test -p coins --lib t4a_
 cargo test -p mm2_main --lib t4a_
 
+# The legacy taker-swap unit tests of `mm2_main`, offline with mocked coins (they run in the CI row
+# `maker-outbox`)
+cargo test -p mm2_main --lib -- lp_swap::taker_swap::
+
 # The node tests of `mm2_main` that need no public server (the CI row `node-tests`)
 cargo test -p mm2_main --lib --features regtest-netid -- mm2::mm2_tests::
 ```

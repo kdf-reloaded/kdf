@@ -599,13 +599,15 @@ pub(crate) async fn build_electrum_client(
 }
 
 /// Builds the Electrum client of an instance of the QTUM family, or reuses the one an instance with exactly the same
-/// client inputs holds (CRD ch.38 D38.6.4Q.1 status note, items 1 to 5). `platform` is the platform's ticker: the
-/// shared client goes by it in its log lines, error texts and transport metrics, whichever instance builds it first.
+/// client inputs holds (CRD ch.38 D38.6.4Q.1 status note, items 1 to 5). `instance` is the ticker of the instance that
+/// asks; `platform` is the platform's ticker: the shared client goes by it in its log lines, error texts and transport
+/// metrics, whichever instance builds it first.
 ///
 /// The callers hold the activation lock of their own ticker (R55.1.12). The build lock of the key follows, then the
 /// registry's maps inside it; the coin registry is not touched here, so the callers take it only after this returns.
 pub(crate) async fn build_or_reuse_electrum_client(
     ctx: &MmArc,
+    instance: &str,
     platform: &str,
     coin_conf: &Json,
     args: ElectrumBuilderArgs,
@@ -626,6 +628,7 @@ pub(crate) async fn build_or_reuse_electrum_client(
     coins_ctx
         .electrum_clients
         .get_or_build(
+            instance,
             key,
             |text| MmError::new(UtxoCoinBuildError::ElectrumServersDisagree(text)),
             || build_electrum_client(ctx, platform, coin_conf, args, servers, min_connected, max_connected),
@@ -837,6 +840,7 @@ pub trait UtxoCoinBuilderCommonOps {
         if let Some(platform) = self.shared_electrum_platform() {
             return build_or_reuse_electrum_client(
                 self.ctx(),
+                self.ticker(),
                 platform,
                 self.conf(),
                 args,

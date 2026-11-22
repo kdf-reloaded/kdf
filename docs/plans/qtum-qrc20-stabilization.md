@@ -1,6 +1,6 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 and P7 #436 merged; Phase C item 3 in PR #462; P8 after PR #439; P9 next) — **Last reviewed:** 2026-11-21
+**Status:** in progress (P1 #354, P0 #356, P2 #377, P3 #385 and #406, P6 #417 merged; P4 recorded in CRD ch.38 after D38.6.4Q.1; P5 #427 and P7 #436 merged; Phase C item 3 #462 merged; Phase C item 5 in PR #476; P8 after PR #439; P9 next) — **Last reviewed:** 2026-11-22
 
 > **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
@@ -221,6 +221,13 @@ other or started together, answers "already initialized" (CRD ch.55 R55.1.12)
 and starts no session, tip subscription, client holder, contract-event
 subscription or history collector. No code changed. Still open in Phase C: item
 5.
+
+*Item 5 (2026-11-22).* PR #476 adds the INFO lines decided on 2026-11-21:
+one when a QTUM-family client is created, one per reuse, and one when it is
+released, with the platform, the instance and the servers as `host:port` (CRD
+ch.38, status note of 2026-11-22 after D38.6.4Q.1). The TRACE attribution of
+individual calls named in item 5 was not part of that decision and is not
+added.
 
 ## Phase D -- QRC20 history reliability
 
