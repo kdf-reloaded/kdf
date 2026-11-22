@@ -1,4 +1,5 @@
 use super::*;
+use crate::CanRefundHtlc;
 
 #[async_trait]
 impl SwapOps for SlpToken {
@@ -306,6 +307,17 @@ impl SwapOps for SlpToken {
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
         utxo_common::extract_secret(secret_hash, spend_tx)
+    }
+
+    /// The refund of an SLP payment is a script spend on the platform chain, so the gate is the platform
+    /// coin's (CRD ch.51 §51.6E R88).
+    fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        Box::new(
+            utxo_common::can_refund_htlc(&self.platform_coin, locktime)
+                .boxed()
+                .map_err(|e| ERRL!("{}", e))
+                .compat(),
+        )
     }
 
     fn negotiate_swap_contract_addr(
