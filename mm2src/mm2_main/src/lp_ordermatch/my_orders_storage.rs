@@ -377,9 +377,10 @@ mod native_impl {
                                           update_was_taker};
     use crate::mm2::lp_ordermatch::{my_maker_order_file_path, my_maker_orders_dir, my_order_history_file_path,
                                     my_taker_order_file_path, my_taker_orders_dir};
-    use mm2_io::fs::{read_dir_json, read_json, remove_file_async, write_json, FsJsonError};
+    use mm2_io::fs::{read_dir_json, read_json, remove_file_async, write_json_durable, FsJsonError};
 
-    const USE_TMP_FILE: bool = false;
+    // Order records are replaced atomically and durably by `write_json_durable` (same write path as the saved
+    // swaps, ch.51 R3, ch.44 R44.8A.6).
 
     impl From<FsJsonError> for MyOrdersError {
         fn from(fs: FsJsonError) -> Self {
@@ -425,13 +426,13 @@ mod native_impl {
 
         async fn save_new_active_maker_order(&self, order: &MakerOrder) -> MyOrdersResult<()> {
             let path = my_maker_order_file_path(&self.ctx, &order.uuid);
-            write_json(order, &path, USE_TMP_FILE).await.mm_err(Into::into)?;
+            write_json_durable(order, &path).await.mm_err(Into::into)?;
             Ok(())
         }
 
         async fn save_new_active_taker_order(&self, order: &TakerOrder) -> MyOrdersResult<()> {
             let path = my_taker_order_file_path(&self.ctx, &order.request.uuid);
-            write_json(order, &path, USE_TMP_FILE).await.mm_err(Into::into)?;
+            write_json_durable(order, &path).await.mm_err(Into::into)?;
             Ok(())
         }
 
@@ -464,7 +465,7 @@ mod native_impl {
     impl MyOrdersHistory for MyOrdersStorage {
         async fn save_order_in_history(&self, order: &Order) -> MyOrdersResult<()> {
             let path = my_order_history_file_path(&self.ctx, &order.uuid());
-            write_json(order, &path, USE_TMP_FILE).await.mm_err(Into::into)?;
+            write_json_durable(order, &path).await.mm_err(Into::into)?;
             Ok(())
         }
 
@@ -880,6 +881,71 @@ mod wasm_impl {
             was_taker: false,
             status,
         })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::{my_maker_order_file_path, my_maker_orders_dir};
+    use crate::mm2::lp_swap::swap_versioning::SwapVersion;
+    use common::{block_on, new_uuid, now_ms};
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use std::collections::HashMap;
+
+    fn maker_order_for_test() -> MakerOrder {
+        MakerOrder {
+            base: "BASE".to_owned(),
+            rel: "REL".to_owned(),
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            max_base_vol: 10.into(),
+            min_base_vol: 0.into(),
+            price: 1.into(),
+            matches: HashMap::new(),
+            started_swaps: Vec::new(),
+            uuid: new_uuid(),
+            conf_settings: None,
+            changes_history: None,
+            save_in_history: true,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            swap_version: SwapVersion::default(),
+            timeout_in_minutes: None,
+        }
+    }
+
+    /// Saving an order record twice replaces it atomically: the second content loads back and no temp file is
+    /// left in the orders directory.
+    #[test]
+    fn save_order_twice_loads_latest_and_leaves_no_tmp() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-my-orders-{}", Uuid::new_v4()));
+        let ctx = MmCtxBuilder::default()
+            .with_conf(serde_json::json!({ "dbdir": dbdir.to_str().unwrap() }))
+            .into_mm_arc();
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        let storage = MyOrdersStorage::new(ctx.clone());
+
+        let mut order = maker_order_for_test();
+        block_on(storage.save_new_active_maker_order(&order)).unwrap();
+        order.max_base_vol = 7.into();
+        block_on(storage.save_new_active_maker_order(&order)).unwrap();
+
+        let loaded = block_on(storage.load_active_maker_order(order.uuid)).unwrap();
+        assert_eq!(loaded, order);
+
+        let names: Vec<_> = std::fs::read_dir(my_maker_orders_dir(&ctx))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let expected = my_maker_order_file_path(&ctx, &order.uuid)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(names, vec![expected]);
+        let _ = std::fs::remove_dir_all(&dbdir);
     }
 }
 

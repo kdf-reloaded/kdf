@@ -452,6 +452,8 @@ pub(crate) struct OrdermatchContext {
     pending_maker_reserved: AsyncMutex<HashMap<Uuid, Vec<MakerReserved>>>,
     /// The outbox of the maker-order messages of this node (CRD ch.32 §32.9B R-MP1).
     pub maker_outbox: MakerOutbox,
+    /// The own orders of coins this build cannot trade: kept, never announced or matched (CRD ch.60 R60.6.5).
+    pub(crate) untradable_orders: PaMutex<UntradableOrders>,
     #[cfg(target_arch = "wasm32")]
     ordermatch_db: ConstructibleDb<OrdermatchDb>,
 }
@@ -487,6 +489,7 @@ impl Default for OrdermatchContext {
             sync_log: Default::default(),
             pending_maker_reserved: Default::default(),
             maker_outbox: Default::default(),
+            untradable_orders: Default::default(),
             orderbook_tickers: Default::default(),
             original_tickers: Default::default(),
         }
@@ -537,6 +540,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         sync_log: Default::default(),
         pending_maker_reserved: Default::default(),
         maker_outbox: Default::default(),
+        untradable_orders: Default::default(),
         orderbook_tickers,
         original_tickers,
         #[cfg(target_arch = "wasm32")]
@@ -573,6 +577,7 @@ impl OrdermatchContext {
                 sync_log: Default::default(),
                 pending_maker_reserved: Default::default(),
                 maker_outbox: Default::default(),
+                untradable_orders: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
             })
@@ -602,6 +607,7 @@ impl OrdermatchContext {
                 sync_log: Default::default(),
                 pending_maker_reserved: Default::default(),
                 maker_outbox: Default::default(),
+                untradable_orders: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
                 ordermatch_db: ConstructibleDb::new(&ctx2),

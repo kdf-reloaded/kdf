@@ -807,6 +807,18 @@ coin not activated in HD mode, answers `CoinIsActivatedNotWithHDWallet`.
 > `hd_accounts_at_index_tests`), and `r35a_*` in `coins_activation`'s
 > `utxo_activation/tests.rs`.
 
+> **Pointer (2026-11-22, Spec Reader round 0.5.0-26; passed the KDF Dirty
+> Gate with chapter 49 §49.2.3).** The vocabulary of the sibling task family
+> `task::get_new_address` at the reference releases -- request members,
+> in-progress and awaiting values, the device-confirmation state with its
+> expected address, cancel, and the error set -- is recorded in
+> [Chapter 49](49-withdrawal-task-path.md) R49.38 -- R49.42. Its
+> in-progress and awaiting value names are those of item 3 above plus one
+> confirmation state. The reference runs that task on the device path
+> whatever the coin's key policy (R49.38 item 5), which R54 below does not
+> adopt for this repository. This note binds nothing of its own and changes
+> nothing in R35c or R54.
+
 ## 5.10 Bound Hardware-Wallet Path
 
 **R25.** The substrate MUST retain the baseline hardware-wallet
@@ -2474,6 +2486,12 @@ surface.
   states no behavior of its own; it travels with chapter 49 §49.2.2 for the
   KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-22, measure 0.03, no
   findings**, as recorded for §49.2.2 in chapter 49's provenance footer.
+- *Pointer added 2026-11-22 (Spec Reader round 0.5.0-26) -- the note after
+  the as-built record of R35c, before §5.10.* It names chapter 49 R49.38 --
+  R49.42 and states no behavior of its own; it travels with chapter 49
+  §49.2.3 for the KDF Dirty Gate. **KDF Dirty Gate: PASS on 2026-11-22,
+  measure 0.03, no findings**, as recorded for §49.2.3 in chapter 49's
+  provenance footer.
 - *Status note added 2026-11-16 (under §5.9B R35c item 5).* Reloaded-original,
   clean side: it records this repository's alignment of the HD account methods'
   hardware and timeout errors with the cleared item 5; no forbidden-class

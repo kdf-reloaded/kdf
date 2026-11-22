@@ -8,8 +8,6 @@
 //!
 //! A coin activated through these methods sends no commitment level with its node requests, so the node's default
 //! applies (the request has no commitment member).
-//!
-//! While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` the routed methods answer as the primary ones do (T40.9).
 
 use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens, EnablePlatformCoinWithTokensError,
                                        EnablePlatformCoinWithTokensReq, TokenActivationRequest};
@@ -17,8 +15,7 @@ use crate::solana_with_tokens_activation::{SolanaWithTokensActivationRequest, So
 use crate::spl_token_activation::{resolve_spl_protocol, SplActivationRequest, SplInitResult};
 use crate::token::{enable_token_resolving, EnableTokenError};
 use coins::solana::{SolanaHdLayout, SolanaNodeUrl};
-use coins::{CoinBalance, PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken,
-            SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
+use coins::{CoinBalance, PrivKeyActivationPolicy, SolanaActivationParams, SolanaCoin, SplToken};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use serde_derive::{Deserialize, Serialize};
@@ -128,18 +125,11 @@ impl SolanaCompatPlatformResult {
 
 /// The `experimental::enable_solana_with_assets` entry point.
 ///
-/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` the request is refused with the `PlatformCoinCreationError` of
-/// the primary surface and nothing is registered; otherwise see [`activate_solana_with_assets`].
+/// See [`activate_solana_with_assets`].
 pub async fn enable_solana_with_assets(
     ctx: MmArc,
     req: SolanaCompatPlatformRequest,
 ) -> Result<SolanaCompatPlatformResult, MmError<EnablePlatformCoinWithTokensError>> {
-    if !SOLANA_ACTIVATION_AVAILABLE {
-        return MmError::err(EnablePlatformCoinWithTokensError::PlatformCoinCreationError {
-            ticker: req.ticker,
-            error: SOLANA_NOT_AVAILABLE.to_owned(),
-        });
-    }
     activate_solana_with_assets(ctx, req).await
 }
 
@@ -204,15 +194,11 @@ impl SolanaCompatTokenResult {
 
 /// The `experimental::enable_solana_token` entry point.
 ///
-/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` the request is refused with the `Internal` error of the primary
-/// surface and nothing is registered; otherwise see [`activate_solana_token`].
+/// See [`activate_solana_token`].
 pub async fn enable_solana_token(
     ctx: MmArc,
     req: SolanaCompatTokenRequest,
 ) -> Result<SolanaCompatTokenResult, MmError<EnableTokenError>> {
-    if !SOLANA_ACTIVATION_AVAILABLE {
-        return MmError::err(EnableTokenError::Internal(SOLANA_NOT_AVAILABLE.to_owned()));
-    }
     activate_solana_token(ctx, req).await
 }
 

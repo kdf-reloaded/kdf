@@ -51,6 +51,15 @@ reloaded; it does not introduce a new coin.
 > has already started still completes or is recovered. Swaps are planned to
 > return in a later release ([Chapter 18](18-tendermint-ibc-htlc.md)).
 
+> **Status note (2026-11-22), a saved Tendermint order is kept, not
+> cancelled (clean-side, not corpus-sourced).** From this date an order
+> with a Tendermint coin saved by an earlier version is no longer
+> cancelled at startup. It is kept, so `my_orders` lists it and
+> `cancel_order` removes it, but it is never announced and never matched,
+> and one log line names it. The rule is in the status note of 2026-11-22
+> at [Chapter 60](60-trading-floors-and-refusal-contract.md) R60.6.5.
+> Nothing else in the note above changes.
+
 ---
 
 ## 36.0 Executive summary
@@ -1390,6 +1399,12 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   of its own; it travels with chapter 43 §43.1F for the KDF Dirty Gate.
   **KDF Dirty Gate: PASS on 2026-11-18, measure 0.02, no findings**, as recorded for §43.1F in chapter 43's
   provenance footer.
+- *Status note added 2026-11-22, clean side.* The status note under the
+  availability note at the head of this chapter, on a saved Tendermint
+  order being kept, records this repository's own behavior and the
+  maintainer's decision of 2026-11-22 on stored orders of untradable
+  coins. It was written by a context that never read the forbidden
+  corpus, takes no forbidden-class input and needs no Dirty Gate pass.
 
 ---
 

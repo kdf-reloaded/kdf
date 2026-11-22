@@ -915,6 +915,18 @@ chapter 49 §49.2.1 (R49.32) records for an ERC-20 ticker on an EVM
 platform; the used-address criterion does not. The sentences of
 R21.10B.4 above are unchanged.
 
+*Status note (2026-11-22), the task form of `get_new_address` for a TRON
+ticker (Spec Reader round 0.5.0-26; passed the KDF Dirty Gate with chapter
+49 §49.2.3).* The "HD methods" item of R21.10B.4 lists
+`task::get_new_address::init` among the methods that work for a TRX or
+TRC20 ticker. At the row `v3.0.0-beta` init answers a task id for such a
+ticker, but the task cannot complete: it requires a hardware context and
+ends with `HwContextNotInitialized` without one, and with one it asks the
+device for an Ethereum-form address that never equals the base58check
+address it expects ([Chapter 49](49-withdrawal-task-path.md) R49.38 item 5,
+R49.42). The direct `get_new_address` and the other listed methods are not
+affected. The sentences of R21.10B.4 above are unchanged.
+
 *Reloaded note (2026-11-19), the HD methods for a TRC20 ticker in this
 repository (its own code, not the reference; PR #428).* Asked for a TRC20
 ticker, `get_new_address`, `account_balance`,
@@ -1426,6 +1438,19 @@ availability note). The read-only views (`orderbook`, `best_orders`,
 `trade_preimage`) read the coins-config `wallet_only` flag alone and are
 unchanged, and so are `max_taker_vol`, `max_maker_vol` and the legacy
 `get_trade_fee`, which do not ask whether a coin is wallet-only.
+
+*Status note (2026-11-22), a saved TRON order is kept, not cancelled
+(clean-side, not corpus-sourced).* From this date an order saved earlier
+that names a coin whose coins-config protocol is `TRX` or `TRC20` is no
+longer cancelled at startup. It is kept, in memory and in the storage,
+so `my_orders` lists it and `cancel_order` removes it, but it is never
+announced and never matched, and one log line names it. The rule, which
+is the same for every coin that cannot trade, is in the status note of
+2026-11-22 at [Chapter 60](60-trading-floors-and-refusal-contract.md)
+R60.6.5. Where the status notes of 2026-11-20 in this chapter (the one
+before §21.0, the one above, and the one at R21.B3) say that such an
+order is cancelled at startup, read them with this note. Nothing else in
+them changes.
 
 *Status note (2026-11-22), EVM-family methods called on a TRON coin (Spec
 Reader round 0.5.0-22; passed the KDF Dirty Gate).* What the reference answers
@@ -2966,3 +2991,17 @@ V3. The address encoding, protobuf transaction/contract formats,
   T21.10B.22 (cleared 2026-11-22) for the comparison, and this
   repository's own code. *Forbidden corpus:* not consulted for this
   note. No cleared sentence was edited.
+- *Status note added 2026-11-22 (clean-side, Reloaded-original) -- a
+  saved TRON order is kept, at R21.10B.9.* *Inputs:* the maintainer's
+  decision of 2026-11-22 on stored orders of untradable coins, the
+  status note of that date at chapter 60 R60.6.5, and this repository's
+  own code. *Forbidden corpus:* not consulted for this note. No cleared
+  sentence was edited.
+- *Status note added 2026-11-22 (Spec Reader round 0.5.0-26) -- after the
+  2026-11-19 status note under R21.10B.4.* It qualifies, for the one method
+  `task::get_new_address::init`, the "HD methods" item of R21.10B.4 from
+  chapter 49 R49.38 and R49.42, read at the row `v3.0.0-beta` of chapter 02
+  §2.15A; it travels with chapter 49 §49.2.3 for the KDF Dirty Gate. **KDF
+  Dirty Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for
+  §49.2.3 in chapter 49's provenance footer. No cleared sentence was
+  edited.
