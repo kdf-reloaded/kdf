@@ -1076,10 +1076,11 @@ the previous version used. The safe way:
   lock over kept running and refreshing, so two runners could work on one swap, and the first one deleted the
   other's lock when it ended. A runner now checks before each refresh that the lock file still holds the value it
   wrote last. When the file is gone or holds another value, or when refreshing has failed for longer than 40
-  seconds, the run stops before its next step, without writing to the swap's record, and leaves the lock file to its
-  holder; the swap goes on wherever the lock is held, or at the next start. A late refresh that finds its own value
-  goes on with a warning. The lock file is now replaced in one step, so a reader never sees it empty, and its
-  content keeps the form GLEEC KDF reads. Detail: PR #480; CRD ch.51 R5 and ch.44 §44.9A (status update).
+  seconds, the run is stopped where it stands, like an abrupt stop, and leaves the lock file. The swap is then
+  handed to the ordinary start of a saved swap, which waits 40 seconds and resumes it if no other runner holds the
+  lock. A late refresh that finds its own value goes on with a warning. A new lock file is created in one step and
+  replaced in one step, so a reader never sees it empty, and its content keeps the form GLEEC KDF reads. Detail: PR
+  #480; CRD ch.51 R5 and ch.44 §44.9A (status updates).
 
 ### Tests
 

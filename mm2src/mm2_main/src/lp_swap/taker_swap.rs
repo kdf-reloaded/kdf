@@ -2,7 +2,7 @@ use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, Ch
                            TakerFeeAdditionalInfo};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::stale_tip_watch::{sleep_observing_tip, StaleTipWatch};
-use super::swap_lock::{run_while_lock_held, SwapLock, SwapLockOps};
+use super::swap_lock::{hand_over_if_lost, run_while_lock_held, LockOutcome, SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
 use super::{already_sent_check_pubkey, check_held_htlc_key, derive_htlc_pubkeys, recover_within, recovery_key_pairs,
             resolve_recovery_htlc_key, restored_htlc_key_pair, start_htlc_key_pair, swap_node_key_pair,
@@ -458,14 +458,24 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
         .fuse(),
     );
     let mut shutdown_fut = Box::pin(shutdown_rx.recv().fuse());
-    let do_nothing = (); // to fix https://rust-lang.github.io/rust-clippy/master/index.html#unused_unit
-                         // Ends when the swap finishes, or, if the swap lock is lost, the run is stopped where it stands and starts no
-                         // further step (ch.44 R44.9A.13).
+    // Ends when the swap finishes, or, if the swap lock is lost, the run is stopped where it stands and starts no
+    // further step (ch.44 R44.9A.13).
     let mut held_swap_fut = Box::pin(run_while_lock_held(swap_fut, swap_lock, lock_uuid, 30.).fuse());
-    select! {
-        _swap = held_swap_fut => do_nothing, // swap finished normally, or its lock was lost
-        _shutdown = shutdown_fut => log!("on_stop] swap " (swap_for_log.uuid) " stopped!"),
+    let outcome = select! {
+        outcome = held_swap_fut => outcome, // swap finished normally, or its lock was lost
+        _shutdown = shutdown_fut => {
+            log!("on_stop] swap " (swap_for_log.uuid) " stopped!");
+            LockOutcome::Finished
+        },
     };
+    // The registry entry and message store are released first; nothing is held across the hand-over. After a lost
+    // lock the swap goes to the ordinary kick-start, which takes the lock by ch.51 R5 and resumes it from its saved
+    // record if the lock is free (R6, R7).
+    drop(_registry_guard);
+    let (maker_coin, taker_coin) = (swap_for_log.maker_coin.clone(), swap_for_log.taker_coin.clone());
+    hand_over_if_lost(outcome, lock_uuid, |uuid| {
+        super::swap_rpc::hand_over_taker_swap_to_kick_start(swap_for_log.ctx.clone(), uuid, maker_coin, taker_coin)
+    });
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

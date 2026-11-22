@@ -58,25 +58,48 @@ pub async fn touch_until_lost<L: SwapLockOps>(lock: L, uuid: Uuid, interval_sec:
     }
 }
 
+/// How [`run_while_lock_held`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockOutcome {
+    /// The swap future ran to its end.
+    Finished,
+    /// The swap lock was lost and the swap future was dropped.
+    Lost,
+}
+
 /// Drives `swap_fut` while `lock` is refreshed. If the lock is lost the swap future is dropped at whatever await
 /// it is suspended on: the run is stopped where it stands, like an abrupt stop, and starts no further step. An
-/// error is logged and no event is written (CRD ch.51 R5 with ch.44 R44.9A.13 item 3). The caller's registry guard
-/// releases as on every other exit.
+/// error is logged, no event is written, and [`LockOutcome::Lost`] is returned so the caller can hand the swap to
+/// the ordinary kick-start (CRD ch.51 R5 with ch.44 R44.9A.13 item 3).
 pub async fn run_while_lock_held<L: SwapLockOps, F: Future<Output = ()>>(
     swap_fut: F,
     lock: L,
     uuid: Uuid,
     interval_sec: f64,
-) {
+) -> LockOutcome {
     let swap_fut = swap_fut.fuse();
     let touch_loop = touch_until_lost(lock, uuid, interval_sec).fuse();
     pin_mut!(swap_fut, touch_loop);
     select! {
-        _swap = swap_fut => (),
-        reason = touch_loop => error!(
-            "Swap {} run stopped because its swap lock was lost ({}); the swap resumes from its saved record",
-            uuid, reason
-        ),
+        _swap = swap_fut => LockOutcome::Finished,
+        reason = touch_loop => {
+            error!(
+                "Swap {} run stopped because its swap lock was lost ({}); the swap is handed to the kick-start, \
+                 which resumes it from its saved record if the lock is free after the wait (ch.51 R5)",
+                uuid, reason
+            );
+            LockOutcome::Lost
+        },
+    }
+}
+
+/// Calls `hand_over` with `uuid` exactly once if `outcome` is [`LockOutcome::Lost`], otherwise never. The caller
+/// invokes it after the run's registry guard has been released, and passes a function that starts the ordinary
+/// kick-start of this one swap, which takes the lock by the ch.51 R5 rule (wait one limit, retry once, abandon if
+/// still held, no event) and otherwise resumes the swap from its saved record (R6, R7).
+pub fn hand_over_if_lost(outcome: LockOutcome, uuid: Uuid, hand_over: impl FnOnce(Uuid)) {
+    if outcome == LockOutcome::Lost {
+        hand_over(uuid);
     }
 }
 
@@ -521,7 +544,68 @@ mod lock_fencing_tests {
     #[test]
     fn run_ends_normally_when_the_swap_finishes_and_removes_its_lock_file() {
         let (path, lock) = lock_in_new_dir("finish");
-        block_on(run_while_lock_held(async {}, lock, Uuid::nil(), 30.));
+        let outcome = block_on(run_while_lock_held(async {}, lock, Uuid::nil(), 30.));
+        assert_eq!(outcome, LockOutcome::Finished);
         assert!(!path.exists(), "the run's own lock file is removed on exit");
+    }
+
+    /// The hand-over runs once, with the uuid, after a lost lock; never after a normal finish.
+    #[test]
+    fn hand_over_runs_exactly_once_after_a_lost_lock_and_never_after_a_finish() {
+        let uuid = Uuid::new_v4();
+        let calls = std::cell::RefCell::new(Vec::new());
+        hand_over_if_lost(LockOutcome::Finished, uuid, |u| calls.borrow_mut().push(u));
+        assert!(calls.borrow().is_empty());
+
+        let (path, lock) = lock_in_new_dir("handover");
+        std::fs::write(&path, (now_ms() / 1000 + 100).to_string()).unwrap();
+        let outcome = block_on(run_while_lock_held(std::future::pending::<()>(), lock, uuid, 0.05));
+        assert_eq!(outcome, LockOutcome::Lost);
+        hand_over_if_lost(outcome, uuid, |u| calls.borrow_mut().push(u));
+        assert_eq!(*calls.borrow(), vec![uuid]);
+    }
+
+    /// What the hand-over's kick-start does with the lock (here with `FileLock::lock`, the file layer of the R5
+    /// acquisition): a free lock (file removed) is taken again with a new value; a lock that another runner holds
+    /// with a current value is not taken. The wait and the retry of R5 live in the run functions and are not run here.
+    #[test]
+    fn hand_over_takes_a_free_lock_and_leaves_a_held_one() {
+        // Free: the file vanished (lost as missing), then the hand-over takes it.
+        let (path, lock) = lock_in_new_dir("handover-free");
+        std::fs::remove_file(&path).unwrap();
+        let outcome = block_on(run_while_lock_held(
+            std::future::pending::<()>(),
+            lock,
+            Uuid::nil(),
+            0.05,
+        ));
+        assert_eq!(outcome, LockOutcome::Lost);
+        let mut taken = None;
+        hand_over_if_lost(outcome, Uuid::nil(), |_| {
+            taken = FileLock::lock(path.clone(), 40.).unwrap()
+        });
+        assert!(taken.is_some(), "a free lock is taken again");
+        assert!(path.exists());
+        drop(taken);
+
+        // Held: another runner replaced the content with a current time. It is one second ahead of ours, because
+        // a value equal to our own (same second) is not told apart from ours; a value in the future counts as held
+        // (CRD ch.44 R44.9A.8).
+        let (path, lock) = lock_in_new_dir("handover-held");
+        let other = (now_ms() / 1000 + 1).to_string();
+        std::fs::write(&path, &other).unwrap();
+        let outcome = block_on(run_while_lock_held(
+            std::future::pending::<()>(),
+            lock,
+            Uuid::nil(),
+            0.05,
+        ));
+        assert_eq!(outcome, LockOutcome::Lost);
+        let mut taken = None;
+        hand_over_if_lost(outcome, Uuid::nil(), |_| {
+            taken = FileLock::lock(path.clone(), 40.).unwrap()
+        });
+        assert!(taken.is_none(), "a lock held with a current value is not taken");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), other);
     }
 }

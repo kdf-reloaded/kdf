@@ -876,10 +876,11 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
 
 - **A swap run that lost its swap lock stops.** Both keep a swap's lock in `<uuid>.lock` as a Unix time in seconds.
   GLEEC KDF rewrites it in place and keeps running, refreshing and finally removing it even after another runner
-  took it over. KDF Reloaded replaces it in one step, checks before each refresh that it still holds its own value,
-  stops the run before its next step when it does not, and then leaves the file. The file's content is the same in
-  both, so each respects the other's lock by its timestamp. No peer sees it, so no switch exists; row in
-  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.51 R5, ch.44 §44.9A.
+  took it over. KDF Reloaded replaces it in one step and checks before each refresh that it still holds its own
+  value; when it does not, the run is stopped where it stands and leaves the file, and the swap is handed to the
+  ordinary start of a saved swap, which resumes it if no other runner holds the lock after 40 seconds. The file's
+  content is the same in both, so each respects the other's lock by its timestamp. No peer sees it, so no switch
+  exists; row in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). CRD ch.51 R5, ch.44 §44.9A.
 
 ### Removed / disabled in KDF Reloaded
 
