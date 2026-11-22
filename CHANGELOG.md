@@ -1256,6 +1256,10 @@ the previous version used. The safe way:
   setting, the tests still skip. The emulator image is pinned to a fixed version. Of the eleven tests, ten run and
   pass; the PIN test stays ignored. The TRON test had never run and failed in its own setup; only its setup
   changed. Detail: PR #498.
+- **Seven Trezor emulator tests of `task::get_new_address`.** They run in the emulator job, where an emulator that
+  does not answer fails them; six run and pass there. The test of a refusal on the device is ignored: the emulator's
+  screen that shows a new address has no cancel button, so that check stays a manual one on a Trezor.
+  Detail: PR #491.
 - **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
   network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
   Detail: PR #479.
