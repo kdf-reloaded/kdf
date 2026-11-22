@@ -5660,13 +5660,15 @@ produce. The payload is not interpreted.
 > history row, is the chain's transaction id. A payload whose prefix claims more
 > bytes than remain is refused in every path. A special-shaped transaction with
 > nothing after its lock time is read without a payload, as R38.6.10.2 describes
-> for the reference, so a transaction of another chain whose version word only
-> happens to have this shape keeps its reading; such a transaction with a
-> witness would not have its witness marker recognized, which no listed chain is
-> known to produce. The whole leading word is kept as the version, so the type
-> is the high 16 bits of it; nothing interprets the payload, and no special
-> transaction is built. Leftover bytes after a complete reading are still not
-> refused in general (the finding above stays open on that point). PIVX special
+> for the reference, so a transaction of another standard-layout chain whose
+> version word only happens to have this shape keeps its reading. Such a
+> transaction with a witness would not have its witness marker recognized, and
+> on a chain read with the time-field layout such a word would be read without
+> its time field and trailing string; no listed chain is known to produce
+> either. The whole leading word is kept as the version, so the type is the high
+> 16 bits of it; nothing interprets the payload, and no special transaction is
+> built. Leftover bytes after a complete reading are still not refused in
+> general (the finding above stays open on that point). PIVX special
 > transactions are not covered by this rule; their reading is not established.
 > Tests: T38.6.10.1 with a DASH coinbase (type 5), provider registration (type
 > 1), asset unlock (type 9, no inputs, one output), a version-3 type-0
