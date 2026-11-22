@@ -193,11 +193,7 @@ mod native_impl {
     use crate::mm2::lp_swap::maker_swap::{stats_maker_swap_dir, stats_maker_swap_file_path};
     use crate::mm2::lp_swap::taker_swap::{stats_taker_swap_dir, stats_taker_swap_file_path};
     use crate::mm2::lp_swap::{my_swap_file_path, my_swaps_dir};
-    use mm2_io::fs::{read_dir_json, read_json, write_json, FsJsonError};
-
-    // Records are replaced atomically and durably: the event log is the only recovery record (ch.51 R3), and each
-    // event append replaces the saved record (ch.44 R44.8A.6).
-    const USE_TMP_FILE: bool = true;
+    use mm2_io::fs::{read_dir_json, read_json, write_json_durable, FsJsonError};
 
     impl From<FsJsonError> for SavedSwapError {
         fn from(fs: FsJsonError) -> Self {
@@ -246,7 +242,9 @@ mod native_impl {
 
         async fn save_to_db(&self, ctx: &MmArc) -> SavedSwapResult<()> {
             let path = my_swap_file_path(ctx, self.uuid());
-            write_json(self, &path, USE_TMP_FILE).await.mm_err(Into::into)?;
+            // Replaced atomically and durably: the event log is the only recovery record (ch.51 R3), and each event
+            // append replaces the saved record (ch.44 R44.8A.6).
+            write_json_durable(self, &path).await.mm_err(Into::into)?;
             Ok(())
         }
 
@@ -255,11 +253,11 @@ mod native_impl {
             match self {
                 SavedSwap::Maker(maker) => {
                     let path = stats_maker_swap_file_path(ctx, &maker.uuid);
-                    write_json(self, &path, USE_TMP_FILE).await.mm_err(Into::into)?;
+                    write_json_durable(self, &path).await.mm_err(Into::into)?;
                 },
                 SavedSwap::Taker(taker) => {
                     let path = stats_taker_swap_file_path(ctx, &taker.uuid);
-                    write_json(self, &path, USE_TMP_FILE).await.mm_err(Into::into)?;
+                    write_json_durable(self, &path).await.mm_err(Into::into)?;
                 },
             }
             Ok(())

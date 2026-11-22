@@ -1051,13 +1051,15 @@ the previous version used. The safe way:
 
 #### Swap and order records
 
-- **A crash or power loss while a swap or order record is being saved no longer damages it.** The saved record of
-  a legacy swap, its statistics copy and the saved record of an order were rewritten in place, so a crash in the
-  middle of a save could leave an empty or cut-off file, and the swap could not be resumed from it. Each save now
-  writes a new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the
-  record holds either its previous or its new complete content. A temporary `*.tmp` file left by a crash is
-  ignored. Browser builds already saved each record in one storage transaction and do not change. Detail: PR #480;
-  CRD ch.51 R3 and ch.44 R44.8A.6.
+- **A crash or power loss while a swap or order record is being saved no longer damages it.** The saved record of a
+  legacy swap, its statistics copy and the saved record of an order were rewritten in place, so a crash in the middle
+  of a save could leave an empty or cut-off file, and the swap could not be resumed from it. Each save now writes a
+  new file next to the record, syncs it to disk, replaces the record with it and syncs the folder, so the record holds
+  either its previous or its new complete content. Where a folder cannot be synced (some network mounts), the save
+  still succeeds and logs a warning. On Windows a replace refused because another program, such as a virus scanner,
+  holds the new file is retried briefly. A temporary `*.tmp` file left by a crash is ignored. Browser builds already
+  saved each record in one storage transaction and do not change. Detail: PR #480; CRD ch.51 R3 and ch.44 R44.8A.6
+  (status note).
 
 ### Tests
 

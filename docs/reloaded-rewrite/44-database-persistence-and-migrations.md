@@ -478,6 +478,17 @@ legacy JSON file, a browser object store, or the native `my_swaps.events_json`
 column after import; the role tag, event tag, order, and payload JSON contract
 remain the same.
 
+> **Status note (2026-11-22, Reloaded-original; informative).** On native
+> builds the replace of a legacy JSON record is atomic and durable: the new
+> record is written to a uniquely named `*.tmp` file in the same folder,
+> synced to disk and renamed over the record, and the folder is then synced
+> (Unix). If only the folder sync fails, for example on a mount that cannot
+> sync a folder, the save succeeds with a warning, because the record is
+> already replaced. On Windows a rename refused because another process holds
+> the file is retried briefly. A left-over `*.tmp` file is never read as a
+> record. The saved order records use the same write. Browser builds save each
+> record in one object-store transaction. Detail: PR #480.
+
 R44.8A.7 Replay shall apply saved events in array order to reconstruct the
 role-specific swap state. The first event is expected to be `Started`; if the
 first event is absent or is not a start event, replay cannot reconstruct coin
