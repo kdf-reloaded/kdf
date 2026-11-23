@@ -313,6 +313,16 @@ the previous version used. The safe way:
   answers an error that names it. The transaction history is the next item. Detail: PR #475; CRD
   ch.40 D40.4.
 
+- **Solana activation reads a swap program and an evidence node.** A `SOLANA` coins-file entry may name
+  the cluster's swap program in `protocol.protocol_data.swap_program_id` (base58). The activation reads that
+  program once: it must exist, be executable and have no upgrade authority, or the coin stays wallet-only.
+  A value that is not a base58 public key makes the entry unparsable (`CoinProtocolParseError`).
+  `enable_solana_with_tokens` and `experimental::enable_solana_with_assets` take an optional
+  `swap_evidence_node`, one URL of the coin's node list, which a swap uses as its one trusted node for the
+  reads before a refund or a secret step; a URL that is not in the list is refused. Solana and SPL tokens
+  still cannot be traded: the SOL side of the swap is built, and SPL and the switch-on follow after 0.5.0. Detail: PR #503;
+  CRD ch.40 §40.6D.
+
 - **Solana and SPL tokens have a transaction history.** With `tx_history: true` at the platform's
   activation (`enable_solana_with_tokens` or `experimental::enable_solana_with_assets`), the node
   reads the whole history of the wallet's address and of its token accounts from the coin's Solana
@@ -1362,6 +1372,10 @@ the previous version used. The safe way:
   also states why a recorded but lost claim is answered differently by the automatic refund and by the manual
   recovery. Only test code and docs changed. Detail: PR #464; CRD ch.51, status notes of 2026-11-21 after
   R82 and R83, T35.
+- **The test code of the coin activation compiles for wasm32, and CI checks it.** The task-framework tests of the
+  standalone-coin family are built only for native targets, like the test helpers they use. A new CI job,
+  `wasm32-test-check`, compiles the test code of `coins_activation`, `coins` and `mm2_main` for wasm32 and is part
+  of the required `tests-passed` check. Only test code and CI changed. Detail: PR #511.
 
 ### Plans touched
 
