@@ -14,7 +14,7 @@ use crate::eth::tron::api::{GetNowBlockResponse, TriggerConstantContractResponse
                             TronApiClient, TronApiError};
 use crate::eth::tron::swap::{decode_payments_output, encode_payments_query, PaymentRecord, PaymentState, TronSwapError};
 use crate::eth::tron::TronAddress;
-use crate::swap_evidence::{self, node_name, Agreement, SwapEvidencePolicy, Undetermined, UndeterminedReason};
+use crate::swap_evidence::{self, node_name, Agreement, SwapEvidencePolicy, Undetermined};
 use common::log::warn;
 use serde::Serialize;
 
@@ -104,18 +104,12 @@ async fn read_node(
     })
 }
 
-/// The error of an undetermined evidence read: the step waits. The line names each node as `host[:port]`.
+/// The error of an undetermined evidence read: the step waits. It carries the core's text for the read
+/// ([`Undetermined::to_err_string`]: the marker, the reason and what each node said, nodes named as `host[:port]`),
+/// whatever the reason, so the swap engine's `is_undetermined` recognizes it (CRD ch.51 R100 item 9, ch.21 R21.11D.1).
 fn undetermined(why: Undetermined) -> TronSwapError {
     warn!("{why}");
-    match why.reason {
-        UndeterminedReason::Disagree => TronSwapError::NodesDisagree,
-        // Two tips too far apart to compare; the plain `agree` these reads use does not give it. The step waits.
-        UndeterminedReason::TipGap => TronSwapError::NodesDisagree,
-        // The trusted node did not answer, or fewer than two distinct hosts did: both name the fix.
-        UndeterminedReason::TooFewAnswers | UndeterminedReason::TrustedNodeSilent => {
-            TronSwapError::NotEnoughAnswers { got: 0 }
-        },
-    }
+    TronSwapError::Undetermined(why.to_err_string())
 }
 
 /// The answer the nodes of the policy agree on, by the decision `classify` reduces each answer to (CRD ch.51 R100
@@ -123,7 +117,7 @@ fn undetermined(why: Undetermined) -> TronSwapError {
 ///
 /// # Errors
 ///
-/// [`TronSwapError::NodesDisagree`], or [`TronSwapError::NotEnoughAnswers`] whose text names the fix.
+/// [`TronSwapError::Undetermined`], whose text carries the core's marker and names the fix.
 async fn agreed_answer<A, K, Fut>(
     api: &TronApiClient,
     policy: &SwapEvidencePolicy,
