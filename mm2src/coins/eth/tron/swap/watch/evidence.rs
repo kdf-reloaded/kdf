@@ -109,6 +109,8 @@ fn undetermined(why: Undetermined) -> TronSwapError {
     warn!("{why}");
     match why.reason {
         UndeterminedReason::Disagree => TronSwapError::NodesDisagree,
+        // Two tips too far apart to compare; the plain `agree` these reads use does not give it. The step waits.
+        UndeterminedReason::TipGap => TronSwapError::NodesDisagree,
         // The trusted node did not answer, or fewer than two distinct hosts did: both name the fix.
         UndeterminedReason::TooFewAnswers | UndeterminedReason::TrustedNodeSilent => {
             TronSwapError::NotEnoughAnswers { got: 0 }
