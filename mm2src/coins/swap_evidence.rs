@@ -55,32 +55,51 @@ pub enum SwapFamily {
     Solana,
 }
 
-/// The one adoption table of R100 (maintainer decision of 2026-11-22): `true` once the family's reads agree on two nodes and its
-/// `swap_evidence_policy()` answers its stored policy; until then it answers [`SwapEvidencePolicy::NotAdopted`].
-/// Every entry must be `true` before 0.5.0 is tagged (`r100_release_gate_every_swap_family_adopted`).
-pub const R100_ADOPTED: &[(SwapFamily, bool)] = &[
-    (SwapFamily::Utxo, false),
-    (SwapFamily::Bch, false),
-    (SwapFamily::Slp, false),
-    (SwapFamily::Qtum, false),
-    (SwapFamily::Qrc20, false),
-    (SwapFamily::Evm, false),
-    (SwapFamily::Zcoin, false),
-    (SwapFamily::Sia, false),
-    (SwapFamily::Tendermint, false),
-    (SwapFamily::Tron, true),
-    (SwapFamily::Solana, false),
-];
-
-/// Whether `family` has adopted R100.
-pub fn family_adopted(family: SwapFamily) -> bool {
-    R100_ADOPTED
-        .iter()
-        .any(|(candidate, adopted)| *candidate == family && *adopted)
+/// Where a family stands with R100 (CRD ch.51 R100 item 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum R100Adoption {
+    /// The family's reads agree on two nodes; its `swap_evidence_policy()` answers the policy stored at activation.
+    Adopted,
+    /// Not adopted yet: today's reads, no admission refusal.
+    NotAdopted,
+    /// The family's swaps are switched off in this release, so no swap read exists to bind. Behaves as
+    /// `NotAdopted`; the existing switches already refuse trading. The tie tests pin this entry to the real switches
+    /// (`TENDERMINT_SWAPS_AVAILABLE`, `TRON_SWAPS_AVAILABLE`, the Solana untradable rule): a lane that switches swaps
+    /// on must adopt R100, or CI fails.
+    SwapsOff,
 }
 
+/// The one adoption table of R100 (maintainer decision of 2026-11-22). A family flips to
+/// [`R100Adoption::Adopted`] once its reads agree on two nodes. The release gate
+/// (`r100_release_gate_every_swap_family_adopted`, ignored in ordinary CI) passes when every entry is `Adopted` or
+/// `SwapsOff`, so it binds only the families that swap in the release.
+pub const R100_ADOPTED: &[(SwapFamily, R100Adoption)] = &[
+    (SwapFamily::Utxo, R100Adoption::NotAdopted),
+    (SwapFamily::Bch, R100Adoption::NotAdopted),
+    (SwapFamily::Slp, R100Adoption::NotAdopted),
+    (SwapFamily::Qtum, R100Adoption::NotAdopted),
+    (SwapFamily::Qrc20, R100Adoption::NotAdopted),
+    (SwapFamily::Evm, R100Adoption::NotAdopted),
+    (SwapFamily::Zcoin, R100Adoption::NotAdopted),
+    (SwapFamily::Sia, R100Adoption::NotAdopted),
+    (SwapFamily::Tendermint, R100Adoption::SwapsOff),
+    (SwapFamily::Tron, R100Adoption::Adopted),
+    (SwapFamily::Solana, R100Adoption::SwapsOff),
+];
+
+/// The table entry of `family`.
+pub fn adoption_of(family: SwapFamily) -> Option<R100Adoption> {
+    R100_ADOPTED
+        .iter()
+        .find(|(candidate, _)| *candidate == family)
+        .map(|(_, adoption)| *adoption)
+}
+
+/// Whether `family` has adopted R100 (true only for [`R100Adoption::Adopted`]).
+pub fn family_adopted(family: SwapFamily) -> bool { adoption_of(family) == Some(R100Adoption::Adopted) }
+
 /// What a coin of `family` answers with: its `stored` policy once the family has adopted R100, else
-/// [`SwapEvidencePolicy::NotAdopted`].
+/// [`SwapEvidencePolicy::NotAdopted`] (also for a family whose swaps are off).
 pub fn effective_policy(family: SwapFamily, stored: &SwapEvidencePolicy) -> SwapEvidencePolicy {
     if family_adopted(family) {
         stored.clone()
@@ -158,19 +177,26 @@ fn parse_node(addr: &str) -> Option<(String, Option<u16>)> {
 /// [`parse_node`] with the default port of an `http`, `https`, `ws` or `wss` scheme when none is written.
 fn host_and_port(addr: &str) -> Option<(String, Option<u16>)> {
     let (host, port) = parse_node(addr)?;
-    let port = port.or_else(|| match addr.trim().split_once("://").map(|(scheme, _)| scheme) {
-        Some("https") | Some("wss") => Some(443),
-        Some("http") | Some("ws") => Some(80),
-        _ => None,
+    let port = port.or_else(|| {
+        match addr
+            .trim()
+            .split_once("://")
+            .map(|(scheme, _)| scheme.to_ascii_lowercase())
+        {
+            Some(scheme) if scheme == "https" || scheme == "wss" => Some(443),
+            Some(scheme) if scheme == "http" || scheme == "ws" => Some(80),
+            _ => None,
+        }
     });
     Some((host, port))
 }
 
-/// The form in which an error or a log line names a node: `host[:port]`, lowercased, the port only when the address
-/// writes one. A scheme, userinfo, path and query (which may hold a credential) are dropped; an address with no host
+/// The form in which an error or a log line names a node, and in which a node is compared with the trusted node:
+/// `host[:port]`, lowercased, with the port the address writes or else the default of its scheme (`https`/`wss` 443,
+/// `http`/`ws` 80); an Electrum `host:port` or a bare host is unchanged. A scheme, userinfo, path and query (which may hold a credential) are dropped; an address with no host
 /// is rendered as [`crate::node_url::UNNAMED_NODE`].
 pub fn node_name(addr: &str) -> String {
-    match parse_node(addr) {
+    match host_and_port(addr) {
         Some((host, Some(port))) => format!("{host}:{port}"),
         Some((host, None)) => host,
         None => crate::node_url::UNNAMED_NODE.to_owned(),
@@ -372,7 +398,7 @@ where
         },
         SwapEvidencePolicy::Trusted { node } => (
             (0..nodes.len())
-                .filter(|index| node_matches(node, &labels[*index]))
+                .filter(|index| node_name(node) == node_name(&labels[*index]))
                 .collect(),
             1,
             UndeterminedReason::TrustedNodeSilent,
@@ -539,7 +565,34 @@ mod tests {
             !wire.contains("secret") && !wire.contains("KEY"),
             "the wire form carries a credential"
         );
-        assert_eq!(node_name("HTTPS://Node.Example.com/v3/KEY"), "node.example.com");
+        assert_eq!(node_name("HTTPS://Node.Example.com/v3/KEY"), "node.example.com:443");
+    }
+
+    /// One rule for the field match and the Trusted selection: the scheme's default port is written by `node_name`.
+    #[test]
+    fn node_name_writes_the_default_port_of_a_scheme() {
+        assert_eq!(node_name("https://a.example/x"), "a.example:443");
+        assert_eq!(node_name("wss://a.example/ws"), "a.example:443");
+        assert_eq!(node_name("http://a.example"), "a.example:80");
+        assert_eq!(node_name("https://a.example:8545"), "a.example:8545");
+        assert_eq!(node_name("a.example:50002"), "a.example:50002");
+        assert_eq!(node_name("A.Example"), "a.example");
+    }
+
+    /// A trusted https node without a port is found by its own label.
+    #[test]
+    fn agree_trusted_node_without_a_port_matches_its_label() {
+        let entry = "https://walletd.example/";
+        let policy = SwapEvidencePolicy::Trusted { node: entry.to_owned() };
+        let label = node_name(entry);
+        assert_eq!(label, "walletd.example:443");
+        let script: Script = vec![("other.example:443", Ok("none")), ("walletd.example:443", Ok("spent"))];
+        let (outcome, asked) = run(policy, &script, &[]);
+        assert_eq!(outcome, Agreement::Agreed {
+            answer: "spent",
+            decision: "spent".to_owned()
+        });
+        assert_eq!(asked, vec![label]);
     }
 
     #[test]
@@ -706,19 +759,58 @@ mod tests {
     fn r100_release_gate_every_swap_family_adopted() {
         let open: Vec<_> = R100_ADOPTED
             .iter()
-            .filter(|(_, adopted)| !adopted)
+            .filter(|(_, adoption)| *adoption == R100Adoption::NotAdopted)
             .map(|(family, _)| *family)
             .collect();
-        assert!(open.is_empty(), "families that have not adopted R100: {open:?}");
+        assert!(
+            open.is_empty(),
+            "families that swap and have not adopted R100: {open:?}"
+        );
+    }
+
+    /// `SwapsOff` is tied to the real switches in both directions (CRD ch.51 R100 item 5): a family marked
+    /// `SwapsOff` must have its swaps off, and a family whose swaps are on must not be `SwapsOff`, so a lane that
+    /// switches swaps on without adopting R100 fails CI. The Solana entry is tied in mm2_main, where its untradable
+    /// rule lives.
+    #[test]
+    fn swaps_off_entries_follow_the_real_switches() {
+        for (family, adoption) in R100_ADOPTED {
+            let swaps_on = match family {
+                SwapFamily::Tendermint => crate::TENDERMINT_SWAPS_AVAILABLE,
+                SwapFamily::Tron => crate::TRON_SWAPS_AVAILABLE,
+                // Solana: mm2_main `r100_swaps_off_for_solana_follows_the_untradable_rule`.
+                SwapFamily::Solana => continue,
+                // every other family swaps in the release
+                SwapFamily::Utxo
+                | SwapFamily::Bch
+                | SwapFamily::Slp
+                | SwapFamily::Qtum
+                | SwapFamily::Qrc20
+                | SwapFamily::Evm
+                | SwapFamily::Zcoin
+                | SwapFamily::Sia => true,
+            };
+            if *adoption == R100Adoption::SwapsOff {
+                assert!(!swaps_on, "a family marked SwapsOff has its swaps switched on");
+            }
+            if swaps_on {
+                assert!(
+                    *adoption != R100Adoption::SwapsOff,
+                    "a family whose swaps are on is marked SwapsOff"
+                );
+            }
+        }
     }
 
     #[test]
     fn adoption_table_gates_the_stored_policy() {
         let stored = SwapEvidencePolicy::Insufficient { hosts: 1 };
-        for (family, adopted) in R100_ADOPTED {
+        for (family, adoption) in R100_ADOPTED {
             let effective = effective_policy(*family, &stored);
-            assert_eq!(effective == stored, *adopted, "{family:?}");
-            assert!(*adopted || effective == SwapEvidencePolicy::NotAdopted);
+            let adopted = *adoption == R100Adoption::Adopted;
+            assert_eq!(effective == stored, adopted, "{family:?}");
+            assert_eq!(family_adopted(*family), adopted, "{family:?}");
+            assert!(adopted || effective == SwapEvidencePolicy::NotAdopted);
         }
     }
 

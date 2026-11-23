@@ -710,7 +710,7 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
 
     /// How this coin's swap-evidence reads are judged (CRD ch.51 R100). The default is
     /// [`SwapEvidencePolicy::NotAdopted`]: today's reads and no admission refusal. A family answers its policy
-    /// stored at activation once its entry in [`crate::swap_evidence::R100_ADOPTED`] is `true`.
+    /// stored at activation once its entry in [`crate::swap_evidence::R100_ADOPTED`] is `Adopted`.
     fn swap_evidence_policy(&self) -> SwapEvidencePolicy { SwapEvidencePolicy::NotAdopted }
 
     /// The refusal text of an order or a swap start with this coin, `None` when the coin may trade (R100 item 4).

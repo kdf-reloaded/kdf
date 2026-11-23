@@ -20151,6 +20151,32 @@ mod t05_12b_swap_key_check_tests {
         );
     }
 
+    /// R100 tie for Solana: the table says `SwapsOff` exactly while the untradable rule refuses a Solana coin
+    /// (the other `SwapsOff` families are tied to their switches in `coins::swap_evidence`).
+    #[test]
+    fn r100_swaps_off_for_solana_follows_the_untradable_rule() {
+        use coins::swap_evidence::{adoption_of, R100Adoption, SwapFamily};
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "coins": [
+                { "coin": "SOL", "protocol": { "type": "SOLANA" } },
+                { "coin": "USDC-SOL", "protocol": { "type": "SPLTOKEN" } },
+            ] }))
+            .into_mm_arc();
+        let swaps_off = ["SOL", "USDC-SOL"]
+            .iter()
+            .all(|ticker| untradable_reason_by_conf(&ctx, ticker) == Some("Solana"));
+        let adoption = adoption_of(SwapFamily::Solana);
+        if adoption == Some(R100Adoption::SwapsOff) {
+            assert!(swaps_off, "Solana is marked SwapsOff but its coins can trade");
+        }
+        if !swaps_off {
+            assert!(
+                adoption != Some(R100Adoption::SwapsOff),
+                "Solana swaps are on but the family is marked SwapsOff"
+            );
+        }
+    }
+
     /// CRD ch.51 R100 item 4: the swap start of a matched order is refused for a coin with fewer than two nodes and
     /// no `swap_evidence_node`; no swap starts. (The start runs on the test thread, where the mock holds.)
     #[test]
