@@ -12,7 +12,7 @@
 ///
 /// The watcher carries **precomputed** spend/refund transactions so it never
 /// needs the taker's private key.
-use crate::mm2::lp_swap::evidence_wait::WaitLog;
+use crate::mm2::lp_swap::evidence_wait::{Read, WaitLog};
 use crate::mm2::lp_swap::taker_swap::spend_secret;
 use crate::mm2::lp_swap::SwapsContext;
 use coins::swap_evidence::is_undetermined;
@@ -288,12 +288,7 @@ impl State for ValidateTakerPayment {
                 },
                 Err(e) => {
                     if is_undetermined(&e) {
-                        validate_log.note(
-                            &ctx.data.uuid,
-                            ctx.taker_coin.ticker(),
-                            "the check of the taker payment",
-                            &e,
-                        );
+                        validate_log.note(&ctx.data.uuid, ctx.taker_coin.ticker(), Read::TakerPaymentCheck, &e);
                     } else {
                         debug!("Watcher {}: taker payment not yet valid: {}", ctx.data.uuid, e);
                     }
@@ -366,12 +361,7 @@ impl State for WaitForTakerPaymentSpend {
                 },
                 Err(e) => {
                     if is_undetermined(&e) {
-                        search_log.note(
-                            &ctx.data.uuid,
-                            ctx.taker_coin.ticker(),
-                            "the state of the taker payment",
-                            &e,
-                        );
+                        search_log.note(&ctx.data.uuid, ctx.taker_coin.ticker(), Read::Look, &e);
                     } else {
                         warn!(
                             "Watcher {}: error searching for taker payment spend: {}",
@@ -442,12 +432,7 @@ impl State for RefundTakerPayment {
                 },
                 Err(e) => {
                     if is_undetermined(&e) {
-                        gate_log.note(
-                            &ctx.data.uuid,
-                            ctx.taker_coin.ticker(),
-                            "the chain time of the refund gate",
-                            &e,
-                        );
+                        gate_log.note(&ctx.data.uuid, ctx.taker_coin.ticker(), Read::Gate, &e);
                     } else {
                         error!("Watcher {}: can_refund_htlc error: {}", ctx.data.uuid, e);
                     }

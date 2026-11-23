@@ -1,7 +1,7 @@
 use super::check_balance::{check_base_coin_balance_for_swap, check_my_coin_balance_for_swap, CheckBalanceError,
                            CheckBalanceResult};
 use super::evidence_wait::{clock_secs, maker_refund_cap_text, maker_refund_gate_cap_text, retry_while_undetermined,
-                           undetermined_refund_deadline, with_fix_hint, WaitLog};
+                           undetermined_refund_deadline, with_fix_hint, Read, WaitLog};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
                              ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
@@ -1178,7 +1178,7 @@ impl MakerSwap {
         let validated = retry_while_undetermined(
             &self.uuid,
             self.taker_coin.ticker(),
-            "the check of the taker payment",
+            Read::TakerPaymentCheck,
             recheck_secs,
             wait_taker_payment,
             || self.taker_coin.validate_taker_payment(validate_input.clone()).compat(),
@@ -1501,12 +1501,7 @@ impl MakerSwap {
                                     ),
                                 ]));
                             }
-                            gate_log.note(
-                                &self.uuid,
-                                self.maker_coin.ticker(),
-                                "the chain time of the refund gate",
-                                &e,
-                            );
+                            gate_log.note(&self.uuid, self.maker_coin.ticker(), Read::Gate, &e);
                         } else {
                             error!("Error {} on can_refund_htlc, retrying in 30 seconds", e);
                         }
@@ -1553,7 +1548,7 @@ impl MakerSwap {
                                 ),
                             ]));
                         }
-                        evidence_log.note(&self.uuid, ticker, "the state of the taker payment", &reason);
+                        evidence_log.note(&self.uuid, ticker, Read::Look, &reason);
                         Timer::sleep(non_final_retry_secs).await;
                         continue;
                     },
@@ -5575,17 +5570,17 @@ mod maker_swap_tests {
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
     }
 
-    /// A look that fails for a plain reason is held; at the cap the step ends with the reason as the coin gave
-    /// it, and with no claim about the cause.
+    /// A look that fails for a plain reason is held; at the cap the step ends naming the kind of failure, not the
+    /// error text, and with no claim about the cause.
     #[test]
-    fn an_unreadable_taker_chain_holds_the_refund_until_the_cap_and_reports_the_error() {
+    fn an_unreadable_taker_chain_holds_the_refund_until_the_cap_and_names_the_kind_of_failure() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SENDS: AtomicUsize = AtomicUsize::new(0);
         static SEARCHES: AtomicUsize = AtomicUsize::new(0);
         let (maker_swap, mut published) = maker_swap_after_the_claim_step(100, vec![spend_confirm_failed_event()]);
         let start = start_test_clock();
         mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
-        mock_failing_taker_payment_search("server unreachable", &SEARCHES);
+        mock_failing_taker_payment_search("error sending request for url (http://node.example:443/)", &SEARCHES);
         mock_refund_counting(&SENDS);
 
         let (next, events) = block_on(maker_swap.refund_maker_payment_paced(0.01, test_clock)).unwrap();
@@ -5596,7 +5591,8 @@ mod maker_swap_tests {
             text.contains("the look for a spend or refund of the taker payment on ticker"),
             "{text}"
         );
-        assert!(text.contains("server unreachable"), "{text}");
+        assert!(text.contains("(the search failed or did not finish)"), "{text}");
+        assert!(!text.contains("node.example") && !text.contains("http"), "{text}");
         assert!(!text.contains("swap_evidence_node"), "{text}");
         assert!(
             text.ends_with("; run `recover_funds_of_swap` once the coin answers again"),
@@ -5909,7 +5905,7 @@ mod maker_swap_tests {
     }
 
     /// A gate that opens after `wait_refund_until()` with a look that fails for a plain reason does not end the
-    /// step at once: it ends one hour after the gate opened, with the error as given.
+    /// step at once: it ends one hour after the gate opened, naming the kind of failure.
     #[test]
     fn an_unreadable_taker_chain_after_the_deadline_ends_an_hour_after_the_gate_opened() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5918,13 +5914,14 @@ mod maker_swap_tests {
         let (maker_swap, _published) = maker_swap_after_the_claim_step(3_701, vec![spend_failed_event()]);
         let start = start_test_clock();
         mock_gate_open_counting(Box::leak(Box::new(AtomicUsize::new(0))));
-        mock_failing_taker_payment_search("server unreachable", &SEARCHES);
+        mock_failing_taker_payment_search("error sending request for url (http://node.example:443/)", &SEARCHES);
         mock_refund_counting(&SENDS);
 
         let (_, events) = block_on(maker_swap.refund_maker_payment_paced(0.01, test_clock)).unwrap();
 
         let text = refund_failed_text(&events);
-        assert!(text.contains("server unreachable"), "{text}");
+        assert!(text.contains("(the search failed or did not finish)"), "{text}");
+        assert!(!text.contains("node.example") && !text.contains("http"), "{text}");
         assert!(!text.contains("swap_evidence_node"), "{text}");
         assert!(
             SEARCHES.load(Ordering::SeqCst) > 1,

@@ -1123,9 +1123,11 @@ dropped and the taker refunded) is not part of this rule.
 > seconds and 3700 seconds after the refund step, in its current run, first
 > could act (the refundability check first answered that the refund can be sent,
 > or the check or a look first gave an undetermined answer at or after the lock
-> time). At that bound `MakerPaymentRefundFailed` gives the reason as it came
-> and, for a read undetermined under R100, the cause and the fix, and asks for
-> `recover_funds_of_swap`. A look held for another reason (a spend found but not
+> time). At that bound `MakerPaymentRefundFailed` names the kind of failure and,
+> for a read undetermined under R100, the cause and the fix, and asks for
+> `recover_funds_of_swap`; as R80 requires, neither the warning nor this text
+> carries a server address, URL, host or response text, and the full reason goes
+> to the debug log. A look held for another reason (a spend found but not
 > confirmed) keeps the text and the deadline of item 3. The manual recovery of
 > R83 and R84, and the taker's, answer as before; an error whose read is
 > undetermined under R100 also names the fix.
