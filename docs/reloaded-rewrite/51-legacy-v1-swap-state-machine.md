@@ -1847,6 +1847,24 @@ answer.
 > `swap_evidence_node`, and then run `recover_funds_of_swap`. No sentence of
 > R100 is changed.
 
+> *Status note (2026-11-23, a second one, Reloaded-original; maintainer
+> decision of 2026-11-23).* The bound of the note above is refined; that note
+> stays as written. A refund step of the maker or the taker whose reads stay
+> undetermined waits until the later of two moments: the lock time of its own
+> payment plus 3700 seconds, and 3700 seconds after the moment at which the
+> refund step, in its current run, first could act. The refund step first could
+> act when its refundability check first answered that the refund can be sent,
+> or when a look or a refundability check of the step first gave an
+> undetermined answer at or after the lock time; while that moment has not
+> come, the step does not end. That moment is not stored, so a restart starts a
+> new wait of 3700 seconds. A chain whose refundability check follows the
+> median time past can open the refund up to about an hour after the lock time,
+> and the later of the two moments keeps a full wait for it. Then the step ends
+> with its refund-failed event, whose text names the kind of failure; only when
+> the read is undetermined under R100 does it name the fix of the note above (a
+> node on a second host, or `swap_evidence_node`, then
+> `recover_funds_of_swap`). No sentence of R100 is changed.
+
 **T42.** *Agreement of the reads (R100).* Over two scripted nodes: answers that
 agree by item 1 let the refund step and the step that uses the secret go on
 (including two chain times that differ but are both past the lock); answers
@@ -1865,6 +1883,47 @@ refused by item 4; two hosts of one operator count as two nodes, with no
 warning; after a disagreement, one further agreeing answer does not decide, and
 a new agreeing pair does; a running swap whose coin loses its second node waits
 and logs the two ways to fix it.
+
+*Status note (2026-11-23, clean side; the maintainer's decisions of 2026-11-22
+and 2026-11-23 and decisions within the lane). How the code applies R100.* It
+changes no sentence above.
+
+1. *Nodes.* Nodes are counted as item 7 defines them; two schemes of one host
+   (for example `https` and `wss`) also name one node.
+2. *The field.* `swap_evidence_node` matches a list entry with the same host;
+   ports are compared only when both have one, and the default port of a scheme
+   counts as written. The activation error `SwapEvidenceNodeNotInList` names the
+   ticker and the node as host and port only, never a scheme, path, query or
+   credential.
+3. *Per family.* UTXO, BCH and QTUM over Electrum count the configured servers.
+   In native mode the daemon is trusted as item 6 says; a field equal to the
+   daemon's address is accepted, any other value refused. A QRC20 token takes
+   its platform's policy, and the field is part of the shared QTUM client's key.
+   An SLP token takes its platform's policy, but has too few nodes while its
+   `bchd_urls` hold fewer than two hosts. EVM counts the nodes that passed the
+   activation probe; the field may name a configured node that failed it, which
+   is then a trusted node that does not answer. ZHTLC counts
+   `light_wallet_d_servers`, and the field must be one of them. Sia has one node
+   and starts swaps only with the field naming it. Tendermint counts its RPC
+   nodes. A token of a platform takes the platform's policy.
+4. *Adoption.* Each family switches to R100 through one table in the code once
+   its reads ask two nodes; until then its coins keep today's reads and are not
+   refused at admission. The table marks a family whose swaps are switched off
+   in a release; R100 binds the families that swap. A release-gate test fails
+   while a family that swaps has not switched, and a test in every build fails
+   when a family's swaps are switched on while the table still marks them off. A
+   release is not tagged before the gate passes.
+5. *Asking two nodes.* Reads are asked as item 8 says: an attempt asks nodes of
+   distinct hosts, in the order of preference the family's node list gives,
+   until two have answered. Each node is read at its own tip, never at a height
+   both share. Two different answers are a disagreement, also when the tips lie
+   far apart. Two equal answers whose tips lie further apart than the read
+   allows (a height or a time) leave the read undetermined. An answer that
+   proves itself, as R100's head says of a secret, is taken alone from any node,
+   also when too few nodes answered or the tips lie too far apart.
+6. *Reporting.* An undetermined read is reported with its reason and what each
+   node answered, each node named by host and port only. The swap step
+   recognizes it by one marker in that text, wherever the text is wrapped.
 
 ## 51.7 Bound Message Contract
 
@@ -3669,5 +3728,17 @@ reference rows alike.
 - *Clean-side addition of 2026-11-23:* the status note after R100 item 9 on
   the bound of a waiting running swap (its refund deadline, then the
   refund-failed event naming the fix). Reloaded-original; it records the
+  maintainer's decision of 2026-11-23, takes no reference input and no
+  forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-23 (PR #521):* the status note after T43,
+  how the code of PRs #508 and #519 applies R100: nodes, the field, the policy
+  per family, adoption and the release gate, asking two nodes, and reporting.
+  It records the maintainer's decisions of 2026-11-22 and 2026-11-23 and
+  decisions within the lane, takes no reference input, and changes no sentence
+  of the chapter.
+- *Clean-side addition of 2026-11-23, a second one:* the second status note
+  after R100 item 9, which refines the bound of the first (the later of the
+  payment's lock time plus 3700 seconds and 3700 seconds after the refund step
+  first could act in its current run). Reloaded-original; it records the
   maintainer's decision of 2026-11-23, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.

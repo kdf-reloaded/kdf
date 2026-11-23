@@ -185,7 +185,7 @@ impl SiaCoin {
                 self.swap_evidence_node_name
             ),
         };
-        format!("{undetermined}; {fix}")
+        format!("{}; {fix}", undetermined.to_err_string())
     }
 
     pub fn my_keypair(&self) -> Result<&SiaKeypair, SiaCoinMyKeypairError> {

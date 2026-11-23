@@ -874,15 +874,12 @@ pub(crate) async fn maker_swap_start(ctx: MmArc, maker_match: MakerMatch, maker_
         log::warn!("Swap {} not started: {}", maker_match.request.uuid, mismatch);
         return;
     }
-    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
-    // moved yet.
-    if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
-        log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
-        return;
-    }
-    // CRD ch.51 R100 item 4: no new swap with a coin that has fewer than two nodes for swap evidence and no
-    // `swap_evidence_node`. Nothing has moved yet.
-    if let Some(error) = swap_evidence_admission(&maker_coin, &taker_coin) {
+    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain; and CRD ch.51
+    // R100 item 4: none with a coin that has fewer than two nodes for swap evidence and no `swap_evidence_node`.
+    // Nothing has moved yet.
+    if let Some(error) =
+        chain_disagreement(&maker_coin, &taker_coin).or_else(|| swap_evidence_admission(&maker_coin, &taker_coin))
+    {
         log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
         return;
     }
@@ -989,14 +986,12 @@ pub(crate) async fn taker_swap_start(ctx: MmArc, taker_order: TakerOrder, taker_
         );
         return;
     }
-    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
-    // moved yet.
-    if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
-        log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
-        return;
-    }
-    // CRD ch.51 R100 item 4, as for the maker.
-    if let Some(error) = swap_evidence_admission(&maker_coin, &taker_coin) {
+    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain; and CRD ch.51
+    // R100 item 4: none with a coin that has fewer than two nodes for swap evidence and no `swap_evidence_node`.
+    // Nothing has moved yet.
+    if let Some(error) =
+        chain_disagreement(&maker_coin, &taker_coin).or_else(|| swap_evidence_admission(&maker_coin, &taker_coin))
+    {
         log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
         return;
     }

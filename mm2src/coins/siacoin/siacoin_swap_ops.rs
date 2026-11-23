@@ -1585,12 +1585,15 @@ mod swap_evidence_read_tests {
         assert!(err.contains("the trusted node did not answer"), "{err}");
         assert!(err.contains("127.0.0.1:"), "the node is named: {err}");
         assert!(!err.contains("pw"), "{err}");
+        assert!(crate::swap_evidence::is_undetermined(&err), "{err}");
         let err = payment_sent(&coin).unwrap_err();
         assert!(err.contains("Undetermined whether the payment was sent"), "{err}");
+        assert!(crate::swap_evidence::is_undetermined(&err), "{err}");
         assert!(err.contains("the trusted node did not answer"), "{err}");
         let (tx, _) = payment();
         let err = search(&coin, [7u8; 32], &tx).unwrap_err();
         assert!(err.to_string().contains("the trusted node did not answer"), "{err}");
+        assert!(crate::swap_evidence::is_undetermined(&err.to_string()), "{err}");
     }
 
     /// A node that answers "no events" is "not sent" and "unspent"; those are answers, not silence.
