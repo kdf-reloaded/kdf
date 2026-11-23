@@ -1302,6 +1302,10 @@ the previous version used. The safe way:
 
 ### Tests
 
+- **A Tendermint history test no longer hangs when the whole `coins` test suite runs in parallel.** Once a test
+  stopped a scripted node, its port was free, and another test could be given it; a request to the stopped node
+  then reached a listener that never answered. On Linux a stopped scripted node now keeps its port until the test
+  ends, so connections to it are refused. No production code changes. Detail: PR #513.
 - **The `get_private_keys` warning tests no longer fail when the whole `coins` test suite runs in parallel.** The
   test log capture is one list for the whole process, and another test writes the same warning line, so the line
   counts of the per-call warning test were sometimes off. Each captured line now records the thread that wrote it,
@@ -1401,6 +1405,10 @@ the previous version used. The safe way:
   standalone-coin family are built only for native targets, like the test helpers they use. A new CI job,
   `wasm32-test-check`, compiles the test code of `coins_activation`, `coins` and `mm2_main` for wasm32 and is part
   of the required `tests-passed` check. Only test code and CI changed. Detail: PR #511.
+- **The Windows CI jobs install a pinned protoc.** After a package-manager install of protoc, the build script of
+  `coins` at times did not find protoc. The Windows test job and the Windows build now download protoc 27.3, check
+  the archive's SHA-256, set `PROTOC` to its path and check the version before the build. Only CI changed.
+  Detail: PR #517.
 
 ### Plans touched
 
