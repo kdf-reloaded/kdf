@@ -1583,35 +1583,59 @@ fn a_trc20_payment_is_accepted_when_the_transfer_fee_is_zero_or_the_token_has_no
 /// What every undetermined error of the watch side must be: it passes the engine's marker test, names no node URL and
 /// still names the fix.
 fn assert_marked(text: &str, nodes: &[&Node]) {
-    assert!(crate::swap_evidence::is_undetermined(text), "{text}");
-    assert!(text.starts_with(crate::swap_evidence::UNDETERMINED_PREFIX), "{text}");
-    assert!(!text.contains("://"), "{text}");
+    assert!(
+        crate::swap_evidence::is_undetermined(text),
+        "the error is not marked undetermined"
+    );
+    assert!(
+        text.starts_with(crate::swap_evidence::UNDETERMINED_PREFIX),
+        "the error does not start with the marker"
+    );
+    assert!(!text.contains("://"), "the error holds a URL scheme");
     for node in nodes {
-        assert!(!text.contains(&node.url()), "{text}");
+        assert!(!text.contains(&node.url()), "the error holds a node URL");
     }
-    assert!(text.contains("swap_evidence_node"), "{text}");
-    assert!(text.contains("another host"), "{text}");
+    assert!(
+        text.contains("swap_evidence_node"),
+        "the error does not name swap_evidence_node"
+    );
+    assert!(text.contains("another host"), "the error does not name another host");
 }
 
 /// The undetermined error of a trusted node that did not answer: marked, no URL, and the advice about that node.
 fn assert_trusted_silent(text: &str, nodes: &[&Node]) {
-    assert!(crate::swap_evidence::is_undetermined(text), "{text}");
-    assert!(text.starts_with(crate::swap_evidence::UNDETERMINED_PREFIX), "{text}");
-    assert!(!text.contains("://"), "{text}");
+    assert!(
+        crate::swap_evidence::is_undetermined(text),
+        "the error is not marked undetermined"
+    );
+    assert!(
+        text.starts_with(crate::swap_evidence::UNDETERMINED_PREFIX),
+        "the error does not start with the marker"
+    );
+    assert!(!text.contains("://"), "the error holds a URL scheme");
     for node in nodes {
-        assert!(!text.contains(&node.url()), "{text}");
+        assert!(!text.contains(&node.url()), "the error holds a node URL");
     }
     assert!(
         text.contains("the node named by swap_evidence_node did not answer"),
-        "{text}"
+        "the error does not name the silent trusted node"
     );
-    assert!(text.contains("remove swap_evidence_node"), "{text}");
-    assert!(!text.contains("add a node on another host"), "{text}");
+    assert!(
+        text.contains("remove swap_evidence_node"),
+        "the error does not advise removing swap_evidence_node"
+    );
+    assert!(
+        !text.contains("add a node on another host"),
+        "the error gives the two-node advice"
+    );
 }
 
 /// What a determined error is: no marker.
 fn assert_not_marked(text: &str) {
-    assert!(!crate::swap_evidence::is_undetermined(text), "{text}");
+    assert!(
+        !crate::swap_evidence::is_undetermined(text),
+        "the error is not marked undetermined"
+    );
 }
 
 #[test]
