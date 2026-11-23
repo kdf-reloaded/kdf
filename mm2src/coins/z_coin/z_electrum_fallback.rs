@@ -1028,7 +1028,10 @@ fn settle_pair<A, K: PartialEq + fmt::Debug>(
     mut conditions: Vec<String>,
 ) -> Result<A, FallbackError> {
     if answers.len() < 2 {
-        conditions.push("fewer than two Electrum servers on distinct hosts answered".to_owned());
+        conditions.push(crate::swap_evidence::undetermined(
+            "fewer than two Electrum servers on distinct hosts answered",
+            &[],
+        ));
         return Err(FallbackError::Undetermined(conditions));
     }
     let (first_name, first, first_decision) = answers.remove(0);
@@ -1036,9 +1039,12 @@ fn settle_pair<A, K: PartialEq + fmt::Debug>(
     if first_decision == second_decision {
         return Ok(first);
     }
-    conditions.push(format!(
-        "the two Electrum servers disagree: {} says {:?}, {} says {:?}",
-        first_name, first_decision, second_name, second_decision
+    conditions.push(crate::swap_evidence::undetermined(
+        &format!(
+            "the two Electrum servers disagree: {} says {:?}, {} says {:?}",
+            first_name, first_decision, second_name, second_decision
+        ),
+        &[],
     ));
     Err(FallbackError::Undetermined(conditions))
 }

@@ -60,6 +60,8 @@ struct StubState {
     version: Mutex<String>,
     /// How long the stub waits before it serves an accepted connection.
     accept_delay: Mutex<Duration>,
+    /// While set, an accepted connection is not served (see [`StubServer::hold_new_connections`]).
+    hold_new_connections: AtomicBool,
     results: Mutex<HashMap<String, Json>>,
     /// Methods that answer a JSON-RPC error with the given message instead of a result; they win over `results`.
     errors: Mutex<HashMap<String, String>>,
@@ -128,6 +130,7 @@ impl StubServer {
             behavior: Mutex::new(behavior),
             version: Mutex::new("1.4".to_owned()),
             accept_delay: Mutex::new(Duration::ZERO),
+            hold_new_connections: AtomicBool::new(false),
             results: Mutex::new(HashMap::new()),
             errors: Mutex::new(HashMap::new()),
             scripthash_results: Mutex::new(HashMap::new()),
@@ -231,6 +234,12 @@ impl StubServer {
 
     /// Makes the stub wait before it serves an accepted connection.
     pub fn set_accept_delay(&self, delay: Duration) { *self.state.accept_delay.lock().unwrap() = delay; }
+
+    /// While `hold` is set, a connection the stub accepts is not served: nothing is read from it and nothing is
+    /// answered, so a client cannot finish opening a session. When the hold is lifted, the connections that wait are
+    /// served as if they had just been accepted. The connections that are open already are not affected. A test uses
+    /// this to keep a client from getting a new session until a step of its own has ended, without a fixed wait.
+    pub fn hold_new_connections(&self, hold: bool) { self.state.hold_new_connections.store(hold, Ordering::SeqCst); }
 
     /// The result `method` answers (the default is `null`).
     pub fn set_result(&self, method: &str, result: Json) {
@@ -635,6 +644,9 @@ async fn serve_connection(
     let delay = *state.accept_delay.lock().unwrap();
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
+    }
+    while state.hold_new_connections.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     if let StubBehavior::RefuseAfter(allowed) = *state.behavior.lock().unwrap() {
         if number >= allowed {

@@ -1686,7 +1686,7 @@ impl LightwalletdBackend {
         format!(
             "{}; add a lightwalletd server on another host to light_wallet_d_servers, or set swap_evidence_node to \
              one of the listed servers",
-            undetermined
+            undetermined.to_err_string()
         )
     }
 
@@ -1728,10 +1728,7 @@ impl LightwalletdBackend {
                     common::log::debug!("the read of {} is still undetermined: {}", step, text);
                 }
                 Err(EvidenceUndetermined {
-                    disagree: matches!(
-                        undetermined.reason,
-                        UndeterminedReason::Disagree | UndeterminedReason::TipGap
-                    ),
+                    disagree: undetermined.reason == UndeterminedReason::Disagree,
                     text,
                 })
             },

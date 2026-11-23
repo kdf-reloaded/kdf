@@ -203,9 +203,8 @@ pub(crate) enum HtlcIndexError {
 #[derive(Clone, Debug, Display, PartialEq)]
 #[display(fmt = "{}", text)]
 pub(crate) struct EvidenceUndetermined {
-    /// The pair ended the attempt: the two endpoints answered with different decisions, or their tips were too far
-    /// apart to compare, so their answers may differ. A second pair (the Electrum fallback) is not asked in the same
-    /// attempt (item 8).
+    /// The two endpoints answered with different decisions. A second pair (the Electrum fallback) is not asked
+    /// in the same attempt (item 8).
     pub(crate) disagree: bool,
     pub(crate) text: String,
 }

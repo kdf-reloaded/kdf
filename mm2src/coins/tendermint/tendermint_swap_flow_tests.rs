@@ -43,6 +43,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -71,15 +72,27 @@ type Seen = Arc<Mutex<Vec<(String, Json)>>>;
 /// A JSON-RPC node on a loopback port. `health` is always answered; any other method is answered by the
 /// function given to [`FakeNode::answer`], and by a JSON-RPC error while there is none (or it returns `None`).
 /// A function that wants to answer with a particular error returns `{ "__rpc_error": { "code": .., "message": .. } }`.
+///
+/// On Linux the port stays reserved until the node is dropped: once the node has stopped accepting, a connection
+/// to the port is refused and no other socket of this process can be given the port, so a later request to this
+/// node cannot reach a listener of another test. On other systems the port is free again once the node stops.
 struct FakeNode {
     port: u16,
     stop: Arc<AtomicBool>,
+    /// Receives one message, or the hang-up, when the accept loop has ended and closed its listener.
+    stopped: Mutex<Receiver<()>>,
+    /// Holds the port while and after the node accepts connections.
+    #[cfg(target_os = "linux")]
+    _reservation: std::os::fd::OwnedFd,
     answer: SharedAnswer,
     seen: Seen,
 }
 
 impl FakeNode {
     fn start() -> Self {
+        #[cfg(target_os = "linux")]
+        let (listener, reservation) = reserved_port::listener_on_a_reserved_port();
+        #[cfg(not(target_os = "linux"))]
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         listener.set_nonblocking(true).expect("a non-blocking listener");
         let port = listener.local_addr().expect("the local address").port();
@@ -89,6 +102,7 @@ impl FakeNode {
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
 
         let (stop_t, answer_t, seen_t) = (stop.clone(), answer.clone(), seen.clone());
+        let (stopped_tx, stopped) = channel();
         std::thread::spawn(move || {
             while !stop_t.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -100,10 +114,15 @@ impl FakeNode {
                     Err(_) => break,
                 }
             }
+            drop(listener);
+            let _ = stopped_tx.send(());
         });
         FakeNode {
             port,
             stop,
+            stopped: Mutex::new(stopped),
+            #[cfg(target_os = "linux")]
+            _reservation: reservation,
             answer,
             seen,
         }
@@ -131,6 +150,96 @@ impl FakeNode {
 
 impl Drop for FakeNode {
     fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); }
+}
+
+/// A loopback listener whose port a second socket keeps for as long as that socket lives.
+#[cfg(target_os = "linux")]
+mod reserved_port {
+    use std::io::Error;
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    /// The size of `T` as the socket calls take it.
+    fn socklen_of<T>() -> libc::socklen_t { std::mem::size_of::<T>() as libc::socklen_t }
+
+    /// A TCP socket with `SO_REUSEPORT` and without `SO_REUSEADDR`, bound to the loopback address and `port`
+    /// (0: a port the system picks).
+    fn reuseport_socket(port: u16) -> OwnedFd {
+        // SAFETY: `socket` takes no pointer; the result is checked before use.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "create a socket: {}", Error::last_os_error());
+        // SAFETY: `fd` is a socket just opened and owned by nothing else, so `OwnedFd` may take and close it.
+        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+
+        let on: libc::c_int = 1;
+        // SAFETY: the option value points at `on`, a live `c_int`, and the length given is its size.
+        let res = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                (&on as *const libc::c_int).cast(),
+                socklen_of::<libc::c_int>(),
+            )
+        };
+        assert_eq!(res, 0, "set SO_REUSEPORT: {}", Error::last_os_error());
+
+        let address = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from(Ipv4Addr::LOCALHOST).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: the address points at `address`, a live `sockaddr_in`, and the length given is its size.
+        let res = unsafe {
+            libc::bind(
+                socket.as_raw_fd(),
+                (&address as *const libc::sockaddr_in).cast(),
+                socklen_of::<libc::sockaddr_in>(),
+            )
+        };
+        assert_eq!(res, 0, "bind the loopback port {port}: {}", Error::last_os_error());
+        socket
+    }
+
+    /// The port `socket` is bound to.
+    fn local_port(socket: &OwnedFd) -> u16 {
+        let mut address = libc::sockaddr_in {
+            sin_family: 0,
+            sin_port: 0,
+            sin_addr: libc::in_addr { s_addr: 0 },
+            sin_zero: [0; 8],
+        };
+        let mut length = socklen_of::<libc::sockaddr_in>();
+        // SAFETY: the address points at `address`, a live `sockaddr_in` the call may write to, and `length` holds
+        // its size.
+        let res = unsafe {
+            libc::getsockname(
+                socket.as_raw_fd(),
+                (&mut address as *mut libc::sockaddr_in).cast(),
+                &mut length,
+            )
+        };
+        assert_eq!(res, 0, "read the bound port: {}", Error::last_os_error());
+        u16::from_be(address.sin_port)
+    }
+
+    /// A listener on a loopback port the system picked, and the socket that reserves that port.
+    ///
+    /// The reservation is bound to the port and never listens. Both sockets set `SO_REUSEPORT`, which lets them
+    /// share the port. The reservation does not set `SO_REUSEADDR`, so a socket without `SO_REUSEPORT` (a std
+    /// listener, or a bind to port 0) is never given the port while the reservation lives; and once the listener
+    /// is closed, a connection to the port finds no listener and is refused.
+    pub(super) fn listener_on_a_reserved_port() -> (TcpListener, OwnedFd) {
+        let reservation = reuseport_socket(0);
+        let listener = reuseport_socket(local_port(&reservation));
+        // SAFETY: `listen` takes no pointer; the result is checked.
+        let res = unsafe { libc::listen(listener.as_raw_fd(), 128) };
+        assert_eq!(res, 0, "listen on the reserved port: {}", Error::last_os_error());
+        (TcpListener::from(listener), reservation)
+    }
 }
 
 fn serve_connection(mut stream: TcpStream, answer: &Mutex<Arc<Answer>>, seen: &Mutex<Vec<(String, Json)>>) {

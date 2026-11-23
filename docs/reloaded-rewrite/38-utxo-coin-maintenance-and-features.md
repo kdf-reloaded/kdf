@@ -4462,6 +4462,28 @@ per instance as follows.
 4. *First placement.* A subscription whose first placement for an instance
    failed or was dropped is not remembered for that instance.
 
+*Status note (2026-11-23, Reloaded-original).* Two rules of the note above
+are refined; both are defect fixes of this tree.
+
+1. *Placing again.* The placing again after a change of session leaves
+   alone a subscription that is already placed over the current session. It
+   places again only what the change of session lost, and it never sends a
+   second subscription over the same session. For a contract-event
+   subscription this keeps the bound of the D38.6.4Q.3 status note, item 2:
+   at most once per session. Before, a placing again that came after an
+   instance's own request over the same session sent the subscription a
+   second time.
+2. *First placement that failed.* Item 4 above holds unless the subscription
+   is placed over the current session when the request fails or is dropped.
+   That happens when the session changes while the request waits and the
+   placing again places the subscription over the new session. The server
+   then holds the subscription, so the instance stays remembered for it: a
+   later request of that instance sends nothing, and the subscription is
+   placed again after later changes of session. Before, the instance was
+   forgotten, and the server held a subscription that the client no longer
+   remembered. The rule of item 2 above, that the placing again is asked for
+   once more after a request it left alone has failed, is unchanged.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -6716,3 +6738,11 @@ R38.8.6 **Tests (two-direction, observable).**
   forbidden corpus, from the maintainer's decision, the cleared text of
   chapter 49 §49.2.2 and this repository's code. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Defect fix (2026-11-23), Reloaded-original, clean side -- status note
+  after the status note of 2026-11-22 on the subscriptions of a shared client
+  (the placing again leaves a subscription placed over the current session
+  alone; a failed first placement keeps an instance whose subscription was
+  placed over the current session meanwhile).* Written by a session that
+  never read the forbidden corpus, from this repository's code and its tests.
+  It takes no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.
