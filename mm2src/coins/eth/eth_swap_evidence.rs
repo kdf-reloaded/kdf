@@ -392,14 +392,26 @@ async fn spend_read_on(
     Ok(SpendRead::Claimed { tx, proven })
 }
 
+/// [`EthCoin::agreed_swap_reads`] for a coin that answers `policy`; `tron_family` is whether it is a TRX or TRC20
+/// coin, which is checked before the policy.
+fn agreed_reads_policy(tron_family: bool, policy: SwapEvidencePolicy) -> Option<SwapEvidencePolicy> {
+    if tron_family {
+        return None;
+    }
+    match policy {
+        SwapEvidencePolicy::OwnDaemon | SwapEvidencePolicy::NotAdopted => None,
+        policy => Some(policy),
+    }
+}
+
 impl EthCoin {
     /// The policy this coin's legacy swap reads are agreed under (CRD ch.51 R100), or `None` when they are read
     /// as before: a family that has not adopted the rule, and a coin served by the operator's own daemon.
+    ///
+    /// A TRX or TRC20 coin always gets `None`: TRON reads its swap evidence through its own TRON swap operations,
+    /// never through the EVM agreed reads, whatever TRON's adoption state.
     pub(crate) fn agreed_swap_reads(&self) -> Option<SwapEvidencePolicy> {
-        match self.swap_evidence_policy() {
-            SwapEvidencePolicy::OwnDaemon | SwapEvidencePolicy::NotAdopted => None,
-            policy => Some(policy),
-        }
+        agreed_reads_policy(self.is_tron_family(), self.swap_evidence_policy())
     }
 
     /// The nodes a read under `policy` may ask: the coin's probe-passed nodes. Under a trusted node and without
@@ -741,5 +753,30 @@ impl EthCoin {
                 evm_refund_eligibility(now, locktime, None)
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod agreed_reads_policy_tests {
+    use super::*;
+
+    /// A TRX or TRC20 coin never takes the EVM agreed reads, also when it answers an adopted policy.
+    #[test]
+    fn a_tron_family_coin_never_takes_the_evm_agreed_reads() {
+        let policies = [
+            SwapEvidencePolicy::TwoNodes {
+                hosts: vec!["a.example".to_owned(), "b.example".to_owned()],
+            },
+            SwapEvidencePolicy::Trusted {
+                node: "https://a.example".to_owned(),
+            },
+            SwapEvidencePolicy::Insufficient { hosts: 1 },
+        ];
+        for policy in policies {
+            assert_eq!(agreed_reads_policy(true, policy.clone()), None, "{policy:?}");
+            assert_eq!(agreed_reads_policy(false, policy.clone()), Some(policy));
+        }
+        assert_eq!(agreed_reads_policy(false, SwapEvidencePolicy::NotAdopted), None);
+        assert_eq!(agreed_reads_policy(false, SwapEvidencePolicy::OwnDaemon), None);
     }
 }

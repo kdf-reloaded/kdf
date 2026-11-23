@@ -3288,8 +3288,9 @@ impl EthCoin {
             use alloy::providers::Provider;
 
             let tx_from_rpc = match selfi.agreed_swap_reads() {
-                // CRD ch.51 §51.6G R100: the payment's state and its transaction are what two nodes agree on at
-                // a common block, or what the trusted node shows. An undetermined read is an error, never "valid".
+                // CRD ch.51 §51.6G R100: each node answers the payment's state and its transaction at its own
+                // latest block, and the pair must agree within the 60 s tip gap, or the trusted node answers. An
+                // undetermined read is an error, never "valid".
                 Some(policy) => {
                     let read = try_s!(
                         selfi
@@ -3510,8 +3511,9 @@ impl EthCoin {
         // the unscanned blocks from the tip downwards, so a late spend or refund near the tip is found within the
         // first few windows and a call cut short by its caller's budget loses no progress.
         let key: PaymentKey = (swap_contract_address, id);
-        // CRD ch.51 §51.6G R100: under an adopted swap-evidence policy the decision is read from single nodes at a
-        // common block; "not spent" then needs two agreeing nodes, or the trusted one.
+        // CRD ch.51 §51.6G R100: under an adopted swap-evidence policy each node answers at its own latest block,
+        // and the pair must agree within the 60 s tip gap, or the trusted node answers; "not spent" is never
+        // taken from an undetermined read.
         if let Some(policy) = self.agreed_swap_reads() {
             return self
                 .agreed_swap_tx_spend(&policy, &tx, &key.1, swap_contract_address, search_from_block)
