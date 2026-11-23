@@ -2740,10 +2740,26 @@ fn seed_store(fx: &Fixture) -> SqliteTxHistoryStorage {
     storage
 }
 
-/// Stops a scripted node: its port stops accepting connections.
+/// Stops a scripted node and waits until its listener is closed: its port stops accepting connections. On Linux
+/// the port stays reserved, and refuses connections, until the node is dropped (see [`FakeNode`]).
 fn refuse_connections(node: &FakeNode) {
     node.stop.store(true, Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(100));
+    // A hang-up means the accept loop ended earlier.
+    if let Err(RecvTimeoutError::Timeout) = node.stopped.lock().unwrap().recv_timeout(Duration::from_secs(5)) {
+        panic!("the scripted node did not stop accepting connections within 5 s");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stopped_node_refuses_connections_and_keeps_its_port() {
+    let node = FakeNode::start();
+    TcpStream::connect(("127.0.0.1", node.port)).expect("a running node accepts");
+    refuse_connections(&node);
+    let connect = TcpStream::connect(("127.0.0.1", node.port));
+    assert_eq!(connect.err().map(|e| e.kind()), Some(ErrorKind::ConnectionRefused));
+    let bind = TcpListener::bind(("127.0.0.1", node.port));
+    assert_eq!(bind.err().map(|e| e.kind()), Some(ErrorKind::AddrInUse));
 }
 
 fn versioned_error(fx: &Fixture, coin: &str) -> MyTxHistoryErrorV2 {
@@ -2890,4 +2906,68 @@ fn t36_60_the_state_is_finished_while_a_node_answers_and_the_fetcher_fails() {
     let legacy = common::block_on(crate::my_tx_history(fx.ctx.clone(), json!({ "coin": "IRIS" }))).expect("an answer");
     let legacy: Json = serde_json::from_slice(legacy.body()).unwrap();
     assert_eq!(legacy["result"]["sync_status"]["state"], "Finished");
+}
+
+/// A node that accepts connections and never answers; returns its URL. The sockets are held open.
+fn holding_node_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let port = listener.local_addr().expect("the local address").port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            held.push(stream);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+fn set_clients(coin: &TendermintCoin, clients: Vec<crate::tendermint::rpc::HttpClient>) {
+    common::block_on(async { coin.client.0.lock().await.rpc_clients = clients });
+}
+
+fn short_client(url: &str) -> crate::tendermint::rpc::HttpClient {
+    crate::tendermint::rpc::HttpClient::with_timeout(url, Duration::from_millis(300)).expect("a client")
+}
+
+#[test]
+fn node_selection_passes_a_holding_node_and_picks_the_answering_one() {
+    // A probe that times out is a failed probe: selection goes on to the next node.
+    let fx = history_fixture();
+    let holding = holding_node_url();
+    set_clients(&fx.coin, vec![short_client(&holding), short_client(&fx.node.url())]);
+    let started = std::time::Instant::now();
+    let client = common::block_on(crate::tendermint::tendermint_helpers::TendermintCommons::rpc_client(
+        &fx.coin,
+    ))
+    .expect("a node is selected");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(client.uri().to_string().trim_end_matches('/'), fx.node.url());
+}
+
+#[test]
+fn the_per_node_block_loop_moves_on_from_a_holding_node() {
+    // The first node answers without a block time, the second node holds, the third has the block.
+    let third = FakeNode::start();
+    let fx = history_fixture_for(&OWN_KEY, Some(&third));
+    let state_a = script_history(&fx);
+    let _state_c = script_history_on(&third, &fx.coin);
+    let holding = holding_node_url();
+    set_clients(&fx.coin, vec![
+        short_client(&fx.node.url()),
+        short_client(&holding),
+        short_client(&third.url()),
+    ]);
+    {
+        let mut st = state_a.lock().unwrap();
+        st.block_times.insert(20, None);
+        st.spender = vec![outgoing(&fx, "has time", 10), outgoing(&fx, "first node lacks it", 20)];
+    }
+    let storage = storage_with_init();
+    let mut fetcher = HistoryFetcher::for_test(fx.coin.clone(), storage.clone());
+    common::block_on(fetcher.pass()).expect("a pass");
+    assert_eq!(history_total_of(&storage, &me(&fx)), 2);
+    assert!(
+        !third.requests("abci_query").is_empty(),
+        "the third node was asked for the block after the holding one"
+    );
 }

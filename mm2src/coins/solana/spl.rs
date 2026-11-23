@@ -690,6 +690,8 @@ impl WatcherOps for SplToken {}
 impl MmCoin for SplToken {
     fn is_asset_chain(&self) -> bool { false }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy { self.platform_coin.swap_evidence_policy() }
+
     /// A custom token (a request-supplied `protocol`, no configuration entry) is always wallet-only; a configured
     /// token follows its entry (CRD ch.40 R40.6B.6).
     fn wallet_only(&self, ctx: &MmArc) -> bool {

@@ -743,10 +743,7 @@ fn a_wallet_without_a_token_account_has_balance_zero() {
 /// A node failure stays an error: a balance is not zero because the node cannot be reached.
 #[test]
 fn a_node_failure_is_still_an_error() {
-    let url = {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
-        format!("http://127.0.0.1:{}", listener.local_addr().expect("address").port())
-    };
+    let url = crate::closed_port::closed_url();
     let token = token_on(&url, SPL_TOKEN_PROGRAM_ID, 6);
     assert!(block_on(token.my_balance().compat()).is_err(), "the balance read fails");
 }
@@ -775,10 +772,7 @@ fn mint_owner_check() {
         "a mint account that does not exist is accepted"
     );
 
-    let url = {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
-        format!("http://127.0.0.1:{}", listener.local_addr().expect("address").port())
-    };
+    let url = crate::closed_port::closed_url();
     let sol = sol_on(&url);
     let error = block_on(sol.check_mint_owner(&mint(), &SPL_TOKEN_PROGRAM_ID)).expect_err("a closed node");
     assert!(matches!(error.get_inner(), MintOwnerError::Node(_)), "{error:?}");

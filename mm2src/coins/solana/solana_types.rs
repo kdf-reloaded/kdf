@@ -162,6 +162,21 @@ impl SolanaActivationParams {
     /// The evidence node the request names, if any.
     pub fn swap_evidence_node(&self) -> Option<&str> { self.swap_evidence_node.as_deref() }
 
+    /// The swap-evidence policy of a coin activated with these parameters (CRD ch.51 R100): over the node list, a
+    /// `swap_evidence_node` matching one entry (same host; ports are compared only when both the field and the entry
+    /// have one, after scheme defaults, and the scheme itself is ignored) is `Trusted` with that list entry, and a
+    /// field outside the list is refused.
+    pub fn swap_evidence_policy(
+        &self,
+        ticker: &str,
+    ) -> Result<crate::swap_evidence::SwapEvidencePolicy, crate::swap_evidence::SwapEvidenceNodeNotInList> {
+        crate::swap_evidence::swap_evidence_policy_from(
+            ticker,
+            self.swap_evidence_node.as_deref(),
+            &self.collected_urls(),
+        )
+    }
+
     /// Flattened endpoint list in dispatch order.
     pub(crate) fn collected_urls(&self) -> Vec<String> {
         let mut v: Vec<String> = Vec::with_capacity(self.client_urls.len() + 1);
@@ -195,13 +210,6 @@ impl<'de> serde::Deserialize<'de> for SolanaNodeUrl {
             _ => Err(serde::de::Error::custom("Invalid node `url`: expected an absolute URL")),
         }
     }
-}
-
-/// Why a `swap_evidence_node` is refused (CRD ch.40 R40.6D.16, chapter 51 R100).
-#[derive(Debug, Display, PartialEq, Eq)]
-pub enum SwapEvidenceNodeError {
-    #[display(fmt = "`swap_evidence_node` must be one of the coin's nodes")]
-    NotInNodeList,
 }
 
 /// The `swap_program_id` of a coins entry (CRD ch.40 R40.6D.2): `protocol.protocol_data.swap_program_id`, a base58
@@ -353,12 +361,12 @@ pub async fn solana_coin_with_node_order(
     order: SolanaNodeOrder,
 ) -> Result<SolanaCoin, String> {
     let urls = params.collected_urls();
-    let evidence_node = params.swap_evidence_node.clone();
-    if let Some(node) = &evidence_node {
-        if !urls.iter().any(|url| url == node) {
-            return Err(SwapEvidenceNodeError::NotInNodeList.to_string());
-        }
-    }
+    // The matched list entry, not the raw field, is the evidence node: the pool finds its node by exact URL.
+    let swap_evidence = params.swap_evidence_policy(ticker).map_err(|e| e.to_string())?;
+    let evidence_node = match &swap_evidence {
+        crate::swap_evidence::SwapEvidencePolicy::Trusted { node } => Some(node.clone()),
+        _ => None,
+    };
     if urls.is_empty() {
         return Err("Solana activation requires at least one RPC endpoint (client_url or client_urls)".to_owned());
     }
@@ -384,6 +392,7 @@ pub async fn solana_coin_with_node_order(
         swap: SolanaSwapConfig::default(),
     }));
     solana_coin.set_swap_evidence_node(evidence_node);
+    solana_coin.set_swap_evidence_policy(swap_evidence);
     Ok(solana_coin)
 }
 
