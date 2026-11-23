@@ -1227,6 +1227,17 @@ the previous version used. The safe way:
   it sent nothing. Now a disabled instance records nothing, and a subscription is skipped only while it is placed
   over the current connection. One instance sends at most one request per subscription at a time. Detail: PR #473;
   CRD ch.38 status note of 2026-11-22 after D38.6.4Q.1.
+- **The Electrum client no longer sends a second subscription on the same connection, and no longer forgets a
+  subscription that a reconnect placed while a request for it was failing.** After a connection is opened, the client
+  places its remembered subscriptions on it again. That step also sent a subscription that a coin had just placed
+  on the same connection itself, so the server got it twice; this could happen right after activation. And when a
+  coin's first request for a subscription was still waiting while the connection changed, the client placed the
+  subscription on the new connection; if the waiting request then failed, the client forgot the subscription
+  although the server held it, and it was not placed again after later reconnects. Now a subscription that is
+  already placed on the current connection is not sent again, and a failed first request keeps the subscription
+  when it is placed on the current connection. This applies to the address and token balance subscriptions of
+  UTXO coins, QTUM and QRC20 tokens on Electrum. Detail: PR #520; CRD ch.38 status note of 2026-11-23 after
+  D38.6.4Q.1.
 
 #### TRON coins
 
