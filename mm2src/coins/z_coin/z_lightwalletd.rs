@@ -109,18 +109,6 @@ pub(crate) const EXPIRY_MAX_TIP_GAP_BLOCKS: u64 = 2;
 /// 2 blocks bounds the difference of two healthy medians to about two and a half minutes.
 pub(crate) const CHAIN_TIME_MAX_TIP_GAP_BLOCKS: u64 = 2;
 
-/// The kind of a swap-evidence policy as a fixed text. The policy's trusted node is the operator's
-/// `swap_evidence_node`, which can carry a credential, so no log line or error text formats the policy itself.
-pub(crate) fn policy_kind(policy: &SwapEvidencePolicy) -> &'static str {
-    match policy {
-        SwapEvidencePolicy::TwoNodes { .. } => "two nodes",
-        SwapEvidencePolicy::Trusted { .. } => "trusted node",
-        SwapEvidencePolicy::Insufficient { .. } => "too few nodes",
-        SwapEvidencePolicy::NotAdopted => "not adopted",
-        SwapEvidencePolicy::OwnDaemon => "own daemon",
-    }
-}
-
 /// How many undetermined steps are remembered to log each of them once (R100 item 9).
 pub(crate) const UNDETERMINED_LOGGED_MAX: usize = 32;
 

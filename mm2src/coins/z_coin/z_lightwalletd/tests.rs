@@ -2690,28 +2690,6 @@ mod r100 {
         assert!(gap(backend.confirmations_agreed(&tx, 0, 6).await.unwrap_err()));
     }
 
-    /// The policy is logged by its kind only: a trusted node is the operator's field and can carry a credential.
-    #[test]
-    fn the_policy_kind_names_no_node() {
-        let trusted = SwapEvidencePolicy::Trusted {
-            node: "https://user:secret@h:443".to_owned(),
-        };
-        let kind = policy_kind(&trusted);
-        assert_eq!(kind, "trusted node");
-        assert!(
-            !kind.contains("secret") && !kind.contains("user"),
-            "the kind names a credential"
-        );
-        for (policy, expected) in [
-            (two_nodes(), "two nodes"),
-            (SwapEvidencePolicy::Insufficient { hosts: 1 }, "too few nodes"),
-            (SwapEvidencePolicy::NotAdopted, "not adopted"),
-            (SwapEvidencePolicy::OwnDaemon, "own daemon"),
-        ] {
-            assert_eq!(policy_kind(&policy), expected);
-        }
-    }
-
     #[test]
     fn zcoin_has_adopted_r100() {
         assert!(crate::swap_evidence::family_adopted(

@@ -1165,7 +1165,7 @@ impl LightwalletdBackend {
             txid_internal_to_display(output.txid),
             output.vout,
             servers.len(),
-            policy_kind(&self.swap_evidence)
+            self.swap_evidence.kind()
         ));
         let agreement = self
             .agree_on_with_tips(
@@ -1235,7 +1235,7 @@ impl LightwalletdBackend {
             log.coin,
             hex::encode(script_pubkey),
             servers.len(),
-            policy_kind(&self.swap_evidence)
+            self.swap_evidence.kind()
         ));
         let agreement = self
             .agree_on_with_tips(
