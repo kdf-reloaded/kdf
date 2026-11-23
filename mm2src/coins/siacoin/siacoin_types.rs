@@ -37,6 +37,10 @@ pub struct SiaCoinActivationRequest {
     /// `CoinCreationError`) before any network access: Sia has no hardware activation.
     #[serde(default = "PrivKeyActivationPolicy::context_priv_key")]
     pub priv_key_policy: PrivKeyActivationPolicy,
+    /// The node whose answer a swap-evidence read takes alone (CRD ch.51 R100 item 2); it must be the coin's
+    /// `server_url`.
+    #[serde(default)]
+    pub swap_evidence_node: Option<String>,
 }
 
 /// A debug view of the walletd client configuration that shows the server in host-only form and no secret:
@@ -78,6 +82,10 @@ impl fmt::Debug for SiaCoinActivationRequest {
             .field("gap_limit", &self.gap_limit)
             .field("client_conf", &RedactedClientConf(&self.client_conf))
             .field("priv_key_policy", &self.priv_key_policy)
+            .field(
+                "swap_evidence_node",
+                &self.swap_evidence_node.as_deref().map(crate::node_url::host_only),
+            )
             .finish()
     }
 }
@@ -88,6 +96,7 @@ pub enum SiaCoinFromLegacyReqErr {
     InvalidGapLimit(serde_json::Error),
     InvalidClientConf(serde_json::Error),
     InvalidPrivKeyPolicy(serde_json::Error),
+    InvalidSwapEvidenceNode(serde_json::Error),
 }
 
 impl SiaCoinActivationRequest {
@@ -106,12 +115,16 @@ impl SiaCoinActivationRequest {
             },
         };
 
+        let swap_evidence_node = serde_json::from_value(req["swap_evidence_node"].clone())
+            .map_to_mm(SiaCoinFromLegacyReqErr::InvalidSwapEvidenceNode)?;
+
         Ok(SiaCoinActivationRequest {
             tx_history,
             required_confirmations,
             gap_limit,
             client_conf,
             priv_key_policy,
+            swap_evidence_node,
         })
     }
 }

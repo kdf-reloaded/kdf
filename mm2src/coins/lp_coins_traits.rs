@@ -708,6 +708,19 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
     /// of a new swap with it and a withdrawal of it are refused with this text.
     fn chain_disagreement(&self) -> Option<String> { None }
 
+    /// How this coin's swap-evidence reads are judged (CRD ch.51 R100). The default is
+    /// [`SwapEvidencePolicy::NotAdopted`]: today's reads and no admission refusal. A family answers its policy
+    /// stored at activation once its entry in [`crate::swap_evidence::R100_ADOPTED`] is `Adopted`.
+    fn swap_evidence_policy(&self) -> SwapEvidencePolicy { SwapEvidencePolicy::NotAdopted }
+
+    /// The refusal text of an order or a swap start with this coin, `None` when the coin may trade (R100 item 4).
+    fn swap_evidence_refusal(&self) -> Option<String> {
+        match self.swap_evidence_policy() {
+            SwapEvidencePolicy::Insufficient { .. } => Some(crate::swap_evidence::insufficient_refusal(self.ticker())),
+            _ => None,
+        }
+    }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut;
 
     /// Maximum number of digits after decimal point used to denominate integer coin units (satoshis, wei, etc.)

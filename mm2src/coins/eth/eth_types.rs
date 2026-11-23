@@ -446,6 +446,8 @@ pub struct EthCoinImpl {
     pub(crate) web3: super::alloy_compat::KdfProvider,
     /// The separate provider instances kept to get nonce, will replace the web3 completely soon
     pub(crate) web3_instances: Vec<Web3Instance>,
+    /// The swap-evidence policy fixed at activation (CRD ch.51 R100). A token of the platform shares the platform's.
+    pub(crate) swap_evidence: crate::SwapEvidencePolicy,
     pub(crate) decimals: u8,
     pub(crate) gas_station_url: Option<String>,
     pub(crate) gas_station_decimals: u8,
@@ -761,6 +763,9 @@ impl fmt::Display for EthCoinType {
 
 #[derive(Clone, Debug)]
 pub struct Web3Instance {
+    /// The configured URL of the node, as the activation request gave it. It may carry a credential: name it
+    /// host-only in any text.
+    pub(crate) url: String,
     pub(crate) web3: super::alloy_compat::KdfProvider,
     pub(crate) is_parity: bool,
 }

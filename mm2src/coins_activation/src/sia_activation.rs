@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use coins::coin_balance::{EnableCoinBalance, EnableCoinBalanceOps, EnableCoinScanPolicy, IguanaWalletBalance};
 use coins::hd_pubkey::{HDXPubExtractor, RpcTaskXPubExtractor};
 use coins::siacoin::{SiaCoin, SiaCoinActivationRequest, SiaCoinNewError};
+use coins::swap_evidence::SwapEvidenceNodeNotInList;
 use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, PrivKeyBuildPolicy, RegisterCoinError};
 use crypto::hw_rpc_task::{HwConnectStatuses, HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use crypto::{CryptoCtx, CryptoCtxError};
@@ -81,6 +82,9 @@ pub enum SiaInitError {
     },
     CouldNotGetBalance(String),
     CouldNotGetBlockCount(String),
+    /// A `swap_evidence_node` other than the coin's `server_url` (CRD ch.51 R100 item 2).
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     Internal(String),
 }
 
@@ -109,6 +113,7 @@ fn single_address_wallet_balance(address: String, balance: CoinBalance) -> Enabl
 impl SiaInitError {
     fn from_new_err(err: SiaCoinNewError, ticker: String) -> Self {
         match err {
+            SiaCoinNewError::SwapEvidenceNodeNotInList(error) => SiaInitError::SwapEvidenceNodeNotInList(error),
             // A signing policy other than the single-key and the HD one is a task-level
             // `CoinCreationError`, not a dedicated key-policy discriminant (CRD ch.46 R46.1.3, R46.5.2).
             SiaCoinNewError::UnsupportedPrivKeyPolicy => SiaInitError::CoinCreationError {
@@ -167,6 +172,7 @@ impl From<SiaInitError> for InitStandaloneCoinError {
             SiaInitError::CouldNotGetBalance(e) | SiaInitError::CouldNotGetBlockCount(e) => {
                 InitStandaloneCoinError::Transport(e)
             },
+            SiaInitError::SwapEvidenceNodeNotInList(error) => InitStandaloneCoinError::SwapEvidenceNodeNotInList(error),
             SiaInitError::Internal(e) => InitStandaloneCoinError::Internal(e),
         }
     }
@@ -348,6 +354,42 @@ mod tests {
         assert_eq!(wire["error_type"], "CoinCreationError");
         assert_eq!(wire["error_data"]["ticker"], "SC");
         assert!(wire["error_data"]["error"].is_string());
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// CRD ch.51 R100 item 2: a `swap_evidence_node` other than the `server_url` is refused before any network
+    /// access, with the wire form `{error_type, error_data: {ticker, node}}`.
+    #[test]
+    fn a_swap_evidence_node_outside_the_node_list_is_refused() {
+        use coins::PrivKeyBuildPolicy;
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        let ctx = MmCtxBuilder::new().with_conf(json!({ "netid": 8762 })).into_mm_arc();
+        crypto::CryptoCtx::init_with_global_hd_account(
+            ctx.clone(),
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .expect("valid test mnemonic");
+        let request: SiaCoinActivationRequest = serde_json::from_value(json!({
+            "client_conf": { "server_url": "http://127.0.0.1:1/", "timeout": 1 },
+            "swap_evidence_node": "other.example",
+        }))
+        .unwrap();
+        let priv_key_policy = PrivKeyBuildPolicy::detect_priv_key_policy(&ctx).unwrap();
+        let err = match block_on(SiaCoin::new(
+            &ctx,
+            json!({ "coin": "SC", "required_confirmations": 1 }),
+            &request,
+            priv_key_policy,
+        )) {
+            Err(err) => err,
+            Ok(_) => panic!("the field is outside the node list"),
+        };
+        let (wire, status) = task_error(SiaInitError::from_new_err(err.into_inner(), "SC".to_owned()));
+        assert_eq!(
+            wire,
+            json!({ "error_type": "SwapEvidenceNodeNotInList", "error_data": { "ticker": "SC", "node": "other.example" } })
+        );
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 

@@ -356,6 +356,10 @@ impl WatcherOps for SiaCoin {
 impl MmCoin for SiaCoin {
     fn is_asset_chain(&self) -> bool { false }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Sia, &self.swap_evidence)
+    }
+
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         let coin = self.clone();
         let fut = async move {

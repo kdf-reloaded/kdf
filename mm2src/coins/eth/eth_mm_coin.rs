@@ -86,6 +86,15 @@ impl EthCoin {
 impl MmCoin for EthCoin {
     fn is_asset_chain(&self) -> bool { false }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        use crate::swap_evidence::{effective_policy, SwapFamily};
+        match self.coin_type {
+            // TRON keeps the trait default until its own lane adopts R100.
+            EthCoinType::Tron | EthCoinType::Trc20 { .. } => effective_policy(SwapFamily::Tron, &self.swap_evidence),
+            _ => effective_policy(SwapFamily::Evm, &self.swap_evidence),
+        }
+    }
+
     /// CRD R47.5.12 / R47.5.13a -- an EVM coin activated under the MetaMask
     /// signing policy is a non-swap (balance / address / `withdraw`) account: it
     /// holds no local secret, so it cannot derive a per-swap HTLC key-pair or

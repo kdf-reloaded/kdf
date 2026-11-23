@@ -58,6 +58,8 @@ pub(crate) struct ClientKey {
     block_interval: Option<Duration>,
     /// `ElectrumBuilderArgs`: `spawn_ping`, `negotiate_version` and `collect_metrics`.
     args: (bool, bool, bool),
+    /// The activation's `swap_evidence_node` (CRD ch.51 R100): two activations that differ only in it do not share.
+    swap_evidence_node: Option<String>,
 }
 
 impl ClientKey {
@@ -78,7 +80,14 @@ impl ClientKey {
             listed_order_for_spends,
             block_interval,
             args: (args.spawn_ping, args.negotiate_version, args.collect_metrics),
+            swap_evidence_node: None,
         }
+    }
+
+    /// The key with the activation's `swap_evidence_node` (CRD ch.51 R100).
+    pub(crate) fn with_swap_evidence_node(mut self, swap_evidence_node: Option<&str>) -> ClientKey {
+        self.swap_evidence_node = swap_evidence_node.map(str::to_owned);
+        self
     }
 
     /// The servers as a text may name them: `host:port` each, in the configured order, comma separated. Nothing else of
@@ -242,6 +251,18 @@ mod tests {
             0,
             "a stale entry is pruned on lookup"
         );
+    }
+
+    /// CRD ch.51 R100: two activations that differ only in `swap_evidence_node` do not share a client.
+    #[test]
+    fn the_swap_evidence_node_tells_clients_apart() {
+        let servers = [server("127.0.0.1:1"), server("127.0.0.1:2")];
+        let key =
+            |field: Option<&str>| key_with(&servers, ElectrumBuilderArgs::default()).with_swap_evidence_node(field);
+        assert_eq!(key(None), key(None));
+        assert_eq!(key(Some("127.0.0.1:1")), key(Some("127.0.0.1:1")));
+        assert_ne!(key(None), key(Some("127.0.0.1:1")));
+        assert_ne!(key(Some("127.0.0.1:1")), key(Some("127.0.0.1:2")));
     }
 
     #[test]

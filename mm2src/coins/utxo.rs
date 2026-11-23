@@ -811,6 +811,9 @@ pub struct UtxoCoinFields {
     /// The flag determines whether to use mature unspent outputs *only* to generate transactions.
     /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
     pub check_utxo_maturity: bool,
+    /// The swap-evidence policy fixed at activation (CRD ch.51 R100). The coin answers it through
+    /// `MmCoin::swap_evidence_policy` once its family has adopted R100 (`swap_evidence::R100_ADOPTED` is `Adopted`).
+    pub swap_evidence: crate::SwapEvidencePolicy,
 }
 
 #[derive(Debug, Display)]
@@ -1631,6 +1634,10 @@ pub struct UtxoActivationParams {
     /// The HD address the coin uses for swaps. Defaults to account 0, the external chain and address 0.
     #[serde(default)]
     pub path_to_address: Option<PathToAddress>,
+    /// The one node whose answer a swap-evidence read takes alone (CRD ch.51 R100 item 2). It must be in the node
+    /// list; in the native mode only the daemon's own address is accepted.
+    #[serde(default)]
+    pub swap_evidence_node: Option<String>,
 }
 
 #[derive(Debug, Display)]
@@ -1645,6 +1652,7 @@ pub enum UtxoFromLegacyReqErr {
     InvalidCheckUtxoMaturity(json::Error),
     InvalidScanPolicy(json::Error),
     InvalidPrivKeyPolicy(json::Error),
+    InvalidSwapEvidenceNode(json::Error),
     #[display(fmt = "Invalid 'min_connected': {}", _0)]
     InvalidMinConnected(json::Error),
     #[display(fmt = "Invalid 'max_connected': {}", _0)]
@@ -1696,6 +1704,8 @@ impl UtxoActivationParams {
         let priv_key_policy = json::from_value::<Option<PrivKeyActivationPolicy>>(req["priv_key_policy"].clone())
             .map_to_mm(UtxoFromLegacyReqErr::InvalidPrivKeyPolicy)?
             .unwrap_or(PrivKeyActivationPolicy::IguanaPrivKey);
+        let swap_evidence_node = json::from_value(req["swap_evidence_node"].clone())
+            .map_to_mm(UtxoFromLegacyReqErr::InvalidSwapEvidenceNode)?;
 
         Ok(UtxoActivationParams {
             mode,
@@ -1710,6 +1720,7 @@ impl UtxoActivationParams {
             priv_key_policy,
             check_utxo_maturity,
             path_to_address: None,
+            swap_evidence_node,
         })
     }
 }
@@ -2617,6 +2628,7 @@ pub fn address_by_conf_and_pubkey_str(
         priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
         check_utxo_maturity: None,
         path_to_address: None,
+        swap_evidence_node: None,
     };
     let conf_builder = UtxoConfBuilder::new(conf, &params, coin)
         // Only the address fields are read here, never the signing algorithm.

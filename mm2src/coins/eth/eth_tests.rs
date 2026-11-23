@@ -74,6 +74,7 @@ fn eth_coin_for_test_with_netid_and_decimals(
 ) -> (MmArc, EthCoin) {
     let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes("TEST", urls), vec![]).unwrap();
     let web3_instances = vec![Web3Instance {
+        url: String::new(),
         web3: web3.clone(),
         is_parity: true,
     }];
@@ -110,6 +111,7 @@ pub(super) fn eth_coin_for_test_with_providers(
 
     let my_addr = key_pair.address();
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals,
         gas_station_url: None,
@@ -205,6 +207,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         EthCoinType::Tron | EthCoinType::Trc20 { .. } => panic!("TRON not used in this test helper"),
     };
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals: 18,
         gas_station_url: None,
@@ -218,6 +221,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         fallback_swap_contract: None,
         ticker,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -393,6 +397,7 @@ fn test_wait_for_payment_spend_timeout() {
 
     let my_addr = key_pair.address();
     let coin = EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type: EthCoinType::Eth,
         decimals: 18,
         gas_station_url: None,
@@ -406,6 +411,7 @@ fn test_wait_for_payment_spend_timeout() {
         fallback_swap_contract: None,
         ticker: "ETH".into(),
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -577,6 +583,7 @@ mod search_for_swap_tx_spend_scripted {
         let swap_contract_address = Address::from_str(SWAP_CONTRACT_ADDR).unwrap();
         let my_addr = key_pair.address();
         let coin = EthCoin(Arc::new(EthCoinImpl {
+            swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
             coin_type,
             decimals: 18,
             gas_station_url: None,
@@ -590,6 +597,7 @@ mod search_for_swap_tx_spend_scripted {
             fallback_swap_contract: None,
             ticker: ticker.into(),
             web3_instances: vec![Web3Instance {
+                url: String::new(),
                 web3: web3.clone(),
                 is_parity: true,
             }],
@@ -2957,6 +2965,7 @@ fn test_message_hash() {
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         ticker: "ETH".into(),
         coin_type: EthCoinType::Eth,
         my_address: my_addr,
@@ -2965,6 +2974,7 @@ fn test_message_hash() {
         swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
         fallback_swap_contract: None,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -3014,6 +3024,7 @@ fn test_sign_verify_message() {
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         ticker: "ETH".into(),
         coin_type: EthCoinType::Eth,
         my_address: my_addr,
@@ -3022,6 +3033,7 @@ fn test_sign_verify_message() {
         swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
         fallback_swap_contract: None,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -3211,6 +3223,7 @@ pub(super) fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoi
     .to_string();
 
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals: 18,
         gas_station_url: None,
@@ -3231,6 +3244,7 @@ pub(super) fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoi
         fallback_swap_contract: None,
         ticker,
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],
@@ -3856,6 +3870,7 @@ mod swap_send_path_wire_form {
         let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
         let my_address = public_to_address(&key_pair.public());
         let coin = EthCoin(Arc::new(EthCoinImpl {
+            swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
             coin_type: EthCoinType::Erc20 {
                 platform: "MATIC".to_owned(),
                 token_addr,
@@ -3872,6 +3887,7 @@ mod swap_send_path_wire_form {
             fallback_swap_contract: None,
             ticker: "USDC-PLG20".to_owned(),
             web3_instances: vec![Web3Instance {
+                url: String::new(),
                 web3: web3.clone(),
                 is_parity: true,
             }],
@@ -4392,6 +4408,7 @@ mod scripted_node_ports {
         let instances: Vec<Web3Instance> = [behind.url.clone(), ahead.url.clone(), dead_url]
             .into_iter()
             .map(|url| Web3Instance {
+                url: String::new(),
                 web3: crate::eth::alloy_compat::build_provider(
                     crate::node_url::listed_nodes("TEST", vec![url]),
                     vec![],

@@ -594,6 +594,10 @@ impl MmCoin for UtxoStandardCoin {
 
     fn chain_disagreement(&self) -> Option<String> { crate::utxo::electrum_chain_disagreement(&self.utxo_arc) }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Utxo, &self.utxo_arc.swap_evidence)
+    }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(utxo_common::get_raw_transaction(&self.utxo_arc, req).boxed().compat())
     }

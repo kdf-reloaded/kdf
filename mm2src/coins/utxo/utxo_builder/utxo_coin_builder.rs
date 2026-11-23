@@ -1,6 +1,7 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageKeyPolicy};
 use crate::rpc_command::get_my_address::PathToAddress;
+use crate::swap_evidence::{swap_evidence_policy_from, SwapEvidenceNodeNotInList, SwapEvidencePolicy};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::electrum_client_registry::ClientKey;
 use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_listed_order_for_spends,
@@ -111,6 +112,9 @@ pub enum UtxoCoinBuildError {
     /// R38.6.4o item 12).
     #[display(fmt = "{}", _0)]
     ElectrumServersDisagree(String),
+    /// A `swap_evidence_node` outside the coin's node list (CRD ch.51 R100 item 2).
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     #[display(
         fmt = "No usable Electrum servers for {}: none are configured, or every configured server was rejected as \
                unusable by this build (native builds cannot use 'ws'/'wss' servers).",
@@ -237,6 +241,7 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
         let derivation_method = DerivationMethod::Iguana(my_address);
         let priv_key_policy = PrivKeyPolicy::KeyPair(key_pair);
 
+        let swap_evidence = self.swap_evidence_policy()?;
         let rpc_client = self.rpc_client().await?;
         let tx_fee = self.tx_fee(&rpc_client).await?;
         let decimals = self.decimals(&rpc_client).await?;
@@ -266,6 +271,7 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
+            swap_evidence,
         };
         Ok(coin)
     }
@@ -377,6 +383,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
 
         let derivation_method = DerivationMethod::HDWallet(hd_wallet);
 
+        let swap_evidence = self.swap_evidence_policy()?;
         let rpc_client = self.rpc_client().await?;
         let tx_fee = self.tx_fee(&rpc_client).await?;
         let decimals = self.decimals(&rpc_client).await?;
@@ -406,6 +413,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
+            swap_evidence,
         };
         Ok(coin)
     }
@@ -452,6 +460,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             gap_limit,
         };
 
+        let swap_evidence = self.swap_evidence_policy()?;
         let rpc_client = self.rpc_client().await?;
         let tx_fee = self.tx_fee(&rpc_client).await?;
         let decimals = self.decimals(&rpc_client).await?;
@@ -481,6 +490,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             tx_fee,
             tx_hash_algo,
             check_utxo_maturity,
+            swap_evidence,
         };
         Ok(coin)
     }
@@ -614,6 +624,7 @@ pub(crate) async fn build_or_reuse_electrum_client(
     servers: Vec<ElectrumRpcRequest>,
     min_connected: Option<usize>,
     max_connected: Option<usize>,
+    swap_evidence_node: Option<&str>,
 ) -> UtxoCoinBuildResult<ElectrumClient> {
     let coins_ctx = CoinsContext::from_ctx(ctx).map_to_mm(UtxoCoinBuildError::Internal)?;
     let key = ClientKey::new(
@@ -624,7 +635,8 @@ pub(crate) async fn build_or_reuse_electrum_client(
         electrum_listed_order_for_spends(coin_conf),
         electrum_block_interval(coin_conf),
         &args,
-    );
+    )
+    .with_swap_evidence_node(swap_evidence_node);
     coins_ctx
         .electrum_clients
         .get_or_build(
@@ -811,6 +823,42 @@ pub trait UtxoCoinBuilderCommonOps {
     /// own.
     fn shared_electrum_platform(&self) -> Option<&str> { None }
 
+    /// The swap-evidence policy of the coin being built (CRD ch.51 R100): over the Electrum server list, or
+    /// [`SwapEvidencePolicy::OwnDaemon`] for the native mode. A `swap_evidence_node` outside the list is refused;
+    /// in the native mode only the daemon's own address is accepted, and it is redundant.
+    fn swap_evidence_policy(&self) -> UtxoCoinBuildResult<SwapEvidencePolicy> {
+        let params = self.activation_params();
+        let field = params.swap_evidence_node.as_deref();
+        match &params.mode {
+            UtxoRpcMode::Native => {
+                let Some(field) = field else {
+                    return Ok(SwapEvidencePolicy::OwnDaemon);
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Ok(native) = self.native_client() {
+                    if crate::swap_evidence::node_matches(field, &native.uri) {
+                        common::log::info!(
+                            "{}: swap_evidence_node is the native daemon, which is trusted anyway; the field is redundant",
+                            self.ticker()
+                        );
+                        return Ok(SwapEvidencePolicy::OwnDaemon);
+                    }
+                }
+                MmError::err(UtxoCoinBuildError::SwapEvidenceNodeNotInList(
+                    SwapEvidenceNodeNotInList {
+                        ticker: self.ticker().to_owned(),
+                        node: crate::swap_evidence::node_name(field),
+                    },
+                ))
+            },
+            UtxoRpcMode::Electrum { servers, .. } => {
+                let urls: Vec<String> = servers.iter().map(|server| server.url.clone()).collect();
+                swap_evidence_policy_from(self.ticker(), field, &urls)
+                    .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))
+            },
+        }
+    }
+
     /// The recently-spent record of the instance being built, and whether it is the shared record of the QTUM family.
     ///
     /// An instance of the QTUM family takes the live record of its platform and `my_script_pubkey` from the registry
@@ -847,6 +895,7 @@ pub trait UtxoCoinBuilderCommonOps {
                 servers,
                 min_connected,
                 max_connected,
+                self.activation_params().swap_evidence_node.as_deref(),
             )
             .await;
         }
@@ -1012,6 +1061,91 @@ fn read_native_mode_conf(
         filename.as_ref().display()
     )));
     Ok((rpc_port, rpc_user.clone(), rpc_password.clone()))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod swap_evidence_tests {
+    use super::*;
+    use crate::swap_evidence::SwapEvidencePolicy;
+    use crate::utxo::utxo_builder::UtxoArcBuilder;
+    use crate::UtxoActivationParams;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use serde_json::json;
+
+    fn params(mode: Json, field: Option<&str>) -> UtxoActivationParams {
+        let mut params = json!({ "mode": mode });
+        if let Some(field) = field {
+            params["swap_evidence_node"] = json!(field);
+        }
+        serde_json::from_value(params).unwrap()
+    }
+
+    fn electrum(servers: &[&str]) -> Json {
+        let servers: Vec<Json> = servers.iter().map(|url| json!({ "url": url })).collect();
+        json!({ "rpc": "Electrum", "rpc_data": { "servers": servers } })
+    }
+
+    fn policy_of(params: &UtxoActivationParams) -> Result<SwapEvidencePolicy, UtxoCoinBuildError> {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let conf = json!({ "coin": "TST" });
+        let builder = UtxoArcBuilder::new(
+            &ctx,
+            "TST",
+            &conf,
+            params,
+            crate::PrivKeyBuildPolicy::IguanaPrivKey(keys::Secret::from([1u8; 32].as_slice())),
+            |arc| arc,
+        );
+        builder.swap_evidence_policy().map_err(|e| e.into_inner())
+    }
+
+    /// CRD ch.51 R100 and the decisions of 2026-11-22: Electrum one host, two hosts, two ports of one host, the
+    /// field set, a field outside the list, and the native mode.
+    #[test]
+    fn the_utxo_policy_per_mode_and_field() {
+        let one = params(electrum(&["a.example:50002"]), None);
+        assert_eq!(policy_of(&one).unwrap(), SwapEvidencePolicy::Insufficient { hosts: 1 });
+        let two = params(electrum(&["a.example:50002", "b.example:50002"]), None);
+        assert!(matches!(policy_of(&two).unwrap(), SwapEvidencePolicy::TwoNodes { hosts } if hosts.len() == 2));
+        let ports = params(electrum(&["a.example:50001", "A.example:50002"]), None);
+        assert_eq!(policy_of(&ports).unwrap(), SwapEvidencePolicy::Insufficient {
+            hosts: 1
+        });
+        let field = params(electrum(&["a.example:50002"]), Some("a.example:50002"));
+        assert_eq!(policy_of(&field).unwrap(), SwapEvidencePolicy::Trusted {
+            node: "a.example:50002".to_owned()
+        });
+        let outside = params(electrum(&["a.example:50002"]), Some("z.example"));
+        match policy_of(&outside).unwrap_err() {
+            UtxoCoinBuildError::SwapEvidenceNodeNotInList(e) => {
+                assert_eq!((e.ticker.as_str(), e.node.as_str()), ("TST", "z.example"))
+            },
+            other => panic!("{other:?}"),
+        }
+        // the native mode is the operator's own daemon; a field naming something else is refused
+        let native = params(json!({ "rpc": "Native" }), None);
+        assert_eq!(policy_of(&native).unwrap(), SwapEvidencePolicy::OwnDaemon);
+        let native_field = params(json!({ "rpc": "Native" }), Some("z.example:1"));
+        assert!(matches!(
+            policy_of(&native_field).unwrap_err(),
+            UtxoCoinBuildError::SwapEvidenceNodeNotInList(_)
+        ));
+        // a field with a credential is named host[:port] only, also in the native mode
+        let credential = params(
+            json!({ "rpc": "Native" }),
+            Some("http://user:secret@evil.example:1/v3/KEY?y=1"),
+        );
+        match policy_of(&credential).unwrap_err() {
+            UtxoCoinBuildError::SwapEvidenceNodeNotInList(e) => {
+                assert_eq!(e.node, "evil.example:1", "the node is not host[:port]");
+                let text = e.to_string();
+                assert!(!text.contains("secret"), "the text carries the userinfo");
+                assert!(!text.contains("KEY"), "the text carries the path");
+                assert!(!text.contains("y=1"), "the text carries the query");
+            },
+            _ => panic!("the error is not SwapEvidenceNodeNotInList"),
+        }
+    }
 }
 
 #[cfg(test)]

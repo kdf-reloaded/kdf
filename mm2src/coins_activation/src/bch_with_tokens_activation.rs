@@ -4,7 +4,8 @@ use crate::prelude::*;
 use async_trait::async_trait;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
-use coins::utxo::bch::{bch_coin_from_conf_and_params, BchActivationRequest, BchCoin, CashAddrPrefix};
+use coins::swap_evidence::SwapEvidenceNodeNotInList;
+use coins::utxo::bch::{bch_coin_from_conf_and_params_typed, BchActivationRequest, BchCoin, CashAddrPrefix};
 use coins::utxo::bch_and_slp_tx_history::bch_and_slp_history_loop;
 use coins::utxo::rpc_clients::UtxoRpcError;
 use coins::utxo::slp::{SlpProtocolConf, SlpToken};
@@ -158,6 +159,9 @@ impl From<BchWithTokensActivationError> for EnablePlatformCoinWithTokensError {
             BchWithTokensActivationError::UnexpectedDerivationMethod(e) => {
                 EnablePlatformCoinWithTokensError::UnexpectedDerivationMethod(e)
             },
+            BchWithTokensActivationError::SwapEvidenceNodeNotInList(error) => {
+                EnablePlatformCoinWithTokensError::SwapEvidenceNodeNotInList(error)
+            },
             BchWithTokensActivationError::UnexpectedDeviceActivationPolicy => {
                 EnablePlatformCoinWithTokensError::UnexpectedDeviceActivationPolicy
             },
@@ -248,6 +252,81 @@ impl CurrentBlock for BchWithTokensActivationResult {
     fn current_block(&self) -> u64 { self.current_block }
 }
 
+/// The empty-`bchd_urls` refusal of the platform build (the text of the legacy builder).
+fn unsafe_slp_error(ticker: String) -> BchWithTokensActivationError {
+    BchWithTokensActivationError::PlatformCoinCreationError {
+        ticker,
+        error: "Using empty bchd_urls is unsafe for SLP users!".to_owned(),
+    }
+}
+
+/// The activation error of a failed platform build. The text is the build error's own: it no longer carries the
+/// `file:line]` prefix and the error trace the string form of the legacy builder added.
+fn platform_build_error(
+    ticker: String,
+    build_err: coins::utxo::utxo_builder::UtxoCoinBuildError,
+) -> BchWithTokensActivationError {
+    match build_err {
+        coins::utxo::utxo_builder::UtxoCoinBuildError::SwapEvidenceNodeNotInList(error) => {
+            BchWithTokensActivationError::SwapEvidenceNodeNotInList(error)
+        },
+        other => BchWithTokensActivationError::PlatformCoinCreationError {
+            ticker,
+            error: other.to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod platform_error_tests {
+    use super::*;
+    use coins::utxo::utxo_builder::UtxoCoinBuildError;
+
+    fn text(err: BchWithTokensActivationError) -> String {
+        match err {
+            BchWithTokensActivationError::PlatformCoinCreationError { error, .. } => error,
+            _ => panic!("the error is not PlatformCoinCreationError"),
+        }
+    }
+
+    /// The texts of the platform build failures of `enable_bch_with_tokens`: the empty-`bchd_urls` text is as it was;
+    /// a build failure now reads as the build error itself, without the `file:line]` prefix and the trace.
+    #[test]
+    fn the_platform_build_failure_texts_are_pinned() {
+        assert_eq!(
+            text(unsafe_slp_error("BCH".to_owned())),
+            "Using empty bchd_urls is unsafe for SLP users!"
+        );
+        assert_eq!(
+            text(platform_build_error(
+                "BCH".to_owned(),
+                UtxoCoinBuildError::NoUsableElectrumServers {
+                    ticker: "BCH".to_owned()
+                }
+            )),
+            "No usable Electrum servers for BCH: none are configured, or every configured server was rejected as \
+             unusable by this build (native builds cannot use 'ws'/'wss' servers)."
+        );
+        assert_eq!(
+            text(platform_build_error(
+                "BCH".to_owned(),
+                UtxoCoinBuildError::FailedToConnectToElectrums("BCH: no server answered".to_owned())
+            )),
+            "BCH: no server answered"
+        );
+        assert!(matches!(
+            platform_build_error(
+                "BCH".to_owned(),
+                UtxoCoinBuildError::SwapEvidenceNodeNotInList(coins::swap_evidence::SwapEvidenceNodeNotInList {
+                    ticker: "BCH".to_owned(),
+                    node: "x.example".to_owned()
+                })
+            ),
+            BchWithTokensActivationError::SwapEvidenceNodeNotInList(_)
+        ));
+    }
+}
+
 #[derive(Debug)]
 pub enum BchWithTokensActivationError {
     PlatformCoinCreationError {
@@ -261,6 +340,8 @@ pub enum BchWithTokensActivationError {
     },
     PrivKeyNotAllowed(String),
     UnexpectedDerivationMethod(String),
+    /// A `swap_evidence_node` outside the platform's Electrum server list (CRD ch.51 R100 item 2).
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     /// The request selects a hardware wallet, which only the task methods accept.
     UnexpectedDeviceActivationPolicy,
     Transport(String),
@@ -346,7 +427,11 @@ impl PlatformWithTokensActivationOps for BchCoin {
 
         let policy = activation_request.platform_request.utxo_params.priv_key_policy;
         let key = platform_priv_key(&ctx, policy, priv_key)?;
-        let platform_coin = bch_coin_from_conf_and_params(
+        // The SLP-safety rule of the legacy builder (empty `bchd_urls` is unsafe), as the same text.
+        if activation_request.platform_request.has_unsafe_slp_configuration() {
+            return MmError::err(unsafe_slp_error(ticker));
+        }
+        let platform_coin = bch_coin_from_conf_and_params_typed(
             &ctx,
             &ticker,
             &platform_conf,
@@ -355,7 +440,7 @@ impl PlatformWithTokensActivationOps for BchCoin {
             &key,
         )
         .await
-        .map_to_mm(|error| BchWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
+        .mm_err(|build_err| platform_build_error(ticker, build_err))?;
         Ok(platform_coin)
     }
 

@@ -14,6 +14,7 @@ use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageKeyPolicy};
 use crate::is_wallet_only_conf;
 use crate::node_url::{host_only, listed_nodes, scrub_node_url, ListedNode};
 use crate::rpc_command::get_my_address::PathToAddress;
+use crate::swap_evidence::{swap_evidence_policy_from, SwapEvidenceNodeNotInList};
 use alloy::providers::Provider as _;
 use common::log::{info, warn};
 use crypto::{Bip44PathToCoin, ChildNumber, DerivationPath, GlobalHDAccountArc};
@@ -35,9 +36,16 @@ pub enum EthCoinBuildError {
     /// Every supplied node failed the reachability probe (R35.1.6).
     #[display(fmt = "{}", _0)]
     Transport(String),
+    /// A `swap_evidence_node` that matches none of the configured nodes (CRD ch.51 R100 item 2).
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNodeNotInList(SwapEvidenceNodeNotInList),
     /// Any other failure, including HD wallet storage failures.
     #[display(fmt = "{}", _0)]
     Internal(String),
+}
+
+impl From<SwapEvidenceNodeNotInList> for EthCoinBuildError {
+    fn from(error: SwapEvidenceNodeNotInList) -> Self { EthCoinBuildError::SwapEvidenceNodeNotInList(error) }
 }
 
 /// The failure classes of building an ERC-20 token coin on top of an activated platform.
@@ -95,6 +103,9 @@ pub struct EthCoinActivationParams {
     pub swap_gas_fee_policy: Option<SwapGasFeePolicy>,
     /// Which route set [`Self::swap_gas_fee_policy`]; only used to log it at activation.
     pub swap_gas_fee_policy_source: SwapGasFeePolicySource,
+    /// The node whose answer a swap-evidence read takes alone (CRD ch.51 R100 item 2). It must match one of
+    /// [`Self::urls`].
+    pub swap_evidence_node: Option<String>,
 }
 
 /// The debug form names each node and the gas-station endpoint by its host-only form (CRD ch.35 R35.1.17).
@@ -304,6 +315,7 @@ impl EthCoinActivationParams {
             gas_station_policy,
             swap_gas_fee_policy,
             swap_gas_fee_policy_source,
+            swap_evidence_node: try_s!(json::from_value(req["swap_evidence_node"].clone())),
         })
     }
 
@@ -605,6 +617,18 @@ pub(crate) async fn eth_coin_from_params_with_trezor(
     .await
 }
 
+/// The swap-evidence policy of an EVM coin (CRD ch.51 R100, maintainer decision of 2026-11-22): without a field, over the nodes that
+/// passed the activation probe; with a field, it must match a configured node, which is then trusted whether or not
+/// it passed the probe.
+pub(crate) fn evm_swap_evidence_policy(
+    ticker: &str,
+    field: Option<&str>,
+    configured: &[String],
+    probed: &[String],
+) -> Result<crate::SwapEvidencePolicy, SwapEvidenceNodeNotInList> {
+    swap_evidence_policy_from(ticker, field, if field.is_some() { configured } else { probed })
+}
+
 /// Probes every node with `web3_clientVersion` and returns the providers that answered.
 ///
 /// When none answers the failure is [`EthCoinBuildError::Transport`] (CRD R35.1.6): every node unresponsive is a
@@ -655,6 +679,7 @@ async fn probe_eth_nodes(
             },
         };
         web3_instances.push(Web3Instance {
+            url: url.clone(),
             web3: direct,
             is_parity: version.contains("Parity") || version.contains("parity"),
         })
@@ -787,11 +812,29 @@ pub(crate) async fn build_eth_coin(
     for url in urls.iter() {
         validate_eth_node_url(url)?;
     }
+    // A `swap_evidence_node` outside the configured nodes is refused before any node is contacted (CRD ch.51 R100).
+    if let Some(field) = params.swap_evidence_node.as_deref() {
+        swap_evidence_policy_from(ticker, Some(field), &urls)
+            .map_err(|e| MmError::new(EthCoinBuildError::SwapEvidenceNodeNotInList(e)))?;
+    }
+    let configured_urls = urls.clone();
     let nodes = shuffled_listed_nodes(ticker, urls, &mut small_rng());
 
     let my_address = signer.address();
 
     let web3_instances = probe_eth_nodes(ctx, ticker, &nodes).await?;
+    // The nodes that passed the probe are the nodes of the policy (CRD ch.51 R100, maintainer decision of 2026-11-22); a trusted node
+    // is one of the configured nodes, answering or not.
+    let swap_evidence = {
+        let probed_urls: Vec<String> = web3_instances.iter().map(|instance| instance.url.clone()).collect();
+        evm_swap_evidence_policy(
+            ticker,
+            params.swap_evidence_node.as_deref(),
+            &configured_urls,
+            &probed_urls,
+        )
+        .map_err(|e| MmError::new(EthCoinBuildError::SwapEvidenceNodeNotInList(e)))?
+    };
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
     let web3 = super::alloy_compat::build_provider(nodes, event_handlers).map_to_mm(EthCoinBuildError::Internal)?;
 
@@ -844,6 +887,7 @@ pub(crate) async fn build_eth_coin(
         gas_station_policy: params.gas_station_policy,
         web3,
         web3_instances,
+        swap_evidence,
         history_sync_state: Mutex::new(initial_history_state),
         ctx: ctx.weak(),
         required_confirmations,
@@ -945,6 +989,46 @@ mod tests {
             taker_swap_v2_contract: Address::default(),
         });
         assert!(invalid_payload(zero_v2.validate_swap_contracts(&conf)));
+    }
+
+    /// CRD ch.51 R100, maintainer decision of 2026-11-22: the policy counts the nodes that passed the probe, not the configured list;
+    /// a field naming a configured node that failed the probe is accepted (a trusted node that does not answer).
+    #[test]
+    fn the_evm_policy_counts_probed_nodes_and_a_field_names_a_configured_one() {
+        use crate::SwapEvidencePolicy;
+        let configured = vec![
+            "https://a.example/v1/KEY".to_owned(),
+            "https://b.example".to_owned(),
+            "https://c.example".to_owned(),
+        ];
+        let probed = vec!["https://a.example/v1/KEY".to_owned()];
+        // three configured, one probed: not enough
+        assert_eq!(
+            evm_swap_evidence_policy("ETH", None, &configured, &probed).unwrap(),
+            SwapEvidencePolicy::Insufficient { hosts: 1 }
+        );
+        let two = vec![configured[0].clone(), configured[1].clone()];
+        assert!(matches!(
+            evm_swap_evidence_policy("ETH", None, &configured, &two).unwrap(),
+            SwapEvidencePolicy::TwoNodes { .. }
+        ));
+        // a configured node that failed the probe is accepted
+        assert_eq!(
+            evm_swap_evidence_policy("ETH", Some("c.example"), &configured, &probed).unwrap(),
+            SwapEvidencePolicy::Trusted {
+                node: "https://c.example".to_owned()
+            }
+        );
+        // a field outside the configured nodes is refused, with the wire form
+        let err = evm_swap_evidence_policy("ETH", Some("z.example"), &configured, &probed).unwrap_err();
+        assert_eq!(
+            EthCoinBuildError::SwapEvidenceNodeNotInList(err.clone()).to_string(),
+            "swap_evidence_node z.example is not in the node list of ETH"
+        );
+        assert_eq!(
+            serde_json::to_value(&err).unwrap(),
+            json!({"ticker": "ETH", "node": "z.example"})
+        );
     }
 
     #[test]

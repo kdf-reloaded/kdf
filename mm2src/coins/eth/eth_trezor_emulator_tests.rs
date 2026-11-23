@@ -627,6 +627,7 @@ fn build_trezor_coin(
     let web3 =
         crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes("TEST", vec![url]), vec![]).unwrap();
     EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         coin_type,
         decimals: 18,
         gas_station_url: None,
@@ -640,6 +641,7 @@ fn build_trezor_coin(
         fallback_swap_contract: None,
         ticker: ticker.to_string(),
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: false,
         }],

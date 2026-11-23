@@ -227,6 +227,20 @@ pub async fn bch_coin_from_conf_and_params(
         return Err("Using empty bchd_urls is unsafe for SLP users!".into());
     }
 
+    let coin = try_s!(bch_coin_from_conf_and_params_typed(ctx, ticker, conf, params, slp_addr_prefix, priv_key).await);
+    Ok(coin)
+}
+
+/// [`bch_coin_from_conf_and_params`] without the SLP-safety rule and with the build error typed, so that the
+/// `enable_bch_with_tokens` activation can tell a `swap_evidence_node` outside the node list (CRD ch.51 R100).
+pub async fn bch_coin_from_conf_and_params_typed(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    params: BchActivationRequest,
+    slp_addr_prefix: CashAddrPrefix,
+    priv_key: &[u8],
+) -> Result<BchCoin, MmError<crate::utxo::utxo_builder::UtxoCoinBuildError>> {
     let bchd_urls = params.bchd_urls;
     let slp_tokens_infos = Arc::new(Mutex::new(HashMap::new()));
     let constructor = {
@@ -239,12 +253,9 @@ pub async fn bch_coin_from_conf_and_params(
     };
 
     let priv_key_policy = PrivKeyBuildPolicy::IguanaPrivKey(keys::Secret::from(priv_key));
-    let coin = try_s!(
-        UtxoArcBuilder::new(ctx, ticker, conf, &params.utxo_params, priv_key_policy, constructor)
-            .build()
-            .await
-    );
-    Ok(coin)
+    UtxoArcBuilder::new(ctx, ticker, conf, &params.utxo_params, priv_key_policy, constructor)
+        .build()
+        .await
 }
 
 /// Builds the BCH coin for `task::enable_bch` (CRD ch. 55 §55.8) with the requested key policy.
@@ -270,6 +281,58 @@ pub async fn bch_coin_from_conf_params_and_policy(
     UtxoArcBuilder::new(ctx, ticker, conf, &params.utxo_params, priv_key_policy, constructor)
         .build()
         .await
+}
+
+impl BchCoin {
+    /// The stored swap-evidence policy of an SLP token on this platform (CRD ch.51 R100): the platform's, but
+    /// `Insufficient` when the validation servers (`bchd_urls`) have fewer than two distinct hosts.
+    pub(crate) fn slp_swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        slp_policy_over(&self.utxo_arc.swap_evidence, &self.bchd_urls)
+    }
+}
+
+/// The policy of an SLP token whose platform holds `platform` and validates over `bchd_urls`.
+fn slp_policy_over(platform: &crate::SwapEvidencePolicy, bchd_urls: &[String]) -> crate::SwapEvidencePolicy {
+    let hosts = crate::swap_evidence::distinct_hosts(bchd_urls).len();
+    if hosts < 2 {
+        return crate::SwapEvidencePolicy::Insufficient { hosts };
+    }
+    platform.clone()
+}
+
+#[cfg(test)]
+mod swap_evidence_tests {
+    use super::*;
+    use crate::SwapEvidencePolicy;
+
+    fn urls(entries: &[&str]) -> Vec<String> { entries.iter().map(|e| (*e).to_owned()).collect() }
+
+    /// CRD ch.51 R100: an SLP token takes the platform's policy, but is `Insufficient` when `bchd_urls` has fewer
+    /// than two distinct hosts.
+    #[test]
+    fn an_slp_token_needs_two_bchd_hosts() {
+        let platform = SwapEvidencePolicy::TwoNodes {
+            hosts: urls(&["a.example", "b.example"]),
+        };
+        let one = slp_policy_over(
+            &platform,
+            &urls(&["https://bchd.example:8335", "https://bchd.example:8336"]),
+        );
+        assert_eq!(one, SwapEvidencePolicy::Insufficient { hosts: 1 });
+        assert_eq!(slp_policy_over(&platform, &[]), SwapEvidencePolicy::Insufficient {
+            hosts: 0
+        });
+        let two = slp_policy_over(&platform, &urls(&["https://x.example", "https://y.example"]));
+        assert_eq!(two, platform);
+        // A trusted platform node does not rescue a single validation host.
+        let trusted = SwapEvidencePolicy::Trusted {
+            node: "a.example:50002".to_owned(),
+        };
+        assert_eq!(
+            slp_policy_over(&trusted, &urls(&["https://bchd.example"])),
+            SwapEvidencePolicy::Insufficient { hosts: 1 }
+        );
+    }
 }
 
 impl BchActivationRequest {
@@ -825,6 +888,10 @@ impl MmCoin for BchCoin {
     fn is_asset_chain(&self) -> bool { utxo_common::is_asset_chain(&self.utxo_arc) }
 
     fn chain_disagreement(&self) -> Option<String> { crate::utxo::electrum_chain_disagreement(&self.utxo_arc) }
+
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Bch, &self.utxo_arc.swap_evidence)
+    }
 
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(utxo_common::get_raw_transaction(&self.utxo_arc, req).boxed().compat())

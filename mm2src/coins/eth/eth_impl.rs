@@ -1793,6 +1793,7 @@ impl EthCoin {
             gas_station_policy: self.gas_station_policy.clone(),
             web3: token_node_provider(&self.web3),
             web3_instances: self.web3_instances.clone(),
+            swap_evidence: self.swap_evidence.clone(),
             history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
             ctx: self.ctx.clone(),
             required_confirmations: required_confirmations.into(),

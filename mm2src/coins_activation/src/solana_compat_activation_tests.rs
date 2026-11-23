@@ -1436,7 +1436,7 @@ fn t40_6d_13_the_evidence_node_must_be_in_the_node_list_on_both_surfaces() {
         ),
     );
     assert!(
-        wire["error_type"] == "PlatformCoinCreationError",
+        wire["error_type"] == "SwapEvidenceNodeNotInList",
         "compat: the error type"
     );
     assert!(status == StatusCode::INTERNAL_SERVER_ERROR, "compat: HTTP 500");
@@ -1451,7 +1451,7 @@ fn t40_6d_13_the_evidence_node_must_be_in_the_node_list_on_both_surfaces() {
         .expect_err("the activation fails");
     let (wire, status) = platform_wire(err.get_inner());
     assert!(
-        wire["error_type"] == "PlatformCoinCreationError",
+        wire["error_type"] == "SwapEvidenceNodeNotInList",
         "primary: the error type"
     );
     assert!(status == StatusCode::INTERNAL_SERVER_ERROR, "primary: HTTP 500");

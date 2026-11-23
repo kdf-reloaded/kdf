@@ -35,6 +35,7 @@ async fn test_send() {
     .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let coin = EthCoin(Arc::new(EthCoinImpl {
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         ticker: "ETH".into(),
         coin_type: EthCoinType::Eth,
         my_address: key_pair.address(),
@@ -49,6 +50,7 @@ async fn test_send() {
         taker_fee_quote_at_limit: true,
         derivation_method: DerivationMethod::Iguana(key_pair.address()),
         web3_instances: vec![Web3Instance {
+            url: String::new(),
             web3: web3.clone(),
             is_parity: true,
         }],

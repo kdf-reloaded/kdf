@@ -62,6 +62,42 @@ fn unreachable_electrum_servers_are_transport_with_a_string() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// CRD ch.51 R100 item 2: a `swap_evidence_node` outside the node list is the wire error
+/// `SwapEvidenceNodeNotInList` with `{ticker, node}`, as an activation error of the family.
+#[test]
+fn a_swap_evidence_node_outside_the_list_is_its_own_wire_error() {
+    let (wire, status) = wire_of(InitUtxoStandardError::from_build_err(
+        UtxoCoinBuildError::SwapEvidenceNodeNotInList(coins::swap_evidence::SwapEvidenceNodeNotInList {
+            ticker: "RIN".to_owned(),
+            node: "other.example:50002".to_owned(),
+        }),
+        "RIN".to_owned(),
+    ));
+    assert_eq!(
+        wire,
+        json!({ "error_type": "SwapEvidenceNodeNotInList",
+                "error_data": { "ticker": "RIN", "node": "other.example:50002" } })
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The field is part of the activation request, in the task form and in the legacy form.
+#[test]
+fn the_swap_evidence_node_is_parsed_in_both_request_forms() {
+    assert_eq!(utxo_params(json!({})).swap_evidence_node, None);
+    assert_eq!(
+        utxo_params(json!({ "swap_evidence_node": "electrum.example.org:50001" })).swap_evidence_node,
+        Some("electrum.example.org:50001".to_owned())
+    );
+    let legacy = UtxoActivationParams::from_legacy_req(&json!({
+        "method": "electrum",
+        "servers": [{ "url": "electrum.example.org:50001" }],
+        "swap_evidence_node": "electrum.example.org",
+    }))
+    .unwrap();
+    assert_eq!(legacy.swap_evidence_node.as_deref(), Some("electrum.example.org"));
+}
+
 #[test]
 fn unusable_electrum_settings_and_internal_build_failures_are_internal() {
     for build_err in [

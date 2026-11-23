@@ -400,6 +400,7 @@ async fn build_tron_coin(
         fallback_swap_contract: swap_contracts.and_then(|bound| bound.fallback_swap_contract),
         web3,
         web3_instances: Vec::new(),
+        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
         decimals,
         gas_station_url: None,
         gas_station_decimals: ETH_GAS_STATION_DECIMALS,
@@ -512,6 +513,7 @@ impl EthCoin {
             gas_station_policy: self.gas_station_policy.clone(),
             web3: self.web3.clone(),
             web3_instances: self.web3_instances.clone(),
+            swap_evidence: self.swap_evidence.clone(),
             // The platform's history process also writes the history of its tokens (CRD ch.21 §21.10C).
             history_sync_state: Mutex::new(if self.tron_history_enabled() {
                 HistorySyncState::NotStarted
