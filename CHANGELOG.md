@@ -28,7 +28,8 @@ or undo, and every change that needs a step from you.
     `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
     not answer, the step waits; no other node is asked in its place.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
-    - none yet.
+    - UTXO coins over Electrum, BCH and QTUM (a coin in native mode reads your own daemon and needs nothing). Detail:
+      PR #NNN; CRD ch.38 status note of 2026-11-23 before §38.6.4Q.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
