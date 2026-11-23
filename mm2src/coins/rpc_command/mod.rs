@@ -10,6 +10,7 @@ pub mod get_token_info;
 pub mod hd_account_balance_rpc_error;
 pub mod init_account_balance;
 pub mod init_create_account;
+pub mod init_get_new_address;
 pub mod init_scan_for_new_addresses;
 pub mod init_withdraw;
 pub mod swap_gas_fee_policy;

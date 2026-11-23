@@ -4,16 +4,19 @@
 use super::contract_abi::{decode_payments_output, encode_call, encode_payments_query, PaymentRecord, PaymentState,
                           TronSwapCall};
 use super::ids_tests::{addr, secret_hash, ID, LOCK_TIME};
-use super::trigger::{dry_run_energy, send_trigger, SWAP_HEAD_TIME_TOLERANCE_SECS};
+use super::trigger::{dry_run_energy, read_swap_head, send_trigger, SWAP_HEAD_TIME_TOLERANCE_SECS};
 use super::tx::TronSwapTx;
 use super::TronSwapError;
-use crate::eth::tron::api::TronApiError;
+use crate::eth::tron::api::{TronApiClient, TronApiError};
 use crate::eth::tron::fee::TronFeeError;
+use crate::eth::tron::nodes::TronNode;
 use crate::eth::tron::test_node::{Reply, StubNode};
 use crate::eth::tron::wallet_path_tests::{trx_coin, NOW_BLOCK_BODY};
-use crate::eth::tron::TronAddress;
-use crate::eth::EthCoinType;
+use crate::eth::tron::{tron_coin_from_conf_and_request, Network, TronAddress};
+use crate::eth::{EthCoin, EthCoinType};
+use crate::CoinProtocol;
 use common::block_on;
+use mm2_core::mm_ctx::{MmArc, MmCtxBuilder};
 use serde_json::{json, Value as Json};
 
 /// The address of the test key (the secret key 1), which signs for the test coin.
@@ -174,6 +177,86 @@ fn a_failed_head_block_read_is_a_node_error_without_a_broadcast() {
     .unwrap_err();
     assert!(matches!(error, TronSwapError::Node(_)), "{error}");
     assert!(node.bodies_for("/wallet/broadcasthex").is_empty());
+}
+
+/// A TRX coin activated against the nodes `urls`. The coin puts them into an order of its own.
+fn trx_coin_over(urls: &[String]) -> (MmArc, EthCoin) {
+    let ctx = MmCtxBuilder::new().into_mm_arc();
+    let mut key = [0u8; 32];
+    key[31] = 1;
+    let protocol = CoinProtocol::TRX { network: Network::Nile };
+    let request = json!({ "urls": urls });
+    let coin = block_on(tron_coin_from_conf_and_request(
+        &ctx,
+        "TRX",
+        &json!({}),
+        &request,
+        &key,
+        protocol,
+    ))
+    .expect("a TRX coin activates against stub nodes");
+    (ctx, coin)
+}
+
+/// The head time is judged node by node: a node whose head block is outside the tolerance gave an unusable answer,
+/// and the next node of the list is asked. The head of the first node inside the tolerance is the one built on.
+#[test]
+fn a_stale_head_moves_on_to_the_next_node() {
+    let stale = node_at(local_ms() - 45_000, |_| r#"{"result":true}"#.to_owned());
+    let fresh_ms = local_ms() + 5_000;
+    let fresh = node_at(fresh_ms, |_| r#"{"result":true}"#.to_owned());
+
+    // The list in a fixed order: the stale node is asked first, then the fresh one.
+    let nodes = vec![TronNode::plain(stale.url()), TronNode::plain(fresh.url())];
+    let client = TronApiClient::new_with_cutoff_s("TRX", nodes, 5.);
+    let head = block_on(read_swap_head(&client)).expect("the second node's head");
+    assert_eq!(head.block_header.raw_data.timestamp, fresh_ms);
+    assert_eq!(stale.bodies_for("/wallet/getnowblock").len(), 1);
+    assert_eq!(fresh.bodies_for("/wallet/getnowblock").len(), 1);
+
+    // The call of a coin over both nodes is sent, whichever node its list starts with, on the fresh head.
+    let (_ctx, coin) = trx_coin_over(&[stale.url(), fresh.url()]);
+    let tx = block_on(send_trigger(
+        &coin,
+        &swap_contract(),
+        payment_data(),
+        CALL_VALUE,
+        FEE_LIMIT_SUN,
+    ))
+    .expect("a call built on the fresh head");
+    assert_eq!(tx.raw().expiration, fresh_ms + 60_000);
+    let broadcasts = stale.bodies_for("/wallet/broadcasthex").len() + fresh.bodies_for("/wallet/broadcasthex").len();
+    assert_eq!(broadcasts, 1);
+}
+
+/// Only when every node answers a head outside the tolerance is the error the head-time one, which names the local
+/// clock as a possible cause; nothing is broadcast. A node that fails in another way beside a stale one is a node
+/// error.
+#[test]
+fn every_node_out_of_tolerance_is_the_head_time_error() {
+    let behind = node_at(local_ms() - 45_000, |_| r#"{"result":true}"#.to_owned());
+    let ahead = node_at(local_ms() + 45_000, |_| r#"{"result":true}"#.to_owned());
+    let (_ctx, coin) = trx_coin_over(&[behind.url(), ahead.url()]);
+    let error = block_on(send_trigger(
+        &coin,
+        &swap_contract(),
+        payment_data(),
+        CALL_VALUE,
+        FEE_LIMIT_SUN,
+    ))
+    .unwrap_err();
+    assert!(matches!(error, TronSwapError::HeadTimeOutOfTolerance { .. }), "{error}");
+    assert!(error.to_string().contains("the local clock may be wrong"), "{error}");
+    assert_eq!(behind.bodies_for("/wallet/getnowblock").len(), 1);
+    assert_eq!(ahead.bodies_for("/wallet/getnowblock").len(), 1);
+    assert!(behind.bodies_for("/wallet/broadcasthex").is_empty());
+    assert!(ahead.bodies_for("/wallet/broadcasthex").is_empty());
+
+    let failing = StubNode::start(|_, _| Reply::status(500, "stub failure"));
+    let nodes = vec![TronNode::plain(behind.url()), TronNode::plain(failing.url())];
+    let client = TronApiClient::new_with_cutoff_s("TRX", nodes, 5.);
+    let error = block_on(read_swap_head(&client)).unwrap_err();
+    assert!(matches!(error, TronSwapError::Node(_)), "{error}");
 }
 
 /// The expiry counts from the head block's time, which one node states, so the local clock bounds it: a head block

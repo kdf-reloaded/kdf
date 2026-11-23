@@ -23,8 +23,8 @@
 //!
 //! The clock and the random source are injectable, so the behavior is tested without sleeping.
 
-use crate::solana::rpc_client::{BlockSummary, ConfirmedTransaction, RpcError, RpcErrorKind, SignatureInfo,
-                                SolanaRpcClient, TokenAccountsFilter};
+use crate::solana::rpc_client::{BlockSummary, ConfirmedTransaction, FullAccount, RpcError, RpcErrorKind,
+                                SignatureInfo, SolanaRpcClient, TokenAccountsFilter};
 use common::log::warn;
 use common::now_ms;
 use mm2_core::mm_ctx::MmArc;
@@ -333,6 +333,75 @@ impl SolanaRpcPool {
         Err(last_err.unwrap_or_else(|| RpcError::transport("pool", "no endpoints configured")))
     }
 
+    /// Whether `url` is the URL of one of the pool's nodes, as it was given.
+    pub fn has_node(&self, url: &str) -> bool { self.inner.clients.iter().any(|c| c.url() == url) }
+
+    /// The reads behind a refund step or a secret step (CRD ch.40 R40.6D.16, chapter 51 R100): `op` runs, from its
+    /// start, on two distinct nodes of the pool, in the pool's order with set-aside nodes skipped; a node that does
+    /// not answer is passed over for the next. The result is the two answers, which the caller compares.
+    ///
+    /// With `evidence_node` (the one node the activation named) `op` runs on that node alone and its answer is
+    /// both members of the pair; when it does not answer, no other node takes its place.
+    ///
+    /// # Errors
+    ///
+    /// The text of the reason when fewer than two nodes answered (the read is undetermined).
+    pub async fn read_for_evidence<T, F, Fut>(&self, evidence_node: Option<&str>, op: F) -> Result<(T, T), String>
+    where
+        T: Clone,
+        F: Fn(SolanaRpcClient) -> Fut,
+        Fut: std::future::Future<Output = Result<T, RpcError>>,
+    {
+        if let Some(url) = evidence_node {
+            let Some(client) = self.inner.clients.iter().find(|c| c.url() == url) else {
+                return Err("the named evidence node is not one of the coin's nodes".to_owned());
+            };
+            return match op(client.clone()).await {
+                Ok(answer) => Ok((answer.clone(), answer)),
+                Err(_) => Err("the named evidence node did not answer".to_owned()),
+            };
+        }
+        let mut candidates: Vec<usize> = (0..self.inner.clients.len())
+            .filter(|idx| !self.is_set_aside(*idx))
+            .collect();
+        if candidates.is_empty() {
+            candidates = (0..self.inner.clients.len()).collect();
+        }
+        let mut answers: Vec<T> = Vec::with_capacity(2);
+        for idx in candidates {
+            let client = self.inner.clients[idx].clone();
+            if self.needs_health_check(idx) {
+                match client.get_health().await {
+                    Ok(()) => self.health_passed(idx),
+                    Err(_) => {
+                        self.set_aside(idx);
+                        continue;
+                    },
+                }
+            }
+            match op(client).await {
+                Ok(answer) => {
+                    self.answered(idx);
+                    answers.push(answer);
+                    if answers.len() == 2 {
+                        break;
+                    }
+                },
+                Err(e) => {
+                    if matches!(e.kind, RpcErrorKind::Transport(_)) {
+                        self.set_aside(idx);
+                    } else {
+                        self.answered(idx);
+                    }
+                },
+            }
+        }
+        match <[T; 2]>::try_from(answers) {
+            Ok([first, second]) => Ok((first, second)),
+            Err(_) => Err("fewer than two nodes answered".to_owned()),
+        }
+    }
+
     // One-request operations. An operation of several requests uses `run` itself.
 
     pub async fn get_health(&self) -> Result<(), RpcError> { self.run(|c| async move { c.get_health().await }).await }
@@ -431,6 +500,13 @@ impl SolanaRpcPool {
             async move { c.get_transaction_base64(&signature).await }
         })
         .await
+    }
+
+    /// `getAccountInfo` of `address` at `finalized` from one node (the whole account).
+    pub async fn get_account_info_finalized(&self, address: &Pubkey) -> Result<Option<FullAccount>, RpcError> {
+        let address = *address;
+        self.run(move |c| async move { c.get_account_info_finalized(&address).await })
+            .await
     }
 
     pub async fn get_block_summary(&self, slot: u64) -> Result<Option<BlockSummary>, RpcError> {

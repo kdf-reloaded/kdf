@@ -79,6 +79,17 @@ pub fn coin_conf_with_protocol<T: TryFromCoinProtocol>(
         }
     })?;
 
+    // CRD ch.40 R40.6D.2: the `swap_program_id` of a Solana entry, kept in the raw `protocol_data`, must be a base58
+    // public key; an invalid member makes the entry unparsable.
+    if matches!(coin_protocol, CoinProtocol::SOLANA) {
+        if let Err(text) = coins::solana::swap_program_id_from_conf(&conf) {
+            return MmError::err(CoinConfWithProtocolError::CoinProtocolParseError {
+                ticker: coin.into(),
+                err: <json::Error as serde::de::Error>::custom(text),
+            });
+        }
+    }
+
     let coin_protocol =
         T::try_from_coin_protocol(coin_protocol).mm_err(|protocol| CoinConfWithProtocolError::UnexpectedProtocol {
             ticker: coin.into(),

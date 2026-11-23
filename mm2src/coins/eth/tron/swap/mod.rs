@@ -6,6 +6,8 @@
 //! - [`tx`]: [`TronSwapTx`], the transaction type a swap record keeps for a TRON leg.
 //! - [`fee_limit`]: the `fee_limit` of a swap contract call.
 //! - [`trigger`]: building, signing and broadcasting a contract call, and its energy dry run.
+//! - [`send`]: the sending side of a swap: the payment with its approval, the DEX fee, the own-payment question
+//!   and the fee figures.
 //!
 //! # Invariants
 //!
@@ -18,6 +20,7 @@
 pub mod contract_abi;
 pub mod fee_limit;
 pub mod ids;
+pub(crate) mod send;
 pub mod trigger;
 pub mod tx;
 pub mod watch;
@@ -29,6 +32,7 @@ mod contract_abi_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod fee_limit_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod ids_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod send_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod trigger_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod tx_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod watch_tests;
@@ -152,7 +156,8 @@ impl fmt::Display for TronSwapError {
                 local_time_ms,
             } => write!(
                 f,
-                "the head block's time {head_time_ms} ms is too far from the local time {local_time_ms} ms"
+                "the head block's time {head_time_ms} ms is too far from the local time {local_time_ms} ms on every \
+                 node that was asked: the local clock may be wrong"
             ),
             TronSwapError::UnknownEvent => write!(f, "the log entry is not an event of the swap contract"),
             TronSwapError::Mismatch { field } => write!(f, "{field} differs from the value the swap expects"),

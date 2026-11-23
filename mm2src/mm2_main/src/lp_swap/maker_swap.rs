@@ -149,8 +149,8 @@ pub struct MakerSwapData {
     // Variable-length, not H160Json: CRD ch.51 R71/R72 selects a 32-byte
     // secret_hash algorithm whenever the maker or taker coin's own payment
     // construction commits to a native 32-byte hash (Sia, Lightning, a
-    // Tendermint-family coin) -- a fixed-20-byte field here would silently
-    // truncate that value, corrupting the swap.
+    // Tendermint-family coin, TRX or TRC20) -- a fixed-20-byte field here
+    // would silently truncate that value, corrupting the swap.
     pub secret_hash: Option<BytesJson>,
     pub my_persistent_pub: H264Json,
     pub lock_duration: u64,
@@ -591,8 +591,9 @@ impl MakerSwap {
 
         // ch.51 R71/R72: 32-byte SHA-256 instead of the 20-byte default
         // whenever either coin's own payment construction commits to a
-        // native 32-byte hash (Sia, Lightning, a Tendermint-family coin) --
-        // computed once here and persisted in `secret_hash` below, rather
+        // native 32-byte hash (Sia, Lightning, a Tendermint-family coin,
+        // TRX or TRC20) -- computed once here and persisted in
+        // `secret_hash` below, rather
         // than re-derived from `secret` at each later use, so every
         // reference to this swap's secret hash agrees for its whole life.
         let secret_hash_algo = select_secret_hash_algo(&self.maker_coin, &self.taker_coin);
