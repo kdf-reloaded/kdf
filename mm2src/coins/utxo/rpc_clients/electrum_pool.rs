@@ -1161,11 +1161,15 @@ impl PoolShared {
     }
 
     /// Takes the usable servers a probe of the contract-event history read may ask now: those that have not served
-    /// it, have no probe running and whose last probe ended at least `min_gap_secs` before `now`. Each is marked as
-    /// being probed until [`Self::end_contract_history_probe`].
-    pub(super) fn claim_contract_history_probes(&self, now: f64, min_gap_secs: f64) -> Vec<String> {
+    /// it, have no probe running and whose last probe ended at least `min_gap_secs` before `now`. With `only`, a
+    /// server name (`host:port`, lowercased), no other server is taken. Each is marked as being probed until
+    /// [`Self::end_contract_history_probe`].
+    pub(super) fn claim_contract_history_probes(&self, now: f64, min_gap_secs: f64, only: Option<&str>) -> Vec<String> {
         let mut claimed = Vec::new();
         for slot in self.usable_slots() {
+            if only.map_or(false, |label| crate::swap_evidence::node_name(&slot.label) != label) {
+                continue;
+            }
             let mut state = slot.state();
             let history = &mut state.contract_history;
             let due = history.probed_at.map_or(true, |at| now - at >= min_gap_secs);

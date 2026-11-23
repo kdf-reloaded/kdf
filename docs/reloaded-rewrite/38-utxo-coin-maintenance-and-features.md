@@ -4910,27 +4910,33 @@ token's swap paths were read only for the set of methods they send
 > 5. *Capability.* A token whose server list has two or more hosts and no
 >    `swap_evidence_node` is admitted for swaps only once two distinct hosts
 >    of its client have answered `blockchain.contract.event.get_history`
->    with a result since the client was built. An error answer does not
->    count. The client records it per server for every such request, routed
->    or directed, so the instances that share a client (D38.6.4Q.1) share
->    the record. Until then the token answers as a coin with too few nodes:
->    orders and swap starts are refused with a text that lists the hosts
->    that have and have not served the request, and the reads of a running
->    swap wait. A token with `swap_evidence_node`, and one in native mode,
->    needs no such proof.
-> 6. *Probe.* After the activation of such a token, each server that has
->    not served the request is asked once, in the background, for the
->    token's own transfer history; the activation does not wait for it and
->    does not fail on it. While the hosts are short, a refusal and an
->    undetermined read start the probe again for the servers still missing.
->    One server is probed at most once a minute and never while a probe of
->    it runs. A probe ends when the token that started it is disabled or
->    dropped, and none starts for a disabled token. One log line names the
->    hosts that have and have not served the request.
+>    with a result since the client was built. A token with
+>    `swap_evidence_node` is admitted only once its trusted server has
+>    answered that request with a result: under a trusted server the spend
+>    read of a claimed payment still needs that server's event history to
+>    name the claim and read the secret. An error answer does not count.
+>    The client records it per server for every such request, routed or
+>    directed, so the instances that share a client (D38.6.4Q.1) share the
+>    record. Until then the token answers as a coin with too few nodes:
+>    orders and swap starts are refused, and the reads of a running swap
+>    wait. The refusal text lists the hosts that have and have not served
+>    the request, or names the trusted server that has not. Only a token in
+>    native mode needs no such proof.
+> 6. *Probe.* After the activation of such a token, each server concerned
+>    that has not served the request is asked once, in the background, for
+>    the token's own transfer history: every server of a token over two or
+>    more hosts, and the trusted server alone of a token with
+>    `swap_evidence_node`. The activation does not wait for it and does not
+>    fail on it. While the proof is missing, a refusal and an undetermined
+>    read start the probe again for the servers still missing. One server
+>    is probed at most once a minute and never while a probe of it runs. A
+>    probe ends when the token that started it is disabled or dropped, and
+>    none starts for a disabled token. One log line names the hosts that
+>    have and have not served the request.
 > 7. *Pending.* The directed header-list read and the per-server median
->    time past live with the QRC20 reads for now. They are to be merged
->    with the equivalent directed reads of the UTXO Electrum client once
->    those exist.
+>    time past live with the QRC20 reads for now. The directed reads are to
+>    be deduplicated onto the directed reads of the UTXO Electrum client,
+>    and the refund gate onto that client's refund gate, once those land.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change

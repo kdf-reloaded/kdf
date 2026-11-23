@@ -4345,14 +4345,23 @@ async fn already_sent(coin: &Qrc20Coin) -> Result<Option<TransactionEnum>, Strin
 }
 
 /// The token over one server that it trusts for its swap reads (CRD ch.51 R100 item 2): without the field the
-/// already-sent check of a token over one host is undetermined.
+/// already-sent check of a token over one host is undetermined. The trusted server must have served the
+/// contract-event history before the token's swap reads are taken, so the stub serves an empty one and the probe that
+/// follows the activation is waited for: one history request, made before the test's own.
 async fn init_token_trusting(env: &TokenEnv, server: &StubServer) -> Qrc20Coin {
+    server.set_result(GET_HISTORY, json!([]));
     let mut request = electrum_request(&[server], false);
     request["swap_evidence_node"] = json!(server.addr());
-    match lp_coininit(&env.ctx, TICKER, &request).await.unwrap() {
+    let coin = match lp_coininit(&env.ctx, TICKER, &request).await.unwrap() {
         MmCoinEnum::Qrc20Coin(coin) => coin,
         _ => panic!("a QRC20 coins-file entry must build a QRC20 coin"),
-    }
+    };
+    wait_until("the trusted server that served the event history", 20., || {
+        coin.swap_evidence_refusal().is_none()
+    })
+    .await;
+    assert_eq!(server.requests(GET_HISTORY), 1);
+    coin
 }
 
 /// R39.11.5A.7: a state of `Uninitialized` answers "not sent" at once, without a history request.
@@ -4366,7 +4375,8 @@ fn r39_11_5a_7_qrc20_uninitialized_state_is_not_sent_without_a_history_request()
         server.set_result(GET_HISTORY, json!([]));
 
         assert_eq!(already_sent(&coin).await.unwrap(), None);
-        assert_eq!(server.requests(GET_HISTORY), 0);
+        // Only the probe after the activation asked for the history.
+        assert_eq!(server.requests(GET_HISTORY), 1);
     });
 }
 
@@ -4394,7 +4404,8 @@ fn t39_11_5a_5_qrc20_state_without_matching_transaction_is_undetermined() {
             );
         };
         assert_undetermined(already_sent(&coin).await);
-        assert_eq!(server.requests(GET_HISTORY), 1);
+        // The probe after the activation, and this read.
+        assert_eq!(server.requests(GET_HISTORY), 2);
 
         // A transaction whose receipt carries the swap contract's payment-sent event, but which holds no payment
         // call with this swap's identifier: it is read, and it does not answer the question.

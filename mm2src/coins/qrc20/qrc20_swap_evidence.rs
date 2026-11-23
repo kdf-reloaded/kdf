@@ -204,6 +204,14 @@ enum ChainTime {
     NotPastTheLock,
 }
 
+/// The servers the capability rule of the contract-event history is about.
+enum CapabilityScope {
+    /// Two distinct hosts of the client must have served the read.
+    TwoHosts,
+    /// The trusted server, by its `host:port`, must have served the read.
+    Trusted(String),
+}
+
 /// Marks the probe of one server as ended when the probe ends or is dropped.
 struct ProbeGuard {
     client: ElectrumClient,
@@ -215,39 +223,68 @@ impl Drop for ProbeGuard {
 }
 
 impl Qrc20Coin {
+    /// What the capability rule of the contract-event history asks of this token: `None` when it asks nothing (the
+    /// family has not adopted the rule, the operator's own daemon, or a coin with too few hosts anyway).
+    fn capability_scope(&self) -> Option<(&ElectrumClient, CapabilityScope)> {
+        let UtxoRpcClientEnum::Electrum(client) = &self.utxo.rpc_client else {
+            return None;
+        };
+        match effective_policy(SwapFamily::Qrc20, &self.utxo.swap_evidence) {
+            SwapEvidencePolicy::TwoNodes { .. } => Some((client, CapabilityScope::TwoHosts)),
+            SwapEvidencePolicy::Trusted { node } => Some((client, CapabilityScope::Trusted(node_name(&node)))),
+            _ => None,
+        }
+    }
+
     /// The policy this token's swap reads are judged by (CRD ch.51 R100), with the capability rule of the
-    /// contract-event history: a token over two or more Electrum hosts is `Insufficient` until two distinct hosts of
-    /// its client have served `blockchain.contract.event.get_history` in this session. A trusted server and the
-    /// operator's own daemon need no such proof. While the hosts are short, a bounded probe of the hosts that have not
-    /// served the read is started.
+    /// contract-event history (`blockchain.contract.event.get_history`): a token over two or more Electrum hosts is
+    /// `Insufficient` until two distinct hosts of its client have served the read in this session, and a token with
+    /// a trusted server until that server has. Only the operator's own daemon needs no such proof. While the proof is
+    /// missing, a bounded probe of the servers concerned is started.
     pub(super) fn evidence_policy(&self) -> SwapEvidencePolicy {
         let stored = effective_policy(SwapFamily::Qrc20, &self.utxo.swap_evidence);
-        let (SwapEvidencePolicy::TwoNodes { .. }, UtxoRpcClientEnum::Electrum(client)) =
-            (&stored, &self.utxo.rpc_client)
-        else {
+        let Some((client, scope)) = self.capability_scope() else {
             return stored;
         };
-        let hosts = distinct_hosts(&client.contract_history_servers().0).len();
-        if hosts >= 2 {
-            return stored;
-        }
+        let served = client.contract_history_servers().0;
+        let hosts = match &scope {
+            CapabilityScope::TwoHosts => {
+                let hosts = distinct_hosts(&served).len();
+                if hosts >= 2 {
+                    return stored;
+                }
+                hosts
+            },
+            // The trusted server has not served the read: nothing can decide a swap read, as with no host at all.
+            CapabilityScope::Trusted(trusted) => {
+                if served.iter().any(|label| node_name(label) == *trusted) {
+                    return stored;
+                }
+                0
+            },
+        };
         self.start_capability_probe();
         SwapEvidencePolicy::Insufficient { hosts }
     }
 
     /// The refusal text of an order or a swap start with this token, `None` when it may trade (CRD ch.51 R100 item
-    /// 4). A token over two or more hosts that is refused for the capability rule is told which hosts have served the
-    /// contract-event history and which have not.
+    /// 4). A token that is refused for the capability rule is told which hosts have served the contract-event history
+    /// and which have not, or that its trusted server has not.
     pub(super) fn evidence_refusal(&self) -> Option<String> {
         let SwapEvidencePolicy::Insufficient { .. } = self.evidence_policy() else {
             return None;
         };
-        let stored = effective_policy(SwapFamily::Qrc20, &self.utxo.swap_evidence);
-        let (SwapEvidencePolicy::TwoNodes { .. }, UtxoRpcClientEnum::Electrum(client)) =
-            (&stored, &self.utxo.rpc_client)
-        else {
+        let Some((client, scope)) = self.capability_scope() else {
             return Some(insufficient_refusal(&self.utxo.conf.ticker));
         };
+        if let CapabilityScope::Trusted(trusted) = scope {
+            return Some(format!(
+                "{}: the trusted Electrum server {} of {} has not served blockchain.contract.event.get_history in \
+                 this session; QRC20 swaps need the server named by swap_evidence_node to serve it: add a server \
+                 that serves it to the server list, or name one of the list that does",
+                self.utxo.conf.ticker, trusted, self.platform
+            ));
+        }
         let (served, not_served) = client.contract_history_servers();
         let list = |labels: Vec<String>| match labels.is_empty() {
             true => "none".to_owned(),
@@ -271,15 +308,16 @@ impl Qrc20Coin {
     /// Starts a probe of the contract-event history on the servers of this token's client that have not served it:
     /// one request per server, the token's own transfer history. A server is probed at most once a minute and never
     /// while a probe of it runs (the client keeps that, so it holds for every token that shares the client). The
-    /// probe runs for a token over two or more hosts only, ends when the token is disabled or dropped, and holds the
-    /// client no longer than the token does. An answer is recorded by the client itself; one INFO line names the
+    /// probe runs for a token over two or more hosts, and for a token with a trusted server on that server only. It
+    /// ends when the token is disabled or dropped, and holds the client no longer than the token does. An answer is recorded by the client itself; one INFO line names the
     /// hosts by `host:port`.
     pub(crate) fn start_capability_probe(&self) {
-        let stored = effective_policy(SwapFamily::Qrc20, &self.utxo.swap_evidence);
-        let (SwapEvidencePolicy::TwoNodes { .. }, UtxoRpcClientEnum::Electrum(client)) =
-            (&stored, &self.utxo.rpc_client)
-        else {
+        let Some((client, scope)) = self.capability_scope() else {
             return;
+        };
+        let only = match &scope {
+            CapabilityScope::TwoHosts => None,
+            CapabilityScope::Trusted(trusted) => Some(trusted.as_str()),
         };
         if self.capability_probes.ended() {
             return;
@@ -291,7 +329,7 @@ impl Qrc20Coin {
             return;
         };
         let guards: Vec<ProbeGuard> = client
-            .claim_contract_history_probes(CAPABILITY_PROBE_GAP_SECS)
+            .claim_contract_history_probes(CAPABILITY_PROBE_GAP_SECS, only)
             .into_iter()
             .map(|server| ProbeGuard {
                 client: client.clone(),

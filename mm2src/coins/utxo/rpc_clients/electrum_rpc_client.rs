@@ -666,10 +666,10 @@ impl ElectrumClientImpl {
 
     /// The servers a probe of `blockchain.contract.event.get_history` may ask now, each marked as being probed until
     /// [`Self::end_contract_history_probe`]: a server is given at most once per `min_gap_secs` and never while a probe
-    /// of it runs.
-    pub(crate) fn claim_contract_history_probes(&self, min_gap_secs: f64) -> Vec<String> {
+    /// of it runs. With `only`, a server label (`host:port`), no other server is given.
+    pub(crate) fn claim_contract_history_probes(&self, min_gap_secs: f64, only: Option<&str>) -> Vec<String> {
         self.pool
-            .claim_contract_history_probes(common::now_float(), min_gap_secs)
+            .claim_contract_history_probes(common::now_float(), min_gap_secs, only)
     }
 
     /// Ends the probe of `server`.

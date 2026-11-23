@@ -36,6 +36,16 @@ fn qrc20_coin_for_test_with_decimals(priv_key: &[u8], fallback_swap: Option<&str
     qrc20_coin_for_test_on_servers(priv_key, fallback_swap, decimals, tqtum_test_servers())
 }
 
+/// Waits until the token is admitted for swaps: its trusted server must have served the contract-event history, which
+/// the probe after the activation asks for (CRD ch.51 R100 item 4).
+fn wait_for_swap_admission(coin: &Qrc20Coin) {
+    let started = std::time::Instant::now();
+    while let Some(refusal) = coin.swap_evidence_refusal() {
+        assert!(started.elapsed().as_secs() < 30, "{refusal}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// The token of the tests over the given Electrum `servers` (an entry list of an activation request).
 fn qrc20_coin_for_test_on_servers(
     priv_key: &[u8],
@@ -154,6 +164,7 @@ fn test_validate_maker_payment() {
         17, 11, 29, 113, 235, 48, 70,
     ];
     let (_ctx, coin) = qrc20_coin_for_test(&priv_key, None);
+    wait_for_swap_admission(&coin);
 
     assert_eq!(
         *coin.utxo.derivation_method.unwrap_iguana(),
@@ -216,6 +227,7 @@ fn test_wait_for_confirmations_excepted() {
         17, 11, 29, 113, 235, 48, 70,
     ];
     let (_ctx, coin) = qrc20_coin_for_test(&priv_key, None);
+    wait_for_swap_admission(&coin);
 
     assert_eq!(
         *coin.utxo.derivation_method.unwrap_iguana(),
@@ -413,6 +425,7 @@ fn test_wait_for_tx_spend_malicious() {
         172, 110, 180, 13, 123, 179, 10, 49,
     ];
     let (_ctx, coin) = qrc20_coin_for_test(&priv_key, None);
+    wait_for_swap_admission(&coin);
 
     // f94d79f89e9ec785db40bb8bb8dca9bc01b7761429618d4c843bbebbc31836b7
     // the transaction has two outputs:
@@ -982,6 +995,7 @@ fn test_validate_maker_payment_malicious() {
         17, 11, 29, 113, 235, 48, 70,
     ];
     let (_ctx, coin) = qrc20_coin_for_test(&priv_key, None);
+    wait_for_swap_admission(&coin);
 
     // Malicious tx 81540dc6abe59cf1e301a97a7e1c9b66d5f475da916faa3f0ef7ea896c0b3e5a
     let payment_tx = hex::decode("01000000010144e2b8b5e6da0666faf1db95075653ef49e2acaa8924e1ec595f6b89a6f715050000006a4730440220415adec5e24148db8e9654a6beda4b1af8aded596ab1cd8667af32187853e8f5022007a91d44ee13046194aafc07ca46ec44f770e75b41187acaa4e38e17d4eccb5d012103693bff1b39e8b5a306810023c29b95397eb395530b106b1820ea235fd81d9ce9ffffffff030000000000000000625403a08601012844095ea7b300000000000000000000000085a4df739bbb2d247746bea611d5d365204725830000000000000000000000000000000000000000000000000000000005f5e10014d362e096e873eb7907e205fadc6175c6fec7bc44c20000000000000000e35403a0860101284cc49b415b2a0a1a8b4af2762154115ced87e2424b3cb940c0181cc3c850523702f1ec298fef0000000000000000000000000000000000000000000000000000000005f5e100000000000000000000000000d362e096e873eb7907e205fadc6175c6fec7bc44000000000000000000000000783cf0be521101942da509846ea476e683aad8324b6b2e5444c2639cc0fb7bcea5afba3f3cdce239000000000000000000000000000000000000000000000000000000000000000000000000000000005fa0fffb1485a4df739bbb2d247746bea611d5d36520472583c208535c01000000001976a9149e032d4b0090a11dc40fe6c47601499a35d55fbb88acc700a15f").unwrap();
