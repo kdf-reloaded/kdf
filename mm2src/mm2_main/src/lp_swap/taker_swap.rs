@@ -1,6 +1,7 @@
 use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, CheckBalanceResult,
                            TakerFeeAdditionalInfo};
-use super::evidence_wait::{refund_cap_text, refund_gate_cap_text, WaitLog};
+use super::evidence_wait::{clock_secs, refund_cap_text, refund_gate_cap_text, retry_while_undetermined,
+                           undetermined_refund_deadline, with_fix_hint, WaitLog};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
                              ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
@@ -65,20 +66,6 @@ struct RefundPacing {
     chain_look_timeout_secs: f64,
     /// The clock the cap of an undetermined look or gate is counted on, in seconds since the epoch.
     now_secs: fn() -> u64,
-}
-
-fn clock_secs() -> u64 { now_ms() / 1000 }
-
-/// How long after the first moment a refund could act an undetermined look or gate keeps the step waiting
-/// (the span of `wait_refund_until()` after the lock time).
-const UNDETERMINED_REFUND_WAIT_SECS: u64 = 3700;
-
-/// The deadline of an undetermined look or gate in the taker's refund chain: the later of `wait_refund_until`
-/// and one hour after the first moment the refund could act (`first_could_act`: the first `CanRefundNow` answer
-/// of the gate, the first undetermined gate answer at or after the lock time, or the first undetermined look at or
-/// after the lock time). `None` while that moment has not come: there is no cap yet.
-fn undetermined_refund_deadline(wait_refund_until: u64, first_could_act: Option<u64>) -> Option<u64> {
-    first_could_act.map(|first| wait_refund_until.max(first.saturating_add(UNDETERMINED_REFUND_WAIT_SECS)))
 }
 
 /// What the look at the chain found while the taker is in its refund chain (CRD ch.51 R31a, §51.6G R100).
@@ -1558,6 +1545,15 @@ impl TakerSwap {
     }
 
     async fn validate_maker_payment(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
+        self.validate_maker_payment_paced(WAIT_CONFIRM_INTERVAL as f64).await
+    }
+
+    /// [`TakerSwap::validate_maker_payment`] with the wait between two repeated payment checks given, so a test
+    /// can shorten it (CRD ch.51 §51.6G R100 item 3).
+    async fn validate_maker_payment_paced(
+        &self,
+        recheck_secs: f64,
+    ) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
         log!({ "Before wait confirm" });
         let confirmations = self.r().data.maker_payment_confirmations;
         let f = self.maker_coin.wait_for_confirmations(
@@ -1587,7 +1583,18 @@ impl TakerSwap {
             try_spv_proof_until: self.r().data.maker_payment_wait,
             confirmations,
         };
-        let validated = self.maker_coin.validate_maker_payment(validate_input).compat().await;
+        // CRD ch.51 §51.6G R100 item 3: a payment check that rests on an undetermined read is repeated until the
+        // step's own deadline.
+        let maker_payment_wait = self.r().data.maker_payment_wait;
+        let validated = retry_while_undetermined(
+            &self.uuid,
+            self.maker_coin.ticker(),
+            "the check of the maker payment",
+            recheck_secs,
+            maker_payment_wait,
+            || self.maker_coin.validate_maker_payment(validate_input.clone()).compat(),
+        )
+        .await;
 
         if let Err(e) = validated {
             return Ok((Some(TakerSwapCommand::Finish), vec![
@@ -2530,7 +2537,10 @@ impl TakerSwap {
 
     /// [`TakerSwap::recover_funds`] with the total bound given, so a test can shorten it.
     pub(crate) async fn recover_funds_within(&self, bound: std::time::Duration) -> Result<RecoveredSwap, String> {
-        recover_within(bound, |stages| async move { self.recover_funds_tracked(&stages).await }).await
+        // CRD ch.51 §51.6G R100 item 9: a recovery that ends on an undetermined read says how to fix it.
+        recover_within(bound, |stages| async move { self.recover_funds_tracked(&stages).await })
+            .await
+            .map_err(with_fix_hint)
     }
 
     async fn recover_funds_tracked(&self, stages: &RecoveryStages) -> Result<RecoveredSwap, String> {
@@ -6218,6 +6228,68 @@ mod taker_swap_tests {
         );
         assert_eq!(GATES.load(Ordering::SeqCst), 3);
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    /// The maker payment's check is repeated while it is undetermined, then the swap goes on.
+    #[test]
+    fn r100_an_undetermined_maker_payment_check_is_repeated_and_the_swap_goes_on() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        {
+            let mut w = taker_swap.w();
+            w.maker_payment = Some(TransactionIdentifier {
+                tx_hex: vec![1u8].into(),
+                tx_hash: vec![2u8].into(),
+            });
+            w.data.maker_payment_wait = now_ms() / 1000 + 100;
+        }
+        TestCoin::wait_for_confirmations
+            .mock_safe(|_, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+        TestCoin::validate_maker_payment.mock_safe(|_, _| {
+            let answer: Box<dyn futures01::Future<Item = (), Error = String> + Send> =
+                if CHECKS.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Box::new(futures01::future::err(undetermined_read()))
+                } else {
+                    Box::new(futures01::future::ok(()))
+                };
+            MockResult::Return(answer)
+        });
+
+        let (next, events) = block_on(taker_swap.validate_maker_payment_paced(0.01)).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::SendTakerPayment)), "{next:?}");
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::MakerPaymentValidatedAndConfirmed]),
+            "{events:?}"
+        );
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 3);
+    }
+
+    /// A check that stays undetermined until the step's deadline fails as any failed check does.
+    #[test]
+    fn r100_an_undetermined_maker_payment_check_fails_at_the_deadline() {
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        {
+            let mut w = taker_swap.w();
+            w.maker_payment = Some(TransactionIdentifier {
+                tx_hex: vec![1u8].into(),
+                tx_hash: vec![2u8].into(),
+            });
+            w.data.maker_payment_wait = now_ms() / 1000;
+        }
+        TestCoin::wait_for_confirmations
+            .mock_safe(|_, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+        TestCoin::validate_maker_payment
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::err(undetermined_read()))));
+
+        let (next, events) = block_on(taker_swap.validate_maker_payment_paced(0.01)).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)), "{next:?}");
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::MakerPaymentValidateFailed(_)]),
+            "{events:?}"
+        );
     }
 
     /// T39.5.f: `recover_funds_of_swap` before the gate opens reports "too early", names the chain time it

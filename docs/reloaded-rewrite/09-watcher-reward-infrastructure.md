@@ -231,6 +231,21 @@ with the following bound states and transitions:
 | Refund-taker-payment        | On deadline: broadcast second preimage                 |
 | Stopped (with outcome)      | Terminal; log the outcome                              |
 
+> **Status note (2026-11-23, Reloaded-original, clean side;
+> maintainer decision of 2026-11-22).** Under chapter 51
+> §51.6G R100, Wait-for-taker-payment-spend moves to
+> Refund-taker-payment at the refund deadline only after a
+> search that answered that the taker payment is not spent;
+> while its searches fail or are undetermined it keeps
+> searching. A spend it finds is handled as before. An
+> undetermined answer of the refundability check in
+> Refund-taker-payment, or of the taker-payment validation, is
+> retried as other errors are, with one warning that names the
+> fix. This note is written in a clean session from the
+> maintainer's decision and this workspace's own watcher code;
+> no reference input was consulted, it makes no parity claim,
+> and no Dirty Gate pass is needed.
+
 > **Clearance (chapter 01 T1, R40).** R10a, and the
 > deferred item D5 it records, are forbidden-class-sourced
 > material: both were authored by the KDF Spec Reader under
