@@ -173,6 +173,47 @@ pub(crate) async fn agreed_spend(
     }
 }
 
+/// The look on every usable server (CRD ch.51 R31a with R100): the agreed pair search of [`agreed_spend`], and then
+/// every server of the list is asked for a PROOF ONLY, a claim whose secret hashes to the swap's secret hash. A
+/// proof found on any server is returned; every other answer of the sweep is ignored. Without a proof the result of
+/// the pair search stands, whatever it is (an agreed spend, none, or an undetermined read).
+pub(crate) async fn agreed_spend_with_proof_sweep(
+    tx_hash_algo: TxHashAlgo,
+    policy: &SwapEvidencePolicy,
+    servers: &EvidenceNodes,
+    payment: &PaymentOutputs,
+    output_index: usize,
+    secret_hash: &[u8],
+) -> Result<Option<SpentOutputInfo>, String> {
+    let pair = agreed_spend(tx_hash_algo, policy, servers, payment, output_index, Some(secret_hash)).await;
+    if matches!(&pair, Ok(spend) if spend_proves_itself(spend, Some(secret_hash))) {
+        return pair;
+    }
+    let client = &servers.client;
+    let mut sweep: futures::stream::FuturesUnordered<_> = servers
+        .nodes
+        .iter()
+        .map(|addr| async move {
+            match client
+                .find_output_spend_from(addr, payment.tx_hash, &payment.spent_script_pubkey, output_index)
+                .await
+            {
+                Ok(spend) => Some(spend).filter(|spend| spend_proves_itself(spend, Some(secret_hash))),
+                Err(e) => {
+                    debug!("swap evidence: the proof sweep on {} failed: {}", node_name(addr), e);
+                    None
+                },
+            }
+        })
+        .collect();
+    while let Some(found) = futures::StreamExt::next(&mut sweep).await {
+        if let Some(proof) = found {
+            return Ok(proof);
+        }
+    }
+    pair
+}
+
 /// The raw payment transaction of `txid`, agreed on the servers: the decision of a node is whether its bytes are
 /// the bytes of `expected`.
 pub(crate) async fn agreed_payment_bytes(

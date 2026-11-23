@@ -388,6 +388,47 @@ fn wait_for_spend_does_not_take_a_wrong_secret() {
     });
 }
 
+/// The look on every server: a hash-valid claim on ANY server is found, whichever pair the pool asks first; a
+/// refund or a forged claim on the third server is ignored.
+#[test]
+fn the_every_server_look_finds_a_proof_on_a_third_server_and_ignores_the_rest() {
+    block_on(async {
+        let servers = start_servers(3).await;
+        let swap = Swap::new();
+        let coin = utxo_coin(&[&servers[0], &servers[1], &servers[2]], None);
+        let payment_bytes = serialize(&swap.payment).take();
+        let look = || {
+            coin.search_for_swap_tx_spend_my_on_every_server(
+                TIME_LOCK,
+                &swap.my_pub,
+                &swap.other_pub,
+                &swap.secret_hash,
+                &payment_bytes,
+            )
+        };
+        for shown in 0..3 {
+            // The claim is on server `shown` only, the other two show nothing.
+            for (index, server) in servers.iter().enumerate() {
+                let claim = swap.spend(Some(SECRET));
+                show_history(server, &swap, (index == shown).then_some(&claim));
+            }
+            assert!(
+                matches!(look().await, Some(FoundSwapTxSpend::Spent(_))),
+                "the claim on server {shown} is found"
+            );
+        }
+        // A refund, or a claim with another secret, on one server is no finding while the others show nothing.
+        for ignored in [swap.spend(None), swap.spend(Some([9; 32]))] {
+            for shown in 0..3 {
+                for (index, server) in servers.iter().enumerate() {
+                    show_history(server, &swap, (index == shown).then_some(&ignored));
+                }
+                assert!(look().await.is_none(), "an unproven spend on server {shown} is ignored");
+            }
+        }
+    });
+}
+
 /// S, in every family: an undetermined read is `Err` that the engine's test accepts.
 #[test]
 fn an_undetermined_spend_read_is_marked_in_utxo_qtum_and_bch() {

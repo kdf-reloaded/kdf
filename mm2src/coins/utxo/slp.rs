@@ -688,7 +688,7 @@ impl MarketCoinOps for SlpToken {
             SLP_SWAP_VOUT,
             from_block,
             wait_until,
-            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
+            &self.swap_evidence_policy(),
         )
     }
 

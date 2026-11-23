@@ -1038,16 +1038,17 @@ pub async fn search_for_swap_tx_spend_my_on_every_server(
             return None;
         },
     };
-    // CRD ch.51 R100: under an adopted policy the look is the agreed search of the single search, with a claim that
-    // shows the swap's secret taken at once on any server. An undetermined look is no finding.
+    // CRD ch.51 R100: under an adopted policy the look is the agreed pair search of the single search, and then every
+    // usable server is asked for a proof only (a claim whose secret hashes to the swap's secret hash), so a claim
+    // on a third server is not missed. An undetermined look without a proof is no finding.
     if let Some(servers) = evidence_nodes(coin, policy) {
-        let spend = match agreed_spend(
+        let spend = match agreed_spend_with_proof_sweep(
             coin.tx_hash_algo,
             policy,
             &servers,
             &payment,
             output_index,
-            Some(secret_hash),
+            secret_hash,
         )
         .await
         {

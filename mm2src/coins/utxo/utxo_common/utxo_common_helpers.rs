@@ -353,8 +353,9 @@ pub(crate) fn wait_for_output_spend_of(
 ) -> TransactionFut {
     let client = coin.rpc_client.clone();
     let tx_hash_algo = coin.tx_hash_algo;
-    // CRD ch.51 R100: the spend that ends the wait is agreed on two servers (no secret hash is known here, so no
-    // answer proves itself); a read that is undetermined waits for the next round.
+    // CRD ch.51 R100: the spend that ends the wait is agreed on two servers. No secret hash is known here, so a claim
+    // proves itself from the payment alone (its redeem script is the payment's and its secret satisfies the hash in
+    // that script); a read that is undetermined waits for the next round.
     let servers = evidence_nodes(coin, policy);
     let policy = policy.clone();
     let payment = PaymentOutputs {
