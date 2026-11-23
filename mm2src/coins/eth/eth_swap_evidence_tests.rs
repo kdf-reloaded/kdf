@@ -219,9 +219,15 @@ fn trusting(field: &str, urls: &[&str]) -> SwapEvidencePolicy {
     swap_evidence_policy_from("ETH", Some(field), &urls_of(urls)).unwrap()
 }
 
-fn sign(coin: &EthCoin, nonce: u64, value: U256, data: Vec<u8>) -> SignedEthTx {
+/// The account nonce of the next test transaction. No test depends on a particular value: each transaction only
+/// gets a nonce of its own.
+static NEXT_NONCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_nonce() -> U256 { NEXT_NONCE.fetch_add(1, AtomicOrdering::Relaxed).into() }
+
+fn sign(coin: &EthCoin, value: U256, data: Vec<u8>) -> SignedEthTx {
     coin.sign_tx_for_send(UnSignedEthTx {
-        nonce: nonce.into(),
+        nonce: next_nonce(),
         value,
         action: Action::Call(coin.swap_contract_address),
         data,
@@ -294,7 +300,7 @@ impl Fixture {
                         Token::Uint(U256::from(time_lock)),
                     ])
                     .unwrap();
-                sign(&coin, 1, paid_wei(), data)
+                sign(&coin, paid_wei(), data)
             },
             Some(token_addr) => {
                 let data = SWAP_CONTRACT
@@ -309,7 +315,7 @@ impl Fixture {
                         Token::Uint(U256::from(time_lock)),
                     ])
                     .unwrap();
-                sign(&coin, 1, 0.into(), data)
+                sign(&coin, 0.into(), data)
             },
         };
         *world.payment.lock().unwrap() = Some(payment.clone());
@@ -346,7 +352,7 @@ impl Fixture {
         Spend {
             event: "ReceiverSpent",
             block,
-            tx: sign(&self.coin, 2, 0.into(), data),
+            tx: sign(&self.coin, 0.into(), data),
             data: [self.id.as_slice(), &secret[..]].concat(),
         }
     }
@@ -367,7 +373,7 @@ impl Fixture {
         Spend {
             event: "SenderRefunded",
             block,
-            tx: sign(&self.coin, 3, 0.into(), data),
+            tx: sign(&self.coin, 0.into(), data),
             data: self.id.clone(),
         }
     }
