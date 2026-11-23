@@ -1214,7 +1214,7 @@ the previous version used. The safe way:
   although the server held it, and it was not placed again after later reconnects. Now a subscription that is
   already placed on the current connection is not sent again, and a failed first request keeps the subscription
   when it is placed on the current connection. This applies to the address and token balance subscriptions of
-  UTXO coins, QTUM and QRC20 tokens on Electrum. Detail: PR #N; CRD ch.38 status note of 2026-11-23 after
+  UTXO coins, QTUM and QRC20 tokens on Electrum. Detail: PR #520; CRD ch.38 status note of 2026-11-23 after
   D38.6.4Q.1.
 
 #### TRON coins
