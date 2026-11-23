@@ -1593,6 +1593,22 @@ fn assert_marked(text: &str, nodes: &[&Node]) {
     assert!(text.contains("another host"), "{text}");
 }
 
+/// The undetermined error of a trusted node that did not answer: marked, no URL, and the advice about that node.
+fn assert_trusted_silent(text: &str, nodes: &[&Node]) {
+    assert!(crate::swap_evidence::is_undetermined(text), "{text}");
+    assert!(text.starts_with(crate::swap_evidence::UNDETERMINED_PREFIX), "{text}");
+    assert!(!text.contains("://"), "{text}");
+    for node in nodes {
+        assert!(!text.contains(&node.url()), "{text}");
+    }
+    assert!(
+        text.contains("the node named by swap_evidence_node did not answer"),
+        "{text}"
+    );
+    assert!(text.contains("remove swap_evidence_node"), "{text}");
+    assert!(!text.contains("add a node on another host"), "{text}");
+}
+
 /// What a determined error is: no marker.
 fn assert_not_marked(text: &str) {
     assert!(!crate::swap_evidence::is_undetermined(text), "{text}");
@@ -1615,7 +1631,18 @@ fn the_refund_gate_error_of_an_undetermined_read_carries_the_marker() {
     b.edit(|w| w.solid_time_ms = None);
     let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
     assert_marked(&gate(&coin).err().expect("undetermined").to_string(), &[&a, &b]);
+    // The trusted node does not answer: its own advice, not the two-node one.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock + 5, 1));
+    a.edit(|w| w.solid_time_ms = None);
+    let (_ctx, coin) = coin_over(&[&a, &b], Some(0), 1);
+    assert_trusted_silent(&gate(&coin).err().expect("undetermined").to_string(), &[&a, &b]);
+    assert_trusted_silent(
+        &trait_gate(&coin, u64::from(LOCK_TIME)).err().expect("undetermined"),
+        &[&a, &b],
+    );
     // A single node.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock + 5, 1));
+    b.edit(|w| w.solid_time_ms = None);
     let (_ctx, coin) = coin_over(&[&a], None, 1);
     assert_marked(&gate(&coin).err().expect("undetermined").to_string(), &[&a]);
     assert_marked(
