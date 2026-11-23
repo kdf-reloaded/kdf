@@ -23,6 +23,8 @@ pub(super) mod evidence;
 
 use self::discovery::{find_consumer, Caps, Kind, DEFAULT_CAPS};
 use self::evidence::{agreed_chain_time, agreed_claim_read, agreed_payment, agreed_state, record_of};
+use super::send::TronSendError;
+use super::trigger::tron_api;
 use super::{call_of, encode_call, encode_payments_query, require_32_byte_hash, tron_payment_hash, tron_swap_id,
             PaymentState, TronSwapCall, TronSwapError, TronSwapEvent, TronSwapTx};
 use crate::eth::tron::api::{TronApiClient, TronApiError};
@@ -61,13 +63,6 @@ pub(super) const OWN_STEP_WAITS: Waits = Waits {
     poll_s: 5.0,
     window_ms: 600_000,
 };
-
-fn tron_api(coin: &EthCoin) -> Result<TronApiClient, TronSwapError> {
-    match (&coin.tron_api, coin.is_tron_family()) {
-        (Some(api), true) => Ok(api.clone()),
-        _ => Err(TronSwapError::NotTronCoin),
-    }
-}
 
 fn my_address(coin: &EthCoin) -> TronAddress { TronAddress::from_evm_address(coin.my_address) }
 
@@ -330,6 +325,15 @@ pub(super) async fn validate_payment_with(
     let me = my_address(coin);
     let counterparty = address_of_pubkey(check.sender_pub)?;
     let (token, amount) = expected_asset(coin, check.amount)?;
+    if let Some(token) = &token {
+        // A token that takes a fee on a transfer is refused; the reader is the send side's.
+        super::send::ensure_no_token_transfer_fee(coin, token)
+            .await
+            .map_err(|e| match e {
+                TronSendError::Swap(error) => error,
+                _ => mismatch("token transfer fee"),
+            })?;
+    }
     // The id is the client's own derivation from the agreed lock time and secret hash, never read from the peer's
     // call; `payments(id)` below is asked under it, and the call's id is only compared with it.
     let id = tron_swap_id(check.time_lock, &secret_hash);

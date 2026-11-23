@@ -162,6 +162,9 @@ struct World {
     /// The TRX balance, in SUN, of the coin's account, and whether the read of it fails.
     balance: i64,
     balance_down: bool,
+    /// The token's `basisPointsRate()` and `maximumFee()`; `None` is a token without that getter (the call reverts).
+    rate: Option<u64>,
+    maximum: Option<u64>,
 }
 
 impl World {
@@ -183,6 +186,8 @@ impl World {
             dry_run_reverts: false,
             balance: 1_000_000_000_000,
             balance_down: false,
+            rate: None,
+            maximum: None,
         }
     }
 
@@ -240,13 +245,37 @@ fn payments_reply(rec: Option<Rec>) -> Reply {
     )
 }
 
+fn setting_reply(value: Option<u64>) -> Reply {
+    match value {
+        Some(value) => {
+            let mut word = [0u8; 32];
+            word[24..].copy_from_slice(&value.to_be_bytes());
+            Reply::ok(
+                &json!({ "result": { "result": true }, "constant_result": [hex::encode(word)], "energy_used": 500 })
+                    .to_string(),
+            )
+        },
+        None => Reply::ok(
+            &json!({ "result": { "result": true, "message": "REVERT opcode executed" }, "energy_used": 400,
+                     "constant_result": [""] })
+            .to_string(),
+        ),
+    }
+}
+
 fn answer(world: &Mutex<World>, path: &str, body: &str) -> Reply {
     let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
     let request: Json = serde_json::from_str(body).unwrap_or(Json::Null);
     let payments_call = request["data"]
         .as_str()
         .is_some_and(|data| data.starts_with("0716326d"));
+    let selector_of = |signature: &str| hex::encode(&keccak256(signature.as_bytes()).as_slice()[..4]);
+    let data = request["data"].as_str().unwrap_or("");
     match path {
+        "/wallet/triggerconstantcontract" if data.starts_with(&selector_of("basisPointsRate()")) => {
+            setting_reply(w.rate)
+        },
+        "/wallet/triggerconstantcontract" if data.starts_with(&selector_of("maximumFee()")) => setting_reply(w.maximum),
         "/wallet/getnowblock" => Reply::ok(&now_block(w.head_number, w.head_time_ms)),
         "/walletsolidity/getnowblock" => match w.solid_time_ms {
             Some(time) => Reply::ok(&now_block(w.head_number, time)),
@@ -1453,4 +1482,98 @@ fn the_wait_falls_back_to_the_payment_when_the_claim_lies_before_the_recorded_st
     .expect("the claim before the recorded start is found from the payment");
     helper.join().unwrap();
     assert_eq!(found, spend);
+}
+
+// ---- the refund gate through `can_refund_htlc` ---------------------------------------------------------------------
+
+fn trait_gate(coin: &EthCoin, lock: u64) -> Result<CanRefundHtlc, String> {
+    use crate::SwapOps;
+    use futures::compat::Future01CompatExt;
+    block_on(coin.can_refund_htlc(lock).compat())
+}
+
+#[test]
+fn can_refund_htlc_of_a_tron_coin_waits_before_the_lock_and_refunds_after_it_on_two_nodes() {
+    let lock = i64::from(LOCK_TIME);
+    let (a, b) = (gate_node(0, lock - 100, 1), gate_node(1, lock - 100, 1));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert!(matches!(
+        trait_gate(&coin, u64::from(LOCK_TIME)),
+        Ok(CanRefundHtlc::HaveToWait(101))
+    ));
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock + 9, 1));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert!(matches!(
+        trait_gate(&coin, u64::from(LOCK_TIME)),
+        Ok(CanRefundHtlc::CanRefundNow)
+    ));
+}
+
+#[test]
+fn can_refund_htlc_of_a_tron_coin_is_an_error_when_the_evidence_is_undetermined() {
+    let lock = i64::from(LOCK_TIME);
+    // The nodes disagree.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock - 5, 1));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert!(trait_gate(&coin, u64::from(LOCK_TIME)).is_err());
+    // One node does not answer.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock + 5, 1));
+    b.edit(|w| w.solid_time_ms = None);
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert!(trait_gate(&coin, u64::from(LOCK_TIME)).is_err());
+}
+
+// ---- a TRC20 leg and the token's transfer-fee setting ----------------------------------------------------------
+
+fn trc20_payment_validation(rate: Option<u64>, maximum: Option<u64>) -> Result<(), TronSwapError> {
+    let token = TronAddress::parse(crate::eth::tron::wallet_path_tests::TRC20_CONTRACT).unwrap();
+    let (_, cp) = counterparty();
+    let me = my_address_of_test_coin();
+    let payment = call_tx(
+        &cp,
+        &contract(),
+        &TronSwapCall::Erc20Payment {
+            id: pay_id(),
+            amount: U256::from(UNITS),
+            token: token.clone(),
+            receiver: me.clone(),
+            secret_hash: secret_hash(),
+            lock_time: u64::from(LOCK_TIME),
+        },
+        0,
+    );
+    let hash = tron_payment_hash(&me, &cp, &secret_hash(), Some(&token), U256::from(UNITS));
+    let node = |index| {
+        let mut world =
+            World::new()
+                .with_state(hash, u64::from(LOCK_TIME), 1)
+                .with_tx(&payment, PAYMENT_BLOCK, "SUCCESS", vec![]);
+        world.rate = rate;
+        world.maximum = maximum;
+        Node::start(index, world)
+    };
+    let (a, b) = (node(0), node(1));
+    let urls = [a.url(), b.url()];
+    let (_ctx, coin) = block_on(crate::eth::tron::wallet_path_tests::trc20_coin_over(
+        &[urls[0].as_str(), urls[1].as_str()],
+        6,
+    ));
+    validate(&coin, &payment, &contract())
+}
+
+#[test]
+fn a_trc20_payment_is_refused_when_the_token_takes_a_transfer_fee() {
+    assert_mismatch(
+        trc20_payment_validation(Some(10), Some(1_000_000)),
+        "token transfer fee",
+    );
+    // A rate and no readable maximum is a fee too.
+    assert_mismatch(trc20_payment_validation(Some(10), None), "token transfer fee");
+}
+
+#[test]
+fn a_trc20_payment_is_accepted_when_the_transfer_fee_is_zero_or_the_token_has_no_getters() {
+    trc20_payment_validation(Some(0), Some(1_000_000)).expect("a zero rate");
+    trc20_payment_validation(Some(10), Some(0)).expect("a zero maximum");
+    trc20_payment_validation(None, None).expect("no getters");
 }

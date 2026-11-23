@@ -635,15 +635,19 @@ impl SwapOps for EthCoin {
         }
     }
 
-    /// The Tron family keeps the wall-clock rule, with no chain read (CRD ch.51 §51.6E R92 item 3). Every other
-    /// EVM coin reads the latest block's timestamp once the local clock is past the lock time
+    /// The Tron family answers with the agreed solidified chain time of `tron::swap::watch` (CRD ch.51 R88, R100).
+    /// Every other EVM coin reads the latest block's timestamp once the local clock is past the lock time
     /// (CRD ch.51 §51.6E R88). A failed read, or a block without a timestamp, is an error.
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
         let fut = async move {
-            let now = now_ms() / 1000;
             if self.is_tron_family() {
-                return Ok(wall_clock_refund_eligibility(now, locktime));
+                // The agreed solidified chain time against the lock time; undetermined evidence or any failure is
+                // an error, never a refund.
+                return crate::eth::tron::swap::watch::tron_can_refund_htlc(self, locktime)
+                    .await
+                    .map_err(|e| e.to_string());
             }
+            let now = now_ms() / 1000;
             if now < locktime {
                 return Ok(evm_refund_eligibility(now, locktime, None));
             }
@@ -870,9 +874,8 @@ mod refund_gate_tests {
     use super::*;
 
     #[test]
-    fn the_tron_family_rule_is_the_wall_clock_rule_around_the_lock_time() {
-        // `can_refund_htlc` answers a Tron-family coin with `wall_clock_refund_eligibility` and no chain read;
-        // the trait default is the same function.
+    fn the_trait_default_is_the_wall_clock_rule_around_the_lock_time() {
+        // The trait default of `can_refund_htlc` is `wall_clock_refund_eligibility`.
         let lock = 5000;
         assert!(matches!(
             wall_clock_refund_eligibility(lock - 1, lock),

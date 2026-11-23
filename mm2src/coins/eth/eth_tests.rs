@@ -798,12 +798,14 @@ mod search_for_swap_tx_spend_scripted {
         assert!(answer.is_err());
     }
 
+    /// A Tron-family coin is answered by the TRON watch side (`tron::swap::watch_tests` pins its answers); a coin
+    /// without a node client has no answer, and the EVM node is not asked.
     #[test]
-    fn refund_gate_of_the_tron_family_asks_no_node() {
+    fn refund_gate_of_the_tron_family_is_an_error_without_a_tron_node() {
         let locktime = now_ms() / 1000 - 7200;
         let (answer, asked) = refund_gate(EthCoinType::Tron, locktime, Some(locktime - 5000));
         assert!(asked.is_empty(), "{asked:?}");
-        assert!(matches!(answer, Ok(CanRefundHtlc::CanRefundNow)));
+        assert!(answer.is_err());
     }
 
     #[test]

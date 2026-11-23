@@ -3118,7 +3118,9 @@ swap contract selected for that coin at negotiation (chapter 51 R98), and the
 record agreed by R21.11D.1 is in state 1 with a stored payment hash equal to the
 one computed over the values the swap expects (receiver, sender, secret hash,
 token or TRX, amount; R21.11C.3), for the swap id of R21.11C.2 and the expected
-lock time. The decoded call is used only to name the field that differs. The
+lock time. For a TRC20 payment the token's transfer fee must be zero, by the
+rule of R21.11C.14; a token that takes a fee, or a failed read, fails the
+validation. The decoded call is used only to name the field that differs. The
 read waits up to 180 seconds for the solidified data to reach the payment.
 
 **R21.11D.3 (DEX fee).** The fee transaction is valid when it is a TRX transfer
@@ -3148,9 +3150,11 @@ the chain time, also past the lock time, with no margin before or after it. Its
 reverts, fails, or needs more than the cap, the call is sent with the fixed
 `fee_limit` of 100 TRX, the cap of R21.11C.7.
 
-**R21.11D.5 (refund gate).** A refund is allowed once the chain time agreed by
+**R21.11D.5 (refund gate).** The coin's answer to "can this payment be refunded
+now" follows this rule: a refund is allowed once the chain time agreed by
 R21.11D.1 is at or past the lock time; before that the swap waits (chapter 51
-§51.6E). The state check of R21.11D.4 is the second half of the gate.
+§51.6E), and an undetermined read is an error, never a refund. The state check
+of R21.11D.4 is the second half of the gate.
 
 **R21.11D.6 (the consuming transaction of a payment).** Per the maintainer
 decision of 2026-11-08 on D21.B8:
