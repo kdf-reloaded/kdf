@@ -2877,16 +2877,21 @@ fn polygon_check_if_my_payment_sent() {
         "swap_contract_address": "0x9130b257d37a52e52f21054c4da3450c72f595ce",
     });
 
+    // The node URL can carry an API key, and an error from a call to the node can
+    // carry that URL. So no assert or panic message in this test prints an error
+    // text: every `Result` of a network call is matched and fails with a fixed
+    // message instead of `unwrap()`.
     let priv_key = [1; 32];
-    let coin = block_on(eth_coin_from_conf_and_request(
+    let Ok(coin) = block_on(eth_coin_from_conf_and_request(
         &ctx,
         "MATIC",
         &conf,
         &request,
         &priv_key,
         CoinProtocol::ETH { chain_id: None },
-    ))
-    .unwrap();
+    )) else {
+        panic!("eth_coin_from_conf_and_request failed");
+    };
 
     // A known, immutable historical maker payment on Polygon mainnet (Dec 2021),
     // emitted in block 22_185_152. We start the scan two blocks before it with a
@@ -2905,7 +2910,7 @@ fn polygon_check_if_my_payment_sent() {
 
     let secret_hash = hex::decode("fc33114b389f0ee1212abf2867e99e89126f4860").unwrap();
     let swap_contract_address: BytesJson = "9130b257d37a52e52f21054c4da3450c72f595ce".into();
-    let my_payment = coin
+    let found = coin
         .check_if_my_payment_sent(
             1638764369,
             &[],
@@ -2914,9 +2919,12 @@ fn polygon_check_if_my_payment_sent() {
             from_block,
             &Some(swap_contract_address.clone()),
         )
-        .wait()
-        .unwrap()
-        .unwrap();
+        .wait();
+    let my_payment = match found {
+        Ok(Some(payment)) => payment,
+        Ok(None) => panic!("the known payment was not found"),
+        Err(_) => panic!("check_if_my_payment_sent failed"),
+    };
     let expected_hash = BytesJson::from("69a20008cea0c15ee483b5bbdff942752634aa072dfd2ff715fe87eec302de11");
     assert_eq!(expected_hash, my_payment.tx_hash());
 
@@ -2931,7 +2939,10 @@ fn polygon_check_if_my_payment_sent() {
     // chunks), so it stays within free-tier getLogs limits.
     let recent_head = {
         use alloy::providers::Provider as _;
-        block_on(coin.alloy_provider().get_block_number()).unwrap()
+        let Ok(head) = block_on(coin.alloy_provider().get_block_number()) else {
+            panic!("get_block_number failed");
+        };
+        head
     };
     let recent_from_block = recent_head.saturating_sub(20);
     let undetermined = coin
@@ -2943,16 +2954,18 @@ fn polygon_check_if_my_payment_sent() {
             recent_from_block,
             &Some(swap_contract_address.clone()),
         )
-        .wait()
-        .unwrap_err();
+        .wait();
+    let Err(undetermined) = undetermined else {
+        panic!("a payment the contract knows must not get an Ok answer in the recent window");
+    };
     // The error text carries a source-location prefix, so the fixed leading phrase
-    // of the message is matched rather than the whole text.
+    // of the message is matched rather than the whole text. The text itself is not
+    // printed (see the note on error texts above).
     assert!(
         undetermined.contains("Undetermined whether the payment was sent"),
-        "a payment the contract knows must be undetermined in the recent {}..{} window: {}",
+        "a payment the contract knows must be undetermined in the recent {}..{} window",
         recent_from_block,
-        recent_head,
-        undetermined
+        recent_head
     );
 
     // Not-sent case: the same lock time with a secret hash whose last byte is
@@ -2970,8 +2983,10 @@ fn polygon_check_if_my_payment_sent() {
             recent_from_block,
             &Some(swap_contract_address),
         )
-        .wait()
-        .unwrap();
+        .wait();
+    let Ok(not_sent) = not_sent else {
+        panic!("check_if_my_payment_sent failed");
+    };
     assert!(
         not_sent.is_none(),
         "a payment id unknown to the contract must be reported as not sent"
