@@ -1,6 +1,6 @@
 use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, CheckBalanceResult,
                            TakerFeeAdditionalInfo};
-use super::evidence_wait::{refund_cap_text, refund_gate_cap_text, WaitLog};
+use super::evidence_wait::{refund_cap_text, refund_gate_cap_text, Read, WaitLog};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
                              ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
@@ -2048,12 +2048,7 @@ impl TakerSwap {
                                     ),
                                 ]));
                             }
-                            gate_log.note(
-                                &self.uuid,
-                                self.taker_coin.ticker(),
-                                "the chain time of the refund gate",
-                                &e,
-                            );
+                            gate_log.note(&self.uuid, self.taker_coin.ticker(), Read::Gate, &e);
                         } else {
                             error!("Error {} on can_refund_htlc, retrying in 30 seconds", e);
                         }
@@ -2180,12 +2175,7 @@ impl TakerSwap {
                             ),
                         ]));
                     }
-                    wait_log.note(
-                        &self.uuid,
-                        self.taker_coin.ticker(),
-                        "the state of the taker payment",
-                        &reason,
-                    );
+                    wait_log.note(&self.uuid, self.taker_coin.ticker(), Read::Look, &reason);
                     Timer::sleep(pacing.non_final_retry_secs).await;
                 },
             }
@@ -5408,11 +5398,14 @@ mod taker_swap_tests {
     /// CRD ch.51 §51.6G R100 item 3 and the cap: a search that fails leaves the look undetermined; no refund is
     /// sent, and at the cap the step ends with the refund failure that shows the error as the coin gave it.
     #[test]
-    fn a_failed_search_holds_the_refund_until_the_cap_and_then_shows_the_error() {
+    fn a_failed_search_holds_the_refund_until_the_cap_and_then_names_the_kind_of_failure() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SEARCHES: AtomicUsize = AtomicUsize::new(0);
         static SENDS: AtomicUsize = AtomicUsize::new(0);
-        static ANSWERS: [ScriptedSearch; 2] = [Ok(None), Err("all electrums are down")];
+        static ANSWERS: [ScriptedSearch; 2] = [
+            Ok(None),
+            Err("error sending request for url (http://node.example:443/)"),
+        ];
         let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
         start_test_clock();
         mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
@@ -5422,9 +5415,10 @@ mod taker_swap_tests {
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(is_refund_failed(&events), "{events:?}");
-        // The coin gave a plain error: it is shown as given, and no cause is claimed.
+        // The coin gave a plain error: the event names the kind of failure, not the error text, and claims no cause.
         let text = format!("{events:?}");
-        assert!(text.contains("all electrums are down"), "{text}");
+        assert!(text.contains("(the search failed or did not finish)"), "{text}");
+        assert!(!text.contains("node.example") && !text.contains("http"), "{text}");
         assert!(!text.contains("swap_evidence_node"), "{text}");
         assert_eq!(SENDS.load(Ordering::SeqCst), 0);
         assert_eq!(published_count(&mut published), 0);

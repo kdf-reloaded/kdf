@@ -1304,8 +1304,8 @@ the previous version used. The safe way:
   claim found on one server whose secret matches the swap's hash is used at once; a refund, or another spend, found
   on one server only is not acted on. A swap still waiting an hour after its refund first became possible in the
   current run, and at least until its payment's lock time plus 3700 seconds, ends as refund failed, with a text
-  that gives the reason and, for a coin on the two-node rule, the fix. Detail: PR #523; CRD ch.51, status note of
-  2026-11-23 under R31a.
+  that names the kind of failure and, when the nodes did not agree, the fix; the servers' own answers go to the
+  debug log only. Detail: PR #523; CRD ch.51, status note of 2026-11-23 under R31a.
 
 ### Tests
 
