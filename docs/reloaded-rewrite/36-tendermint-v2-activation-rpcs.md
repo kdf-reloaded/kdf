@@ -3714,7 +3714,7 @@ not respond the error can take up to `n × 15` seconds to arrive; the
 figure is the reference's and is not part of the contract. Reloaded
 answers the same error type and status in the same order of conditions.
 
-> **Status note (2026-11-23, Reloaded-original; PR #NNN).** In the native build
+> **Status note (2026-11-23, Reloaded-original; PR #516).** In the native build
 > every request to a Tendermint node, the `health` and `abci_info` probes of the
 > node choice included, is bounded at 30 seconds for sending the request and
 > reading the whole answer. A node that accepts the connection and does not

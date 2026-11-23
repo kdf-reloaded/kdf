@@ -956,7 +956,7 @@ the previous version used. The safe way:
   native build to a Tendermint node is now bounded at 30 seconds, the node health checks included. A node that does
   not answer in time counts as failed, so the node choice moves on to the next configured node, and the history
   stops waiting on it. With no node answering, the request fails after at most about a minute per configured node.
-  Detail: PR #NNN; CRD ch.36, status note after R36.14.33.
+  Detail: PR #516; CRD ch.36, status note after R36.14.33.
 
 #### ZEC
 
