@@ -655,6 +655,25 @@ locktime.
 > classification, and its difference from the baseline anchor, is §51.6E R90
 > items 2 and 5.
 
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100 a look lets the chain
+> continue only when it is a determined "not spent". A search that fails, or
+> does not finish within its bound, leaves the look undetermined, unless the
+> search on every server (status note of 2026-11-21) finds a spend or a refund,
+> which is handled on that one answer (R100 item 3: a secret proven by its hash
+> needs no agreeing read). A found spend whose secret cannot be extracted
+> continues as R31 states, unless the read behind it was undetermined. While the
+> look is undetermined the chain waits: it builds no refund, it does not emit
+> `TakerPaymentRefundFailed` after a rejection, and it looks again after the
+> chain's retry wait (30 seconds in the node), writing one warning that names
+> the fix. The look also runs at a fourth point: each time the refundability
+> check answers that the refund can be sent, before the refund is built, which
+> happens only after a determined "not spent". An undetermined answer of the
+> refundability check is retried the same way. A look or a refundability check
+> that is still undetermined at the swap's refund deadline ends the chain as
+> chapter 51 R100 item 9 and its status note of 2026-11-23 state. The event set,
+> the resume map of R32 and the persisted log shape are unchanged.
+
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
 stages.
@@ -3446,6 +3465,11 @@ reference rows alike.
   the maintainer's decision of 2026-11-22, the cleared §51.6E and this
   workspace's own QRC20 search code; no other reference input was consulted,
   the note makes no parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-23: the status note after the 2026-11-22 pointer
+  under R31a is a Reloaded addition written in a clean session from the
+  maintainer's decisions of 2026-11-22 and 2026-11-23, §51.6G and this
+  workspace's own refund chain code; no reference input was consulted, the
+  note makes no parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
