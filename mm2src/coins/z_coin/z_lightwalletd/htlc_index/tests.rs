@@ -2000,8 +2000,8 @@ async fn r100_a_pair_inside_the_tip_gap_decides_and_one_beyond_it_is_undetermine
         .unwrap_err();
     assert!(is_tip_gap(&error), "{error:?}");
     assert!(
-        !error.is_disagreement(),
-        "a tip gap is no disagreement of answers: {error:?}"
+        error.is_disagreement(),
+        "a tip gap ends the attempt like a disagreement, so no other pair (the Electrum fallback) is asked: {error:?}"
     );
 
     // The same for the already-sent read.
@@ -2051,4 +2051,49 @@ async fn r100_a_field_with_a_port_names_a_bare_host_entry_and_the_trusted_node_a
         .unwrap();
     assert!(matches!(outcome, SpendOutcome::NotSpent(_)), "{outcome:?}");
     assert!(transport.asked("b", "utxos").is_empty());
+}
+
+/// A pair beyond the tip gap ends the attempt whatever it answers (R100 item 8): differing answers and equal answers
+/// alike are undetermined and are not settled by a further pair.
+#[tokio::test]
+async fn r100_a_pair_beyond_the_tip_gap_ends_the_attempt_with_differing_or_equal_answers() {
+    let far = TIP + SPEND_READ_MAX_TIP_GAP_BLOCKS + 1;
+
+    // The higher endpoint says "not spent", the lagging one shows the spend: they differ.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), far));
+    transport.serve("b", at_tip(spent_endpoint(), TIP));
+    transport.serve("c", at_tip(spent_endpoint(), TIP));
+    let backend = agreeing_backend(&transport, &["a", "b", "c"], two_nodes());
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(is_tip_gap(&error) && error.is_disagreement(), "{error:?}");
+    // The third endpoint is asked only for a secret that proves itself; its other answer settles nothing, so the
+    // result above stays undetermined.
+
+    // Equal answers beyond the gap: also undetermined, with no fallback.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), far));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(is_tip_gap(&error) && error.is_disagreement(), "{error:?}");
+
+    // A self-proving claim across the gap is still taken.
+    let secret = [9u8; 32];
+    let matching = ClaimFixture::new(secret, secret);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), far));
+    transport.serve("b", at_tip(matching.endpoint_showing_the_claim(), TIP));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let outcome = backend
+        .detect_output_spend(&matching.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .expect("the proof is taken");
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
 }

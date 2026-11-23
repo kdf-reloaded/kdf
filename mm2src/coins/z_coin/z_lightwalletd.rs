@@ -1716,7 +1716,10 @@ impl LightwalletdBackend {
                     common::log::debug!("the read of {} is still undetermined: {}", step, text);
                 }
                 Err(EvidenceUndetermined {
-                    disagree: undetermined.reason == UndeterminedReason::Disagree,
+                    disagree: matches!(
+                        undetermined.reason,
+                        UndeterminedReason::Disagree | UndeterminedReason::TipGap
+                    ),
                     text,
                 })
             },
