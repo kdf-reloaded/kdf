@@ -431,11 +431,16 @@ to `MakerPaymentRefundRequired`.
 > and R36. The maker's abort carries the existing `InternalError`
 > discriminant. Its text opens with one fixed phrase that both roles
 > share, "Own claim was broadcast but its confirmation could not be
-> read: " (one line in the text), and then names the coin, the hash of
-> the claim transaction and the last read error. R44 applies: this
-> `Aborted` is reached with the claim on the network, and the phrase is
-> what tells it from an abort with nothing committed. No other abort
-> text carries the phrase; in particular the maker's aborts on a
+> read: " (one line in the text), and then names the coin and the claim
+> transaction by its hash. The text is stored with the swap and shown by
+> the status RPCs, so it carries no error text of a node read. While
+> the read is repeated, the log has one warning per wait, which names
+> the coin and the claim transaction and, as chapter 51 R80 says of its
+> warning, no server address, URL, host or response text; the error
+> text of a failed read is logged at debug level only. R44 applies:
+> this `Aborted` is reached with the claim on the network, and the
+> phrase is what tells it from an abort with nothing committed. No other
+> abort text carries the phrase; in particular the maker's aborts on a
 > confirmation timeout, which commit nothing, do not.
 
 **R20.** *The propagation gate.* Before committing its own payment, the
@@ -707,8 +712,10 @@ and a ten-second poll interval. Failure MUST transition to
 > the existing discriminant of a maker-payment spend that was not
 > confirmed in time (`MakerPaymentSpendNotConfirmedInTime`), and its
 > text opens with the fixed phrase of the note after R19, followed by
-> the coin, the hash of the claim transaction and the last read error.
-> R44 applies: this `Aborted` is reached with the claim on the network.
+> the coin and the hash of the claim transaction; it carries no error
+> text of a node read, and the log follows the same rule as that note
+> states. R44 applies: this `Aborted` is reached with the claim on the
+> network.
 
 **R34.** *Two independent refund states.*
 `TakerFundingRefundRequired` MUST immediately broadcast the

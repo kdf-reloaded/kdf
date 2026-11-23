@@ -2152,10 +2152,17 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             let taker_coin = &sm.taker_coin;
             let confs = confirmation_gate_confs(sm.conf_settings.taker_coin_confs);
             let nota = sm.conf_settings.taker_coin_nota;
+            let claim_tx_hash = match sm.taker_coin.parse_tx(&self.taker_payment_spend) {
+                Ok(tx) => Ok(hex::encode(tx.tx_hash().0)),
+                Err(_) => Err(hex::encode(&self.taker_payment_spend.0)),
+            };
+            let claim = own_claim_name(sm.taker_coin.ticker(), claim_tx_hash);
             let confirmed = await_own_claim_confirmation(
+                &claim,
                 own_claim_confirmation_deadline(sm.maker_payment_locktime(), now_ms() / 1000),
                 CONFIRMATION_POLL_SECS,
                 || now_ms() / 1000,
+                log_own_claim_line,
                 |wait_until| {
                     taker_coin
                         .wait_for_confirmations(
@@ -2169,12 +2176,8 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                 },
             )
             .await;
-            if let Err(e) = confirmed {
-                let claim_tx_hash = match sm.taker_coin.parse_tx(&self.taker_payment_spend) {
-                    Ok(tx) => Ok(hex::encode(tx.tx_hash().0)),
-                    Err(_) => Err(hex::encode(&self.taker_payment_spend.0)),
-                };
-                let reason = maker_own_claim_not_confirmed_reason(sm.taker_coin.ticker(), claim_tx_hash, &e);
+            if !confirmed {
+                let reason = maker_own_claim_not_confirmed_reason(&claim);
                 return Self::change_state(Aborted::new(reason), sm).await;
             }
         }
