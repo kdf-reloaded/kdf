@@ -70,6 +70,20 @@ pub(crate) fn sia_swap_evidence_policy(
     swap_evidence_policy_from(ticker, field, &[server_url.to_owned()])
 }
 
+/// The label a swap-evidence read names the one walletd node by: `host:port`, with the default port of an `http` or
+/// `https` URL written out so that the label matches the `Trusted` node it was computed from (never the URL).
+pub(crate) fn sia_evidence_node_name(server_url: &str) -> String {
+    let name = crate::swap_evidence::node_name(server_url);
+    let has_port = name
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.ends_with(':') && port.parse::<u16>().is_ok());
+    match (has_port, server_url.trim().split_once("://").map(|(scheme, _)| scheme)) {
+        (false, Some("https")) => format!("{name}:443"),
+        (false, Some("http")) => format!("{name}:80"),
+        _ => name,
+    }
+}
+
 pub struct SiaCoinBuilder<'a> {
     conf: SiaCoinConf,
     key_pair: SiaKeypair,
@@ -118,6 +132,7 @@ impl<'a> SiaCoinBuilder<'a> {
             PublicKey::from_bytes(&fee_pubkey_bytes).map_err(|e| SiaCoinBuilderError::FeePubkey(e.to_string()))?;
         let fee_address = Address::from_public_key(&fee_public_key);
 
+        let swap_evidence_node_name = sia_evidence_node_name(self.request.client_conf.server_url.as_str());
         Ok(SiaCoin {
             conf: self.conf,
             client: Arc::new(
@@ -131,6 +146,7 @@ impl<'a> SiaCoinBuilder<'a> {
             required_confirmations: required_confirmations.into(),
             fee_address,
             swap_evidence: self.swap_evidence,
+            swap_evidence_node_name,
         })
     }
 }
@@ -138,6 +154,54 @@ impl<'a> SiaCoinBuilder<'a> {
 // ── Internal helpers ─────────────────────────────────────────────────
 
 impl SiaCoin {
+    /// One swap-evidence read of the coin's single walletd node, judged by the coin's policy (CRD ch.51 R100).
+    ///
+    /// `ask` reads the node, `classify` reduces the answer to the decision the step acts on, and `proves_itself`
+    /// is `true` for an answer that needs no second node (a claim whose secret hashes to the swap's secret hash).
+    /// `Err` is an undetermined read, as text that names the node and says how to fix it; the step must wait and
+    /// must never refund, claim or take "not spent" as proven on it.
+    pub(super) async fn swap_evidence_read<A, K, F, Fut>(
+        &self,
+        ask: F,
+        classify: impl Fn(&A) -> K,
+        proves_itself: impl Fn(&A) -> bool,
+    ) -> Result<(A, K), String>
+    where
+        K: PartialEq + std::fmt::Debug,
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<A, String>>,
+    {
+        let policy = MmCoin::swap_evidence_policy(self);
+        let nodes = [self.swap_evidence_node_name.clone()];
+        match crate::swap_evidence::agree(&policy, &nodes, |node| node.clone(), |_| ask(), classify, proves_itself)
+            .await
+        {
+            crate::swap_evidence::Agreement::Agreed { answer, decision } => Ok((answer, decision)),
+            crate::swap_evidence::Agreement::Undetermined(undetermined) => {
+                Err(self.swap_evidence_undetermined_text(&policy, &undetermined))
+            },
+        }
+    }
+
+    /// The text of an undetermined read: the reason with the node asked (R100 item 9), then the fix.
+    fn swap_evidence_undetermined_text(
+        &self,
+        policy: &SwapEvidencePolicy,
+        undetermined: &crate::swap_evidence::Undetermined,
+    ) -> String {
+        let fix = match policy {
+            SwapEvidencePolicy::Insufficient { .. } => format!(
+                "{} has one walletd node ({}); set swap_evidence_node to the walletd server_url to trust it",
+                self.conf.ticker, self.swap_evidence_node_name
+            ),
+            _ => format!(
+                "the node is {}; it must answer for the swap to go on, check that walletd is reachable",
+                self.swap_evidence_node_name
+            ),
+        };
+        format!("{undetermined}; {fix}")
+    }
+
     pub fn my_keypair(&self) -> Result<&SiaKeypair, SiaCoinMyKeypairError> {
         match &*self.priv_key_policy {
             PrivKeyPolicy::KeyPair(keypair) => Ok(keypair),
