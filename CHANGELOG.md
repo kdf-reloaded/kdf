@@ -952,6 +952,11 @@ the previous version used. The safe way:
 - **Sending a Tendermint transaction the node already holds answers its hash.** A repeated
   `send_raw_transaction` was answered with an error ("tx already exists in cache") although the transaction
   was included. Detail: PR #393; CRD ch.36 R36.14.15.
+- **A Tendermint node that accepts a request and never answers no longer holds it forever.** Every request of the
+  native build to a Tendermint node is now bounded at 30 seconds, the node health checks included. A node that does
+  not answer in time counts as failed, so the node choice moves on to the next configured node, and the history
+  stops waiting on it. With no node answering, the request fails after at most about a minute per configured node.
+  Detail: PR #NNN; CRD ch.36, status note after R36.14.33.
 
 #### ZEC
 
