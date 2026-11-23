@@ -1837,6 +1837,16 @@ answer.
    and the node logs how to fix it, by adding a second node to the coin's node
    list or by setting `swap_evidence_node`.
 
+> *Status note (2026-11-23, Reloaded-original; maintainer decision of
+> 2026-11-23).* Item 9 has a bound. A running swap whose refund reads stay
+> undetermined waits at most until its refund deadline, the lock time of its
+> own payment plus 3700 seconds, for the maker (R18) and for the taker (the
+> deadline table of §51.5). Then it ends with its refund-failed event
+> (`MakerPaymentRefundFailed` or `TakerPaymentRefundFailed`), whose text names
+> the fix: add a node on a second host to the coin's node list, or set
+> `swap_evidence_node`, and then run `recover_funds_of_swap`. No sentence of
+> R100 is changed.
+
 **T42.** *Agreement of the reads (R100).* Over two scripted nodes: answers that
 agree by item 1 let the refund step and the step that uses the secret go on
 (including two chain times that differ but are both past the lock); answers
@@ -3656,3 +3666,8 @@ reference rows alike.
   two hosts, no outvoting, swaps already running). Reloaded-original; no
   reference input and no forbidden-class input; no sentence of the chapter is
   changed.
+- *Clean-side addition of 2026-11-23:* the status note after R100 item 9 on
+  the bound of a waiting running swap (its refund deadline, then the
+  refund-failed event naming the fix). Reloaded-original; it records the
+  maintainer's decision of 2026-11-23, takes no reference input and no
+  forbidden-class input, and changes no sentence of the chapter.
