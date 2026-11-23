@@ -3971,14 +3971,17 @@ sentence above.
    script commits to. Where the swap's secret hash is known, the secret is
    checked against it. Such a claim is taken from one server.
 5. *Confirmations.* The wait for confirmations stays on one server as before;
-   its final decision that a payment has enough confirmations is read again on a
-   second server.
+   its final decision that a payment has enough confirmations must then be
+   agreed by two servers, or given by the trusted node.
 6. *Native mode.* A coin served by its own daemon reads that daemon as before
    (ch.51 R100 item 6).
 7. *Every server.* The look on every server that follows a failed spend search
-   is, under R100, the same agreed search. When it is undetermined, it finds no
-   spend, and the step stays undetermined and waits: the answer is never "not
-   spent" (ch.51 R100 item 3).
+   is, under R100, the agreed search of a pair, and in addition every other
+   server is asked for a claim that proves itself; such a claim is taken from
+   any server, and every other answer of those servers is ignored. When the
+   pair's search is undetermined and no server shows such a claim, the look
+   finds no spend, and the step stays undetermined and waits: the answer is
+   never "not spent" (ch.51 R100 item 3).
 
 ### 38.6.4Q QTUM and QRC20 over Electrum: clients, methods and shared wallet state
 
