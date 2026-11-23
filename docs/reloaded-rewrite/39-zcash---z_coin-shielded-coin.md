@@ -6002,8 +6002,9 @@ that:
 > time past of the refund gate (R39.11.4f) are decided only when two endpoints
 > on two hosts agree, each read over its own endpoint (its own tip, its own
 > blocks), or by the trusted endpoint alone. Two medians that differ but are
-> both past the lock open the gate. A disagreement or a single answer leaves
-> the read undetermined, the step waits, and the next attempt asks a new pair.
+> both past the lock open the gate. A pair whose tips are more than two blocks
+> apart, a disagreement or a single answer leaves the read undetermined, the
+> step waits, and the next attempt asks a new pair.
 > A claim whose script reveals a secret that hashes to the HTLC's own hash
 > proves itself and is taken on one answer, also when the coin has too few
 > nodes or the trusted endpoint does not answer; a refund, "not spent" and

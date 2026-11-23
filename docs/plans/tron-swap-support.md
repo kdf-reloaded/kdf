@@ -1,6 +1,6 @@
 # Plan: Tron V1 atomic-swap participation
 
-**Status:** parked (the branch is not revived; its topics move to the 0.4.0 TRON work, see below) — **Last reviewed:** 2026-11-22
+**Status:** in progress (the old branch stays parked; the V1 swap series is built anew, and TRON swaps stay off in 0.5.0) — **Last reviewed:** 2026-11-22
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a fully wired Tron V1 swap implementation and a 568-line

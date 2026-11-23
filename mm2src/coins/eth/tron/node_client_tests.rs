@@ -6,6 +6,7 @@ use super::api::{AccountListing, TronApiClient, TronApiError};
 use super::nodes::{parse_nodes, TronApiKey, TronNode};
 use super::test_node::{Reply, StubNode};
 use super::{tron_coin_from_conf_and_request, Network, TronAddress};
+use crate::closed_port::closed_url;
 use crate::CoinProtocol;
 use common::block_on;
 use mm2_core::mm_ctx::MmCtxBuilder;
@@ -222,14 +223,11 @@ fn t_n8_a_broadcast_fails_over_on_a_node_failure_and_stops_on_a_rejection() {
     let accepted: &'static str = Box::leak(accepted.into_boxed_str());
 
     // A transport failure, then a bad body, then an acceptance.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let closed_url = format!("http://{}", closed.local_addr().expect("address"));
-    drop(closed);
     let (junk, good) = (fixed(200, "junk"), fixed(200, accepted));
     let client = TronApiClient::new_with_cutoff_s(
         "TRX",
         vec![
-            TronNode::plain(closed_url),
+            TronNode::plain(closed_url()),
             TronNode::plain(junk.url()),
             TronNode::plain(good.url()),
         ],

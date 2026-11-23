@@ -1,7 +1,8 @@
 //! Unit tests of the EVM-only RPC methods a TRX or TRC20 coin refuses (CRD ch.21 D7): `get_raw_transaction`,
-//! `sign_raw_transaction`, the legacy `get_trade_fee`, the receiver side of `trade_preimage`,
-//! `get_eth_estimated_fee_per_gas` and `get_token_info`. (`stream::fee_estimator::enable` is tested next to its
-//! handler in `mm2_main`.)
+//! `sign_raw_transaction`, `get_eth_estimated_fee_per_gas` and `get_token_info`. (`stream::fee_estimator::enable`
+//! is tested next to its handler in `mm2_main`.) The legacy `get_trade_fee` and the receiver side of
+//! `trade_preimage` have a TRON figure (CRD ch.21 §21.11C); a coin without a swap contract, which is every TRON
+//! coin while TRON swaps are switched off, is refused there before any node request.
 //!
 //! A TRON coin is built the way the legacy activation does, against a stub node on the loopback interface. The
 //! coin's placeholder alloy provider is over that node's URL, so a request sent through it would be recorded by
@@ -28,7 +29,7 @@ use serde_json::json;
 
 const TX_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const ERC20_CONTRACT: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
-const RECEIVER_FEE_REFUSAL: &str = "TRON V1 receiver trade fee is not supported";
+const NO_SWAP_CONTRACT: &str = "the coin has no swap contract: it cannot trade";
 
 /// A node that answers every request the way a TRON node answers EVM JSON-RPC: HTTP 405.
 fn tron_node() -> StubNode { StubNode::start(|_, _| Reply::status(405, "")) }
@@ -144,19 +145,19 @@ fn sign_raw_transaction_is_not_implemented_for_a_tron_coin() {
 }
 
 #[test]
-fn legacy_get_trade_fee_refuses_a_tron_coin() {
+fn legacy_get_trade_fee_refuses_a_tron_coin_without_a_swap_contract() {
     let node = tron_node();
     block_on(async {
         for (_ctx, coin) in tron_coins(&node).await {
             let err = coin.get_trade_fee().compat().await.expect_err("a TRON coin is refused");
-            assert_eq!(err, "TRON trade fee is not supported", "{}", coin.ticker());
+            assert!(err.contains(NO_SWAP_CONTRACT), "{}: {err}", coin.ticker());
         }
     });
     assert!(node.requests().is_empty(), "the refusal comes before any node request");
 }
 
 #[test]
-fn receiver_trade_fee_refuses_a_tron_coin() {
+fn receiver_trade_fee_refuses_a_tron_coin_without_a_swap_contract() {
     let node = tron_node();
     block_on(async {
         for (_ctx, coin) in tron_coins(&node).await {
@@ -167,7 +168,7 @@ fn receiver_trade_fee_refuses_a_tron_coin() {
                 .expect_err("a TRON coin is refused")
                 .into_inner();
             assert!(
-                matches!(&err, TradePreimageError::InternalError(text) if text == RECEIVER_FEE_REFUSAL),
+                matches!(&err, TradePreimageError::InternalError(text) if text == NO_SWAP_CONTRACT),
                 "{}: {err}",
                 coin.ticker()
             );

@@ -34,7 +34,8 @@ use super::ZcoinConsensusParams;
 use crate::big_decimal_from_sat_unsigned;
 use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
 use crate::node_url::lightwalletd_endpoint_label;
-use crate::swap_evidence::{agree, node_name, Agreement, SwapEvidencePolicy, Undetermined, UndeterminedReason};
+use crate::swap_evidence::{agree, agree_with_tips, node_name, Agreement, SwapEvidencePolicy, Undetermined,
+                           UndeterminedReason};
 use crate::utxo::rpc_clients::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo,
                                UnspentMap, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut, UtxoRpcResult};
 use async_trait::async_trait;
@@ -85,6 +86,28 @@ pub(crate) const MEDIAN_TIME_WINDOW_MAX: u64 = 64;
 /// taken from the library's per-branch default, so that a later upgrade of the library or of the consensus
 /// branch cannot move the expiry or the staleness bound derived from it.
 pub(crate) const BUILDER_EXPIRY_DELTA: u32 = 40;
+
+/// The largest difference, in blocks, between the tips of the two endpoints of a pair for the spend and the
+/// already-sent reads. ARRR and ZEC make a block about every 60 to 75 seconds, so two healthy endpoints that were
+/// asked at the same moment are at most a block or two apart; 2 admits that. An endpoint three blocks (about three
+/// minutes) or more behind is lagging and does not pair with a current one: its index may not hold a spend yet.
+pub(crate) const SPEND_READ_MAX_TIP_GAP_BLOCKS: u64 = 2;
+
+/// The largest difference, in blocks, between the tips of the two endpoints of a pair for the confirmation count.
+/// The depth of a payment moves by one per block, so a pair a block or two apart still reaches the same decision
+/// near the required depth; 2 keeps a lagging endpoint from pairing with a current one (ARRR and ZEC blocks come
+/// about every 60 to 75 seconds).
+pub(crate) const CONFIRMATION_MAX_TIP_GAP_BLOCKS: u64 = 2;
+
+/// The largest difference, in blocks, between the tips of the two endpoints of a pair for the own-send expiry.
+/// The expiry height is compared with each endpoint's tip; 2 blocks (about two to two and a half minutes on ARRR and
+/// ZEC) is the lag two healthy endpoints can show.
+pub(crate) const EXPIRY_MAX_TIP_GAP_BLOCKS: u64 = 2;
+
+/// The largest difference, in blocks, between the tips of the two endpoints of a pair for the chain time of the
+/// refund gate. The median time past of eleven blocks moves by one block interval (60 to 75 seconds) per block, so
+/// 2 blocks bounds the difference of two healthy medians to about two and a half minutes.
+pub(crate) const CHAIN_TIME_MAX_TIP_GAP_BLOCKS: u64 = 2;
 
 /// How many undetermined steps are remembered to log each of them once (R100 item 9).
 pub(crate) const UNDETERMINED_LOGGED_MAX: usize = 32;
@@ -1616,6 +1639,35 @@ impl LightwalletdBackend {
         .await
     }
 
+    /// [`Self::agree_on`] that also refuses a pair whose tips differ by more than `max_gap` blocks: `tip_of` is the
+    /// tip height the endpoint answered at, so `ask` must read each endpoint at its own tip.
+    pub(crate) async fn agree_on_with_tips<A, K, F, Fut>(
+        &self,
+        servers: &[String],
+        ask: F,
+        classify: impl Fn(&A) -> K,
+        proves_itself: impl Fn(&A) -> bool,
+        tip_of: impl Fn(&A) -> Option<u64>,
+        max_gap: u64,
+    ) -> Agreement<A, K>
+    where
+        K: PartialEq + fmt::Debug,
+        F: Fn(&str) -> Fut,
+        Fut: std::future::Future<Output = Result<A, String>>,
+    {
+        agree_with_tips(
+            &self.swap_evidence,
+            servers,
+            |server| node_name(server),
+            |server| ask(server),
+            classify,
+            proves_itself,
+            tip_of,
+            max_gap,
+        )
+        .await
+    }
+
     /// The text of an undetermined read: what each endpoint said, by host, and the two ways to fix it
     /// (R100 item 9).
     fn undetermined_text(undetermined: &Undetermined) -> String {
@@ -1748,38 +1800,45 @@ impl LightwalletdBackend {
         let step = format!("the confirmations of the transaction {:?}", tx_hash);
         let servers = self.agreement_servers().await.map_err(|e| e.to_string())?;
         let agreement = self
-            .agree_on(
+            .agree_on_with_tips(
                 &servers,
                 |server| {
                     let server = server.to_owned();
                     async move {
                         let tip = self.server_tip(&server).await?;
-                        match self.server_transaction(&server, txid).await {
-                            Ok(raw) => Ok(if confirmation_depth(tip, raw.height) >= u64::from(confirmations) {
-                                ConfirmationDecision::Reached
-                            } else {
-                                ConfirmationDecision::NotYet
-                            }),
+                        let decision = match self.server_transaction(&server, txid).await {
+                            Ok(raw) => {
+                                if confirmation_depth(tip, raw.height) >= u64::from(confirmations) {
+                                    ConfirmationDecision::Reached
+                                } else {
+                                    ConfirmationDecision::NotYet
+                                }
+                            },
                             Err(EndpointError::NotFound(_)) => {
-                                Ok(if expiry_height > 0 && tip > u64::from(expiry_height) {
+                                if expiry_height > 0 && tip > u64::from(expiry_height) {
                                     ConfirmationDecision::MissingExpired
                                 } else {
                                     ConfirmationDecision::MissingNotExpired
-                                })
+                                }
                             },
-                            Err(e) => Err(format!(
-                                "GetTransaction failed: {}",
-                                self.scrub(&e.to_string(), &server)
-                            )),
-                        }
+                            Err(e) => {
+                                return Err(format!(
+                                    "GetTransaction failed: {}",
+                                    self.scrub(&e.to_string(), &server)
+                                ))
+                            },
+                        };
+                        Ok((decision, tip))
                     }
                 },
-                |decision| *decision,
+                |(decision, _)| *decision,
                 |_| false,
+                |(_, tip)| Some(*tip),
+                CONFIRMATION_MAX_TIP_GAP_BLOCKS,
             )
             .await;
         self.settle(&step, agreement)
-            .map(|(decision, _)| decision)
+            .map(|((decision, _), _)| decision)
             .map_err(|undetermined| undetermined.text)
     }
 
@@ -1791,7 +1850,7 @@ impl LightwalletdBackend {
         let step = format!("whether the chain tip is past height {}", height);
         let servers = self.agreement_servers().await.map_err(|e| e.to_string())?;
         let agreement = self
-            .agree_on(
+            .agree_on_with_tips(
                 &servers,
                 |server| {
                     let server = server.to_owned();
@@ -1799,6 +1858,8 @@ impl LightwalletdBackend {
                 },
                 |tip| *tip > height,
                 |_| false,
+                |tip| Some(*tip),
+                EXPIRY_MAX_TIP_GAP_BLOCKS,
             )
             .await;
         self.settle(&step, agreement)
@@ -1814,13 +1875,13 @@ impl LightwalletdBackend {
         let step = format!("the chain time for the lock time {}", locktime);
         let servers = self.agreement_servers().await.map_err(|e| e.to_string())?;
         let agreement = self
-            .agree_on(
+            .agree_on_with_tips(
                 &servers,
                 |server| {
                     let server = server.to_owned();
                     async move { self.server_median_time_past(&server, count).await }
                 },
-                |mtp| {
+                |(mtp, _)| {
                     if u64::from(*mtp) > locktime {
                         LockTimeState::Past
                     } else {
@@ -1828,15 +1889,18 @@ impl LightwalletdBackend {
                     }
                 },
                 |_| false,
+                |(_, tip)| Some(*tip),
+                CHAIN_TIME_MAX_TIP_GAP_BLOCKS,
             )
             .await;
         self.settle(&step, agreement)
-            .map(|(mtp, _)| mtp)
+            .map(|((mtp, _), _)| mtp)
             .map_err(|undetermined| undetermined.text)
     }
 
-    /// The median time past of the last `count` blocks ending at `server`'s tip, from `server`'s blocks only.
-    async fn server_median_time_past(&self, server: &str, count: u64) -> Result<u32, String> {
+    /// The median time past of the last `count` blocks ending at `server`'s tip, from `server`'s blocks only, with
+    /// that tip height.
+    async fn server_median_time_past(&self, server: &str, count: u64) -> Result<(u32, u64), String> {
         if count == 0 || count > MEDIAN_TIME_WINDOW_MAX {
             return Err(format!(
                 "median-time window of {} blocks is outside 1..={}",
@@ -1861,7 +1925,9 @@ impl LightwalletdBackend {
                 },
             }
         }
-        median(times.as_mut_slice()).ok_or_else(|| "empty median-time window".to_owned())
+        median(times.as_mut_slice())
+            .map(|mtp| (mtp, tip))
+            .ok_or_else(|| "empty median-time window".to_owned())
     }
 
     /// The name a text uses for `server`, one of the endpoints this backend was built with (R39.11.29): its

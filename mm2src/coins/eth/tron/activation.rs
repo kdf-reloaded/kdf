@@ -8,11 +8,12 @@
 //! JSON-RPC, so no TRON path may use it, and the EVM-only RPC methods refuse a
 //! TRON coin before reaching it (CRD ch.21 D7).
 //!
-//! TRON activation deliberately does not parse `swap_contract_address` or
-//! V2 contracts because TRON-side atomic swaps are still pending
-//! (P10.3.7 / nft_swap_v2). When the field is missing in the request we fall
-//! back to the zero address so the coin can be enabled for withdraw / balance
-//! flows.
+//! The V1 swap contract is bound from `swap_contract_address` and the optional `fallback_swap_contract` of the
+//! activation request, by the EVM family's rule (CRD ch.21 R21.B2): required and non-zero for a coin that can
+//! trade, accepted and ignored for a wallet-only coin ([`tron_swap_contracts`]). While
+//! [`crate::TRON_SWAPS_AVAILABLE`] is `false` every TRON coin is wallet-only, so no TRON coin carries a binding:
+//! its swap contract is the zero address, as for an EVM wallet-only coin activated without one. The V2 contracts
+//! are not bound for a TRON coin.
 
 use super::api::TronApiClient;
 use super::balance::trc20_decimals;
@@ -25,7 +26,7 @@ use crate::eth::{build_eth_hd_wallet, derive_eth_hd_activation_key, rpc_event_ha
                  EthHDWallet, EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
 use crate::hd_wallet_storage::HDWalletStorageKeyPolicy;
 use crate::rpc_command::get_my_address::PathToAddress;
-use crate::{CoinProtocol, DerivationMethod, HistorySyncState, MarketCoinOps};
+use crate::{is_wallet_only_conf, CoinProtocol, DerivationMethod, HistorySyncState, MarketCoinOps};
 
 use common::log::warn;
 use crypto::GlobalHDAccountArc;
@@ -93,6 +94,96 @@ pub(super) async fn resolve_trc20_decimals(
     }
 }
 
+/// The V1 swap contracts a TRON coin that can trade is bound to at activation (CRD ch.21 R21.B2), as 20-byte
+/// payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TronSwapContracts {
+    /// The swap contract. Never the zero address.
+    pub swap_contract_address: Address,
+    /// The fallback swap contract, when the request names one. Never the zero address.
+    pub fallback_swap_contract: Option<Address>,
+}
+
+/// The swap-contract binding of a TRON coin with the coin config `conf`, from the `swap_contract_address` and
+/// `fallback_swap_contract` of its activation request (CRD ch.21 R21.B2, the generic rule of F21.B3).
+/// `swaps_available` is the TRON swap switch; an activation route passes [`crate::TRON_SWAPS_AVAILABLE`].
+///
+/// `None` is a wallet-only coin, which accepts and ignores the members: a coin whose config says `wallet_only`,
+/// and every TRON coin while `swaps_available` is `false`.
+///
+/// # Errors
+///
+/// [`EthCoinBuildError::InvalidPayload`] for a coin that can trade when `swap_contract_address` is absent or the
+/// zero address, or `fallback_swap_contract` is the zero address.
+pub fn tron_swap_contracts(
+    conf: &Json,
+    swap_contract_address: Option<Address>,
+    fallback_swap_contract: Option<Address>,
+    swaps_available: bool,
+) -> Result<Option<TronSwapContracts>, MmError<EthCoinBuildError>> {
+    if !swaps_available || is_wallet_only_conf(conf) {
+        return Ok(None);
+    }
+    let swap_contract_address = swap_contract_address.or_mm_err(|| {
+        EthCoinBuildError::InvalidPayload("swap_contract_address is required for a coin that can trade".to_owned())
+    })?;
+    if swap_contract_address.is_zero() {
+        return MmError::err(EthCoinBuildError::InvalidPayload(
+            "swap_contract_address can't be zero address".to_owned(),
+        ));
+    }
+    if fallback_swap_contract.is_some_and(|fallback| fallback.is_zero()) {
+        return MmError::err(EthCoinBuildError::InvalidPayload(
+            "fallback_swap_contract can't be zero address".to_owned(),
+        ));
+    }
+    Ok(Some(TronSwapContracts {
+        swap_contract_address,
+        fallback_swap_contract,
+    }))
+}
+
+/// A swap-contract member of a legacy activation request: absent or `null` is `None`; a string is read in the EVM
+/// `0x` 20-byte form or in either TRON form (base58check, or the hex wire form with or without `0x`) and
+/// normalized to the 20-byte payload (CRD ch.21 R21.B2, D21.B7).
+fn legacy_swap_contract_member(req: &Json, member: &str) -> Result<Option<Address>, String> {
+    let value = &req[member];
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Ok(address) = json::from_value::<Address>(value.clone()) {
+        return Ok(Some(address));
+    }
+    value
+        .as_str()
+        .and_then(|text| TronAddress::parse(text).ok())
+        .map(|address| Some(address.to_evm_address()))
+        .ok_or_else(|| format!("{member} is not a valid swap contract address"))
+}
+
+/// The swap-contract binding of a legacy activation request (CRD ch.21 R21.B2). A wallet-only coin does not read
+/// the members at all; it says so once when the request carries `swap_contract_address`.
+fn legacy_swap_contracts(
+    ticker: &str,
+    conf: &Json,
+    req: &Json,
+    swaps_available: bool,
+) -> Result<Option<TronSwapContracts>, String> {
+    if !swaps_available || is_wallet_only_conf(conf) {
+        if req["swap_contract_address"].is_string() {
+            warn!("TRON coin '{ticker}': swap_contract_address is ignored, the coin is wallet-only");
+        }
+        return Ok(None);
+    }
+    tron_swap_contracts(
+        conf,
+        legacy_swap_contract_member(req, "swap_contract_address")?,
+        legacy_swap_contract_member(req, "fallback_swap_contract")?,
+        swaps_available,
+    )
+    .map_err(|e| e.into_inner().to_string())
+}
+
 /// What the TRON coin builder takes from an activation request, already parsed.
 pub struct TronCoinParams {
     /// The validated node list, in the order given.
@@ -105,6 +196,9 @@ pub struct TronCoinParams {
     /// The GasFree provider binding of a TRX platform coin (CRD ch.63 §63.3.1), already validated. `None` when the
     /// request gave no `tron_gasless_provider`; the legacy route has no such member.
     pub gasfree: Option<GasFreeBinding>,
+    /// The swap-contract binding of [`tron_swap_contracts`]. `None` for a wallet-only coin: the coin then carries
+    /// no swap contract.
+    pub swap_contracts: Option<TronSwapContracts>,
 }
 
 /// Assemble the [`EthCoinImpl`] for a TRX or TRC20 coin and wrap it in
@@ -117,20 +211,34 @@ pub async fn tron_coin_from_conf_and_request(
     priv_key: &[u8],
     protocol: CoinProtocol,
 ) -> Result<EthCoin, String> {
+    tron_coin_from_conf_and_request_with_switch(ctx, ticker, conf, req, priv_key, protocol, crate::TRON_SWAPS_AVAILABLE)
+        .await
+}
+
+/// [`tron_coin_from_conf_and_request`] with the TRON swap switch given, so a test can activate a coin that can
+/// trade.
+pub(crate) async fn tron_coin_from_conf_and_request_with_switch(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    req: &Json,
+    priv_key: &[u8],
+    protocol: CoinProtocol,
+    swaps_available: bool,
+) -> Result<EthCoin, String> {
     // Each entry of `urls` is a URL string or an object with the node's own request headers; `tron_api_key`
     // reaches the TronGrid hosts only (CRD ch.21 R-N9). Misconfiguration surfaces here, and no error echoes a
     // configured string.
     let api_key = TronApiKey::from_conf(&ctx.conf).map_err(|e| e.to_string())?;
     let nodes = parse_nodes(&req["urls"], api_key.as_ref()).map_err(|e| e.to_string())?;
 
-    if req["swap_contract_address"].is_string() {
-        warn!("TRON coin '{ticker}': swap_contract_address ignored (TRON swaps not yet wired)");
-    }
+    let swap_contracts = legacy_swap_contracts(ticker, conf, req, swaps_available)?;
     let params = TronCoinParams {
         nodes,
         required_confirmations: tron_required_confirmations(req["required_confirmations"].as_u64(), conf),
         tx_history: req["tx_history"].as_bool().unwrap_or(false),
         gasfree: None,
+        swap_contracts,
     };
     tron_coin_from_params(ctx, ticker, conf, params, priv_key, protocol)
         .await
@@ -216,6 +324,7 @@ async fn build_tron_coin(
         required_confirmations,
         tx_history,
         gasfree,
+        swap_contracts,
     } = params;
     let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
 
@@ -285,10 +394,10 @@ async fn build_tron_coin(
         signer: EthSigner::Local(key_pair),
         my_address,
         sign_message_prefix: json::from_value(conf["sign_message_prefix"].clone()).unwrap_or(None),
-        // TRON has no EtomicSwap contract today — leave as zero address. Swap
-        // paths reject this defensively until P10.3.7 lands.
-        swap_contract_address: Address::default(),
-        fallback_swap_contract: None,
+        // CRD ch.21 R21.B2. A wallet-only coin has no binding: its swap contract is the zero address, as for an
+        // EVM wallet-only coin activated without one, and the contract negotiation refuses it.
+        swap_contract_address: swap_contracts.map_or_else(Address::zero, |bound| bound.swap_contract_address),
+        fallback_swap_contract: swap_contracts.and_then(|bound| bound.fallback_swap_contract),
         web3,
         web3_instances: Vec::new(),
         swap_evidence: crate::SwapEvidencePolicy::NotAdopted,

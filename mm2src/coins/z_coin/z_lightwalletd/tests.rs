@@ -2649,6 +2649,47 @@ mod r100 {
             .unwrap();
     }
 
+    /// Chain times and confirmations of two endpoints whose tips are within the gap decide; beyond it they are
+    /// undetermined (TipGap).
+    #[tokio::test]
+    async fn the_tip_gap_applies_to_the_chain_time_and_the_confirmations() {
+        let gap = |error: String| error.contains("tips of the nodes differ too much");
+
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        transport.serve("b", at(100 + CHAIN_TIME_MAX_TIP_GAP_BLOCKS, 10));
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+        assert!(backend.median_time_past_agreed(11, LOCK_BETWEEN).await.is_ok());
+
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        transport.serve("b", at(100 + CHAIN_TIME_MAX_TIP_GAP_BLOCKS + 1, 10));
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+        assert!(gap(backend
+            .median_time_past_agreed(11, LOCK_BETWEEN)
+            .await
+            .unwrap_err()));
+
+        let tx = H256Json::from([1; 32]);
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", payment(b"tx", Some(50)));
+        transport.serve("b", Script {
+            tip_floor: Some(100 + CONFIRMATION_MAX_TIP_GAP_BLOCKS),
+            ..payment(b"tx", Some(50))
+        });
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+        assert_eq!(
+            backend.confirmations_agreed(&tx, 0, 6).await.unwrap(),
+            ConfirmationDecision::Reached
+        );
+
+        transport.serve("b", Script {
+            tip_floor: Some(100 + CONFIRMATION_MAX_TIP_GAP_BLOCKS + 1),
+            ..payment(b"tx", Some(50))
+        });
+        assert!(gap(backend.confirmations_agreed(&tx, 0, 6).await.unwrap_err()));
+    }
+
     #[test]
     fn zcoin_has_adopted_r100() {
         assert!(crate::swap_evidence::family_adopted(

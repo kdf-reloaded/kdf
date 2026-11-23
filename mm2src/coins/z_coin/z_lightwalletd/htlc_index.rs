@@ -348,12 +348,16 @@ pub(crate) struct EndpointSpend {
     decision: SpendDecision,
     /// The claim's secret hashes to the swap's secret hash ([`spend_proves_itself`]).
     proves_itself: bool,
+    /// The tip height the endpoint answered at.
+    tip: u64,
 }
 
 /// One endpoint's answer to the already-sent question under R100.
 pub(crate) struct EndpointSent {
     outcome: SentOutcome,
     decision: SentDecision,
+    /// The tip height the endpoint answered at.
+    tip: u64,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1134,6 +1138,7 @@ impl LightwalletdBackend {
             outcome,
             decision,
             proves_itself,
+            tip,
         })
     }
 
@@ -1163,7 +1168,7 @@ impl LightwalletdBackend {
             self.swap_evidence
         ));
         let agreement = self
-            .agree_on(
+            .agree_on_with_tips(
                 &servers,
                 |server| {
                     let server = server.to_owned();
@@ -1171,6 +1176,8 @@ impl LightwalletdBackend {
                 },
                 |answer| answer.decision.clone(),
                 |answer| answer.proves_itself,
+                |answer| Some(answer.tip),
+                SPEND_READ_MAX_TIP_GAP_BLOCKS,
             )
             .await;
         let result = self
@@ -1205,7 +1212,7 @@ impl LightwalletdBackend {
         self.note_encodings(server, &forms);
         let outcome = decide_sent(script_pubkey, &forms).map_err(|e| e.to_string())?;
         let decision = SentDecision::of(&outcome).ok_or_else(|| "the payment transaction cannot be read".to_owned())?;
-        Ok(EndpointSent { outcome, decision })
+        Ok(EndpointSent { outcome, decision, tip })
     }
 
     /// Already-sent detection under R100: two endpoints on distinct hosts must agree on the payment transaction
@@ -1231,7 +1238,7 @@ impl LightwalletdBackend {
             self.swap_evidence
         ));
         let agreement = self
-            .agree_on(
+            .agree_on_with_tips(
                 &servers,
                 |server| {
                     let server = server.to_owned();
@@ -1242,6 +1249,8 @@ impl LightwalletdBackend {
                 },
                 |answer| answer.decision.clone(),
                 |_| false,
+                |answer| Some(answer.tip),
+                SPEND_READ_MAX_TIP_GAP_BLOCKS,
             )
             .await;
         let result = self

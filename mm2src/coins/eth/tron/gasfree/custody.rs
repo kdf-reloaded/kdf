@@ -97,16 +97,14 @@ pub(crate) const CONFIRMATION_VALIDITY_MS: u64 = 600_000;
 /// The (network, user) pairs whose derived custody address the controller has confirmed, each with the time of
 /// its last confirmation (R29).
 ///
-/// The gasless rail uses the one [`ControllerChecks::process_wide`] instance, which lives as long as the process:
-/// the check runs again after a restart, and whenever the last confirmation is older than
-/// [`CONFIRMATION_VALIDITY_MS`].
+/// Each platform binding owns one instance, which the gasless rail of that platform uses and which lives as long
+/// as the binding: the check runs again after a restart or a new activation, and whenever the last confirmation
+/// is older than [`CONFIRMATION_VALIDITY_MS`].
 pub(crate) struct ControllerChecks {
     /// (EIP-712 chain id, 20-byte user address) to the time of the last confirmation, in milliseconds. Never
     /// held across an `.await`.
     confirmed: Mutex<BTreeMap<(u64, [u8; 20]), u64>>,
 }
-
-static PROCESS_WIDE_CHECKS: ControllerChecks = ControllerChecks::new();
 
 impl ControllerChecks {
     pub(crate) const fn new() -> Self {
@@ -114,9 +112,6 @@ impl ControllerChecks {
             confirmed: Mutex::new(BTreeMap::new()),
         }
     }
-
-    /// The instance of the running process.
-    pub(crate) fn process_wide() -> &'static ControllerChecks { &PROCESS_WIDE_CHECKS }
 
     fn key(network: &Network, user: &TronAddress) -> (u64, [u8; 20]) {
         (gasfree_network(network).chain_id, user.to_evm_address().0)

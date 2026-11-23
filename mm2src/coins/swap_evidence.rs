@@ -207,14 +207,20 @@ pub fn node_name(addr: &str) -> String {
 /// the address names no host.
 pub fn node_host(url: &str) -> Option<String> { host_and_port(url).map(|(host, _)| host) }
 
-/// Whether the `swap_evidence_node` value `field` names the list entry `entry`: the same host, and the same port
-/// when the field names one (explicitly, or by an `http(s)`/`ws(s)` scheme); the scheme itself is ignored.
+/// Whether the `swap_evidence_node` value `field` names the list entry `entry`: the same host, and the same port only
+/// when BOTH the field and the entry have one (written, or the default of an `http(s)`/`ws(s)` scheme); the scheme
+/// itself is ignored. So a bare-host entry matches a field `host:443`, a field `host` matches an entry `host:50002`,
+/// and an entry `https://a.example:8443` does not match a field `a.example:443`.
 pub fn node_matches(field: &str, entry: &str) -> bool {
     let (Some((field_host, field_port)), Some((entry_host, entry_port))) = (host_and_port(field), host_and_port(entry))
     else {
         return false;
     };
-    field_host == entry_host && (field_port.is_none() || field_port == entry_port)
+    field_host == entry_host
+        && match (field_port, entry_port) {
+            (Some(field_port), Some(entry_port)) => field_port == entry_port,
+            _ => true,
+        }
 }
 
 /// The distinct hosts of `nodes`, in list order.
@@ -271,6 +277,8 @@ pub enum UndeterminedReason {
     TooFewAnswers,
     /// The trusted node did not answer; no other node is taken in its place.
     TrustedNodeSilent,
+    /// The tips of the two answering nodes differ by more than the allowed gap ([`agree_with_tips`]).
+    TipGap,
 }
 
 /// A read that cannot be decided: the step waits and must not refund or claim on it.
@@ -287,6 +295,7 @@ impl fmt::Display for Undetermined {
             UndeterminedReason::Disagree => "the nodes disagree",
             UndeterminedReason::TooFewAnswers => "fewer than two nodes answered",
             UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
+            UndeterminedReason::TipGap => "the tips of the nodes differ too much",
         };
         write!(f, "swap evidence undetermined: {reason}")?;
         for (index, (label, summary)) in self.per_node.iter().enumerate() {
@@ -336,6 +345,10 @@ enum Asked<A, K> {
 /// reopened.
 ///
 /// Each call asks one pair and decides only when that pair agrees: when two answers differ, no third node is asked.
+///
+/// `ask` must read each node at that node's own tip: comparing the nodes at a common lower height is not allowed for
+/// a read that can prove itself, because a node that is behind could hide a claim the other node already shows. Use
+/// [`agree_with_tips`] to refuse a pair whose tips are far apart.
 pub async fn agree<N, A, K, F, Fut>(
     policy: &SwapEvidencePolicy,
     nodes: &[N],
@@ -343,6 +356,55 @@ pub async fn agree<N, A, K, F, Fut>(
     ask: F,
     classify: impl Fn(&A) -> K,
     proves_itself: impl Fn(&A) -> bool,
+) -> Agreement<A, K>
+where
+    K: PartialEq + fmt::Debug,
+    F: Fn(&N) -> Fut,
+    Fut: Future<Output = Result<A, String>>,
+{
+    agree_with_tips(policy, nodes, label, ask, classify, proves_itself, |_| None, 0).await
+}
+
+/// [`agree`] with a tip-gap rule: when both answers of the pair report a tip and the tips differ by more than
+/// `max_gap`, the read is `Undetermined(TipGap)` and one WARN line names the two node labels and the gap. It is
+/// checked after `proves_itself`, so an answer that proves itself is still taken at once, whatever the other node
+/// says.
+///
+/// `tip_of` returns a monotonic tip measure in the same unit as `max_gap`: a block height, or the timestamp of the tip
+/// block in seconds, at the caller's choice. `ask` must read each node at that node's own tip; comparing at a common
+/// lower height is not allowed for a read that can prove itself.
+///
+/// Otherwise as [`agree`].
+///
+/// # Arguments
+///
+/// - `ask` asks one node and returns its answer or an error text;
+/// - `classify` reduces an answer to the step's decision, which two answers are compared on;
+/// - `proves_itself` is `true` for an answer the node cannot be wrong about (a secret whose hash is the swap's
+///   secret hash): it is taken alone, at once;
+/// - `label` names a node for the log line and for matching the trusted node.
+///
+/// `label` must return a `host[:port]` form of the node (see [`node_name`]), never a raw URL: it is matched against
+/// the trusted node and it appears in the log line of an undetermined read. The per-node texts of an
+/// [`Undetermined`] carry what `ask` returns as its error, so an `ask` error must be free of URLs and credentials,
+/// as `label` must be.
+///
+/// A secret that proves itself needs no agreeing read (R100): whenever the read would otherwise end undetermined
+/// because too few nodes answered (an `Insufficient` policy, a silent trusted node, fewer than two answers), the nodes
+/// not asked yet are asked and an answer that proves itself is taken from any of them. Any other answer of those
+/// nodes is ignored and the result stays undetermined with the original reason; a disagreement of two answers is not
+/// reopened.
+///
+/// Each call asks one pair and decides only when that pair agrees: when two answers differ, no third node is asked.
+pub async fn agree_with_tips<N, A, K, F, Fut>(
+    policy: &SwapEvidencePolicy,
+    nodes: &[N],
+    label: impl Fn(&N) -> String,
+    ask: F,
+    classify: impl Fn(&A) -> K,
+    proves_itself: impl Fn(&A) -> bool,
+    tip_of: impl Fn(&A) -> Option<u64>,
+    max_gap: u64,
 ) -> Agreement<A, K>
 where
     K: PartialEq + fmt::Debug,
@@ -439,7 +501,7 @@ where
     for index in next.by_ref().take(needed) {
         in_flight.push(ask_one(index));
     }
-    let mut answers: Vec<(usize, A, K)> = Vec::new();
+    let mut answers: Vec<(usize, A, K, Option<u64>)> = Vec::new();
     while let Some(asked) = in_flight.next().await {
         match asked {
             Asked::Answer {
@@ -451,7 +513,8 @@ where
                     return Agreement::Agreed { answer, decision };
                 }
                 per_node.push((index, labels[index].clone(), format!("{decision:?}")));
-                answers.push((index, answer, decision));
+                let tip = tip_of(&answer);
+                answers.push((index, answer, decision, tip));
                 if answers.len() == needed {
                     break;
                 }
@@ -472,9 +535,25 @@ where
             None => finish(silent_reason, per_node),
         };
     }
-    answers.sort_by_key(|(index, _, _)| *index);
-    let (_, answer, decision) = answers.remove(0);
-    if answers.iter().all(|(_, _, other)| *other == decision) {
+    answers.sort_by_key(|(index, _, _, _)| *index);
+    // The tips of the pair: too far apart is undetermined, and the nodes not asked yet may still show a proof.
+    if let [(first, _, _, Some(first_tip)), (second, _, _, Some(second_tip))] = answers.as_slice() {
+        let gap = first_tip.abs_diff(*second_tip);
+        if gap > max_gap {
+            common::log::warn!(
+                "swap evidence: tips differ by {gap}, more than {max_gap}: {} and {}",
+                labels[*first],
+                labels[*second]
+            );
+            let asked: Vec<usize> = per_node.iter().map(|(index, _, _)| *index).collect();
+            return match proof_from_rest(asked).await {
+                Some((answer, decision)) => Agreement::Agreed { answer, decision },
+                None => finish(UndeterminedReason::TipGap, per_node),
+            };
+        }
+    }
+    let (_, answer, decision, _) = answers.remove(0);
+    if answers.iter().all(|(_, _, other, _)| *other == decision) {
         Agreement::Agreed { answer, decision }
     } else {
         finish(UndeterminedReason::Disagree, per_node)
@@ -593,6 +672,26 @@ mod tests {
             decision: "spent".to_owned()
         });
         assert_eq!(asked, vec![label]);
+    }
+
+    /// Ports are compared only when both sides have one.
+    #[test]
+    fn ports_are_compared_only_when_both_sides_have_one() {
+        let bare = list(&["lwd.example"]);
+        assert_eq!(
+            swap_evidence_policy_from("T", Some("lwd.example:443"), &bare).unwrap(),
+            SwapEvidencePolicy::Trusted {
+                node: "lwd.example".to_owned()
+            }
+        );
+        assert!(node_matches("lwd.example", "lwd.example:50002"));
+        assert!(node_matches("https://lwd.example", "lwd.example"));
+        let https = list(&["https://a.example:8443"]);
+        assert!(swap_evidence_policy_from("T", Some("a.example:443"), &https).is_err());
+        assert!(swap_evidence_policy_from("T", Some("a.example:8443"), &https).is_ok());
+        // two explicit ports of one host are still one node for counting
+        let policy = swap_evidence_policy_from("T", None, &list(&["a.example:1", "a.example:2"])).unwrap();
+        assert_eq!(policy, SwapEvidencePolicy::Insufficient { hosts: 1 });
     }
 
     #[test]
@@ -858,6 +957,61 @@ mod tests {
         let script: Script = vec![("a:1", Ok("none")), ("b:1", Err("down")), ("c:1", Ok("secret:s"))];
         let (outcome, _) = run(two(), &script, proves);
         assert!(matches!(outcome, Agreement::Agreed { .. }));
+    }
+
+    type TipScript = Vec<(&'static str, Result<(&'static str, u64), &'static str>)>;
+
+    fn run_tips(
+        script: &TipScript,
+        max_gap: u64,
+        proves: &'static [&'static str],
+    ) -> Agreement<(&'static str, u64), String> {
+        block_on(agree_with_tips(
+            &two(),
+            script,
+            |(label, _)| (*label).to_owned(),
+            |(_, result)| {
+                let result = result.map_err(str::to_owned);
+                async move { result }
+            },
+            |answer: &(&'static str, u64)| answer.0.to_owned(),
+            |answer| proves.contains(&answer.0),
+            |answer| Some(answer.1),
+            max_gap,
+        ))
+    }
+
+    /// A tip gap above the maximum is undetermined, within it the normal comparison runs, and an answer that proves
+    /// itself wins whatever the gap.
+    #[test]
+    fn agree_with_tips_refuses_a_large_gap_and_lets_a_proof_win() {
+        // block heights
+        let script: TipScript = vec![("a:1", Ok(("none", 1000))), ("b:1", Ok(("none", 1010)))];
+        assert!(matches!(run_tips(&script, 5, &[]),
+            Agreement::Undetermined(u) if u.reason == UndeterminedReason::TipGap));
+        assert!(matches!(run_tips(&script, 10, &[]), Agreement::Agreed { .. }));
+        // different decisions within the gap: the normal comparison
+        let script: TipScript = vec![("a:1", Ok(("none", 1000))), ("b:1", Ok(("spent", 1001)))];
+        assert!(matches!(run_tips(&script, 5, &[]),
+            Agreement::Undetermined(u) if u.reason == UndeterminedReason::Disagree));
+        // timestamps in seconds, max gap 60
+        let script: TipScript = vec![
+            ("a:1", Ok(("none", 1_780_000_000))),
+            ("b:1", Ok(("none", 1_780_000_045))),
+        ];
+        assert!(matches!(run_tips(&script, 60, &[]), Agreement::Agreed { .. }));
+        let script: TipScript = vec![
+            ("a:1", Ok(("none", 1_780_000_000))),
+            ("b:1", Ok(("none", 1_780_000_300))),
+        ];
+        assert!(matches!(run_tips(&script, 60, &[]),
+            Agreement::Undetermined(u) if u.reason == UndeterminedReason::TipGap));
+        // one node shows a self-proving answer and the gap is huge: the proof is taken
+        let script: TipScript = vec![("a:1", Ok(("secret:s", 5))), ("b:1", Ok(("none", 5_000_000)))];
+        assert!(matches!(run_tips(&script, 5, &["secret:s"]), Agreement::Agreed {
+            answer: ("secret:s", 5),
+            ..
+        }));
     }
 
     /// A bracketed IPv6 host is never split at a colon inside the brackets.

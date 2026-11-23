@@ -137,12 +137,10 @@ pub fn error_of<T, E>(result: Result<T, E>, what: &str) -> E {
 pub fn bad_gateway_node() -> MockEvmNode { spawn_node(|_, _| Reply::HttpStatus(502)) }
 
 /// The URL of a port nothing listens on.
-pub fn refusing_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
-    let port = listener.local_addr().expect("local address").port();
-    drop(listener);
-    format!("http://127.0.0.1:{port}")
-}
+///
+/// The port is below 1024: the operating system never hands such a port out for a bind to port 0, so no stub node
+/// of a parallel test can end up on it and receive the request, and nothing listens on port 1 of a build host.
+pub fn refusing_url() -> String { "http://127.0.0.1:1".to_owned() }
 
 /// A 32-byte ABI word holding `value`.
 pub fn abi_word(value: u128) -> String { format!("0x{:064x}", value) }

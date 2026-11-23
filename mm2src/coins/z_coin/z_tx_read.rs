@@ -1176,7 +1176,7 @@ mod own_send_expiry_tests {
     use crate::swap_evidence::SwapEvidencePolicy;
     use crate::z_coin::z_coin_wallet_db::tests::test_params_with_zip212;
     use crate::z_coin::z_lightwalletd::tests::{info, test_addressing, FakeTransport, Script};
-    use crate::z_coin::z_lightwalletd::LightwalletdBackend;
+    use crate::z_coin::z_lightwalletd::{LightwalletdBackend, EXPIRY_MAX_TIP_GAP_BLOCKS};
     use std::sync::Arc;
 
     /// The expiry height every fixture transaction of this crate carries.
@@ -1246,8 +1246,18 @@ mod own_send_expiry_tests {
 
     #[tokio::test]
     async fn the_record_stops_counting_only_when_two_hosts_put_the_tip_past_its_expiry() {
-        let (client, _) = rig(&[Some(EXPIRY + 1), Some(EXPIRY + 5)], two_nodes());
+        let (client, _) = rig(&[Some(EXPIRY + 1), Some(EXPIRY + 2)], two_nodes());
         assert!(!counts(&client).await);
+    }
+
+    /// Two hosts whose tips are further apart than the gap are no pair: the record keeps counting.
+    #[tokio::test]
+    async fn two_hosts_beyond_the_tip_gap_keep_the_record_counting() {
+        let (client, _) = rig(
+            &[Some(EXPIRY + 1), Some(EXPIRY + 1 + EXPIRY_MAX_TIP_GAP_BLOCKS + 1)],
+            two_nodes(),
+        );
+        assert!(counts(&client).await);
     }
 
     #[tokio::test]

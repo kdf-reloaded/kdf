@@ -1,0 +1,297 @@
+{
+ "_source": "Captured 2026-11-22 by JSON-RPC from https://api.devnet.solana.com (public devnet chain data, CRD ch.01 R6): getSignaturesForAddress of the swap program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx, then getTransaction (base64, finalized, maxSupportedTransactionVersion 0) of the listed signatures, getAccountInfo (base64, finalized) of the program account and of its program-data account (dataSlice offset 0 length 45: the header). Nothing is altered.",
+ "program": "54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx",
+ "program_account": {
+  "data": [
+   "AgAAALRMkssTSuz5U50Dz/usSehsnB0q410E23sDX9WADE40",
+   "base64"
+  ],
+  "executable": true,
+  "lamports": 833120,
+  "owner": "BPFLoaderUpgradeab1e11111111111111111111111",
+  "rentEpoch": 18446744073709551615,
+  "space": 36
+ },
+ "program_data_address": "D8p7EfW7dqGJECToSvxqA4oLiBDNrzEhJbAE54DHFJdy",
+ "program_data_header": {
+  "data": [
+   "AwAAALsJkB4AAAAAAa1qb1R6gHTFbrXelxwdJPND7RDMdRNNbVwUfP1MN7ed",
+   "base64"
+  ],
+  "executable": false,
+  "lamports": 1229669880,
+  "owner": "BPFLoaderUpgradeab1e11111111111111111111111",
+  "rentEpoch": 18446744073709551615,
+  "space": 241933
+ },
+ "transactions": {
+  "5SRwg5RWPMt2SosTeA6H6iSqVvPhYjgjvaUyX38iNsTh1PrRsNeStgQuCJKUoDiN9Yd7Zh6Qdnzicf8ZCnnLpFRr": {
+   "blockTime": 1795018102,
+   "meta": {
+    "computeUnitsConsumed": 5188,
+    "costUnits": 6897,
+    "err": null,
+    "fee": 5006,
+    "innerInstructions": [],
+    "loadedAddresses": {
+     "readonly": [],
+     "writable": []
+    },
+    "logMessages": [
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx invoke [1]",
+     "Program log: Instruction: ReceiverSpendLamports",
+     "Program data: 5ga3l3IDIOKi224eUwX930ghazfFv5JBScRP14xphPDKy6b02ASJoOQ4+xOBLEqlcwMcKFmQk3KEu9/pxfzfycrTIzDZdzFRQEIPAAAAAADzQEGPUMqZS8mvDLr7enIt0vilf32w8fRRPfJFSL7hrw==",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx consumed 4888 of 5406 compute units",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx success"
+    ],
+    "postBalances": [
+     1999436435,
+     4989310464,
+     0,
+     1,
+     833120
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+     1998441441,
+     4988614504,
+     1695960,
+     1,
+     833120
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+     "Ok": null
+    }
+   },
+   "slot": 523685214,
+   "transaction": [
+    "Ad3/dlnxvaLMaa8Xgp54D8T6k9bbmRYWP/5OZxP20U9JU8fJfxYn4t+Yo08uT3Q1qVVnsvOGmYOoNKSd/DUQswEBAAIF5Dj7E4EsSqVzAxwoWZCTcoS73+nF/N/JytMjMNl3MVFEzyfu3rw9SSTWd8VHOf0DNR8rXDEbO8MdFGqyvfb+dqLbbh5TBf3fSCFrN8W/kkFJxE/XjGmE8MrLpvTYBImgAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAAA8ZX1B10cSiClDXRxZLcGXRWq9dpxZjREgWs9MWnGE08p3lekHC//3XY09bXtaJVJ6XH9K9h8x//L4fig4VlWqAwMABQJKFgAAAwAJA+gDAAAAAAAABAMAAQJYPVPgibS+bPnzQEGPUMqZS8mvDLr7enIt0vilf32w8fRRPfJFSL7hr8Byjuw1WgzEVJ/j96Vyxv4Iy4+DUOZKS5qWd+/Xwnu3fdv9agAAAABAQg8AAAAAAA==",
+    "base64"
+   ],
+   "transactionIndex": 1,
+   "version": "legacy"
+  },
+  "3G7v3uGoADWCxkYjN3BrPNpdMKHBymT7YLNa9dqFeMKHRNomVHbVSmmH52qzhhVqA4VKiMMMkwByoipNJhjj312a": {
+   "blockTime": 1795018096,
+   "meta": {
+    "computeUnitsConsumed": 8649,
+    "costUnits": 10050,
+    "err": null,
+    "fee": 5010,
+    "innerInstructions": [
+     {
+      "index": 2,
+      "instructions": [
+       {
+        "accounts": [
+         0,
+         1
+        ],
+        "data": "11116bhxrqzb8eYjRt57c8pfxxh9Cvm5XNbftbWRJbq29LhPmD3ZoXFycd1HmMbgri13op",
+        "programIdIndex": 2,
+        "stackHeight": 2
+       },
+       {
+        "accounts": [
+         0,
+         1
+        ],
+        "data": "3Bxs4Bc3VYuGVB19",
+        "programIdIndex": 2,
+        "stackHeight": 2
+       }
+      ]
+     }
+    ],
+    "loadedAddresses": {
+     "readonly": [],
+     "writable": []
+    },
+    "logMessages": [
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx invoke [1]",
+     "Program log: Instruction: LamportsPayment",
+     "Program 11111111111111111111111111111111 invoke [2]",
+     "Program 11111111111111111111111111111111 success",
+     "Program 11111111111111111111111111111111 invoke [2]",
+     "Program 11111111111111111111111111111111 success",
+     "Program data: T9U39+Ztvl2i224eUwX930ghazfFv5JBScRP14xphPDKy6b02ASJoETPJ+7evD1JJNZ3xUc5/QM1HytcMRs7wx0UarK99v525Dj7E4EsSqVzAxwoWZCTcoS73+nF/N/JytMjMNl3MVEAQEIPAAAAAAB92/1qAAAAAMByjuw1WgzEVJ/j96Vyxv4Iy4+DUOZKS5qWd+/Xwnu3",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx consumed 8349 of 9213 compute units",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx success"
+    ],
+    "postBalances": [
+     4988614504,
+     1695960,
+     1,
+     1,
+     833120,
+     1998441441
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+     4990315474,
+     0,
+     1,
+     1,
+     833120,
+     1998441441
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+     "Ok": null
+    }
+   },
+   "slot": 523685188,
+   "transaction": [
+    "AXESfhmZlQpYk78V74/IyroGJlhHWhLQEGkT0vN1P8IDC+yDaDYQrg+1/I81aTsSbYJCI1u514yBMUS3KtIzQQsBAAQGRM8n7t68PUkk1nfFRzn9AzUfK1wxGzvDHRRqsr32/nai224eUwX930ghazfFv5JBScRP14xphPDKy6b02ASJoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAAA8ZX1B10cSiClDXRxZLcGXRWq9dpxZjREgWs9MWnGE0+Q4+xOBLEqlcwMcKFmQk3KEu9/pxfzfycrTIzDZdzFRxq8AP6HTqWl3Mi4jG27CATFa35xMNzbXsaP5L0RP3ykDAwAFAiklAAADAAkD6AMAAAAAAAAEBAAFAQI4n0NTbGKdsIXAco7sNVoMxFSf4/elcsb+CMuPg1DmSkualnfv18J7t33b/WoAAAAAQEIPAAAAAAA=",
+    "base64"
+   ],
+   "transactionIndex": 33,
+   "version": "legacy"
+  },
+  "3JE5cZ3YxYbHmFTjAizvhAp7B4jonz9thyuGVcqQcQJXT37DE3i8LmqSgSMu4Farfs4KMYbKjUaARUSLwxGn7kr8": {
+   "blockTime": 1795018074,
+   "meta": {
+    "computeUnitsConsumed": 4398,
+    "costUnits": 5799,
+    "err": null,
+    "fee": 5005,
+    "innerInstructions": [],
+    "loadedAddresses": {
+     "readonly": [],
+     "writable": []
+    },
+    "logMessages": [
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx invoke [1]",
+     "Program log: Instruction: SenderRefundLamports",
+     "Program data: xbLMafdAnwQZz1FSnza2Se5/n2DqXADenr+BwIVHNHDwiGjMBlFFlETPJ+7evD1JJNZ3xUc5/QM1HytcMRs7wx0UarK99v52QEIPAAAAAAA=",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx consumed 4098 of 4537 compute units",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx success"
+    ],
+    "postBalances": [
+     4990315474,
+     0,
+     1,
+     833120,
+     1998441441
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+     4988624519,
+     1695960,
+     1,
+     833120,
+     1998441441
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+     "Ok": null
+    }
+   },
+   "slot": 523685097,
+   "transaction": [
+    "AXLjfLwEE0RSdFln+5TW0URA0YA/rwnVnYc7mRek6o9hF57iDe5lEs7qmEbMqV50VUL/Iw5iPQ1AQzJsGRqltQ0BAAMFRM8n7t68PUkk1nfFRzn9AzUfK1wxGzvDHRRqsr32/nYZz1FSnza2Se5/n2DqXADenr+BwIVHNHDwiGjMBlFFlAMGRm/lIRcy/+ytunLDm+e8jOW7xfcSayxDmzpAAAAAPGV9QddHEogpQ10cWS3Bl0VqvXacWY0RIFrPTFpxhNPkOPsTgSxKpXMDHChZkJNyhLvf6cX838nK0yMw2XcxUaZZkkYw4Vxd4uwtnR7dATjy2nNgPX53H371d2Qyf+1iAwIABQLlEgAAAgAJA+gDAAAAAAAAAwMABAE4D0FD3WwzBNRtTJ43lUPIfhe/tfGNaDt0CqPwEoNoa4k1fDiBLsu6tvnK/WoAAAAAQEIPAAAAAAA=",
+    "base64"
+   ],
+   "transactionIndex": 17,
+   "version": "legacy"
+  },
+  "3ih1aXspkqeiQ1SqgJhqLzxJ87kNjYe2Qrz3Mgyng36CMujky4e9SvCx4EAtRFh368rMNgEUiCzcP4tKSWsDJMX5": {
+   "blockTime": 1795018070,
+   "meta": {
+    "computeUnitsConsumed": 8649,
+    "costUnits": 10050,
+    "err": null,
+    "fee": 5010,
+    "innerInstructions": [
+     {
+      "index": 2,
+      "instructions": [
+       {
+        "accounts": [
+         0,
+         1
+        ],
+        "data": "11116bhxrqzb8eYjRt57c8pfxxh9Cvm5XNbftbWRJbq29LhPmD3ZoXFycd1HmMbgri13op",
+        "programIdIndex": 2,
+        "stackHeight": 2
+       },
+       {
+        "accounts": [
+         0,
+         1
+        ],
+        "data": "3Bxs4Bc3VYuGVB19",
+        "programIdIndex": 2,
+        "stackHeight": 2
+       }
+      ]
+     }
+    ],
+    "loadedAddresses": {
+     "readonly": [],
+     "writable": []
+    },
+    "logMessages": [
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+     "Program ComputeBudget111111111111111111111111111111 success",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx invoke [1]",
+     "Program log: Instruction: LamportsPayment",
+     "Program 11111111111111111111111111111111 invoke [2]",
+     "Program 11111111111111111111111111111111 success",
+     "Program 11111111111111111111111111111111 invoke [2]",
+     "Program 11111111111111111111111111111111 success",
+     "Program data: T9U39+Ztvl0Zz1FSnza2Se5/n2DqXADenr+BwIVHNHDwiGjMBlFFlETPJ+7evD1JJNZ3xUc5/QM1HytcMRs7wx0UarK99v525Dj7E4EsSqVzAxwoWZCTcoS73+nF/N/JytMjMNl3MVEAQEIPAAAAAAD5yv1qAAAAAG1MnjeVQ8h+F7+18Y1oO3QKo/ASg2hriTV8OIEuy7q2",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx consumed 8349 of 9213 compute units",
+     "Program 54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx success"
+    ],
+    "postBalances": [
+     4988624519,
+     1695960,
+     1,
+     1,
+     833120,
+     1998441441
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+     4990325489,
+     0,
+     1,
+     1,
+     833120,
+     1998441441
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+     "Ok": null
+    }
+   },
+   "slot": 523685079,
+   "transaction": [
+    "AYf8WDfXcLlbyOe+MG2arXRd8xCbBPNHgHFelZWDF2V7MkqVTNRaoFpg3etRJizGTiRD564MtfLvbT8RtA9PSAgBAAQGRM8n7t68PUkk1nfFRzn9AzUfK1wxGzvDHRRqsr32/nYZz1FSnza2Se5/n2DqXADenr+BwIVHNHDwiGjMBlFFlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAAA8ZX1B10cSiClDXRxZLcGXRWq9dpxZjREgWs9MWnGE0+Q4+xOBLEqlcwMcKFmQk3KEu9/pxfzfycrTIzDZdzFRh81lKVQnWw3yh8iFmlRyAUxBotGJbK3DbYvZIZgj1jMDAwAFAiklAAADAAkD6AMAAAAAAAAEBAAFAQI4n0NTbGKdsIVtTJ43lUPIfhe/tfGNaDt0CqPwEoNoa4k1fDiBLsu6tvnK/WoAAAAAQEIPAAAAAAA=",
+    "base64"
+   ],
+   "transactionIndex": 9,
+   "version": "legacy"
+  }
+ }
+}

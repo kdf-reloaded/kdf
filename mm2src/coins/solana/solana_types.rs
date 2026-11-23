@@ -104,6 +104,10 @@ pub struct SolanaActivationParams {
     /// set aside after a failure, see the pool.
     #[serde(default)]
     client_urls: Vec<String>,
+    /// The one node whose reads decide the refund and secret steps of a swap (CRD ch.40 R40.6D.16, chapter 51
+    /// R100). Must be one of the nodes above.
+    #[serde(default)]
+    swap_evidence_node: Option<String>,
 }
 
 /// A member that must be present: a missing `confirmation_commitment` fails request parsing, as it did before the
@@ -129,6 +133,10 @@ impl std::fmt::Debug for SolanaActivationParams {
                 &self.client_url.as_deref().map(crate::node_url::host_only),
             )
             .field("client_urls", &client_urls)
+            .field(
+                "swap_evidence_node",
+                &self.swap_evidence_node.as_deref().map(crate::node_url::host_only),
+            )
             .finish()
     }
 }
@@ -141,7 +149,31 @@ impl SolanaActivationParams {
             confirmation_commitment: None,
             client_url: None,
             client_urls: urls,
+            swap_evidence_node: None,
         }
+    }
+
+    /// The same parameters with the evidence node of CRD ch.40 R40.6D.16.
+    pub fn with_swap_evidence_node(mut self, url: Option<String>) -> Self {
+        self.swap_evidence_node = url;
+        self
+    }
+
+    /// The evidence node the request names, if any.
+    pub fn swap_evidence_node(&self) -> Option<&str> { self.swap_evidence_node.as_deref() }
+
+    /// The swap-evidence policy of a coin activated with these parameters (CRD ch.51 R100): over the node list, a
+    /// `swap_evidence_node` matching one entry (same host, and the same port when the field names one, the scheme
+    /// ignored) is `Trusted` with that list entry, and a field outside the list is refused.
+    pub fn swap_evidence_policy(
+        &self,
+        ticker: &str,
+    ) -> Result<crate::swap_evidence::SwapEvidencePolicy, crate::swap_evidence::SwapEvidenceNodeNotInList> {
+        crate::swap_evidence::swap_evidence_policy_from(
+            ticker,
+            self.swap_evidence_node.as_deref(),
+            &self.collected_urls(),
+        )
     }
 
     /// Flattened endpoint list in dispatch order.
@@ -176,6 +208,22 @@ impl<'de> serde::Deserialize<'de> for SolanaNodeUrl {
             Ok(parsed) if parsed.has_host() => Ok(SolanaNodeUrl(url)),
             _ => Err(serde::de::Error::custom("Invalid node `url`: expected an absolute URL")),
         }
+    }
+}
+
+/// The `swap_program_id` of a coins entry (CRD ch.40 R40.6D.2): `protocol.protocol_data.swap_program_id`, a base58
+/// public key. `None` when the member is absent or null.
+///
+/// # Errors
+///
+/// The member is present and is not a base58 32-byte public key (the entry is then unparsable, R40.6B.3 item 1).
+pub fn swap_program_id_from_conf(conf: &Json) -> Result<Option<Pubkey>, String> {
+    match &conf["protocol"]["protocol_data"]["swap_program_id"] {
+        Json::Null => Ok(None),
+        Json::String(text) => Pubkey::from_str(text)
+            .map(Some)
+            .map_err(|_| "invalid `swap_program_id`: expected a base58 public key".to_owned()),
+        _ => Err("invalid `swap_program_id`: expected a base58 public key".to_owned()),
     }
 }
 
@@ -312,6 +360,12 @@ pub async fn solana_coin_with_node_order(
     order: SolanaNodeOrder,
 ) -> Result<SolanaCoin, String> {
     let urls = params.collected_urls();
+    // The matched list entry, not the raw field, is the evidence node: the pool finds its node by exact URL.
+    let swap_evidence = params.swap_evidence_policy(ticker).map_err(|e| e.to_string())?;
+    let evidence_node = match &swap_evidence {
+        crate::swap_evidence::SwapEvidencePolicy::Trusted { node } => Some(node.clone()),
+        _ => None,
+    };
     if urls.is_empty() {
         return Err("Solana activation requires at least one RPC endpoint (client_url or client_urls)".to_owned());
     }
@@ -334,7 +388,10 @@ pub async fn solana_coin_with_node_order(
         spl_tokens_infos,
         settings: SolanaCoinSettings::default(),
         history: SolanaHistoryStates::default(),
+        swap: SolanaSwapConfig::default(),
     }));
+    solana_coin.set_swap_evidence_node(evidence_node);
+    solana_coin.set_swap_evidence_policy(swap_evidence);
     Ok(solana_coin)
 }
 
@@ -349,6 +406,8 @@ pub struct SolanaCoinImpl {
     pub(crate) settings: SolanaCoinSettings,
     /// The transaction-history states of the platform and of its tokens (CRD ch.40 §40.6C).
     pub history: SolanaHistoryStates,
+    /// The program check and the evidence node of the SOL swap legs (CRD ch.40 §40.6D).
+    pub swap: SolanaSwapConfig,
 }
 
 /// Whether the transaction history of a Solana platform runs (CRD ch.40 R40.6C.1) and the `history_sync_status` of

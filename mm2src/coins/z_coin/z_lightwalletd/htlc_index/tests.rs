@@ -1966,3 +1966,89 @@ fn r100_the_undetermined_log_record_does_not_grow_past_its_bound() {
     );
     assert_eq!(backend.undetermined_logged.lock().len(), UNDETERMINED_LOGGED_MAX);
 }
+
+/// An endpoint of `endpoint`'s kind whose tip is `tip` (the scripted endpoints answer `TIP` unless told otherwise).
+fn at_tip(mut endpoint: Endpoint, tip: u64) -> Endpoint {
+    endpoint.tips = VecDeque::from([tip]);
+    endpoint
+}
+
+fn is_tip_gap(error: &HtlcIndexError) -> bool {
+    matches!(error, HtlcIndexError::SwapEvidence(u) if u.text.contains("tips of the nodes differ too much"))
+}
+
+/// A pair whose tips are within the gap decides; one beyond it is undetermined (TipGap), whatever it says.
+#[tokio::test]
+async fn r100_a_pair_inside_the_tip_gap_decides_and_one_beyond_it_is_undetermined() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), TIP));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP + SPEND_READ_MAX_TIP_GAP_BLOCKS));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SpendOutcome::NotSpent(_)), "{outcome:?}");
+
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), TIP));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP + SPEND_READ_MAX_TIP_GAP_BLOCKS + 1));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(is_tip_gap(&error), "{error:?}");
+    assert!(
+        !error.is_disagreement(),
+        "a tip gap is no disagreement of answers: {error:?}"
+    );
+
+    // The same for the already-sent read.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(funded_endpoint(), TIP));
+    transport.serve("b", at_tip(funded_endpoint(), TIP + 50));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let error = backend
+        .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(is_tip_gap(&error), "{error:?}");
+}
+
+/// A claim that proves itself is taken from one endpoint however far the other endpoint's tip is.
+#[tokio::test]
+async fn r100_a_self_proving_claim_wins_with_a_large_tip_gap() {
+    let secret = [9u8; 32];
+    let matching = ClaimFixture::new(secret, secret);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(matching.endpoint_showing_the_claim(), TIP));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP + 1_000));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+
+    let outcome = backend
+        .detect_output_spend(&matching.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .expect("the proof is taken");
+
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
+}
+
+/// A field `a:443` names the bare-host list entry `a`: the trusted node is that entry, and its label matches it.
+#[tokio::test]
+async fn r100_a_field_with_a_port_names_a_bare_host_entry_and_the_trusted_node_answers() {
+    let entries = vec!["a".to_owned(), "b".to_owned()];
+    let policy = crate::swap_evidence::swap_evidence_policy_from("ARRR", Some("a:443"), &entries).unwrap();
+    assert_eq!(policy, SwapEvidencePolicy::Trusted { node: "a".to_owned() });
+
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", unspent_endpoint());
+    transport.serve("b", Endpoint::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], policy);
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SpendOutcome::NotSpent(_)), "{outcome:?}");
+    assert!(transport.asked("b", "utxos").is_empty());
+}
