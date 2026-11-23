@@ -517,9 +517,8 @@ async fn counting_unmined(
     unmined: Vec<ZTransaction>,
 ) -> Option<(ZTransaction, Option<u64>)> {
     // Under R100 a record stops counting only when two hosts (or the trusted endpoint) put the tip past its expiry
-    // height, each reading its own tip: one endpoint's tip must not drop a record that can still mine, because the
-    // servers' search reads mined blocks only and a second payment would follow. One answer, a disagreement, an
-    // `Insufficient` coin or a silent trusted node keep the record counting.
+    // height, each reading its own tip. One answer, a disagreement, an `Insufficient` coin or a silent trusted node
+    // keep the record counting.
     if client.0.reads_agree() {
         let mut counting = None;
         for tx in unmined {

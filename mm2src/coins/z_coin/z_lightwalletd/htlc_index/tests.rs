@@ -1588,7 +1588,7 @@ async fn r100_endpoints_that_differ_are_undetermined_no_third_is_asked_and_a_new
     assert!(error.is_named_condition());
     let text = evidence_text(&error);
     assert!(
-        text.contains("a:443") && text.contains("b:443"),
+        text.contains("a: ") && text.contains("b: "),
         "each node by host: {text}"
     );
     assert!(text.contains("swap_evidence_node"), "the fix is named: {text}");

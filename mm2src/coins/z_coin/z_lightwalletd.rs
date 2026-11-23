@@ -33,7 +33,7 @@ use super::z_rpc::z_coin_grpc;
 use super::ZcoinConsensusParams;
 use crate::big_decimal_from_sat_unsigned;
 use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
-use crate::node_url::{lightwalletd_endpoint_label, lightwalletd_endpoint_url, UNNAMED_NODE};
+use crate::node_url::lightwalletd_endpoint_label;
 use crate::swap_evidence::{agree, node_name, Agreement, SwapEvidencePolicy, Undetermined, UndeterminedReason};
 use crate::utxo::rpc_clients::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo,
                                UnspentMap, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut, UtxoRpcResult};
@@ -1447,22 +1447,6 @@ pub(crate) fn confirmation_depth(tip: u64, mined_height: Option<u64>) -> u64 {
     }
 }
 
-/// The name of `server` the agreement helper matches against the trusted node and logs: `host:port`, the port being
-/// the one the client connects to (an entry without one takes the port of its scheme), never the configured string.
-/// The one place of this rule; it is replaced by `swap_evidence::node_name` once that writes the scheme's default port.
-fn evidence_node_label(server: &str) -> String {
-    let url = lightwalletd_endpoint_url(server);
-    let name = node_name(&url);
-    let has_port = name
-        .rsplit_once(':')
-        .is_some_and(|(host, port)| !host.ends_with(':') && port.parse::<u16>().is_ok());
-    if has_port || name == UNNAMED_NODE {
-        name
-    } else {
-        format!("{}:{}", name, if url.starts_with("http://") { 80 } else { 443 })
-    }
-}
-
 /// What two endpoints are compared on when a transaction's confirmations are read (CRD ch.51 R100 item 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConfirmationDecision {
@@ -1624,7 +1608,7 @@ impl LightwalletdBackend {
         agree(
             &self.swap_evidence,
             servers,
-            |server| evidence_node_label(server),
+            |server| node_name(server),
             |server| ask(server),
             classify,
             proves_itself,
