@@ -31,11 +31,15 @@ fn wait_text(ticker: &str, what: &str, reason: &str) -> String {
 }
 
 fn cap_text(what: &str, ticker: &str, reason: &str) -> String {
-    format!(
+    let head = format!(
         "{what} on {ticker} did not give a determined answer before the refund deadline: {reason}; the taker \
-         payment is not refunded{}, then run `recover_funds_of_swap`",
-        cause_and_fix(reason)
-    )
+         payment is not refunded"
+    );
+    if is_undetermined(reason) {
+        format!("{head}{}, then run `recover_funds_of_swap`", cause_and_fix(reason))
+    } else {
+        format!("{head}; run `recover_funds_of_swap` once the coin answers again")
+    }
 }
 
 /// The text of the event that ends a refund step whose look at the taker payment stayed undetermined until its
@@ -92,7 +96,7 @@ mod tests {
             assert!(text.contains("BTC"), "{text}");
         }
         for text in [refund_cap_text("BTC", &reason), refund_gate_cap_text("BTC", &reason)] {
-            assert!(text.contains("`recover_funds_of_swap`"), "{text}");
+            assert!(text.ends_with("then run `recover_funds_of_swap`"), "{text}");
         }
     }
 
@@ -107,7 +111,13 @@ mod tests {
             assert!(!text.contains("swap_evidence_node"), "{text}");
             assert!(!text.contains("no two nodes agreed"), "{text}");
         }
-        assert!(refund_cap_text("BTC", "x").contains("`recover_funds_of_swap`"));
+        for text in [refund_cap_text("BTC", "x"), refund_gate_cap_text("BTC", "x")] {
+            assert!(
+                text.ends_with("; run `recover_funds_of_swap` once the coin answers again"),
+                "{text}"
+            );
+            assert!(text.contains("the taker payment is not refunded;"), "{text}");
+        }
     }
 
     #[test]

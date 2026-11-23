@@ -672,10 +672,14 @@ locktime.
 > fourth point: each time the refundability check answers that the refund can be
 > sent, before the refund is built, which happens only after a determined "not
 > spent". An undetermined answer of the refundability check is retried the same
-> way. A look or a refundability check that is still undetermined at the swap's
-> refund deadline ends the chain as chapter 51 R100 item 9 and its status note
-> of 2026-11-23 state. The event set, the resume map of R32 and the persisted
-> log shape are unchanged.
+> way. A look or a refundability check that is still undetermined at the
+> deadline of R100 item 9 ends the chain as chapter 51 R100 item 9 and its
+> status notes of 2026-11-23 state: the later of the taker payment's lock time
+> plus 3700 seconds and 3700 seconds after the refund step, in its current run,
+> first could act (the refundability check first answered that the refund can be
+> sent, or the check or a look first gave an undetermined answer at or after the
+> lock time). The event set, the resume map of R32 and the persisted log shape
+> are unchanged.
 
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume

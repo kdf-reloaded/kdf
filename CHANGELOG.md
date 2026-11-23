@@ -1302,9 +1302,10 @@ the previous version used. The safe way:
   a coin whose reads need two agreeing nodes also while they do not agree, the refund waits and the look repeats,
   with one warning. The look also runs each time the refund becomes possible, just before the refund is built. A
   claim found on one server whose secret matches the swap's hash is used at once; a refund, or another spend, found
-  on one server only is not acted on. A swap still waiting at its refund deadline ends as refund failed, with a
-  text that gives the reason and, for a coin on the two-node rule, the fix. Detail: PR #523; CRD ch.51, status note
-  of 2026-11-23 under R31a.
+  on one server only is not acted on. A swap still waiting an hour after its refund first became possible in the
+  current run, and at least until its payment's lock time plus 3700 seconds, ends as refund failed, with a text
+  that gives the reason and, for a coin on the two-node rule, the fix. Detail: PR #523; CRD ch.51, status note of
+  2026-11-23 under R31a.
 
 ### Tests
 
