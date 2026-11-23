@@ -7,6 +7,7 @@
 //! tip has too. The chain is read only after the wall clock has passed the lock time.
 
 use super::ZCoin;
+use crate::utxo::rpc_clients::UtxoRpcClientEnum;
 use crate::utxo::utxo_common::capped_refund_wait;
 use crate::utxo::UtxoCommonOps;
 use crate::CanRefundHtlc;
@@ -77,6 +78,20 @@ pub(crate) async fn refund_gate(coin: &ZCoin, locktime: u64) -> Result<RefundGat
     let now = now_ms() / 1000;
     if let Some(secs) = wall_clock_wait(now, locktime) {
         return Ok(RefundGate::WaitWallClock { secs });
+    }
+    // Under R100 each endpoint computes the median time past from its own blocks and two endpoints on distinct
+    // hosts must agree that the lock time is past (or the trusted endpoint answers alone); a read that cannot be
+    // decided is an error, never an open gate (CRD ch.51 R100 item 3).
+    if let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client {
+        if client.0.reads_agree() {
+            let count = coin.as_ref().conf.mtp_block_count.get();
+            let mtp = client
+                .0
+                .median_time_past_agreed(count, locktime)
+                .await
+                .map_err(|e| format!("cannot read the chain's median time past: {}", e))?;
+            return Ok(chain_time_gate(locktime, mtp));
+        }
     }
     let mtp = coin
         .get_current_mtp()

@@ -24,15 +24,17 @@
 
 mod htlc_index;
 
-pub(crate) use htlc_index::{p2sh_hash_of, DetectionLog, FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding,
-                            OutputRef, SentOutcome, SpendOutcome};
+pub(crate) use htlc_index::{p2sh_hash_of, spend_proves_itself, DetectionLog, EvidenceUndetermined, FundingFound,
+                            HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef, SentDecision, SentOutcome,
+                            SpendDecision, SpendOutcome};
 
 use super::z_coin_wallet_db::{dedupe_lightwalletd_endpoints, scrub_lightwalletd_text, ZCoinShieldedHistory};
 use super::z_rpc::z_coin_grpc;
 use super::ZcoinConsensusParams;
 use crate::big_decimal_from_sat_unsigned;
 use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
-use crate::node_url::lightwalletd_endpoint_label;
+use crate::node_url::{lightwalletd_endpoint_label, lightwalletd_endpoint_url, UNNAMED_NODE};
+use crate::swap_evidence::{agree, node_name, Agreement, SwapEvidencePolicy, Undetermined, UndeterminedReason};
 use crate::utxo::rpc_clients::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo,
                                UnspentMap, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut, UtxoRpcResult};
 use async_trait::async_trait;
@@ -83,6 +85,9 @@ pub(crate) const MEDIAN_TIME_WINDOW_MAX: u64 = 64;
 /// taken from the library's per-branch default, so that a later upgrade of the library or of the consensus
 /// branch cannot move the expiry or the staleness bound derived from it.
 pub(crate) const BUILDER_EXPIRY_DELTA: u32 = 40;
+
+/// How many undetermined steps are remembered to log each of them once (R100 item 9).
+pub(crate) const UNDETERMINED_LOGGED_MAX: usize = 32;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1442,6 +1447,42 @@ pub(crate) fn confirmation_depth(tip: u64, mined_height: Option<u64>) -> u64 {
     }
 }
 
+/// The name of `server` the agreement helper matches against the trusted node and logs: `host:port`, the port being
+/// the one the client connects to (an entry without one takes the port of its scheme), never the configured string.
+/// The one place of this rule; it is replaced by `swap_evidence::node_name` once that writes the scheme's default port.
+fn evidence_node_label(server: &str) -> String {
+    let url = lightwalletd_endpoint_url(server);
+    let name = node_name(&url);
+    let has_port = name
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.ends_with(':') && port.parse::<u16>().is_ok());
+    if has_port || name == UNNAMED_NODE {
+        name
+    } else {
+        format!("{}:{}", name, if url.starts_with("http://") { 80 } else { 443 })
+    }
+}
+
+/// What two endpoints are compared on when a transaction's confirmations are read (CRD ch.51 R100 item 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfirmationDecision {
+    /// The transaction is known and has at least the required confirmations.
+    Reached,
+    /// The transaction is known and has fewer.
+    NotYet,
+    /// The service explicitly has no such transaction, and the tip is past its expiry height.
+    MissingExpired,
+    /// The service explicitly has no such transaction, and the tip is not past its expiry height.
+    MissingNotExpired,
+}
+
+/// What two endpoints are compared on for the chain time of the refund gate: whether the lock time is past.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockTimeState {
+    Past,
+    NotPast,
+}
+
 // ---------------------------------------------------------------------------------------------
 // The backend
 // ---------------------------------------------------------------------------------------------
@@ -1484,6 +1525,12 @@ pub(crate) struct LightwalletdBackend {
     /// of this backend: a new activation starts with none, and re-evaluating admission clears none.
     suspensions: Mutex<HashMap<String, Suspension>>,
     clock: Clock,
+    /// How the swap-evidence reads are judged (CRD ch.51 R100): the coin's stored policy once its family has
+    /// adopted R100, else [`SwapEvidencePolicy::NotAdopted`], which keeps today's reads.
+    swap_evidence: SwapEvidencePolicy,
+    /// For each swap step whose read was last undetermined, the text that was logged, so a step that stays
+    /// undetermined is logged once (R100 item 9).
+    undetermined_logged: Mutex<Vec<(String, String)>>,
 }
 
 impl fmt::Debug for LightwalletdBackend {
@@ -1537,7 +1584,300 @@ impl LightwalletdBackend {
             detection_progress: Mutex::new(HashMap::new()),
             suspensions: Mutex::new(HashMap::new()),
             clock: Arc::new(common::now_float),
+            swap_evidence: SwapEvidencePolicy::NotAdopted,
+            undetermined_logged: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Sets how the swap-evidence reads are judged (CRD ch.51 R100). The coin passes its policy as
+    /// `swap_evidence::effective_policy` answers it.
+    pub(crate) fn with_swap_evidence(mut self, policy: SwapEvidencePolicy) -> Self {
+        self.swap_evidence = policy;
+        self
+    }
+
+    pub(crate) fn swap_evidence(&self) -> &SwapEvidencePolicy { &self.swap_evidence }
+
+    /// Whether the swap-evidence reads agree between endpoints (or ask the named trusted one, or none at all):
+    /// every policy but the ones that keep today's reads.
+    pub(crate) fn reads_agree(&self) -> bool {
+        !matches!(
+            self.swap_evidence,
+            SwapEvidencePolicy::NotAdopted | SwapEvidencePolicy::OwnDaemon
+        )
+    }
+
+    /// Asks `servers` the same read under the coin's policy and compares the decisions (CRD ch.51 R100). Each
+    /// call asks one pair; no further endpoint is asked to outvote two that differ.
+    pub(crate) async fn agree_on<A, K, F, Fut>(
+        &self,
+        servers: &[String],
+        ask: F,
+        classify: impl Fn(&A) -> K,
+        proves_itself: impl Fn(&A) -> bool,
+    ) -> Agreement<A, K>
+    where
+        K: PartialEq + fmt::Debug,
+        F: Fn(&str) -> Fut,
+        Fut: std::future::Future<Output = Result<A, String>>,
+    {
+        agree(
+            &self.swap_evidence,
+            servers,
+            |server| evidence_node_label(server),
+            |server| ask(server),
+            classify,
+            proves_itself,
+        )
+        .await
+    }
+
+    /// The text of an undetermined read: what each endpoint said, by host, and the two ways to fix it
+    /// (R100 item 9).
+    fn undetermined_text(undetermined: &Undetermined) -> String {
+        format!(
+            "{}; add a lightwalletd server on another host to light_wallet_d_servers, or set swap_evidence_node to \
+             one of the listed servers",
+            undetermined
+        )
+    }
+
+    /// Records the text logged for the undetermined `step`; `true` when it is to be logged (first time, or the text
+    /// changed). The record is bounded by [`UNDETERMINED_LOGGED_MAX`]: a step that never settles (a swap that ends
+    /// undetermined) is forgotten, oldest first, and is then merely logged once more if it comes back.
+    fn note_undetermined(&self, step: &str, text: &str) -> bool {
+        let mut logged = self.undetermined_logged.lock();
+        match logged.iter().position(|(known, _)| known == step) {
+            Some(index) => {
+                let changed = logged[index].1 != text;
+                logged[index].1 = text.to_owned();
+                changed
+            },
+            None => {
+                if logged.len() >= UNDETERMINED_LOGGED_MAX {
+                    logged.remove(0);
+                }
+                logged.push((step.to_owned(), text.to_owned()));
+                true
+            },
+        }
+    }
+
+    /// Turns an agreement into the decided answer, or into the undetermined read, logged once per `step` for as
+    /// long as its text does not change.
+    pub(crate) fn settle<A, K>(&self, step: &str, agreement: Agreement<A, K>) -> Result<(A, K), EvidenceUndetermined> {
+        match agreement {
+            Agreement::Agreed { answer, decision } => {
+                self.undetermined_logged.lock().retain(|(logged, _)| logged != step);
+                Ok((answer, decision))
+            },
+            Agreement::Undetermined(undetermined) => {
+                let text = Self::undetermined_text(&undetermined);
+                let first = self.note_undetermined(step, &text);
+                if first {
+                    common::log::warn!("the read of {} is undetermined and the step waits: {}", step, text);
+                } else {
+                    common::log::debug!("the read of {} is still undetermined: {}", step, text);
+                }
+                Err(EvidenceUndetermined {
+                    disagree: undetermined.reason == UndeterminedReason::Disagree,
+                    text,
+                })
+            },
+        }
+    }
+
+    /// `server`'s own chain tip, for a read that must come from that endpoint alone.
+    pub(crate) async fn server_tip(&self, server: &str) -> Result<u64, String> {
+        match self.transport.latest_block(server).await {
+            Ok(height) => {
+                self.reset_suspension(server);
+                Ok(height)
+            },
+            Err(e) => {
+                let text = self.scrub(&e.to_string(), server);
+                if matches!(e, EndpointError::Transport(_)) {
+                    self.suspend_on_failure(server, &text);
+                }
+                Err(format!("its tip could not be read: {}", text))
+            },
+        }
+    }
+
+    /// `server`'s own `GetTransaction` of `txid`, for a read that must come from that endpoint alone.
+    async fn server_transaction(&self, server: &str, txid: [u8; 32]) -> Result<RawTx, EndpointError> {
+        let result = self.transport.transaction(server, txid).await;
+        match &result {
+            Ok(_) => self.reset_suspension(server),
+            Err(EndpointError::Transport(text)) => self.suspend_on_failure(server, &self.scrub(text, server)),
+            Err(_) => {},
+        }
+        result
+    }
+
+    /// The payment transaction `txid` (internal byte order) as two endpoints on distinct hosts agree on its
+    /// bytes, or as the trusted endpoint answers it (R100 item 1). `Err` is the text of a read that could not be
+    /// decided.
+    pub(crate) async fn payment_agreed(&self, txid: [u8; 32]) -> Result<RawTx, String> {
+        let step = format!("the payment transaction {:?}", txid_internal_to_display(txid));
+        let servers = self.agreement_servers().await.map_err(|e| e.to_string())?;
+        let agreement = self
+            .agree_on(
+                &servers,
+                |server| {
+                    let server = server.to_owned();
+                    async move {
+                        let raw = self.server_transaction(&server, txid).await.map_err(|e| {
+                            let text = self.scrub(&e.to_string(), &server);
+                            format!("GetTransaction failed: {}", text)
+                        })?;
+                        Ok(raw)
+                    }
+                },
+                |raw| <[u8; 32]>::from(Sha256::digest(&raw.data)),
+                |_| false,
+            )
+            .await;
+        self.settle(&step, agreement)
+            .map(|(raw, _)| raw)
+            .map_err(|undetermined| undetermined.text)
+    }
+
+    /// The admitted endpoints an agreeing read asks: none under `Insufficient`, which asks nothing.
+    async fn agreement_servers(&self) -> Result<Vec<String>, LightwalletdError> {
+        if matches!(self.swap_evidence, SwapEvidencePolicy::Insufficient { .. }) {
+            return Ok(Vec::new());
+        }
+        self.admitted_ordered().await
+    }
+
+    /// Whether `tx_hash` (display order) has `confirmations` confirmations, as two endpoints on distinct hosts
+    /// agree on it, or as the trusted endpoint answers it (R100 item 1). Each endpoint reads the transaction and
+    /// the tip itself.
+    pub(crate) async fn confirmations_agreed(
+        &self,
+        tx_hash: &H256Json,
+        expiry_height: u32,
+        confirmations: u32,
+    ) -> Result<ConfirmationDecision, String> {
+        let txid = txid_display_to_internal(tx_hash);
+        let step = format!("the confirmations of the transaction {:?}", tx_hash);
+        let servers = self.agreement_servers().await.map_err(|e| e.to_string())?;
+        let agreement = self
+            .agree_on(
+                &servers,
+                |server| {
+                    let server = server.to_owned();
+                    async move {
+                        let tip = self.server_tip(&server).await?;
+                        match self.server_transaction(&server, txid).await {
+                            Ok(raw) => Ok(if confirmation_depth(tip, raw.height) >= u64::from(confirmations) {
+                                ConfirmationDecision::Reached
+                            } else {
+                                ConfirmationDecision::NotYet
+                            }),
+                            Err(EndpointError::NotFound(_)) => {
+                                Ok(if expiry_height > 0 && tip > u64::from(expiry_height) {
+                                    ConfirmationDecision::MissingExpired
+                                } else {
+                                    ConfirmationDecision::MissingNotExpired
+                                })
+                            },
+                            Err(e) => Err(format!(
+                                "GetTransaction failed: {}",
+                                self.scrub(&e.to_string(), &server)
+                            )),
+                        }
+                    }
+                },
+                |decision| *decision,
+                |_| false,
+            )
+            .await;
+        self.settle(&step, agreement)
+            .map(|(decision, _)| decision)
+            .map_err(|undetermined| undetermined.text)
+    }
+
+    /// Whether the chain tip is past `height`, as two endpoints on distinct hosts agree on it, or as the trusted
+    /// endpoint answers it (R100 item 1); each reads its own tip. `Err` is an undetermined read (one answer, a
+    /// disagreement, an `Insufficient` coin, a silent trusted node): the caller must then treat the tip as not
+    /// past, never as past.
+    pub(crate) async fn tip_past_agreed(&self, height: u64) -> Result<bool, String> {
+        let step = format!("whether the chain tip is past height {}", height);
+        let servers = self.agreement_servers().await.map_err(|e| e.to_string())?;
+        let agreement = self
+            .agree_on(
+                &servers,
+                |server| {
+                    let server = server.to_owned();
+                    async move { self.server_tip(&server).await }
+                },
+                |tip| *tip > height,
+                |_| false,
+            )
+            .await;
+        self.settle(&step, agreement)
+            .map(|(_, past)| past)
+            .map_err(|undetermined| undetermined.text)
+    }
+
+    /// Whether the chain time of the refund gate has passed `locktime`, as two endpoints on distinct hosts agree
+    /// on it, or as the trusted endpoint answers it (R100 item 1). Each endpoint computes the median time past
+    /// of the last `count` blocks ending at its own tip from its own blocks. Two endpoints that both say "past"
+    /// agree even when their medians differ. The answer is the median of the first agreeing endpoint.
+    pub(crate) async fn median_time_past_agreed(&self, count: u64, locktime: u64) -> Result<u32, String> {
+        let step = format!("the chain time for the lock time {}", locktime);
+        let servers = self.agreement_servers().await.map_err(|e| e.to_string())?;
+        let agreement = self
+            .agree_on(
+                &servers,
+                |server| {
+                    let server = server.to_owned();
+                    async move { self.server_median_time_past(&server, count).await }
+                },
+                |mtp| {
+                    if u64::from(*mtp) > locktime {
+                        LockTimeState::Past
+                    } else {
+                        LockTimeState::NotPast
+                    }
+                },
+                |_| false,
+            )
+            .await;
+        self.settle(&step, agreement)
+            .map(|(mtp, _)| mtp)
+            .map_err(|undetermined| undetermined.text)
+    }
+
+    /// The median time past of the last `count` blocks ending at `server`'s tip, from `server`'s blocks only.
+    async fn server_median_time_past(&self, server: &str, count: u64) -> Result<u32, String> {
+        if count == 0 || count > MEDIAN_TIME_WINDOW_MAX {
+            return Err(format!(
+                "median-time window of {} blocks is outside 1..={}",
+                count, MEDIAN_TIME_WINDOW_MAX
+            ));
+        }
+        let tip = self.server_tip(server).await?;
+        let first = tip.saturating_sub(count - 1).max(1);
+        let mut times = Vec::with_capacity(count as usize);
+        for height in first..=tip {
+            match self.transport.block_time(server, height).await {
+                Ok(time) => {
+                    self.reset_suspension(server);
+                    times.push(time);
+                },
+                Err(e) => {
+                    let text = self.scrub(&e.to_string(), server);
+                    if matches!(e, EndpointError::Transport(_)) {
+                        self.suspend_on_failure(server, &text);
+                    }
+                    return Err(format!("GetBlock of height {} failed: {}", height, text));
+                },
+            }
+        }
+        median(times.as_mut_slice()).ok_or_else(|| "empty median-time window".to_owned())
     }
 
     /// The name a text uses for `server`, one of the endpoints this backend was built with (R39.11.29): its
@@ -2023,13 +2363,17 @@ impl LightwalletdClient {
         params: &ZcoinConsensusParams,
         ironwood_activation_time: Option<u32>,
         addressing: HtlcAddressing,
+        swap_evidence: SwapEvidencePolicy,
     ) -> Self {
-        LightwalletdClient(Arc::new(LightwalletdBackend::new(
-            Arc::new(GrpcTransport::default()),
-            servers,
-            AdmissionPolicy::from_params(params).with_ironwood_activation_time(ironwood_activation_time),
-            addressing,
-        )))
+        LightwalletdClient(Arc::new(
+            LightwalletdBackend::new(
+                Arc::new(GrpcTransport::default()),
+                servers,
+                AdmissionPolicy::from_params(params).with_ironwood_activation_time(ironwood_activation_time),
+                addressing,
+            )
+            .with_swap_evidence(swap_evidence),
+        ))
     }
 
     pub(crate) fn backend(&self) -> &Arc<LightwalletdBackend> { &self.0 }
@@ -2063,6 +2407,33 @@ impl LightwalletdClient {
                 ));
             }
 
+            if self.0.reads_agree() {
+                // R100: the final decision is the agreement of two endpoints on distinct hosts (or the trusted
+                // endpoint's answer), each reading the transaction and its own tip.
+                match self
+                    .0
+                    .confirmations_agreed(&tx_hash, expiry_height, confirmations)
+                    .await
+                {
+                    Ok(ConfirmationDecision::Reached) => return Ok(()),
+                    Ok(ConfirmationDecision::MissingExpired) => {
+                        return Err(format!(
+                            "The transaction {:?} has expired: the endpoints answered that they have no such \
+                             transaction and the tip is past its expiry height {}",
+                            tx_hash, expiry_height
+                        ))
+                    },
+                    Ok(decision) => common::log::info!(
+                        "Waiting for tx {:?} confirmations, required {}: {:?}",
+                        tx_hash,
+                        confirmations,
+                        decision
+                    ),
+                    Err(e) => common::log::error!("could not decide the confirmations of {:?}: {}", tx_hash, e),
+                }
+                common::executor::Timer::sleep(check_every as f64).await;
+                continue;
+            }
             match self.raw_transaction(&tx_hash).await {
                 Ok(raw) => match self.0.confirmation_tip().await {
                     Ok(tip) => {
