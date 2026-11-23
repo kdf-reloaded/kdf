@@ -1388,6 +1388,9 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`swap-recovery-retry-switch`](docs/plans/swap-recovery-retry-switch.md) — new, planning (v0.6): a decision,
+  after a discussion with experienced users, on whether an operator or frontend switch retries the recovery of
+  swaps that end needing manual recovery; added with the R100 item 9 note, PR #518.
 - [`tron-swap-support`](docs/plans/tron-swap-support.md) — note of 2026-11-22: the TRON arm of the secret-hash
   selection is built, in PR #499.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
