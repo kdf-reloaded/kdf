@@ -3669,6 +3669,7 @@ impl MarketCoinOps for ZCoin {
                 requires_nota,
                 wait_until,
                 check_every,
+                &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
             )
         }
     }
@@ -3692,6 +3693,7 @@ impl MarketCoinOps for ZCoin {
                 utxo_common::DEFAULT_SWAP_VOUT,
                 from_block,
                 wait_until,
+                &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
             )
         }
     }

@@ -74,10 +74,10 @@ pub enum R100Adoption {
 /// (`r100_release_gate_every_swap_family_adopted`, ignored in ordinary CI) passes when every entry is `Adopted` or
 /// `SwapsOff`, so it binds only the families that swap in the release.
 pub const R100_ADOPTED: &[(SwapFamily, R100Adoption)] = &[
-    (SwapFamily::Utxo, R100Adoption::NotAdopted),
-    (SwapFamily::Bch, R100Adoption::NotAdopted),
+    (SwapFamily::Utxo, R100Adoption::Adopted),
+    (SwapFamily::Bch, R100Adoption::Adopted),
     (SwapFamily::Slp, R100Adoption::NotAdopted),
-    (SwapFamily::Qtum, R100Adoption::NotAdopted),
+    (SwapFamily::Qtum, R100Adoption::Adopted),
     (SwapFamily::Qrc20, R100Adoption::NotAdopted),
     (SwapFamily::Evm, R100Adoption::NotAdopted),
     (SwapFamily::Zcoin, R100Adoption::NotAdopted),
@@ -289,23 +289,40 @@ pub struct Undetermined {
     pub per_node: Vec<(String, String)>,
 }
 
-impl fmt::Display for Undetermined {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+/// The start of the text of every undetermined swap read, the one marker the engine matches on (see
+/// [`is_undetermined`]).
+pub const UNDETERMINED_PREFIX: &str = "swap evidence undetermined: ";
+
+/// The only constructor of the error text of an undetermined read: [`UNDETERMINED_PREFIX`], the `reason` and the
+/// node labels (`host[:port]` forms, see [`node_name`], never URLs).
+pub fn undetermined(reason: &str, nodes: &[&str]) -> String {
+    if nodes.is_empty() {
+        format!("{UNDETERMINED_PREFIX}{reason}")
+    } else {
+        format!("{UNDETERMINED_PREFIX}{reason} ({})", nodes.join(", "))
+    }
+}
+
+/// The only test of an error text for an undetermined read. It looks for the prefix anywhere in the text, because
+/// `try_s!` and `ERR!` put a `file:line]` in front of it.
+pub fn is_undetermined(err: &str) -> bool { err.contains(UNDETERMINED_PREFIX) }
+
+impl Undetermined {
+    /// The error text of this read, built by [`undetermined`]: the reason and the node labels.
+    pub fn to_err_string(&self) -> String {
         let reason = match self.reason {
             UndeterminedReason::Disagree => "the nodes disagree",
             UndeterminedReason::TooFewAnswers => "fewer than two nodes answered",
             UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
             UndeterminedReason::TipGap => "the tips of the nodes differ too much",
         };
-        write!(f, "swap evidence undetermined: {reason}")?;
-        for (index, (label, summary)) in self.per_node.iter().enumerate() {
-            write!(f, "{} {label}: {summary}", if index == 0 { " (" } else { "; " })?;
-        }
-        if !self.per_node.is_empty() {
-            f.write_str(")")?;
-        }
-        Ok(())
+        let labels: Vec<&str> = self.per_node.iter().map(|(label, _)| label.as_str()).collect();
+        undetermined(reason, &labels)
     }
+}
+
+impl fmt::Display for Undetermined {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.to_err_string()) }
 }
 
 /// The outcome of [`agree`].
@@ -366,7 +383,7 @@ where
 }
 
 /// [`agree`] with a tip-gap rule: when both answers of the pair report a tip and the tips differ by more than
-/// `max_gap`, the read is `Undetermined(TipGap)` and one WARN line names the two node labels and the gap. It is
+/// `max_gap`, the read is `Undetermined(TipGap)` and one DEBUG line names the two node labels and the gap (the caller logs the undetermined read once per step). It is
 /// checked after `proves_itself`, so an answer that proves itself is still taken at once, whatever the other node
 /// says.
 ///
@@ -540,7 +557,7 @@ where
     if let [(first, _, _, Some(first_tip)), (second, _, _, Some(second_tip))] = answers.as_slice() {
         let gap = first_tip.abs_diff(*second_tip);
         if gap > max_gap {
-            common::log::warn!(
+            common::log::debug!(
                 "swap evidence: tips differ by {gap}, more than {max_gap}: {} and {}",
                 labels[*first],
                 labels[*second]
@@ -567,6 +584,22 @@ mod tests {
     use std::cell::RefCell;
 
     fn list(entries: &[&str]) -> Vec<String> { entries.iter().map(|entry| (*entry).to_owned()).collect() }
+
+    #[test]
+    fn undetermined_marker_survives_wrapping() {
+        let text = undetermined("disagree", &["a:1", "b:2"]);
+        assert!(is_undetermined(&format!("x.rs:1] {text}")));
+        assert!(is_undetermined(&text));
+        assert!(!is_undetermined("x.rs:1] connection refused"));
+        assert!(!text.contains("://"));
+        assert_eq!(text, "swap evidence undetermined: disagree (a:1, b:2)");
+        let read = Undetermined {
+            reason: UndeterminedReason::TipGap,
+            per_node: vec![("a:1".to_owned(), "x".to_owned())],
+        };
+        assert!(is_undetermined(&read.to_err_string()));
+        assert_eq!(read.to_string(), read.to_err_string());
+    }
 
     #[test]
     fn node_host_forms() {

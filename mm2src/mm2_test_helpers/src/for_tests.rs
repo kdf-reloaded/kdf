@@ -757,9 +757,30 @@ pub async fn enable_electrum(mm: &MarketMakerIt, coin: &str, tx_history: bool, u
     enable_electrum_json(mm, coin, tx_history, servers).await
 }
 
+/// The `swap_evidence_node` value of an Electrum activation over `urls` (CRD ch.51 R100): the one server when the
+/// list holds fewer than two distinct hosts, so that the coin may trade; `Null` otherwise.
+pub fn swap_evidence_node_for(urls: &[String]) -> Json {
+    let host_of = |url: &String| {
+        url.rsplit_once(':')
+            .map_or(url.as_str(), |(host, _)| host)
+            .to_ascii_lowercase()
+    };
+    let mut hosts: Vec<String> = urls.iter().map(host_of).collect();
+    hosts.sort();
+    hosts.dedup();
+    match urls.first() {
+        Some(first) if hosts.len() < 2 => json!(first),
+        _ => Json::Null,
+    }
+}
+
 /// Asks MM to enable the given currency in electrum mode
 /// fresh list of servers at https://github.com/jl777/coins/blob/master/electrums/.
 pub async fn enable_electrum_json(mm: &MarketMakerIt, coin: &str, tx_history: bool, servers: Vec<Json>) -> Json {
+    let urls: Vec<String> = servers
+        .iter()
+        .filter_map(|server| server["url"].as_str().map(str::to_owned))
+        .collect();
     let electrum = mm
         .rpc(&json! ({
             "userpass": mm.userpass,
@@ -768,6 +789,8 @@ pub async fn enable_electrum_json(mm: &MarketMakerIt, coin: &str, tx_history: bo
             "servers": servers,
             "mm2": 1,
             "tx_history": tx_history,
+            // A one-server list names its server as the evidence node.
+            "swap_evidence_node": swap_evidence_node_for(&urls),
         }))
         .await
         .unwrap();
@@ -938,6 +961,13 @@ pub async fn enable_bch_with_tokens(
     tx_history: bool,
 ) -> Json {
     let slp_requests: Vec<_> = tokens.iter().map(|ticker| json!({ "ticker": ticker })).collect();
+    let evidence_node = match &mode {
+        UtxoRpcMode::Electrum { servers } => {
+            let urls: Vec<String> = servers.iter().map(|server| server.url.clone()).collect();
+            swap_evidence_node_for(&urls)
+        },
+        UtxoRpcMode::Native => Json::Null,
+    };
 
     let enable = mm
         .rpc(&json! ({
@@ -949,6 +979,7 @@ pub async fn enable_bch_with_tokens(
                 "allow_slp_unsafe_conf": true,
                 "bchd_urls": [],
                 "mode": mode,
+                "swap_evidence_node": evidence_node,
                 "tx_history": tx_history,
                 "slp_tokens_requests": slp_requests,
             }

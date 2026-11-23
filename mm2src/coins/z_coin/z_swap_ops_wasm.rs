@@ -98,11 +98,11 @@ impl SwapOps for ZCoin {
     }
 
     fn validate_maker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        utxo_common::validate_maker_payment(self, input)
+        utxo_common::validate_maker_payment(self, input, &crate::swap_evidence::SwapEvidencePolicy::NotAdopted)
     }
 
     fn validate_taker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        utxo_common::validate_taker_payment(self, input)
+        utxo_common::validate_taker_payment(self, input, &crate::swap_evidence::SwapEvidencePolicy::NotAdopted)
     }
 
     fn check_if_my_payment_sent(
@@ -114,7 +114,14 @@ impl SwapOps for ZCoin {
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        utxo_common::check_if_my_payment_sent(self.clone(), time_lock, my_pub, other_pub, secret_hash)
+        utxo_common::check_if_my_payment_sent(
+            self.clone(),
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
+        )
     }
 
     async fn search_for_swap_tx_spend_my(
@@ -129,6 +136,7 @@ impl SwapOps for ZCoin {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_my(
             self.as_ref(),
+            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
             time_lock,
             my_pub,
             other_pub,
@@ -152,6 +160,7 @@ impl SwapOps for ZCoin {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_other(
             self.as_ref(),
+            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
             time_lock,
             my_pub,
             other_pub,

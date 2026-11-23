@@ -195,6 +195,7 @@ impl SlpToken {
             input.time_lock,
             now_ms() / 1000 + 60,
             input.confirmations,
+            crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
         );
 
         validate_fut

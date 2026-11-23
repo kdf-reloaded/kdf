@@ -256,7 +256,14 @@ impl SwapOps for SlpToken {
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        utxo_common::check_if_my_payment_sent(self.platform_coin.clone(), time_lock, my_pub, other_pub, secret_hash)
+        utxo_common::check_if_my_payment_sent(
+            self.platform_coin.clone(),
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
+        )
     }
 
     async fn search_for_swap_tx_spend_my(
@@ -271,6 +278,7 @@ impl SwapOps for SlpToken {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_my(
             self.platform_coin.as_ref(),
+            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
             time_lock,
             my_pub,
             other_pub,
@@ -294,6 +302,7 @@ impl SwapOps for SlpToken {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_other(
             self.platform_coin.as_ref(),
+            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
             time_lock,
             my_pub,
             other_pub,
@@ -313,10 +322,14 @@ impl SwapOps for SlpToken {
     /// coin's (CRD ch.51 §51.6E R88).
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
         Box::new(
-            utxo_common::can_refund_htlc(&self.platform_coin, locktime)
-                .boxed()
-                .map_err(|e| ERRL!("{}", e))
-                .compat(),
+            utxo_common::can_refund_htlc(
+                &self.platform_coin,
+                locktime,
+                &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
+            )
+            .boxed()
+            .map_err(|e| ERRL!("{}", e))
+            .compat(),
         )
     }
 

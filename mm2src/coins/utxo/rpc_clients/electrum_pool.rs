@@ -3171,6 +3171,9 @@ impl PoolShared {
     /// Whether the tip checks are on for this coin (R38.6.4o item 11).
     pub(super) fn tip_checks_on(&self) -> bool { self.tip_checks }
 
+    /// The coin's tolerance in blocks (R38.6.4o item 1): the gap within which a server counts as up to date.
+    pub(super) fn tolerance_blocks(&self) -> u64 { self.tolerance }
+
     /// R38.6.4o item 6, status note of 2026-11-21: the server a wait that polls `addr` continues on when `addr` is
     /// now out of date (item 4). The polled server is left out; the choice is the first up-to-date maintained
     /// connection in priority order that is not in `failed` (the servers that failed during this wait), else the
