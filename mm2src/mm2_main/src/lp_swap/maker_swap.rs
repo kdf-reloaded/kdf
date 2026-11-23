@@ -1534,7 +1534,8 @@ impl MakerSwap {
                         debug!("Swap {}: the taker payment search failed: {}", self.uuid, reason);
                         // CRD ch.51 §51.6G R100 item 3: a look that gave no determined answer, undetermined by
                         // the two-node rule or failed for any other reason, is held. The cap counts from the
-                        // first moment the refund could act and ends the step with the reason as given.
+                        // first moment the refund could act and ends the step with `MakerPaymentRefundFailed`
+                        // naming the kind of failure; the reason goes to the debug log only (CRD ch.51 R80).
                         let now = now_secs();
                         if now >= locktime {
                             first_could_act.get_or_insert(now);
