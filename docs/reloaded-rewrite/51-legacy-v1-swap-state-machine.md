@@ -1847,6 +1847,22 @@ answer.
 > `swap_evidence_node`, and then run `recover_funds_of_swap`. No sentence of
 > R100 is changed.
 
+> *Status note (2026-11-23, a second one, Reloaded-original; maintainer
+> decision of 2026-11-23).* The bound of the note above is refined; that note
+> stays as written. A refund step of the maker or the taker whose reads stay
+> undetermined waits until the later of two moments: the lock time of its own
+> payment plus 3700 seconds, and 3700 seconds after the moment at which the
+> refund step, in its current run, first could act. The refund step first could
+> act when its refundability check first answered that the refund can be sent,
+> or first gave an undetermined answer at or after the lock time. That moment
+> is not stored, so a restart starts a new wait of 3700 seconds. A chain whose
+> refundability check follows the median time past can open the refund up to
+> about an hour after the lock time, and the later of the two moments keeps a
+> full wait for it. Then the step ends with its refund-failed event, whose text
+> gives the reason; only when the read is undetermined under R100 does it name
+> the fix of the note above (a node on a second host, or `swap_evidence_node`,
+> then `recover_funds_of_swap`). No sentence of R100 is changed.
+
 **T42.** *Agreement of the reads (R100).* Over two scripted nodes: answers that
 agree by item 1 let the refund step and the step that uses the secret go on
 (including two chain times that differ but are both past the lock); answers
@@ -3669,5 +3685,11 @@ reference rows alike.
 - *Clean-side addition of 2026-11-23:* the status note after R100 item 9 on
   the bound of a waiting running swap (its refund deadline, then the
   refund-failed event naming the fix). Reloaded-original; it records the
+  maintainer's decision of 2026-11-23, takes no reference input and no
+  forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-23, a second one:* the second status note
+  after R100 item 9, which refines the bound of the first (the later of the
+  payment's lock time plus 3700 seconds and 3700 seconds after the refund step
+  first could act in its current run). Reloaded-original; it records the
   maintainer's decision of 2026-11-23, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
