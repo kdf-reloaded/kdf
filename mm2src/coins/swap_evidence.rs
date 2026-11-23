@@ -277,7 +277,8 @@ pub enum UndeterminedReason {
     TooFewAnswers,
     /// The trusted node did not answer; no other node is taken in its place.
     TrustedNodeSilent,
-    /// The tips of the two answering nodes differ by more than the allowed gap ([`agree_with_tips`]).
+    /// The two answering nodes gave the same decision, but their tips differ by more than the allowed gap
+    /// ([`agree_with_tips`]).
     TipGap,
 }
 
@@ -304,11 +305,15 @@ pub fn undetermined(reason: &str, nodes: &[&str]) -> String {
 }
 
 /// The only test of an error text for an undetermined read. It looks for the prefix anywhere in the text, because
-/// `try_s!` and `ERR!` put a `file:line]` in front of it.
+/// `try_s!` and `ERR!` put a `file:line]` in front of it. It matches the prefix anywhere, so a lower-layer error
+/// that quotes it counts as undetermined; that errs toward waiting, the safe side.
 pub fn is_undetermined(err: &str) -> bool { err.contains(UNDETERMINED_PREFIX) }
 
 impl Undetermined {
-    /// The error text of this read, built by [`undetermined`]: the reason and the node labels.
+    /// The error text of this read: [`UNDETERMINED_PREFIX`], the reason, and what each node said, as
+    /// `(label: summary; label: summary)`. A summary is the decision or the fixed error text of the node's `ask`,
+    /// which carries no URL or credential by the contract of [`agree`]. [`undetermined`] builds the labels-only form
+    /// for callers without an `Undetermined` value; both start with the prefix.
     pub fn to_err_string(&self) -> String {
         let reason = match self.reason {
             UndeterminedReason::Disagree => "the nodes disagree",
@@ -316,8 +321,15 @@ impl Undetermined {
             UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
             UndeterminedReason::TipGap => "the tips of the nodes differ too much",
         };
-        let labels: Vec<&str> = self.per_node.iter().map(|(label, _)| label.as_str()).collect();
-        undetermined(reason, &labels)
+        if self.per_node.is_empty() {
+            return format!("{UNDETERMINED_PREFIX}{reason}");
+        }
+        let nodes: Vec<String> = self
+            .per_node
+            .iter()
+            .map(|(label, summary)| format!("{label}: {summary}"))
+            .collect();
+        format!("{UNDETERMINED_PREFIX}{reason} ({})", nodes.join("; "))
     }
 }
 
@@ -382,10 +394,12 @@ where
     agree_with_tips(policy, nodes, label, ask, classify, proves_itself, |_| None, 0).await
 }
 
-/// [`agree`] with a tip-gap rule: when both answers of the pair report a tip and the tips differ by more than
-/// `max_gap`, the read is `Undetermined(TipGap)` and one DEBUG line names the two node labels and the gap (the caller logs the undetermined read once per step). It is
-/// checked after `proves_itself`, so an answer that proves itself is still taken at once, whatever the other node
-/// says.
+/// [`agree`] with a tip-gap rule. After `proves_itself` (an answer that proves itself is taken at once, whatever the
+/// other node says) the two decisions are compared first: different decisions are `Undetermined(Disagree)`, even when
+/// the tips are also far apart (the gap is only logged at DEBUG, naming the two node labels). Equal decisions from a
+/// pair that both report a tip, the tips differing by more than `max_gap`, are `Undetermined(TipGap)`. So `TipGap`
+/// always means "the same answer, tips too far apart", and a caller that keeps a second source for the cases that are
+/// not a disagreement cannot use it to outvote a pair that disagreed.
 ///
 /// `tip_of` returns a monotonic tip measure in the same unit as `max_gap`: a block height, or the timestamp of the tip
 /// block in seconds, at the caller's choice. `ask` must read each node at that node's own tip; comparing at a common
@@ -553,28 +567,35 @@ where
         };
     }
     answers.sort_by_key(|(index, _, _, _)| *index);
-    // The tips of the pair: too far apart is undetermined, and the nodes not asked yet may still show a proof.
-    if let [(first, _, _, Some(first_tip)), (second, _, _, Some(second_tip))] = answers.as_slice() {
-        let gap = first_tip.abs_diff(*second_tip);
-        if gap > max_gap {
-            common::log::debug!(
-                "swap evidence: tips differ by {gap}, more than {max_gap}: {} and {}",
-                labels[*first],
-                labels[*second]
-            );
-            let asked: Vec<usize> = per_node.iter().map(|(index, _, _)| *index).collect();
-            return match proof_from_rest(asked).await {
-                Some((answer, decision)) => Agreement::Agreed { answer, decision },
-                None => finish(UndeterminedReason::TipGap, per_node),
-            };
-        }
-    }
+    // The decisions are compared first: two different decisions are a disagreement, whatever the tips are, so
+    // `TipGap` always means "the same answer, tips too far apart".
+    let tip_gap = match answers.as_slice() {
+        [(first, _, _, Some(first_tip)), (second, _, _, Some(second_tip))] => {
+            let gap = first_tip.abs_diff(*second_tip);
+            (gap > max_gap).then(|| {
+                common::log::debug!(
+                    "swap evidence: tips differ by {gap}, more than {max_gap}: {} and {}",
+                    labels[*first],
+                    labels[*second]
+                );
+            })
+        },
+        _ => None,
+    };
     let (_, answer, decision, _) = answers.remove(0);
-    if answers.iter().all(|(_, _, other, _)| *other == decision) {
-        Agreement::Agreed { answer, decision }
-    } else {
-        finish(UndeterminedReason::Disagree, per_node)
+    if !answers.iter().all(|(_, _, other, _)| *other == decision) {
+        return finish(UndeterminedReason::Disagree, per_node);
     }
+    if tip_gap.is_some() {
+        // The same answer from nodes whose tips are far apart: undetermined, and the nodes not asked yet may still
+        // show a proof.
+        let asked: Vec<usize> = per_node.iter().map(|(index, _, _)| *index).collect();
+        return match proof_from_rest(asked).await {
+            Some((answer, decision)) => Agreement::Agreed { answer, decision },
+            None => finish(UndeterminedReason::TipGap, per_node),
+        };
+    }
+    Agreement::Agreed { answer, decision }
 }
 
 #[cfg(test)]
@@ -599,6 +620,22 @@ mod tests {
         };
         assert!(is_undetermined(&read.to_err_string()));
         assert_eq!(read.to_string(), read.to_err_string());
+        // the long form carries what each node said
+        let disagree = Undetermined {
+            reason: UndeterminedReason::Disagree,
+            per_node: vec![
+                ("a:1".to_owned(), "Claimed".to_owned()),
+                ("b:2".to_owned(), "NotSpent".to_owned()),
+            ],
+        };
+        let long = disagree.to_err_string();
+        assert_eq!(
+            long,
+            "swap evidence undetermined: the nodes disagree (a:1: Claimed; b:2: NotSpent)"
+        );
+        assert_eq!(disagree.to_string(), long);
+        assert!(is_undetermined(&long));
+        assert!(is_undetermined(&format!("x.rs:1] {long}")));
     }
 
     #[test]
@@ -1045,6 +1082,25 @@ mod tests {
             answer: ("secret:s", 5),
             ..
         }));
+    }
+
+    /// Different decisions with far-apart tips are a disagreement, equal decisions with far-apart tips are a tip gap,
+    /// and a self-proving answer wins over both.
+    #[test]
+    fn agree_with_tips_compares_the_decisions_before_the_gap() {
+        let far_apart_different: TipScript = vec![("a:1", Ok(("none", 1000))), ("b:1", Ok(("spent", 9000)))];
+        assert!(matches!(run_tips(&far_apart_different, 5, &[]),
+            Agreement::Undetermined(u) if u.reason == UndeterminedReason::Disagree));
+        let far_apart_equal: TipScript = vec![("a:1", Ok(("none", 1000))), ("b:1", Ok(("none", 9000)))];
+        assert!(matches!(run_tips(&far_apart_equal, 5, &[]),
+            Agreement::Undetermined(u) if u.reason == UndeterminedReason::TipGap));
+        let proof: TipScript = vec![("a:1", Ok(("secret:s", 1000))), ("b:1", Ok(("none", 9000)))];
+        assert!(matches!(run_tips(&proof, 5, &["secret:s"]), Agreement::Agreed { .. }));
+        let proof_vs_spent: TipScript = vec![("a:1", Ok(("spent", 1000))), ("b:1", Ok(("secret:s", 9000)))];
+        assert!(matches!(
+            run_tips(&proof_vs_spent, 5, &["secret:s"]),
+            Agreement::Agreed { .. }
+        ));
     }
 
     /// A bracketed IPv6 host is never split at a colon inside the brackets.
