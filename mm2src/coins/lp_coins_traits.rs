@@ -254,6 +254,11 @@ pub trait SwapOps {
         other_side_address: Option<&[u8]>,
     ) -> Result<Option<BytesJson>, MmError<NegotiateSwapContractAddrErr>>;
 
+    /// Whether `volume` can be a swap volume of this coin: a coin whose payment address derives from the amount in
+    /// its smallest units refuses a volume that is not a whole number of them (CRD ch.40 R40.6D.6). The default
+    /// accepts every volume. The order placement and the swap start of both sides ask it (CRD ch.40 §40.6D, S11d).
+    fn check_swap_volume_units(&self, _volume: &BigDecimal) -> Result<(), String> { Ok(()) }
+
     fn get_htlc_key_pair(&self) -> Option<KeyPair>;
 
     /// The key pair this coin signs its swap transactions with, for a coin that holds one key of its own that

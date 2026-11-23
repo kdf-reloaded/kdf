@@ -25,7 +25,7 @@ pub struct CoinsActivationContext {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) init_lightning_task_manager: L2TaskManagerShared<LightningCoin>,
     /// The registry of the task-framework tests, which drive a scripted coin through the standalone-coin family.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) init_test_coin_task_manager:
         crate::standalone_coin::InitStandaloneCoinTaskManagerShared<coins::TestCoin>,
     /// The registries of the serialized-activation tests, which drive a scripted coin through the other families.
@@ -53,7 +53,7 @@ impl CoinsActivationContext {
                 init_z_coin_task_manager: RpcTaskManager::new_shared(),
                 #[cfg(not(target_arch = "wasm32"))]
                 init_lightning_task_manager: RpcTaskManager::new_shared(),
-                #[cfg(test)]
+                #[cfg(all(test, not(target_arch = "wasm32")))]
                 init_test_coin_task_manager: RpcTaskManager::new_shared(),
                 #[cfg(all(test, not(target_arch = "wasm32")))]
                 init_test_platform_task_manager: RpcTaskManager::new_shared(),

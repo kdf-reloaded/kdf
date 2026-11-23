@@ -920,12 +920,11 @@ pub mod stub_server {
     }
 
     /// The URL of an endpoint nobody listens on: a request to it fails at once.
-    pub fn dead_url() -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        format!("http://127.0.0.1:{port}/api/v2/tickers?expire_at=259200")
-    }
+    ///
+    /// The port is below 1024: the operating system never hands such a port out for a bind to port 0, so no stub
+    /// server of a parallel test can end up on it and receive the request, and nothing listens on port 1 of a
+    /// build host.
+    pub fn dead_url() -> String { "http://127.0.0.1:1/api/v2/tickers?expire_at=259200".to_owned() }
 
     /// A price document with one full record per `(ticker, price, provider, timestamp)`.
     pub fn price_document(entries: &[(&str, &str, &str, u64)]) -> String {

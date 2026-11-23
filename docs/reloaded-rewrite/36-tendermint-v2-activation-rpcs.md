@@ -1405,6 +1405,10 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   maintainer's decision of 2026-11-22 on stored orders of untradable
   coins. It was written by a context that never read the forbidden
   corpus, takes no forbidden-class input and needs no Dirty Gate pass.
+- *Clean-context addition (2026-11-23, forbidden corpus not consulted):* the
+  status note after R36.14.33 on the time bound of a native Tendermint request
+  describes this repository's code. It takes no forbidden-class input and
+  changes no sentence of the chapter.
 
 ---
 
@@ -3709,6 +3713,19 @@ seconds for its `health` answer, so with `n` configured nodes that do
 not respond the error can take up to `n × 15` seconds to arrive; the
 figure is the reference's and is not part of the contract. Reloaded
 answers the same error type and status in the same order of conditions.
+
+> **Status note (2026-11-23, Reloaded-original; PR #516).** In the native build
+> every request to a Tendermint node, the `health` and `abci_info` probes of the
+> node choice included, is bounded at 30 seconds for sending the request and
+> reading the whole answer. A node that accepts the connection and does not
+> answer within that time gives a timeout error that names the node by its
+> host-only form (R36.5A.1). The node choice counts such a probe as failed and
+> asks the next configured node, so the height read of this rule and the other
+> node loops of the history path move on to an answering node instead of waiting
+> without end; when no node answers, the error of item 3 arrives after at most
+> about 60 seconds per configured node (both probes). A request already made on
+> the chosen node is not repeated on another node within the same call; the next
+> call chooses a node again. The browser build is not changed.
 
 R36.14.34 **The legacy method in the same situation (shared legacy path;
 completes R36.14.1 and R36.14.12).** The legacy flat `my_tx_history`

@@ -819,6 +819,7 @@ mod loopback_tests {
     use super::super::failure::{GaslessMember, RpcArm};
     use super::super::test_vectors::{address, MESSAGES, MESSAGE_MAX_FEE, MESSAGE_SERVICE_PROVIDER, USERS};
     use super::*;
+    use crate::closed_port::closed_url;
     use common::block_on;
     use ethereum_types::U256;
     use mm2_eth::keys::Secret;
@@ -937,15 +938,10 @@ mod loopback_tests {
         assert_eq!(error.rpc_arm(), RpcArm::Gasless(GaslessMember::InvalidProviderResponse));
         assert_no_credential(&format!("{error} {error:?}"));
 
-        // Nothing listens: reserve a port and close it again.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("a loopback port")
-            .local_addr()
-            .expect("a local address")
-            .port();
+        // Nothing listens.
         let credentials = ProviderCredentials::new(API_KEY.to_owned(), API_SECRET.to_owned());
-        let unreachable = GasFreeProvider::new(&Network::Nile, &format!("http://127.0.0.1:{port}"), credentials, None)
-            .expect("a host-only URL");
+        let unreachable =
+            GasFreeProvider::new(&Network::Nile, &closed_url(), credentials, None).expect("a host-only URL");
         let error = block_on(unreachable.account_info(&user)).expect_err("no connection");
         assert!(matches!(error, GasFreeError::Transport(_)));
         assert_eq!(error.rpc_arm(), RpcArm::Transport);

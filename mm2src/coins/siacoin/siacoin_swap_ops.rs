@@ -1802,6 +1802,37 @@ mod swap_evidence_read_tests {
         assert_eq!(committed_address(&full), full.address());
     }
 
+    /// The `swap_evidence_node` field against the one `server_url` under the port rule (a port is compared only when
+    /// both sides have one; an `http(s)` URL without a port has its scheme's default): explicit port, no port, and
+    /// the field written with or without the default port.
+    #[test]
+    fn t42_sia_field_match_follows_the_port_rule() {
+        let trusted = |field: &str, url: &str| {
+            matches!(
+                sia_swap_evidence_policy("SC", Some(field), url),
+                Ok(SwapEvidencePolicy::Trusted { .. })
+            )
+        };
+        // explicit port: a field without a port or with the same port matches, another port does not
+        let url = "http://walletd.example:9980/";
+        assert!(trusted("walletd.example", url));
+        assert!(trusted("WALLETD.example:9980", url));
+        assert!(!trusted("walletd.example:9981", url));
+        assert!(!trusted("walletd.example:443", url));
+        // https without a port: the default port is 443
+        let url = "https://walletd.example/api";
+        assert!(trusted("walletd.example", url));
+        assert!(trusted("walletd.example:443", url));
+        assert!(trusted("https://walletd.example", url));
+        assert!(!trusted("walletd.example:8443", url));
+        // http without a port: the default port is 80
+        let url = "http://walletd.example";
+        assert!(trusted("walletd.example:80", url));
+        assert!(!trusted("walletd.example:443", url));
+        // another host never matches
+        assert!(!trusted("other.example", url));
+    }
+
     /// The label the reads ask the node by (the shared `node_name`) matches the `Trusted` node it came from, with or without a port.
     #[test]
     fn t42_sia_node_label_matches_the_trusted_node() {

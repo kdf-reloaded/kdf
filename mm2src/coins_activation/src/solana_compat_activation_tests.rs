@@ -25,6 +25,8 @@ use std::sync::{Arc, Mutex};
 
 const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const MINT2: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+/// The swap program of the devnet lab (CRD ch.40 F40.6B.5).
+const SWAP_PROGRAM: &str = "54mDjQz6jS9sggCV1P5GoUzqHaBEueGVZqmaMPLt2tDx";
 const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 /// A node that refuses the connection. The path and the query stand in for a credential: no error text may carry
@@ -50,6 +52,10 @@ fn coins() -> Vec<Json> {
         json!({ "coin": "BADPROTO", "mm2": 1, "protocol": { "type": "NO_SUCH_PROTOCOL" } }),
         json!({ "coin": "UTXOCOIN", "mm2": 1, "protocol": { "type": "UTXO" } }),
         json!({ "coin": "SUB-TOK", "mm2": 1, "protocol": solanatoken("TOK-SOL", MINT2, SPL_TOKEN_PROGRAM) }),
+        json!({ "coin": "SOLPROG", "mm2": 1, "protocol": { "type": "SOLANA",
+            "protocol_data": { "swap_program_id": SWAP_PROGRAM } } }),
+        json!({ "coin": "SOLBADPROG", "mm2": 1, "protocol": { "type": "SOLANA",
+            "protocol_data": { "swap_program_id": "not base58 0OIl" } } }),
     ]
 }
 
@@ -1291,4 +1297,171 @@ fn an_unknown_solana_node_order_activates_with_random_order_and_one_warning() {
     ))
     .map_err(|e| e.into_inner())
     .expect("the primary activation succeeds");
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// CRD ch.40 §40.6D: the swap program member, its check at activation, and the evidence node (S11b)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A scripted node whose program account of `SWAP_PROGRAM` is owned by `owner` (executable as given); `None`: the
+/// account does not exist.
+fn program_node(program: Option<(&'static str, bool)>) -> Node {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let node = spawn_node(move |method, params| {
+        log.lock().expect("the request log").push(format!("{method} {params}"));
+        match method {
+            "getHealth" => Reply::Result(json!("ok")),
+            "getAccountInfo" => {
+                let value = match (params[0].as_str() == Some(SWAP_PROGRAM), program) {
+                    (true, Some((owner, executable))) => json!({ "owner": owner, "lamports": 1,
+                        "data": ["", "base64"], "executable": executable, "rentEpoch": 0 }),
+                    _ => Json::Null,
+                };
+                Reply::Result(json!({ "context": { "slot": 1 }, "value": value }))
+            },
+            "getBalance" => Reply::Result(json!({ "context": { "slot": 1 }, "value": 1_500_000_000u64 })),
+            "getBlockHeight" => Reply::Result(json!(42)),
+            _ => Reply::RpcError,
+        }
+    });
+    Node { node, seen }
+}
+
+fn registered_solana(ctx: &MmArc, ticker: &str) -> SolanaCoin {
+    match block_on(lp_coinfind(ctx, ticker))
+        .expect("the lookup")
+        .expect("the coin is registered")
+    {
+        MmCoinEnum::SolanaCoin(coin) => coin,
+        _ => panic!("a Solana platform coin"),
+    }
+}
+
+/// R40.6B.3 item 1: an invalid `swap_program_id` makes the entry unparsable, on both surfaces, before any node is
+/// contacted; the answer is the `CoinProtocolParseError` of HTTP 500 with `{ticker, error}`.
+#[test]
+fn t40_6d_1_an_invalid_swap_program_id_is_a_protocol_parse_error_on_both_surfaces() {
+    let ctx = ctx();
+    let (wire, status) = platform_failure(
+        &ctx,
+        platform_req(&[CLOSED_NODE], json!([]), json!({ "ticker": "SOLBADPROG" })),
+    );
+    assert!(wire["error_type"] == "CoinProtocolParseError", "compat: the error type");
+    assert!(
+        keys_of(&wire["error_data"]) == keys(&["ticker", "error"]),
+        "compat: the members"
+    );
+    assert!(status == StatusCode::INTERNAL_SERVER_ERROR, "compat: HTTP 500");
+    assert_no_node_secrets(&wire.to_string());
+
+    let mut request = primary_platform_req(&[CLOSED_NODE], &[]);
+    request.ticker = "SOLBADPROG".to_owned();
+    let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx.clone(), request))
+        .map(|_| ())
+        .expect_err("the activation fails");
+    let (wire, status) = platform_wire(err.get_inner());
+    assert!(
+        wire["error_type"] == "CoinProtocolParseError",
+        "primary: the error type"
+    );
+    assert!(
+        keys_of(&wire["error_data"]) == keys(&["ticker", "error"]),
+        "primary: the members"
+    );
+    assert!(status == StatusCode::INTERNAL_SERVER_ERROR, "primary: HTTP 500");
+}
+
+/// R40.6D.2: the activation reads the program once; a program that passes makes the coin tradable, one that is
+/// missing or not executable leaves it wallet-only with the matching reason, and the activation succeeds either way.
+#[test]
+fn t40_6d_1_the_activation_checks_the_program_and_succeeds_either_way() {
+    for (program, tradable, reason) in [
+        (Some(("BPFLoader2111111111111111111111111111111111", true)), true, None),
+        (None, false, Some(coins::solana::WalletOnlyReason::ProgramMissing)),
+        (
+            Some(("BPFLoader2111111111111111111111111111111111", false)),
+            false,
+            Some(coins::solana::WalletOnlyReason::ProgramNotExecutable),
+        ),
+        (
+            Some(("LoaderV411111111111111111111111111111111111", true)),
+            false,
+            Some(coins::solana::WalletOnlyReason::ProgramLoaderUnsupported),
+        ),
+    ] {
+        let ctx = ctx();
+        let node = program_node(program);
+        block_on(activate_solana_with_assets(
+            ctx.clone(),
+            platform_req(&[node.url()], json!([]), json!({ "ticker": "SOLPROG" })),
+        ))
+        .map_err(|e| e.into_inner())
+        .expect("the activation succeeds");
+        let coin = registered_solana(&ctx, "SOLPROG");
+        assert!(
+            coin.swap_program().is_some() == tradable,
+            "the coin trades only when the program passes"
+        );
+        assert!(
+            coin.swap_wallet_only_reason() == reason,
+            "the reason names which case applies"
+        );
+        assert!(node.count_of("getAccountInfo") == 1, "the program account is read once");
+    }
+    // Without the member the coin stays wallet-only and no program is read.
+    let ctx = ctx();
+    let node = program_node(None);
+    activate_platform(&ctx, node.url());
+    let coin = registered_solana(&ctx, "SOL");
+    assert!(
+        coin.swap_wallet_only_reason() == Some(coins::solana::WalletOnlyReason::NoProgramConfigured),
+        "no member, no program"
+    );
+    assert!(node.count_of("getAccountInfo") == 0, "no program account is read");
+}
+
+/// R40.6D.16: `swap_evidence_node` must be one of the coin's nodes, on both surfaces; a URL that is not refuses the
+/// activation before any node is contacted; one that is, is recorded.
+#[test]
+fn t40_6d_13_the_evidence_node_must_be_in_the_node_list_on_both_surfaces() {
+    let node = node(HEALTHY);
+    let ctx = ctx();
+    let (wire, status) = platform_failure(
+        &ctx,
+        platform_req(
+            &[node.url()],
+            json!([]),
+            json!({ "swap_evidence_node": "http://127.0.0.1:9/other" }),
+        ),
+    );
+    assert!(
+        wire["error_type"] == "SwapEvidenceNodeNotInList",
+        "compat: the error type"
+    );
+    assert!(status == StatusCode::INTERNAL_SERVER_ERROR, "compat: HTTP 500");
+    assert!(node.count() == 0, "compat: no node was contacted");
+
+    let request: EnablePlatformCoinWithTokensReq<SolanaWithTokensActivationRequest> = serde_json::from_value(json!({
+        "ticker": "SOL", "confirmation_commitment": "finalized", "client_urls": [node.url()],
+        "spl_tokens_requests": [], "swap_evidence_node": "http://127.0.0.1:9/other" }))
+    .expect("a well-formed request");
+    let err = block_on(enable_platform_coin_with_tokens::<SolanaCoin>(ctx.clone(), request))
+        .map(|_| ())
+        .expect_err("the activation fails");
+    let (wire, status) = platform_wire(err.get_inner());
+    assert!(
+        wire["error_type"] == "SwapEvidenceNodeNotInList",
+        "primary: the error type"
+    );
+    assert!(status == StatusCode::INTERNAL_SERVER_ERROR, "primary: HTTP 500");
+    assert!(node.count() == 0, "primary: no node was contacted");
+
+    // A node of the list is accepted on the compatibility surface (additive member).
+    block_on(activate_solana_with_assets(
+        ctx.clone(),
+        platform_req(&[node.url()], json!([]), json!({ "swap_evidence_node": node.url() })),
+    ))
+    .map_err(|e| e.into_inner())
+    .expect("the activation succeeds");
 }
