@@ -85,6 +85,13 @@ async fn withdraw_impl(coin: SolanaCoin, req: WithdrawRequest) -> WithdrawResult
 impl MmCoin for SolanaCoin {
     fn is_asset_chain(&self) -> bool { false }
 
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        crate::swap_evidence::effective_policy(
+            crate::swap_evidence::SwapFamily::Solana,
+            &self.stored_swap_evidence_policy(),
+        )
+    }
+
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         Box::new(Box::pin(withdraw_impl(self.clone(), req)).compat())
     }

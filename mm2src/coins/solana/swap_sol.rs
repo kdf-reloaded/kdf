@@ -79,6 +79,8 @@ impl Default for SwapTiming {
 pub struct SolanaSwapConfig {
     state: Mutex<SwapProgramState>,
     evidence_node: Mutex<Option<String>>,
+    /// The swap-evidence policy fixed at activation (CRD ch.51 R100).
+    evidence_policy: Mutex<crate::SwapEvidencePolicy>,
     timing: Mutex<SwapTiming>,
 }
 
@@ -87,6 +89,7 @@ impl Default for SolanaSwapConfig {
         SolanaSwapConfig {
             state: Mutex::new(SwapProgramState::WalletOnly(WalletOnlyReason::NoProgramConfigured)),
             evidence_node: Mutex::new(None),
+            evidence_policy: Mutex::new(crate::SwapEvidencePolicy::NotAdopted),
             timing: Mutex::new(SwapTiming::default()),
         }
     }
@@ -458,8 +461,18 @@ impl SolanaCoin {
         }
     }
 
-    /// Records the evidence node the activation named (R40.6D.16).
+    /// Records the evidence node the activation named (R40.6D.16): the matched entry of the node list.
     pub fn set_swap_evidence_node(&self, url: Option<String>) { *lock(&self.swap.evidence_node) = url; }
+
+    /// Records the swap-evidence policy computed at activation (CRD ch.51 R100).
+    pub fn set_swap_evidence_policy(&self, policy: crate::SwapEvidencePolicy) {
+        *lock(&self.swap.evidence_policy) = policy;
+    }
+
+    /// The swap-evidence policy fixed at activation.
+    pub(crate) fn stored_swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
+        lock(&self.swap.evidence_policy).clone()
+    }
 
     pub(crate) fn evidence_node(&self) -> Option<String> { lock(&self.swap.evidence_node).clone() }
 

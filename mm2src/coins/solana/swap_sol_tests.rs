@@ -1734,8 +1734,20 @@ fn t40_6d_13_the_evidence_node_must_be_one_of_the_coins_nodes() {
     );
     let refused = build(request(Some("http://127.0.0.1:3")));
     assert!(
-        matches!(refused, Err(ref text) if text == &SwapEvidenceNodeError::NotInNodeList.to_string()),
-        "a URL that is not in the node list is refused"
+        matches!(refused, Err(ref text) if text == "swap_evidence_node 127.0.0.1:3 is not in the node list of SOL"),
+        "a URL that is not in the node list is refused with the shared error"
+    );
+    // A field that differs from the list entry only by the default port is accepted, and the list entry is stored.
+    let default_port = serde_json::from_value::<SolanaActivationParams>(json!({
+        "confirmation_commitment": "finalized",
+        "client_urls": ["https://x.example:443/", "https://y.example"],
+        "swap_evidence_node": "https://x.example",
+    }))
+    .expect("parses");
+    let coin = build(default_port).expect("the field names the first node by its default port");
+    assert!(
+        coin.evidence_node().as_deref() == Some("https://x.example:443/"),
+        "the matched list entry is stored, not the raw field"
     );
     assert!(
         format!("{:?}", request(Some("http://user:secret@127.0.0.1:2/path"))).contains("127.0.0.1")
