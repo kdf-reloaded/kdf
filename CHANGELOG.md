@@ -1297,6 +1297,13 @@ the previous version used. The safe way:
   swap event to the contract call it belongs to, requires that call to the swap contract to have succeeded, and
   looks for a refund in the history of the payment's sender, so a refund of the other side's payment is found too.
   Detail: PR #496; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
+- **The taker's refund waits while the chain's answer about its payment is undetermined.** Before it refunds, the
+  taker looks for a claim or a refund of its payment, and a look that fails, does not finish, or whose nodes do
+  not agree no longer counts as "nothing found": the refund waits and the look repeats, with one warning that
+  names the fix. The look also runs each time the refund becomes possible, just before the refund is built. A
+  claim found on one server whose secret matches the swap's hash is still used at once. A swap still waiting at
+  its refund deadline ends as refund failed, naming the fix. Detail: PR #523; CRD ch.51, status note of
+  2026-11-23 under R31a.
 
 ### Tests
 
