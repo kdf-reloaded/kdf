@@ -224,6 +224,26 @@ pub enum HDWalletRpcError {
     AccountAlreadyExists { account_id: u32 },
     #[display(fmt = "Addresses limit reached. Max number of addresses: {}", max_addresses_number)]
     AddressLimitReached { max_addresses_number: u32 },
+    /// The last `gap_limit` known addresses of the chain are all unused (CRD ch.49 R49.41 item 1).
+    #[display(
+        fmt = "The last {} known addresses are all unused, no new address is made",
+        gap_limit
+    )]
+    EmptyAddressesLimitReached { gap_limit: u32 },
+    /// A user action of the other type than the awaited one (CRD ch.49 R49.39 item 4).
+    #[display(fmt = "Unexpected user action, expected '{}'", expected)]
+    UnexpectedUserAction { expected: String },
+    /// The device showed another address than the one the node derived (CRD ch.49 R49.39 item 3, a Reloaded error
+    /// type in place of the reference's `Internal`).
+    #[display(
+        fmt = "The device returned the address '{}', the expected one is '{}'",
+        device_address,
+        expected_address
+    )]
+    DeviceAddressMismatch {
+        expected_address: String,
+        device_address: String,
+    },
     #[display(fmt = "Electrum/Native RPC invalid response: {}", _0)]
     RpcInvalidResponse(String),
     #[display(fmt = "HD wallet storage error: {}", _0)]
@@ -336,6 +356,9 @@ impl HttpStatusCode for HDWalletRpcError {
             | HDWalletRpcError::InvalidBip44Chain { .. }
             | HDWalletRpcError::ErrorDerivingAddress(_)
             | HDWalletRpcError::AddressLimitReached { .. }
+            | HDWalletRpcError::EmptyAddressesLimitReached { .. }
+            | HDWalletRpcError::UnexpectedUserAction { .. }
+            | HDWalletRpcError::DeviceAddressMismatch { .. }
             | HDWalletRpcError::AccountLimitReached { .. }
             | HDWalletRpcError::AccountAlreadyExists { .. } => StatusCode::BAD_REQUEST,
             HDWalletRpcError::HwError(_) => StatusCode::GONE,
@@ -567,7 +590,7 @@ pub struct GetNewHDAddressParams {
     pub(crate) chain: Bip44Chain,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct GetNewHDAddressResponse {
     pub(crate) new_address: HDAddressBalance,
 }
@@ -635,25 +658,28 @@ pub mod common_impl {
             + Send,
         <Coin as HDWalletCoinOps>::Address: fmt::Display,
     {
-        let account_id = params.account_id;
         let chain = params.chain;
-
-        let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
-        let mut hd_account = hd_wallet
-            .get_account_mut(params.account_id)
-            .await
-            .or_mm_err(|| HDWalletRpcError::UnknownAccount { account_id })?;
-
         let HDAddress {
             address,
             derivation_path,
             ..
-        } = coin
-            .generate_new_address(hd_wallet, hd_account.deref_mut(), chain)
-            .await
-            .mm_err(Into::into)?;
-        let balance = coin.known_address_balance(&address).await.mm_err(Into::into)?;
+        } = record_next_address(coin, params.account_id, chain, None).await?;
+        report_new_address(coin, &address, derivation_path, chain).await
+    }
 
+    /// The balance step of `get_new_address`: the answer for the address that was just recorded. The direct method
+    /// and the task form of the coins that write an address with its `Display` share it.
+    pub async fn report_new_address<Coin>(
+        coin: &Coin,
+        address: &<Coin as HDWalletCoinOps>::Address,
+        derivation_path: DerivationPath,
+        chain: Bip44Chain,
+    ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError>
+    where
+        Coin: HDWalletBalanceOps + MarketCoinOps + Sync,
+        <Coin as HDWalletCoinOps>::Address: fmt::Display,
+    {
+        let balance = coin.known_address_balance(address).await.mm_err(Into::into)?;
         Ok(GetNewHDAddressResponse {
             new_address: HDAddressBalance {
                 address: address.to_string(),
@@ -663,6 +689,133 @@ pub mod common_impl {
                 balance: crate::coin_balance::coin_balance_map_for_ticker(coin.ticker(), balance),
             },
         })
+    }
+
+    /// The step of `get_new_address` that derives the next address of `chain` and records it: the count of known
+    /// addresses is raised and written to the wallet's storage and to the loaded wallet (CRD ch.49 R49.37 item 1).
+    /// The direct method and the task form share it.
+    ///
+    /// `expected_address_id` is the index the caller has planned (and, in the task form of the Trezor policy, had the
+    /// device confirm). When the account has meanwhile moved on, nothing is recorded and the call answers `Internal`,
+    /// so the address recorded is always the one that was confirmed.
+    pub async fn record_next_address<Coin>(
+        coin: &Coin,
+        account_id: u32,
+        chain: Bip44Chain,
+        expected_address_id: Option<u32>,
+    ) -> MmResult<HDAddress<<Coin as HDWalletCoinOps>::Address, <Coin as HDWalletCoinOps>::Pubkey>, HDWalletRpcError>
+    where
+        Coin: HDWalletCoinOps + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet> + Sync,
+    {
+        let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
+        let mut hd_account = hd_wallet
+            .get_account_mut(account_id)
+            .await
+            .or_mm_err(|| HDWalletRpcError::UnknownAccount { account_id })?;
+        if let Some(expected_address_id) = expected_address_id {
+            let known_addresses_number = hd_account.known_addresses_number(chain).mm_err(Into::into)?;
+            if known_addresses_number != expected_address_id {
+                return MmError::err(HDWalletRpcError::Internal(format!(
+                    "The known addresses of the account changed while the address was confirmed: expected the next \
+                     address index {}, the account is at {}",
+                    expected_address_id, known_addresses_number
+                )));
+            }
+        }
+        coin.generate_new_address(hd_wallet, hd_account.deref_mut(), chain)
+            .await
+            .mm_err(Into::into)
+    }
+
+    /// The next address of an account, derived and checked but not recorded (CRD ch.49 R49.41 item 1).
+    pub struct PlannedNewAddress {
+        pub account_id: u32,
+        pub chain: Bip44Chain,
+        /// The index the address will have, which is the account's known count of the chain.
+        pub address_id: u32,
+        /// The address as the final result writes it (and `expected_address` of the confirmation state).
+        pub address: String,
+        pub derivation_path: DerivationPath,
+    }
+
+    /// The checks of the task form of `get_new_address` that come before the device is asked, in the order of CRD ch.49
+    /// R49.41 item 1: the account (`UnknownAccount`), the gap check made with `gap_limit` (the wallet's when `None`),
+    /// the address limit, and the derivation of the next address. Nothing is recorded.
+    ///
+    /// `scanner` is the future of the scanner that decides whether a known address is used; it is awaited only when
+    /// the gap check needs it, so a request that fails earlier never asks the node. `render` writes an address the
+    /// way the coin's answers do.
+    pub async fn plan_new_address<Coin, Render, ScannerFut>(
+        coin: &Coin,
+        account_id: u32,
+        chain: Bip44Chain,
+        gap_limit: Option<u32>,
+        scanner: ScannerFut,
+        render: Render,
+    ) -> MmResult<PlannedNewAddress, HDWalletRpcError>
+    where
+        Coin: HDWalletBalanceOps + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet> + Sync,
+        Render: Fn(&<Coin as HDWalletCoinOps>::Address) -> String,
+        ScannerFut: std::future::Future<Output = crate::BalanceResult<Coin::HDAddressScanner>> + Send,
+    {
+        let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
+        let hd_account = hd_wallet
+            .get_account(account_id)
+            .await
+            .or_mm_err(|| HDWalletRpcError::UnknownAccount { account_id })?;
+        // A chain the coin does not use (the internal chain of an EVM coin) is refused here, before the node is asked.
+        let known_addresses_number = hd_account.known_addresses_number(chain).mm_err(Into::into)?;
+        let gap_limit = gap_limit.unwrap_or_else(|| hd_wallet.gap_limit());
+        check_gap_limit(coin, &hd_account, chain, known_addresses_number, gap_limit, scanner).await?;
+        if known_addresses_number >= ChildNumber::HARDENED_FLAG {
+            return MmError::err(HDWalletRpcError::AddressLimitReached {
+                max_addresses_number: ChildNumber::HARDENED_FLAG,
+            });
+        }
+        let HDAddress {
+            address,
+            derivation_path,
+            ..
+        } = coin
+            .derive_address(&hd_account, chain, known_addresses_number)
+            .mm_err(Into::into)?;
+        Ok(PlannedNewAddress {
+            account_id,
+            chain,
+            address_id: known_addresses_number,
+            address: render(&address),
+            derivation_path,
+        })
+    }
+
+    /// The gap check: no new address is made while the last `gap_limit` known addresses of the chain are all unused
+    /// (`EmptyAddressesLimitReached`). Fewer known addresses than the limit never hit it, and the addresses are asked
+    /// from the newest backwards, so the first used one ends the check. A limit of `0` is not checked.
+    async fn check_gap_limit<Coin, ScannerFut>(
+        coin: &Coin,
+        hd_account: &<Coin as HDWalletCoinOps>::HDAccount,
+        chain: Bip44Chain,
+        known_addresses_number: u32,
+        gap_limit: u32,
+        scanner: ScannerFut,
+    ) -> MmResult<(), HDWalletRpcError>
+    where
+        Coin: HDWalletBalanceOps + Sync,
+        ScannerFut: std::future::Future<Output = crate::BalanceResult<Coin::HDAddressScanner>> + Send,
+    {
+        use crate::coin_balance::HDAddressBalanceScanner;
+
+        if gap_limit == 0 || known_addresses_number < gap_limit {
+            return Ok(());
+        }
+        let scanner = scanner.await.mm_err(Into::into)?;
+        for address_id in (known_addresses_number - gap_limit..known_addresses_number).rev() {
+            let HDAddress { address, .. } = coin.derive_address(hd_account, chain, address_id).mm_err(Into::into)?;
+            if scanner.is_address_used(&address).await.mm_err(Into::into)? {
+                return Ok(());
+            }
+        }
+        MmError::err(HDWalletRpcError::EmptyAddressesLimitReached { gap_limit })
     }
 
     /// Removes the account `account_id` that a cancelled `task::create_new_account` created, from the storage and

@@ -1408,7 +1408,8 @@ mod swap_spend_search_tests {
 mod swap_evidence_read_tests {
     use super::*;
     use crate::answer_stub::{http_response, serve};
-    use crate::siacoin::siacoin_helpers::{sia_evidence_node_name, sia_swap_evidence_policy};
+    use crate::siacoin::siacoin_helpers::sia_swap_evidence_policy;
+    use crate::swap_evidence::node_name;
     use crate::swap_evidence::{Agreement, SwapEvidencePolicy, UndeterminedReason};
     use std::sync::atomic::AtomicUsize;
 
@@ -1505,7 +1506,7 @@ mod swap_evidence_read_tests {
             fee_address: address.clone(),
             derivation_method: Arc::new(DerivationMethod::Iguana(address)),
             swap_evidence: policy,
-            swap_evidence_node_name: sia_evidence_node_name(&server_url),
+            swap_evidence_node_name: node_name(&server_url),
         };
         (coin, seen)
     }
@@ -1801,7 +1802,7 @@ mod swap_evidence_read_tests {
         assert_eq!(committed_address(&full), full.address());
     }
 
-    /// The label the reads ask the node by matches the `Trusted` node it came from, with or without a port.
+    /// The label the reads ask the node by (the shared `node_name`) matches the `Trusted` node it came from, with or without a port.
     #[test]
     fn t42_sia_node_label_matches_the_trusted_node() {
         for url in [
@@ -1809,7 +1810,7 @@ mod swap_evidence_read_tests {
             "http://walletd.example:9980/",
             "https://user:pw@walletd.example:8443",
         ] {
-            let label = sia_evidence_node_name(url);
+            let label = node_name(url);
             assert!(!label.contains("pw") && !label.contains('/'), "{label}");
             let policy = sia_swap_evidence_policy("SC", Some("walletd.example"), url).unwrap();
             let SwapEvidencePolicy::Trusted { node } = policy else {
@@ -1817,10 +1818,7 @@ mod swap_evidence_read_tests {
             };
             assert!(crate::swap_evidence::node_matches(&node, &label), "{url}: {label}");
         }
-        assert_eq!(
-            sia_evidence_node_name("https://walletd.example/"),
-            "walletd.example:443"
-        );
+        assert_eq!(node_name("https://walletd.example/"), "walletd.example:443");
     }
 }
 

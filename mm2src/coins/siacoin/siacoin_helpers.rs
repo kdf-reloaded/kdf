@@ -70,20 +70,6 @@ pub(crate) fn sia_swap_evidence_policy(
     swap_evidence_policy_from(ticker, field, &[server_url.to_owned()])
 }
 
-/// The label a swap-evidence read names the one walletd node by: `host:port`, with the default port of an `http` or
-/// `https` URL written out so that the label matches the `Trusted` node it was computed from (never the URL).
-pub(crate) fn sia_evidence_node_name(server_url: &str) -> String {
-    let name = crate::swap_evidence::node_name(server_url);
-    let has_port = name
-        .rsplit_once(':')
-        .is_some_and(|(host, port)| !host.ends_with(':') && port.parse::<u16>().is_ok());
-    match (has_port, server_url.trim().split_once("://").map(|(scheme, _)| scheme)) {
-        (false, Some("https")) => format!("{name}:443"),
-        (false, Some("http")) => format!("{name}:80"),
-        _ => name,
-    }
-}
-
 pub struct SiaCoinBuilder<'a> {
     conf: SiaCoinConf,
     key_pair: SiaKeypair,
@@ -132,7 +118,7 @@ impl<'a> SiaCoinBuilder<'a> {
             PublicKey::from_bytes(&fee_pubkey_bytes).map_err(|e| SiaCoinBuilderError::FeePubkey(e.to_string()))?;
         let fee_address = Address::from_public_key(&fee_public_key);
 
-        let swap_evidence_node_name = sia_evidence_node_name(self.request.client_conf.server_url.as_str());
+        let swap_evidence_node_name = crate::swap_evidence::node_name(self.request.client_conf.server_url.as_str());
         Ok(SiaCoin {
             conf: self.conf,
             client: Arc::new(

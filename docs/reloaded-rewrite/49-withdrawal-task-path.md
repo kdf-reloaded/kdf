@@ -1107,6 +1107,78 @@ no HD account set for a Sia coin at either row.
 > ticker as the single map key (the same status note), which R49.43 item 5
 > classes as a Reloaded extension.
 
+*Status note (2026-11-22), the task form of `get_new_address` (as built).*
+This repository now serves `task::get_new_address::init`, `::status`,
+`::user_action` and `::cancel` (the Reloaded note above no longer holds for
+the task form). It binds nothing in the sentences of R49.38 -- R49.42 above;
+it records what is built and where it differs from the reference.
+
+- *What is built.* The request is that of R49.38 item 1 (`account_id`
+  required, `chain` default `External`, optional `gap_limit`, `client_id`
+  as every task init). Init answers only `NoSuchCoin` and `Internal`. The
+  served families are the standard UTXO coins, QTUM, an EVM platform and an
+  ERC-20 token, TRX and a TRC20 token, and Siacoin; every other coin kind
+  ends with `CoinIsActivatedNotWithHDWallet`. The in-progress values are
+  `Preparing`, `ConfirmAddress {expected_address}` and
+  `RequestingAccountBalance`; the awaiting values and the user action are
+  those of R49.39 item 4, an action of the other type ends the task with
+  `UnexpectedUserAction {expected}` and a wait of 300 seconds with `Timeout`.
+  The result is the answer of the direct method with no wrapper. The order of
+  the checks is that of R49.41 item 1, without the subscription step.
+  The derivation, the recording and the balance step are the code of the direct
+  `get_new_address`, split into steps.
+- *The path follows the coin's key policy (chapter 05 R54).* Under the
+  software policy the task derives, records and queries without any device
+  state and never touches the device, also when a hardware context exists
+  beside the login; it shows `Preparing` and then `RequestingAccountBalance`
+  and completes. Under the `Trezor` policy it looks up the hardware context at
+  call time (`HwContextNotInitialized` when the slot is empty; another device
+  than the coin was activated with answers `FoundUnexpectedDevice`, chapter 05
+  R58a), derives the address from the stored account key, asks the device to
+  **show** it (R49.42), and shows `{"ConfirmAddress": {"expected_address"}}`
+  while the device waits. Nothing is recorded before the confirmation; the
+  count is raised and written right after it, and the balance is queried.
+  A refusal on the device ends the task with `HwError` `UserCancelled`.
+- *Recorded divergences from the reference.* (1) The software case completes
+  where the reference ends with `HwContextNotInitialized` (R49.38 item 5), and a
+  TRX or TRC20 ticker completes on the software path, the only one it has,
+  because a TRON coin cannot be activated under the `Trezor` policy. (2) Siacoin
+  is served on the software path, as the direct method is (R49.43 items 2 and 5;
+  a Reloaded extension). (3) An address that the device shows differently from
+  `expected_address` ends the task with the typed request error
+  `DeviceAddressMismatch` and `error_data` `{expected_address, device_address}`
+  (HTTP 400), where the reference answers `Internal` (R49.39 item 3, the first
+  code-quality finding of this subsection); nothing is recorded. The comparison
+  the user makes on the device's screen is the check that matters; the daemon's
+  comparison is a second line. (4) The gap check of R49.41 item 1 runs in the
+  task, with the request's `gap_limit` (the wallet's by default), and answers
+  `EmptyAddressesLimitReached {gap_limit}` before an address is derived (a
+  `gap_limit` of `0` is not checked, this repository's choice: the text above
+  says nothing about zero); the direct `get_new_address` still runs none (the
+  status note of 2026-11-22 in §49.2.2). A failure of the node during the check
+  ends the task before any address exists. (5) The chain `Internal` is refused
+  for an EVM coin and for a TRON coin in the task form, with `InvalidBip44Chain
+  {chain}`, as the direct method refuses it; the reference accepts both chains
+  (R49.41 item 2). UTXO and QTUM accept both. (6) There is no
+  address-subscription step and no `FailedScripthashSubscription`: this
+  repository has no Electrum scripthash subscriptions for R49.39 item 6 to
+  attach to. (7) No rollback, as in R49.37 item 2 and R49.40 item 3: a failure
+  after the confirmation (after the recording under the software policy), and a
+  cancel during the balance query, leave the address known. The task has no
+  clean-up step.
+- *Tests.* T49.36 is rewritten by the note below the tests of this subsection.
+  Without a device: the software path for UTXO, QTUM, an EVM platform, an ERC-20
+  token, a TRX and a TRC20 ticker and a Siacoin (`coins/src/utxo/utxo_tests.rs`
+  `leb_*`, `coins_activation` `evm_hd_p4_tests.rs`, the TRON tests,
+  `sia_activation.rs`), the gap check, the refusal of the internal chain for EVM
+  and TRON, `UnknownAccount`, an unsupported family, `NoSuchCoin` from init, the
+  empty hardware slot and the replaced device under the `Trezor` policy, a
+  failing balance query after the recording, and the wire forms of the new
+  errors (`init_get_new_address.rs`). T49.37 and the runs of T49.38 are written
+  for the emulator (`trezor-emulator-tests`, `eth_trezor_emulator_tests.rs`);
+  the note below the tests maps every run to its emulator test, its unit test
+  with mocks, or the check that stays open.
+
 T49.36. *(R49.38, R49.41.)* With a software global-HD login and no
 hardware context, call `task::get_new_address::init` for an HD-activated
 UTXO coin, a QTUM coin, an EVM platform and an ERC-20 token. Each answers
@@ -1136,6 +1208,68 @@ loaded with another seed than the one the coin was activated on, confirm
 the address: the status is `Error` with `Internal`, and `total` is
 unchanged. Make the balance query fail after a confirmation: the status
 is `Error` with `Transport`, and `total` has risen by one.
+
+> *Status note (2026-11-22), T49.36 to T49.38 as built.* T49.36 is rewritten to
+> the decision recorded in the status note above: with a software HD login and
+> no hardware context the task for an HD-activated UTXO coin, a QTUM coin, an
+> EVM platform and an ERC-20 token reaches `Ok` with `{"new_address": {address,
+> derivation_path, chain, balance}}`, shows only `Preparing` and
+> `RequestingAccountBalance`, and the `total` of `account_balance` rises by one;
+> a ticker that is not activated still answers `NoSuchCoin` from init. The
+> sentence of T49.36 above is the reference's expectation and stays.
+>
+> *Coverage map of T49.37 and T49.38.* E is an emulator test of
+> `eth_trezor_emulator_tests.rs` (every name starts with
+> `emulator_trezor_get_new_address_`), U a unit test with mocks, O a check that
+> is open and has to be made by hand on a Trezor.
+>
+> - T49.37, `ConfirmAddress` and the press, EVM platform. E
+>   `shows_the_address_and_records_it_after_the_button`: the status shows the
+>   address of the later result, the count is unchanged until the press and
+>   raised by one after it. U: the wire form of `ConfirmAddress`. O: the address
+>   in full on the device's screen.
+>
+> - T49.37, the same for a UTXO coin. E
+>   `utxo_shows_the_address_and_records_it_after_the_button`, with a
+>   Bitcoin-style node stub that answers an empty `listunspent`; the device
+>   request is right because the address the device shows is the daemon's. U:
+>   `leb_r4942_the_device_request_of_a_utxo_coin` (the device name and the
+>   script type). O: the screen check.
+>
+> - T49.37, cancel while the address is shown. E
+>   `cancel_while_the_address_is_shown_records_nothing` (EVM): the cancel
+>   answers success, the task is gone, the count is unchanged, the next task
+>   offers the same address.
+>
+> - T49.38, the rejection on the device. Open, to be checked by hand on a
+>   Trezor. The emulator test `refused_on_the_device_is_user_cancelled` (EVM) is
+>   `#[ignore]`d: on the pinned T2T1 emulator the address screen has one button
+>   (confirm) and no cancel. The debug link's "no" opens an "Address mismatch?"
+>   screen with a back button and a "Quit" button, and "Quit" ends the emulator
+>   process, so the host sees no `UserCancelled`. U: the mapping of the
+>   device's answers (the mock cover stays). O: the refusal on the model's own
+>   buttons.
+>
+> - T49.38, another seed. E `another_seed_is_found_unexpected_device` (EVM): the
+>   emulator is loaded with another seed after the activation and the task ends
+>   with `HwError` `FoundUnexpectedDevice` before the address is shown (chapter
+>   05 R58a), the count unchanged; the reconnect needs `TREZOR_EMULATOR_UDP`. U:
+>   the same refusal for a UTXO coin (the `leb_` replaced-device test of
+>   `utxo_tests.rs`). The `Internal` of the sentence above is not what this
+>   repository answers.
+>
+> - T49.38, the mismatch. E `another_passphrase_is_a_device_address_mismatch`
+>   (EVM): with passphrase protection on, the first passphrase request (the
+>   identity check) is answered with the activation's passphrase and the second
+>   (the address request) with another one; the device shows the other hidden
+>   wallet's address and the task ends with `DeviceAddressMismatch` naming both
+>   addresses, the count unchanged. U: the wire form of the error.
+>
+> - T49.38, the failing balance query after the confirmation. E
+>   `a_failing_balance_query_leaves_the_address_known` (EVM): the node answers
+>   an error after the press, the task ends with `Transport` and the count is
+>   raised by one. U: `leb_a_failing_balance_query_leaves_the_address_known` and
+>   `evm_hd_p4_a_failing_balance_query_leaves_the_address_known`.
 
 T49.39. *(R49.43; reference parity statement, not a test of this
 repository.)* At the reference, with a software global-HD login and an

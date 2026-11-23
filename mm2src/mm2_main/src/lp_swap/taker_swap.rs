@@ -539,8 +539,8 @@ pub struct TakerSwapMut {
     // Variable-length, not H160Json: CRD ch.51 R71/R72 selects a 32-byte
     // secret_hash algorithm whenever the maker or taker coin's own payment
     // construction commits to a native 32-byte hash (Sia, Lightning, a
-    // Tendermint-family coin) -- a fixed-20-byte field here would silently
-    // truncate that value, corrupting the swap.
+    // Tendermint-family coin, TRX or TRC20) -- a fixed-20-byte field here
+    // would silently truncate that value, corrupting the swap.
     secret_hash: BytesJson,
     secret: H256Json,
     my_maker_coin_htlc_keypair: KeyPair,

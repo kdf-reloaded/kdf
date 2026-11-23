@@ -39,7 +39,9 @@ protocol directly over a single persistent UDP socket:
 * Messages used (message-type / field tags):
       DebugLinkWatchLayout = 9006  { watch: bool = field 1 }
       DebugLinkGetState    = 101   { (empty) }  -> DebugLinkState/Layout
-      DebugLinkDecision    = 100   { button: DebugButton = field 1; YES = 1 }
+      DebugLinkDecision    = 100   { button: DebugButton = field 1; NO = 0, YES = 1 }
+  `press-no` and `confirm-loop --decision no` send the NO button (the user's refusal on
+  the device); the framing is the one of the YES button, only the field value differs.
   `watch_layout` and `get_state` read one reply; a `DebugLinkDecision` is sent
   fire-and-forget (no reply), mirroring trezorlib's `nowait` decision.
 
@@ -68,8 +70,9 @@ MT_DEBUG_DECISION = 100
 MT_DEBUG_GET_STATE = 101
 MT_DEBUG_WATCH_LAYOUT = 9006
 
-# DebugButton.YES == 1 (field 1, varint).
+# DebugButton.YES == 1, DebugButton.NO == 0 (field 1, varint).
 _DECISION_YES = b"\x08\x01"
+_DECISION_NO = b"\x08\x00"
 _WATCH_ON = b"\x08\x01"
 _WATCH_OFF = b"\x08\x00"
 
@@ -203,6 +206,10 @@ class DebugLink:
         # Fire-and-forget decision (no reply expected), like trezorlib's nowait.
         self._send(MT_DEBUG_DECISION, _DECISION_YES)
 
+    def press_no(self):
+        # The refusal on the device; fire-and-forget as press_yes.
+        self._send(MT_DEBUG_DECISION, _DECISION_NO)
+
     def close(self):
         try:
             self.sock.close()
@@ -220,6 +227,18 @@ def cmd_press_yes(_args) -> int:
         dl.watch_layout(True)
         dl.press_yes()
         print("press-yes: sent DebugLinkDecision(YES)")
+    finally:
+        dl.watch_layout(False)
+        dl.close()
+    return 0
+
+
+def cmd_press_no(_args) -> int:
+    dl = DebugLink(debug_addr())
+    try:
+        dl.watch_layout(True)
+        dl.press_no()
+        print("press-no: sent DebugLinkDecision(NO)")
     finally:
         dl.watch_layout(False)
         dl.close()
@@ -245,8 +264,12 @@ def cmd_confirm_loop(args) -> int:
             # screens are treated as "maybe a confirmation" and pressed, keeping
             # the loop robust to layout changes across firmware versions.
             if not _is_homescreen(payload):
-                dl.press_yes()
-                print("confirm-loop: pressed yes", flush=True)
+                if args.decision == "no":
+                    dl.press_no()
+                    print("confirm-loop: pressed no", flush=True)
+                else:
+                    dl.press_yes()
+                    print("confirm-loop: pressed yes", flush=True)
             time.sleep(args.interval)
     finally:
         dl.watch_layout(False)
@@ -274,7 +297,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_yes = sub.add_parser("press-yes", help="send a single DebugLinkDecision(YES)")
     p_yes.set_defaults(func=cmd_press_yes, is_async=False)
 
-    p_loop = sub.add_parser("confirm-loop", help="auto-approve on-device confirmations")
+    p_no = sub.add_parser("press-no", help="send a single DebugLinkDecision(NO)")
+    p_no.set_defaults(func=cmd_press_no, is_async=False)
+
+    p_loop = sub.add_parser("confirm-loop", help="answer on-device confirmations (approve by default)")
+    p_loop.add_argument("--decision", choices=["yes", "no"], default="yes",
+                        help="the button to press on every non-idle screen")
     p_loop.add_argument("--timeout", type=float, default=30.0)
     p_loop.add_argument("--interval", type=float, default=0.3)
     p_loop.add_argument("--stop", default=None, help="path to a sentinel file that stops the loop")
