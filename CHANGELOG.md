@@ -915,6 +915,11 @@ the previous version used. The safe way:
   such an order with `cancel_order`, which still sends its cancel message. A kept taker order still times out as
   before: fill-or-kill is removed, good-till-cancelled becomes a maker order that is kept and not announced.
   Detail: PR #485; CRD ch.60 R60.6.5.
+- **A wallet-only coin is refused as wallet-only before the two-node check.** `setprice`, `buy` and `sell` with a
+  coin that cannot trade (a wallet-only coin, every TRON coin while TRON swaps are off) now answer the wallet-only
+  error first. Before, a coin that also had fewer than two nodes was told to add a node or set `swap_evidence_node`
+  (see the R100 item under "Breaking changes and upgrade notes"), which would not have made it tradable.
+  Detail: PR #509.
 
 #### EVM, BCH, Sia and Lightning coins
 

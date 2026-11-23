@@ -6217,6 +6217,54 @@ fn order_placement_rejects_a_wallet_only_coin() {
     }
 }
 
+/// A wallet-only coin that would also fail the swap-evidence admission (CRD ch.51 R100 item 4) is refused as
+/// wallet-only: a coin that cannot trade at all is never told to add a node.
+fn wallet_only_ctx_with_failing_admission() -> MmArc {
+    use coins::{lp_register_coin, RegisterCoinParams, SwapEvidencePolicy};
+    use mocktopus::mocking::{MockResult, Mockable};
+
+    TestCoin::swap_evidence_policy.mock_safe(|_| MockResult::Return(SwapEvidencePolicy::Insufficient { hosts: 1 }));
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json::json!({ "coins": [{ "coin": "WALLET", "wallet_only": true }, { "coin": "TRADE" }] }))
+        .into_mm_arc();
+    for ticker in ["WALLET", "TRADE"] {
+        block_on(lp_register_coin(
+            &ctx,
+            TestCoin::new(ticker).into(),
+            RegisterCoinParams {
+                ticker: ticker.to_owned(),
+                tx_history: false,
+            },
+        ))
+        .unwrap_or_else(|e| panic!("cannot register {ticker}: {e}"));
+    }
+    ctx
+}
+
+#[test]
+fn setprice_refuses_a_wallet_only_coin_before_the_swap_evidence_admission() {
+    let ctx = wallet_only_ctx_with_failing_admission();
+    for (base, rel, side) in [("WALLET", "TRADE", "Base"), ("TRADE", "WALLET", "Rel")] {
+        let request: SetPriceReq =
+            json::from_value(json::json!({ "base": base, "rel": rel, "price": 1, "volume": 1 })).unwrap();
+        let err = block_on(create_maker_order(&ctx, request)).unwrap_err();
+        assert!(err.ends_with(&format!("{side} coin WALLET is wallet only")), "{err}");
+    }
+}
+
+#[test]
+fn buy_and_sell_refuse_a_wallet_only_coin_before_the_swap_evidence_admission() {
+    let ctx = wallet_only_ctx_with_failing_admission();
+    for (base, rel, side) in [("WALLET", "TRADE", "Base"), ("TRADE", "WALLET", "Rel")] {
+        let order = |method: &str| json::json!({ "method": method, "base": base, "rel": rel, "price": 1, "volume": 1 });
+        let expected = format!("{side} coin WALLET is wallet only");
+        let err = block_on(sell(ctx.clone(), order("sell"))).unwrap_err();
+        assert!(err.ends_with(&expected), "{err}");
+        let err = block_on(buy(ctx.clone(), order("buy"))).unwrap_err();
+        assert!(err.ends_with(&expected), "{err}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ch.57 T11 -- the field report, end to end (R57.7A.1, R57.7A.4)
 //

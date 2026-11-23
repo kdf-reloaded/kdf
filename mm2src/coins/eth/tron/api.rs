@@ -1391,6 +1391,7 @@ mod tests {
 
     /// The event query reaches a TronGrid node that has no key and sends no key header to it. The stub node poses
     /// as such a node through the client's flags: a loopback stub cannot be an `https` TronGrid host.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_event_query_reaches_an_unkeyed_trongrid_node_without_a_key_header() {
         use super::super::test_node::{Reply, StubNode};
