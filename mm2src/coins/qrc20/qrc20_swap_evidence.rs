@@ -73,7 +73,7 @@ fn first_report(key: String) -> bool {
 
 /// The one place that builds the text of an undetermined QRC20 swap read. It starts with
 /// `"swap evidence undetermined: "`, the marker the swap engine matches on, and names servers by `host:port` only.
-pub(super) fn undetermined_text(undetermined: &Undetermined) -> String { undetermined.to_string() }
+pub(super) fn undetermined_text(undetermined: &Undetermined) -> String { undetermined.to_err_string() }
 
 /// A read that no server was asked for, because nothing could decide it.
 fn too_few_answers<A, K>() -> Agreement<A, K> {

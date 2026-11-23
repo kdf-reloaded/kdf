@@ -7,7 +7,7 @@
 use super::qrc20_swap_evidence::undetermined_text;
 use super::swap::ClaimCheck;
 use super::*;
-use crate::swap_evidence::{Undetermined, UndeterminedReason};
+use crate::swap_evidence::{is_undetermined, Undetermined, UndeterminedReason};
 use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
 use crate::{CanRefundHtlc, SwapEvidencePolicy};
 use common::block_on;
@@ -376,7 +376,7 @@ async fn refund_gate_error(coin: &Qrc20Coin, locktime: u64) -> String {
 }
 
 fn assert_undetermined(text: &str, reason: &str) {
-    assert!(text.contains(PREFIX), "{text}");
+    assert!(is_undetermined(text), "{text}");
     assert!(text.contains(reason), "{text}");
     assert!(!text.contains("://"), "{text}");
 }
@@ -435,7 +435,7 @@ fn payment_that_both_hosts_show_as_not_sent_is_refused() {
         }
         let error = validate(&coin, &payment, now()).await.unwrap_err();
         assert!(error.contains("Payment state is not PAYMENT_STATE_SENT"), "{error}");
-        assert!(!error.contains(PREFIX), "{error}");
+        assert!(!is_undetermined(&error), "{error}");
     });
 }
 
@@ -721,7 +721,7 @@ fn the_makers_claim_rests_on_an_agreed_payment_state_and_the_takers_claim_is_not
             )
             .await;
         if let Err(error) = outcome {
-            assert!(!format!("{:?}", error).contains(PREFIX), "{:?}", error);
+            assert!(!is_undetermined(&format!("{:?}", error)), "{:?}", error);
         }
     });
 }
@@ -1093,7 +1093,7 @@ fn the_undetermined_text_is_built_from_the_undetermined_value() {
         ],
     };
     let text = undetermined_text(&undetermined);
-    assert!(text.starts_with(PREFIX), "{text}");
+    assert!(is_undetermined(&text), "{text}");
     assert!(text.contains("a.test:50001") && text.contains("b.test:50001"), "{text}");
 }
 
