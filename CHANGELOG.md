@@ -1445,6 +1445,9 @@ the previous version used. The safe way:
 - [`swap-v2-chain-read-agreement`](docs/plans/swap-v2-chain-read-agreement.md) — new, planning: swap protocol v2
   follows the agreement of chain reads (R100) in 0.5.0, with the recovery and the funding-refund rules decided on
   2026-11-23, PR #528.
+- [`swap-v2-state-and-abort-reason-naming`](docs/plans/swap-v2-state-and-abort-reason-naming.md) — new, planning
+  (after 0.5.0): a decision, with wallet maintainers, on renaming or adding swap protocol v2 states and abort
+  reasons, then compatibility, migration of stored rows and docs; PR #N.
 - [`swap-recovery-retry-switch`](docs/plans/swap-recovery-retry-switch.md) — new, planning (v0.6): a decision,
   after a discussion with experienced users, on whether an operator or frontend switch retries the recovery of
   swaps that end needing manual recovery; added with the R100 item 9 note, PR #518.
