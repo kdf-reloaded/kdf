@@ -2,6 +2,7 @@ use super::*;
 use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
 use crate::utxo::rpc_clients::UnspentInfo;
 use crate::utxo::utxo_tests::tqtum_test_servers;
+use crate::CanRefundHtlc;
 use crate::TxFeeDetails;
 use bigdecimal::Zero;
 use chain::OutPoint;
@@ -1266,4 +1267,415 @@ fn r72a_qrc20_extract_secret_refuses_a_wrongly_sized_secret_hash() {
     let tx_hex = hex::decode("01000000033f56ecafafc8602fde083ba868d1192d6649b8433e42e1a2d79ba007ea4f7abb010000006b48304502210093404e90e40d22730013035d31c404c875646dcf2fad9aa298348558b6d65ba60220297d045eac5617c1a3eddb71d4bca9772841afa3c4c9d6c68d8d2d42ee6de3950121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff9cac7fe90d597922a1d92e05306c2215628e7ea6d5b855bfb4289c2944f4c73a030000006b483045022100b987da58c2c0c40ce5b6ef2a59e8124ed4ef7a8b3e60c7fb631139280019bc93022069649bcde6fe4dd5df9462a1fcae40598488d6af8c324cd083f5c08afd9568be0121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff70b9870f2b0c65d220a839acecebf80f5b44c3ca4c982fa2fdc5552c037f5610010000006a473044022071b34dd3ebb72d29ca24f3fa0fc96571c815668d3b185dd45cc46a7222b6843f02206c39c030e618d411d4124f7b3e7ca1dd5436775bd8083a85712d123d933a51300121022b00078841f37b5d30a6a1defb82b3af4d4e2d24dd4204d41f0c9ce1e875de1affffffff020000000000000000c35403a0860101284ca402ed292b806a1835a1b514ad643f2acdb5c8db6b6a9714accff3275ea0d79a3f23be8fd00000000000000000000000000000000000000000000000000000000001312d000101010101010101010101010101010101010101010101010101010101010101000000000000000000000000d362e096e873eb7907e205fadc6175c6fec7bc440000000000000000000000009e032d4b0090a11dc40fe6c47601499a35d55fbb14ba8b71f3544b93e2f681f996da519a98ace0107ac2c02288d4010000001976a914783cf0be521101942da509846ea476e683aad83288ac0f047f5f").unwrap();
     let err = coin.extract_secret(&[0u8; 33], &tx_hex).unwrap_err();
     assert!(err.contains("got 33"), "unexpected error text: {}", err);
+}
+
+// ---- CRD ch.51 §51.6E R89: a found spend or refund is bound to its contract call ----
+
+use super::swap::{bound_swap_event_output, holds_swap_call, ExpectedSwapEvent};
+
+const R89_SWAP_ID: [u8; 32] = [7; 32];
+const R89_SECRET: [u8; 32] = [1; 32];
+
+fn r89_swap_contract() -> H160 { H160::from([0xba; 20]) }
+
+fn r89_other_contract() -> H160 { H160::from([0xcc; 20]) }
+
+fn r89_secret_hash() -> Vec<u8> { dhash160(&R89_SECRET).to_vec() }
+
+/// A transaction with one output per call.
+fn r89_tx(calls: Vec<ContractCallOutput>) -> UtxoTx {
+    let mut tx = UtxoTx::default();
+    tx.outputs = calls.into_iter().map(TransactionOutput::from).collect();
+    tx
+}
+
+fn r89_spend_call(coin: &Qrc20Coin, contract: &H160, swap_id: &[u8], secret: &[u8]) -> ContractCallOutput {
+    coin.receiver_spend_output(
+        contract,
+        swap_id.to_vec(),
+        U256::from(1000u64),
+        secret.to_vec(),
+        H160::from([0x11; 20]),
+    )
+    .unwrap()
+}
+
+fn r89_refund_call(coin: &Qrc20Coin, contract: &H160, swap_id: &[u8]) -> ContractCallOutput {
+    coin.sender_refund_output(
+        contract,
+        swap_id.to_vec(),
+        U256::from(1000u64),
+        r89_secret_hash(),
+        H160::from([0x22; 20]),
+    )
+    .unwrap()
+}
+
+fn r89_log(topic: &str, emitter: &H160, data: &[u8]) -> LogEntry {
+    LogEntry {
+        address: format!("{:x}", emitter),
+        topics: vec![topic.to_owned()],
+        data: hex::encode(data),
+    }
+}
+
+/// The data of a `ReceiverSpent` event: the swap id and the secret.
+fn r89_spent_data(swap_id: &[u8]) -> Vec<u8> { [swap_id, &R89_SECRET[..]].concat() }
+
+fn r89_receipt(output_index: u64, excepted: &str, log: Vec<LogEntry>) -> TxReceipt {
+    TxReceipt {
+        block_hash: H256Json::default(),
+        block_number: 1,
+        transaction_hash: H256Json::default(),
+        transaction_index: 1,
+        output_index,
+        from: "22".repeat(20),
+        to: None,
+        cumulative_gas_used: 0,
+        gas_used: 0,
+        contract_address: None,
+        log,
+        excepted: Some(excepted.to_owned()),
+        excepted_message: None,
+    }
+}
+
+fn r89_spent_log(emitter: &H160, swap_id: &[u8]) -> LogEntry {
+    r89_log(QRC20_RECEIVER_SPENT_TOPIC, emitter, &r89_spent_data(swap_id))
+}
+
+fn r89_expected_spend(secret_hash: &[u8]) -> ExpectedSwapEvent<'_> { ExpectedSwapEvent::ReceiverSpent { secret_hash } }
+
+#[test]
+fn r89_spend_with_a_completed_call_and_its_own_event_is_found() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let tx = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    let receipts = [r89_receipt(0, "None", vec![r89_spent_log(
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+    )])];
+    let found = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    );
+    assert_eq!(found, Ok(0));
+}
+
+#[test]
+fn r89_spend_whose_matched_output_is_excepted_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let tx = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    let receipts = [r89_receipt(0, "Revert", vec![r89_spent_log(
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+    )])];
+    let err = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    )
+    .unwrap_err();
+    assert!(err.contains("Revert"), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r89_spend_whose_event_is_in_the_receipt_of_another_output_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    // output 0 holds the matched call, output 1 holds another call; the event is in the receipt of output 1.
+    let tx = r89_tx(vec![
+        r89_spend_call(&coin, &r89_swap_contract(), &R89_SWAP_ID, &R89_SECRET),
+        r89_refund_call(&coin, &r89_swap_contract(), &[9; 32]),
+    ]);
+    let receipts = [
+        r89_receipt(0, "None", vec![]),
+        r89_receipt(1, "None", vec![r89_spent_log(&r89_swap_contract(), &R89_SWAP_ID)]),
+    ];
+    let err = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    )
+    .unwrap_err();
+    assert!(err.contains("holds no event"), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r89_spend_whose_event_is_emitted_by_another_address_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let tx = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    let receipts = [r89_receipt(0, "None", vec![r89_spent_log(
+        &r89_other_contract(),
+        &R89_SWAP_ID,
+    )])];
+    let err = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    )
+    .unwrap_err();
+    assert!(err.contains("holds no event"), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r89_spend_call_to_another_contract_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let tx = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_other_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    let receipts = [r89_receipt(0, "None", vec![r89_spent_log(
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+    )])];
+    let err = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("expected the swap contract"),
+        "unexpected error text: {}",
+        err
+    );
+}
+
+#[test]
+fn r89_spend_whose_event_data_carries_another_swap_id_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let tx = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    let receipts = [r89_receipt(0, "None", vec![r89_spent_log(
+        &r89_swap_contract(),
+        &[8; 32],
+    )])];
+    let err = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    )
+    .unwrap_err();
+    assert!(err.contains("holds no event"), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r89_spend_event_with_more_than_one_topic_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let tx = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    let mut log = r89_spent_log(&r89_swap_contract(), &R89_SWAP_ID);
+    log.topics.push("00".repeat(32));
+    let receipts = [r89_receipt(0, "None", vec![log])];
+    assert!(bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract()
+    )
+    .is_err());
+}
+
+#[test]
+fn r89_with_two_matching_outputs_the_first_that_passes_is_taken() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    // output 0 calls another contract, output 1 is good.
+    let tx = r89_tx(vec![
+        r89_spend_call(&coin, &r89_other_contract(), &R89_SWAP_ID, &R89_SECRET),
+        r89_spend_call(&coin, &r89_swap_contract(), &R89_SWAP_ID, &R89_SECRET),
+    ]);
+    let receipts = [
+        r89_receipt(0, "None", vec![r89_spent_log(&r89_swap_contract(), &R89_SWAP_ID)]),
+        r89_receipt(1, "None", vec![r89_spent_log(&r89_swap_contract(), &R89_SWAP_ID)]),
+    ];
+    let found = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    );
+    assert_eq!(found, Ok(1));
+}
+
+#[test]
+fn r89_spend_with_a_secret_of_another_hash_is_not_the_swap_call() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let tx = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &[2; 32],
+    )]);
+    let receipts = [r89_receipt(0, "None", vec![r89_spent_log(
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+    )])];
+    assert!(bound_swap_event_output(
+        &tx,
+        &receipts,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID,
+        &r89_swap_contract()
+    )
+    .is_err());
+}
+
+#[test]
+fn r89_refund_with_a_completed_call_and_its_own_event_is_found() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let tx = r89_tx(vec![r89_refund_call(&coin, &r89_swap_contract(), &R89_SWAP_ID)]);
+    let log = r89_log(QRC20_SENDER_REFUNDED_TOPIC, &r89_swap_contract(), &R89_SWAP_ID);
+    let receipts = [r89_receipt(0, "None", vec![log])];
+    let found = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &ExpectedSwapEvent::SenderRefunded,
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    );
+    assert_eq!(found, Ok(0));
+}
+
+#[test]
+fn r89_refund_whose_event_is_emitted_by_another_address_or_is_excepted_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let tx = r89_tx(vec![r89_refund_call(&coin, &r89_swap_contract(), &R89_SWAP_ID)]);
+    let foreign = r89_log(QRC20_SENDER_REFUNDED_TOPIC, &r89_other_contract(), &R89_SWAP_ID);
+    let own = r89_log(QRC20_SENDER_REFUNDED_TOPIC, &r89_swap_contract(), &R89_SWAP_ID);
+    for receipt in [
+        r89_receipt(0, "None", vec![foreign]),
+        r89_receipt(0, "OutOfGas", vec![own]),
+    ] {
+        assert!(bound_swap_event_output(
+            &tx,
+            &[receipt],
+            &ExpectedSwapEvent::SenderRefunded,
+            &R89_SWAP_ID,
+            &r89_swap_contract()
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn r89_refund_whose_event_data_carries_another_swap_id_is_skipped() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let tx = r89_tx(vec![r89_refund_call(&coin, &r89_swap_contract(), &R89_SWAP_ID)]);
+    let log = r89_log(QRC20_SENDER_REFUNDED_TOPIC, &r89_swap_contract(), &[8; 32]);
+    let receipts = [r89_receipt(0, "None", vec![log])];
+    let err = bound_swap_event_output(
+        &tx,
+        &receipts,
+        &ExpectedSwapEvent::SenderRefunded,
+        &R89_SWAP_ID,
+        &r89_swap_contract(),
+    )
+    .unwrap_err();
+    assert!(err.contains("holds no event"), "unexpected error text: {}", err);
+}
+
+#[test]
+fn r89_precheck_finds_the_swap_call_without_receipts() {
+    let (coin, _server) = r72a_qrc20_coin();
+    let hash = r89_secret_hash();
+    let spend = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &R89_SECRET,
+    )]);
+    assert!(holds_swap_call(&spend, &r89_expected_spend(&hash), &R89_SWAP_ID));
+    // another swap id, a secret of another hash, a refund where a spend is expected, no outputs: no call of the swap
+    assert!(!holds_swap_call(&spend, &r89_expected_spend(&hash), &[9; 32]));
+    let wrong_secret = r89_tx(vec![r89_spend_call(
+        &coin,
+        &r89_swap_contract(),
+        &R89_SWAP_ID,
+        &[2; 32],
+    )]);
+    assert!(!holds_swap_call(
+        &wrong_secret,
+        &r89_expected_spend(&hash),
+        &R89_SWAP_ID
+    ));
+    let refund = r89_tx(vec![r89_refund_call(&coin, &r89_swap_contract(), &R89_SWAP_ID)]);
+    assert!(!holds_swap_call(&refund, &r89_expected_spend(&hash), &R89_SWAP_ID));
+    assert!(holds_swap_call(
+        &refund,
+        &ExpectedSwapEvent::SenderRefunded,
+        &R89_SWAP_ID
+    ));
+    assert!(!holds_swap_call(
+        &UtxoTx::default(),
+        &ExpectedSwapEvent::SenderRefunded,
+        &R89_SWAP_ID
+    ));
+}
+
+fn qrc20_refund_gate_answer(mtp: u32, locktime: u64) -> CanRefundHtlc {
+    Qrc20Coin::get_current_mtp.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(mtp))));
+    let (_ctx, coin) = qrc20_coin_for_test(&[1; 32], None);
+    block_on(coin.can_refund_htlc(locktime).compat()).unwrap()
+}
+
+#[test]
+fn qrc20_refund_gate_waits_while_the_qtum_mtp_is_below_the_lock_time() {
+    let locktime = now_ms() / 1000 - 7200;
+    let answer = qrc20_refund_gate_answer((locktime - 10) as u32, locktime);
+    assert!(matches!(answer, CanRefundHtlc::HaveToWait(11)));
+}
+
+#[test]
+fn qrc20_refund_gate_opens_when_the_qtum_mtp_is_past_the_lock_time() {
+    let locktime = now_ms() / 1000 - 7200;
+    let answer = qrc20_refund_gate_answer((locktime + 10) as u32, locktime);
+    assert!(matches!(answer, CanRefundHtlc::CanRefundNow));
 }

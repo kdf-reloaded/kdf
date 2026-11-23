@@ -345,13 +345,93 @@ impl HDWalletRpcOps for EthCoin {
         // in the coin's own form (R49.33); the common implementation would abbreviate a 20-byte address.
         let serving = self.hd_serving_coin().await.map_to_mm(HDWalletRpcError::Internal)?;
         let mut response = hd_get_new_address_rpc(&serving, params).await?;
+        self.complete_new_address_report(&mut response).await?;
+        Ok(response)
+    }
+}
+
+impl EthCoin {
+    /// The last step of the report of `get_new_address` for this coin, after the platform's report was made: the
+    /// tokens of a platform are added, a TRC20 ticker keeps its own, and an ERC-20 ticker answers its token only (CRD
+    /// ch.49 R49.32).
+    async fn complete_new_address_report(
+        &self,
+        response: &mut GetNewHDAddressResponse,
+    ) -> MmResult<(), HDWalletRpcError> {
         self.add_tokens_to_platform_entries(std::slice::from_mut(&mut response.new_address))
             .await
             .mm_err(HDWalletRpcError::from)?;
         self.keep_own_ticker_if_trc20(&mut response.new_address.balance);
         self.narrow_to_erc20_ticker(std::slice::from_mut(&mut response.new_address))
             .await
-            .mm_err(HDWalletRpcError::from)?;
+            .mm_err(HDWalletRpcError::from)
+    }
+}
+
+/// `task::get_new_address` for an EVM coin or a TRON coin (CRD ch.49 R49.38 item 4). The steps run on the platform's
+/// HD wallet; a TRON coin has no hardware policy, so it completes on the software path.
+#[async_trait]
+impl InitGetNewAddressRpcOps for EthCoin {
+    async fn plan_new_address(
+        &self,
+        account_id: u32,
+        chain: Bip44Chain,
+        gap_limit: Option<u32>,
+    ) -> MmResult<hd_wallet::common_impl::PlannedNewAddress, HDWalletRpcError> {
+        let serving = self.hd_serving_coin().await.map_to_mm(HDWalletRpcError::Internal)?;
+        // An address is used by the rule of the ticker the task was asked for, as the scan of that ticker counts it.
+        let scanner = async {
+            let scanner = match self.erc20_ticker_info() {
+                Some(info) => EthAddressScanner {
+                    provider: serving.alloy_provider(),
+                    tron: None,
+                    token: Some((self.clone(), info)),
+                    platform_tokens: None,
+                    probed_tokens: Default::default(),
+                },
+                None if serving.is_evm_platform_coin() => EthAddressScanner {
+                    provider: serving.alloy_provider(),
+                    tron: None,
+                    token: None,
+                    platform_tokens: Some((serving.clone(), serving.get_erc20_tokens_infos().into_iter().collect())),
+                    probed_tokens: Default::default(),
+                },
+                None => serving.produce_hd_address_scanner().await?,
+            };
+            Ok(scanner)
+        };
+        hd_wallet::common_impl::plan_new_address(&serving, account_id, chain, gap_limit, scanner, |address| {
+            serving.hd_address_string(address)
+        })
+        .await
+    }
+
+    /// An activated hardware-wallet EVM coin has the device coin name its activation required, so the request is
+    /// the Ethereum address request alone.
+    fn device_address_request(&self) -> MmResult<DeviceAddressRequest, HDWalletRpcError> {
+        Ok(DeviceAddressRequest::Eth)
+    }
+
+    async fn record_new_address(
+        &self,
+        planned: &hd_wallet::common_impl::PlannedNewAddress,
+        on_recorded: &(dyn Fn() -> MmResult<(), HDWalletRpcError> + Sync),
+    ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
+        let serving = self.hd_serving_coin().await.map_to_mm(HDWalletRpcError::Internal)?;
+        let HDAddress {
+            address,
+            derivation_path,
+            ..
+        } = hd_wallet::common_impl::record_next_address(
+            &serving,
+            planned.account_id,
+            planned.chain,
+            Some(planned.address_id),
+        )
+        .await?;
+        on_recorded()?;
+        let mut response = hd_report_new_address(&serving, &address, derivation_path, planned.chain).await?;
+        self.complete_new_address_report(&mut response).await?;
         Ok(response)
     }
 }
@@ -830,29 +910,30 @@ async fn hd_get_new_address_rpc(
     coin: &EthCoin,
     params: GetNewHDAddressParams,
 ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
-    use std::ops::DerefMut;
-
-    let (account_id, chain) = (params.account_id, params.chain);
-    let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
-    let mut hd_account = hd_wallet
-        .get_account_mut(account_id)
-        .await
-        .or_mm_err(|| HDWalletRpcError::UnknownAccount { account_id })?;
+    let chain = params.chain;
     let HDAddress {
         address,
         derivation_path,
         ..
-    } = coin
-        .generate_new_address(hd_wallet, hd_account.deref_mut(), chain)
-        .await
-        .mm_err(Into::into)?;
-    let balance = coin.known_address_balance(&address).await.mm_err(Into::into)?;
-    let balance = coin.hd_balance_map(&address, balance).await.mm_err(Into::into)?;
+    } = hd_wallet::common_impl::record_next_address(coin, params.account_id, chain, None).await?;
+    hd_report_new_address(coin, &address, derivation_path, chain).await
+}
+
+/// The balance step of `get_new_address` of an HD platform, shared by the direct method and the task form.
+async fn hd_report_new_address(
+    coin: &EthCoin,
+    address: &Address,
+    derivation_path: DerivationPath,
+    chain: Bip44Chain,
+) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
+    let balance = coin.known_address_balance(address).await.mm_err(Into::into)?;
+    let balance = coin.hd_balance_map(address, balance).await.mm_err(Into::into)?;
     Ok(GetNewHDAddressResponse {
-        new_address: coin.hd_address_balance(&address, derivation_path, chain, balance).await,
+        new_address: coin.hd_address_balance(address, derivation_path, chain, balance).await,
     })
 }
 
+use crate::rpc_command::init_get_new_address::{DeviceAddressRequest, InitGetNewAddressRpcOps};
 use crate::rpc_command::init_scan_for_new_addresses::{self, InitScanAddressesRpcOps, ScanAddressesParams,
                                                       ScanAddressesResponse};
 

@@ -1457,7 +1457,8 @@ where
 ///
 /// - 20 bytes (R71's default): already that exact digest -- used unchanged.
 /// - 32 bytes (R72's alternate, forced whenever a native-32-byte-hash-lock
-///   coin -- Sia, Tendermint/IBC-HTLC, Lightning -- is on either side): this
+///   coin -- Sia, Tendermint/IBC-HTLC, Lightning, TRX or TRC20 -- is on
+///   either side): this
 ///   value *is* `SHA-256(secret)`, the inner half of the same
 ///   `RIPEMD160(SHA-256(secret))` composite (R72A), so applying `RIPEMD160`
 ///   alone -- the remaining, outer half -- reproduces exactly what

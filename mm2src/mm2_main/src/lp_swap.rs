@@ -1003,8 +1003,10 @@ pub fn validate_wire_pubkey(field: &[u8], what: &str) -> Result<(), String> {
 /// The 20-byte `RIPEMD160(SHA-256(_))` default is correct for the ordinary
 /// case, but a coin family whose own atomic-swap payment construction
 /// commits to a native 32-byte hash -- Siacoin's spend-policy HTLC, Bitcoin
-/// Lightning, or a Tendermint-family coin's IBC-HTLC -- has no way to accept
-/// or be satisfied by a shorter external value. Whenever one of those
+/// Lightning, a Tendermint-family coin's IBC-HTLC, or the Tron-VM swap
+/// contract of a TRX or TRC20 coin, which locks with SHA-256 over 32 bytes
+/// (CRD ch.21 R21.B6) -- has no way to accept or be satisfied by a shorter
+/// external value. Whenever one of those
 /// families sits on either side of the pair, both peers must independently
 /// select the 32-byte `SHA-256(_)` alternate instead; the algorithm itself is
 /// never carried on the wire, only its result, so this selection has to be a
@@ -1016,6 +1018,9 @@ pub fn select_secret_hash_algo(maker_coin: &MmCoinEnum, taker_coin: &MmCoinEnum)
             MmCoinEnum::SiaCoin(_) | MmCoinEnum::TendermintCoin(_) | MmCoinEnum::TendermintToken(_) => true,
             #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::LightningCoin(_) => true,
+            // CRD ch.21 R21.B6: TRX and TRC20 only. An ETH or ERC20 coin is
+            // the same variant and keeps the 20-byte default.
+            MmCoinEnum::EthCoin(coin) => coin.is_tron_family(),
             _ => false,
         }
     }
@@ -1995,8 +2000,10 @@ mod secret_hash_algo_selection_tests {
     // NOT independently tested here: that Sia, Tendermint, TendermintToken,
     // and (off-wasm32) Lightning select the 32-byte alternate. This
     // repository's test infrastructure has no lightweight way to construct a
-    // functional SiaCoin/TendermintCoin/LightningCoin (each wraps a real API
-    // client, unlike the MmCoinEnum::Test double used above), and a test that
+    // functional SiaCoin/TendermintToken/LightningCoin (each wraps a real API
+    // client, unlike the MmCoinEnum::Test double used above; a Tendermint
+    // platform coin is built in `with_real_coins` below, but only for a pair
+    // with TRX, which the TRON arm decides on its own), and a test that
     // merely re-typed the same family list a second time to compare against
     // itself would pass regardless of whether `select_secret_hash_algo`'s
     // match arms were ever kept in sync with it — worse than no test, since
@@ -2004,6 +2011,242 @@ mod secret_hash_algo_selection_tests {
     // cross-reference and code review instead (see the doc comment on
     // `select_secret_hash_algo` above); a real regression test needs test
     // doubles for these coin families that do not exist yet.
+
+    // The selection has one caller, the maker's start of a new swap, and its
+    // result is saved with the swap. Every later step, a restart included,
+    // reads the saved bytes: a record keeps the hash it was started with,
+    // whatever the selection would answer for its pair today, and a record
+    // from before the member existed keeps the 20-byte default.
+    #[test]
+    fn a_saved_maker_record_keeps_the_hash_it_was_started_with() {
+        use super::maker_swap::{maker_htlc_key_input, MakerSwapData};
+
+        let secret = [0x33u8; 32];
+        for algo in [SecretHashAlgo::DHASH160, SecretHashAlgo::SHA256] {
+            let saved_hash = algo.hash_secret(&secret);
+            let data = MakerSwapData {
+                secret: secret.into(),
+                secret_hash: Some(saved_hash.clone().into()),
+                ..Default::default()
+            };
+            assert_eq!(maker_htlc_key_input(&data), saved_hash);
+        }
+
+        let before_the_member = MakerSwapData {
+            secret: secret.into(),
+            secret_hash: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            maker_htlc_key_input(&before_the_member),
+            SecretHashAlgo::DHASH160.hash_secret(&secret)
+        );
+    }
+
+    /// CRD ch.21 R21.B6, ch.51 R72: the selection over real coins of the EVM
+    /// variant, which holds TRX and TRC20 next to ETH and ERC20.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod with_real_coins {
+        use super::*;
+        use coins::eth::eth_coin_from_conf_and_request;
+        use coins::eth::tron::tron_coin_from_conf_and_request;
+        use coins::tendermint::{tendermint_coin_from_conf_and_request, RpcNode};
+        use coins::CoinProtocol;
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        /// Nothing listens on port 1 of the loopback interface; building a TRON or a Tendermint coin asks no node.
+        const NO_NODE: &str = "http://127.0.0.1:1";
+        const KEY: [u8; 32] = [1u8; 32];
+
+        /// An ordinary coin, of no family the selection names; a UTXO coin reaches the same arm.
+        fn plain() -> MmCoinEnum { MmCoinEnum::Test(TestCoin::new("DOC")) }
+
+        fn tron(ctx: &MmArc, ticker: &str, protocol: Json) -> MmCoinEnum {
+            let conf = json::json!({ "coin": ticker, "mm2": 1, "decimals": 6, "protocol": protocol });
+            let protocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).unwrap();
+            let request = json::json!({ "urls": [NO_NODE] });
+            let coin = block_on(tron_coin_from_conf_and_request(
+                ctx, ticker, &conf, &request, &KEY, protocol,
+            ))
+            .unwrap_or_else(|e| panic!("cannot build {ticker}: {e}"));
+            MmCoinEnum::from(coin)
+        }
+
+        fn trx(ctx: &MmArc) -> MmCoinEnum {
+            tron(
+                ctx,
+                "TRX",
+                json::json!({ "type": "TRX", "protocol_data": { "network": "Nile" } }),
+            )
+        }
+
+        fn trc20(ctx: &MmArc) -> MmCoinEnum {
+            tron(
+                ctx,
+                "USDT-TRC20",
+                json::json!({ "type": "TRC20", "protocol_data": {
+                    "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } }),
+            )
+        }
+
+        /// A loopback JSON-RPC node that answers every request with a string result, which is all the build of an
+        /// EVM coin asks (the client version). Its thread stops when the value is dropped.
+        struct EvmStub {
+            url: String,
+            stop: Arc<AtomicBool>,
+        }
+
+        impl Drop for EvmStub {
+            fn drop(&mut self) { self.stop.store(true, Ordering::SeqCst); }
+        }
+
+        fn serve(mut stream: TcpStream) {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let body_start = loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                }
+                let Some(head_end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+                let content_length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= head_end + 4 + content_length {
+                    break head_end + 4;
+                }
+            };
+            let request: Json = json::from_slice(&raw[body_start..]).unwrap_or(Json::Null);
+            let reply = json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": "stub" }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            stream.write_all(response.as_bytes()).ok();
+            stream.flush().ok();
+        }
+
+        impl EvmStub {
+            fn start() -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").expect("bind the stub node");
+                let port = listener.local_addr().expect("local address").port();
+                listener.set_nonblocking(true).expect("non-blocking listener");
+                let stop = Arc::new(AtomicBool::new(false));
+                let stop_thread = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop_thread.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                stream.set_nonblocking(false).ok();
+                                std::thread::spawn(move || serve(stream));
+                            },
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(5));
+                            },
+                            Err(_) => break,
+                        }
+                    }
+                });
+                EvmStub {
+                    url: format!("http://127.0.0.1:{port}"),
+                    stop,
+                }
+            }
+        }
+
+        fn evm(ctx: &MmArc, node: &EvmStub, conf: Json) -> MmCoinEnum {
+            let ticker = conf["coin"].as_str().unwrap();
+            let protocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).unwrap();
+            let request = json::json!({
+                "urls": [node.url],
+                "swap_contract_address": "0x24ABE4c71FC658C91313b6552cd40cD808b3Ea80",
+            });
+            let coin = block_on(eth_coin_from_conf_and_request(
+                ctx, ticker, &conf, &request, &KEY, protocol,
+            ))
+            .unwrap_or_else(|e| panic!("cannot build {ticker}: {e}"));
+            MmCoinEnum::from(coin)
+        }
+
+        #[test]
+        fn a_tron_coin_on_either_side_selects_the_32_byte_alternate() {
+            let ctx = MmCtxBuilder::new().into_mm_arc();
+            let (trx, trc20, plain) = (trx(&ctx), trc20(&ctx), plain());
+
+            for tron in [&trx, &trc20] {
+                assert_eq!(select_secret_hash_algo(tron, &plain), SecretHashAlgo::SHA256);
+                assert_eq!(select_secret_hash_algo(&plain, tron), SecretHashAlgo::SHA256);
+            }
+            assert_eq!(select_secret_hash_algo(&trx, &trc20), SecretHashAlgo::SHA256);
+            assert_eq!(select_secret_hash_algo(&trc20, &trx), SecretHashAlgo::SHA256);
+        }
+
+        #[test]
+        fn an_eth_or_erc20_coin_keeps_the_20_byte_default() {
+            let ctx = MmCtxBuilder::new().into_mm_arc();
+            let node = EvmStub::start();
+            let eth = evm(
+                &ctx,
+                &node,
+                json::json!({ "coin": "ETH", "mm2": 1, "protocol": { "type": "ETH" } }),
+            );
+            let erc20 = evm(
+                &ctx,
+                &node,
+                json::json!({ "coin": "USDT-ERC20", "mm2": 1, "decimals": 6, "protocol": {
+                    "type": "ERC20", "protocol_data": {
+                        "platform": "ETH", "contract_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7" } } }),
+            );
+            let plain = plain();
+
+            for coin in [&eth, &erc20] {
+                assert_eq!(select_secret_hash_algo(coin, &plain), SecretHashAlgo::DHASH160);
+                assert_eq!(select_secret_hash_algo(&plain, coin), SecretHashAlgo::DHASH160);
+            }
+            assert_eq!(select_secret_hash_algo(&eth, &erc20), SecretHashAlgo::DHASH160);
+
+            // The same variant with a TRON coin across: the TRON side decides.
+            let trx = trx(&ctx);
+            assert_eq!(select_secret_hash_algo(&eth, &trx), SecretHashAlgo::SHA256);
+            assert_eq!(select_secret_hash_algo(&trx, &erc20), SecretHashAlgo::SHA256);
+        }
+
+        #[test]
+        fn trx_with_a_tendermint_coin_selects_the_32_byte_alternate() {
+            let ctx = MmCtxBuilder::new().into_mm_arc();
+            let conf = json::json!({
+                "coin": "IRIS", "mm2": 1, "avg_blocktime": 5,
+                "protocol": { "type": "TENDERMINT", "protocol_data": {
+                    "denom": "uiris", "decimals": 6, "account_prefix": "iaa", "chain_id": "irishub-1" } },
+            });
+            let node: RpcNode = json::from_value(json::json!({ "url": NO_NODE })).unwrap();
+            let iris = block_on(tendermint_coin_from_conf_and_request(
+                &ctx,
+                "IRIS".to_owned(),
+                &conf,
+                vec![node],
+                &KEY,
+                false,
+            ))
+            .unwrap_or_else(|e| panic!("cannot build IRIS: {e}"));
+            let iris = MmCoinEnum::from(iris);
+            let trx = trx(&ctx);
+
+            assert_eq!(select_secret_hash_algo(&trx, &iris), SecretHashAlgo::SHA256);
+            assert_eq!(select_secret_hash_algo(&iris, &trx), SecretHashAlgo::SHA256);
+        }
+    }
 }
 
 #[cfg(test)]

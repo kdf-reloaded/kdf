@@ -25,6 +25,14 @@
 //!   * T50.10        — `emulator_trezor_withdraw_bad_from_selector`
 //!   * T50.11        — `emulator_trezor_withdraw_tron_unsupported`
 //!   * T49.31        — `emulator_trezor_account_balance_of_a_platform_ticker_lists_the_platform_and_its_tokens`
+//!   * T49.37        — `emulator_trezor_get_new_address_shows_the_address_and_records_it_after_the_button` (EVM),
+//!                     `emulator_trezor_get_new_address_utxo_shows_the_address_and_records_it_after_the_button`
+//!                     (UTXO, a Bitcoin-style node stub) and
+//!                     `emulator_trezor_get_new_address_cancel_while_the_address_is_shown_records_nothing`
+//!   * T49.38        — `emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled`,
+//!                     `emulator_trezor_get_new_address_another_seed_is_found_unexpected_device`,
+//!                     `emulator_trezor_get_new_address_another_passphrase_is_a_device_address_mismatch` and
+//!                     `emulator_trezor_get_new_address_a_failing_balance_query_leaves_the_address_known`
 //! The passphrase tests (T50.6 / T50.7) re-seed the shared device with
 //! passphrase protection ON and, via a teardown RAII guard, restore the clean
 //! SLIP-14 (no-pin, no-passphrase) state so the other serialized tests stay
@@ -147,6 +155,21 @@ fn emulator_setup() {
     assert!(status.success(), "emulator_control.py setup failed: {status}");
 }
 
+/// Start + wipe + seed the emulator with `mnemonic` (no PIN, no passphrase): another seed than the SLIP-14 one.
+fn emulator_setup_with_mnemonic(mnemonic: &str) {
+    let status = Command::new("python3")
+        .arg(script_path())
+        .arg("setup")
+        .arg("--mnemonic")
+        .arg(mnemonic)
+        .status()
+        .expect("failed to spawn emulator_control.py setup --mnemonic");
+    assert!(
+        status.success(),
+        "emulator_control.py setup --mnemonic failed: {status}"
+    );
+}
+
 /// Start + wipe + seed the emulator with the SLIP-14 mnemonic **and passphrase
 /// protection ON** (host passphrase entry — the emulator default after a wipe).
 /// A passphrase yields a distinct hidden wallet, so callers must read the sender
@@ -186,12 +209,17 @@ struct ConfirmLoop {
 }
 
 impl ConfirmLoop {
-    fn spawn(timeout_secs: u32) -> ConfirmLoop {
+    fn spawn(timeout_secs: u32) -> ConfirmLoop { Self::spawn_deciding(timeout_secs, "yes") }
+
+    /// A loop that presses `decision` (`"yes"` or `"no"`, the user's refusal) on every non-idle screen.
+    fn spawn_deciding(timeout_secs: u32, decision: &str) -> ConfirmLoop {
         let child = Command::new("python3")
             .arg(script_path())
             .arg("confirm-loop")
             .arg("--timeout")
             .arg(timeout_secs.to_string())
+            .arg("--decision")
+            .arg(decision)
             .spawn()
             .expect("failed to spawn emulator_control.py confirm-loop");
         ConfirmLoop { child }
@@ -233,6 +261,12 @@ fn spawn_mock_node(
     nonce_hex: &'static str,
     erc20_balance_hex: &'static str,
 ) -> MockNode {
+    spawn_scripted_node(move |request| rpc_reply(request, native_balance_hex, nonce_hex, erc20_balance_hex))
+}
+
+/// Spawn a node that answers every JSON-RPC request (each member of a batch) with `reply(request)`. The mock node of
+/// the EVM reads, the Bitcoin-style node of the UTXO tests and the failing node are all of this kind.
+fn spawn_scripted_node(reply: impl Fn(&serde_json::Value) -> serde_json::Value + Send + 'static) -> MockNode {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock node");
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
@@ -243,7 +277,7 @@ fn spawn_mock_node(
         while !stop_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    handle_conn(stream, native_balance_hex, nonce_hex, erc20_balance_hex);
+                    handle_conn(stream, &reply);
                 },
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -259,7 +293,30 @@ fn spawn_mock_node(
     }
 }
 
-fn handle_conn(mut stream: TcpStream, native_balance_hex: &str, nonce_hex: &str, erc20_balance_hex: &str) {
+/// A node whose every answer is a JSON-RPC error: a node that is up but cannot serve the read (the balance query of
+/// the tests that expect it to fail). The error member has the form of both the Ethereum and the Bitcoin-style nodes.
+fn spawn_failing_node() -> MockNode {
+    spawn_scripted_node(|request| {
+        let id = request.get("id").cloned().unwrap_or(serde_json::Value::from(0));
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": null,
+            "error": { "code": -32000, "message": "the node cannot answer" }
+        })
+    })
+}
+
+/// A Bitcoin-style node with no unspent outputs: every address has a zero balance (`listunspent` answers an empty
+/// list), which is all the balance step of a new address asks.
+fn spawn_empty_utxo_node() -> MockNode {
+    spawn_scripted_node(|request| {
+        let id = request.get("id").cloned().unwrap_or(serde_json::Value::from(0));
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": [], "error": null })
+    })
+}
+
+fn handle_conn(mut stream: TcpStream, reply: &dyn Fn(&serde_json::Value) -> serde_json::Value) {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     let mut raw = Vec::new();
     let mut buf = [0u8; 4096];
@@ -289,14 +346,8 @@ fn handle_conn(mut stream: TcpStream, native_balance_hex: &str, nonce_hex: &str,
     let json_body = serde_json::from_slice::<serde_json::Value>(body).unwrap_or(serde_json::Value::Null);
 
     let response_json = match &json_body {
-        serde_json::Value::Array(items) => {
-            let replies: Vec<serde_json::Value> = items
-                .iter()
-                .map(|it| rpc_reply(it, native_balance_hex, nonce_hex, erc20_balance_hex))
-                .collect();
-            serde_json::Value::Array(replies)
-        },
-        other => rpc_reply(other, native_balance_hex, nonce_hex, erc20_balance_hex),
+        serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(reply).collect()),
+        other => reply(other),
     };
 
     let payload = serde_json::to_vec(&response_json).unwrap();
@@ -670,6 +721,31 @@ fn device_trezor_hd_coin_with_addresses(
     leaf_public: Public,
     external_addresses_number: u32,
 ) -> EthCoin {
+    device_trezor_hd_coin_with_storage(
+        ctx,
+        coin_type,
+        url,
+        account_xpub,
+        leaf_address,
+        leaf_public,
+        external_addresses_number,
+        HDWalletCoinStorage::default(),
+    )
+}
+
+/// Same as [`device_trezor_hd_coin_with_addresses`], over the wallet storage `hd_wallet_storage` (the default one is
+/// a mock that records nothing and must not be written).
+#[allow(clippy::too_many_arguments)]
+fn device_trezor_hd_coin_with_storage(
+    ctx: &MmArc,
+    coin_type: EthCoinType,
+    url: String,
+    account_xpub: Secp256k1ExtendedPublicKey,
+    leaf_address: Address,
+    leaf_public: Public,
+    external_addresses_number: u32,
+    hd_wallet_storage: HDWalletCoinStorage,
+) -> EthCoin {
     let ticker = match coin_type {
         EthCoinType::Eth => "ETH",
         EthCoinType::Erc20 { .. } => "JST",
@@ -694,7 +770,7 @@ fn device_trezor_hd_coin_with_addresses(
         hw_ctx: activation_hw_ctx(ctx),
     });
     let derivation_method = DerivationMethod::HDWallet(EthHDWallet {
-        hd_wallet_storage: HDWalletCoinStorage::default(),
+        hd_wallet_storage,
         derivation_path,
         accounts: HDAccountsMutex::new(accounts),
         gap_limit: 20,
@@ -1557,5 +1633,518 @@ fn emulator_trezor_activate_eth_native() {
         signed.sender(),
         device_addr,
         "recovered sender of the activated-coin withdraw must be the device address"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// task::get_new_address under the Trezor policy (CRD ch.49 §49.2.3, R49.39, R49.40, R49.42; T49.37)
+// ---------------------------------------------------------------------------
+
+/// An emulator-backed platform coin of the Trezor policy over a real (in-memory) wallet storage that holds account 0
+/// with one known address, registered on `ctx`. The returned `ctx` has the storage database pinned.
+fn trezor_platform_with_storage(ctx: &MmArc, material: &DeviceMaterial, node_url: String) -> EthCoin {
+    use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletCoinWithStorageOps};
+
+    let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().expect("an in-memory database");
+    let _ = ctx
+        .sqlite_connection
+        .pin(StdArc::new(std::sync::Mutex::new(connection)));
+    let hw_ctx = activation_hw_ctx(ctx);
+    let storage = block_on(HDWalletCoinStorage::init_for_device(ctx, "ETH".to_owned(), &hw_ctx))
+        .expect("the device's wallet storage opens");
+    let platform = device_trezor_hd_coin_with_storage(
+        ctx,
+        EthCoinType::Eth,
+        node_url,
+        material.eth_account_xpub.clone(),
+        material.eth_address,
+        material.eth_public.clone(),
+        1,
+        storage,
+    );
+    let DerivationMethod::HDWallet(wallet) = &platform.derivation_method else {
+        unreachable!("an HD coin")
+    };
+    let account_item = block_on(wallet.accounts.lock())[&0].to_storage_item();
+    block_on(platform.upload_new_account(wallet, account_item)).expect("account 0 is stored");
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    block_on(coins_ctx.add_coin(MmCoinEnum::EthCoin(platform.clone()))).unwrap();
+    platform
+}
+
+fn known_external_addresses(platform: &EthCoin) -> u32 {
+    use crate::hd_wallet::HDAccountOps;
+    match &platform.derivation_method {
+        DerivationMethod::HDWallet(wallet) => block_on(wallet.accounts.lock())[&0]
+            .known_addresses_number(Bip44Chain::External)
+            .expect("the external chain"),
+        _ => unreachable!("an HD coin"),
+    }
+}
+
+fn get_new_address_status(ctx: &MmArc, task_id: u64) -> Option<serde_json::Value> {
+    use crate::rpc_command::init_get_new_address::init_get_new_address_status;
+    block_on(init_get_new_address_status(
+        ctx.clone(),
+        serde_json::from_value(serde_json::json!({ "task_id": task_id, "forget_if_finished": false })).unwrap(),
+    ))
+    .ok()
+    .map(|status| serde_json::to_value(&status).unwrap())
+}
+
+/// Polls the task until its status satisfies `done`, or panics after `timeout`.
+fn wait_for_status(
+    ctx: &MmArc,
+    task_id: u64,
+    timeout: Duration,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = get_new_address_status(ctx, task_id) {
+            println!("  status: {status}");
+            if done(&status) {
+                return status;
+            }
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "the task did not reach the expected status in {timeout:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// T49.37 (CRD ch.49 R49.39, R49.42): under the Trezor policy the status shows
+/// `{"ConfirmAddress": {"expected_address"}}` while the device waits for the button, the address is not recorded
+/// meanwhile, and the button press completes the task with the answer of the direct method; the address of that answer
+/// is the expected one. Needs the emulator (see `emulator_available`).
+#[test]
+fn emulator_trezor_get_new_address_shows_the_address_and_records_it_after_the_button() {
+    use crate::rpc_command::init_get_new_address::init_get_new_address;
+
+    if !emulator_available("emulator_trezor_get_new_address_shows_the_address_and_records_it_after_the_button") {
+        return;
+    }
+    emulator_setup();
+    let material = fetch_device_material();
+    let ctx = ctx_with_hw(material.client.clone(), material.internal_pubkey);
+    let node = spawn_mock_node("0x56bc75e2d63100000", "0x0", "0x0");
+    let platform = trezor_platform_with_storage(&ctx, &material, node.url.clone());
+    assert_eq!(known_external_addresses(&platform), 1);
+
+    let request = serde_json::from_value(serde_json::json!({ "coin": "ETH", "account_id": 0 })).unwrap();
+    let init = block_on(init_get_new_address(ctx.clone(), request)).unwrap_or_else(|e| panic!("init failed: {}", e));
+
+    // Nobody presses the button yet: the status shows the address to confirm.
+    let status = wait_for_status(&ctx, init.task_id, Duration::from_secs(60), |status| {
+        status["status"] == "InProgress" && status["details"].get("ConfirmAddress").is_some()
+    });
+    let expected = status["details"]["ConfirmAddress"]["expected_address"]
+        .as_str()
+        .expect("the expected address")
+        .to_owned();
+    assert_eq!(expected, checksum_address(&expected.to_lowercase()), "EIP-55 form");
+    assert_eq!(
+        known_external_addresses(&platform),
+        1,
+        "nothing is recorded before the confirmation"
+    );
+
+    let _confirm = ConfirmLoop::spawn(60);
+    let status = wait_for_status(&ctx, init.task_id, Duration::from_secs(60), |status| {
+        matches!(status["status"].as_str(), Some("Ok") | Some("Error"))
+    });
+    assert_eq!(status["status"], "Ok", "{status}");
+    assert_eq!(status["details"]["new_address"]["address"], expected.as_str());
+    assert_eq!(status["details"]["new_address"]["derivation_path"], "m/44'/60'/0'/0/1");
+    assert_eq!(
+        known_external_addresses(&platform),
+        2,
+        "the address is recorded after the press"
+    );
+}
+
+/// CRD ch.49 R49.40 items 1 and 2: cancelling while the device shows the address answers success, the task is gone
+/// (`NoSuchTask`), nothing is recorded, and the next task offers the same expected address. Needs the emulator.
+#[test]
+fn emulator_trezor_get_new_address_cancel_while_the_address_is_shown_records_nothing() {
+    use crate::rpc_command::init_get_new_address::{init_get_new_address, init_get_new_address_cancel};
+
+    if !emulator_available("emulator_trezor_get_new_address_cancel_while_the_address_is_shown_records_nothing") {
+        return;
+    }
+    emulator_setup();
+    let material = fetch_device_material();
+    let ctx = ctx_with_hw(material.client.clone(), material.internal_pubkey);
+    let node = spawn_mock_node("0x56bc75e2d63100000", "0x0", "0x0");
+    let platform = trezor_platform_with_storage(&ctx, &material, node.url.clone());
+
+    let mut offered = Vec::new();
+    for _ in 0..2 {
+        let request = serde_json::from_value(serde_json::json!({ "coin": "ETH", "account_id": 0 })).unwrap();
+        let init =
+            block_on(init_get_new_address(ctx.clone(), request)).unwrap_or_else(|e| panic!("init failed: {}", e));
+        let status = wait_for_status(&ctx, init.task_id, Duration::from_secs(60), |status| {
+            status["status"] == "InProgress" && status["details"].get("ConfirmAddress").is_some()
+        });
+        offered.push(status["details"]["ConfirmAddress"]["expected_address"].clone());
+
+        let cancel = serde_json::from_value(serde_json::json!({ "task_id": init.task_id })).unwrap();
+        block_on(init_get_new_address_cancel(ctx.clone(), cancel)).unwrap_or_else(|e| panic!("cancel failed: {}", e));
+        assert!(
+            get_new_address_status(&ctx, init.task_id).is_none(),
+            "the task is gone after the cancel"
+        );
+        assert_eq!(known_external_addresses(&platform), 1, "nothing is recorded");
+    }
+    assert_eq!(offered[0], offered[1], "the next request offers the same address");
+}
+
+// ---------------------------------------------------------------------------
+// task::get_new_address: more device runs (T49.37 for a UTXO coin, T49.38)
+// ---------------------------------------------------------------------------
+
+/// The BIP-44 path of the UTXO fixture coin (Komodo, SLIP-44 coin type 141) and its account 0.
+const UTXO_COIN_PATH: &str = "m/44'/141'";
+const UTXO_ACCOUNT_PATH: &str = "m/44'/141'/0'";
+
+/// Reads the extended public key of account 0 of the UTXO fixture coin from the device (the activation's read).
+fn fetch_utxo_account_xpub(client: &TrezorClient) -> Secp256k1ExtendedPublicKey {
+    block_on(async {
+        let mut session = client.session().await.expect("open session");
+        let xpub = session
+            .get_public_key(
+                DerivationPath::from_str(UTXO_ACCOUNT_PATH).unwrap(),
+                TrezorUtxoCoin::Komodo,
+                EcdsaCurve::Secp256k1,
+            )
+            .await
+            .expect("get_public_key call")
+            .ack_all()
+            .await
+            .expect("resolve the account xpub");
+        Secp256k1ExtendedPublicKey::from_str(&xpub).expect("parse the account xpub")
+    })
+}
+
+/// An emulator-backed UTXO coin (`KMD`, standard address format) of the Trezor policy over a real (in-memory) wallet
+/// storage that holds account 0 with one known address, registered on `ctx`. Its node is the Bitcoin-style JSON-RPC
+/// endpoint `node_url` (the native client reads balances with `listunspent`).
+fn trezor_utxo_coin_with_storage(
+    ctx: &MmArc,
+    material: &DeviceMaterial,
+    node_url: String,
+) -> crate::utxo::utxo_standard::UtxoStandardCoin {
+    use crate::hd_wallet_storage::HDWalletCoinWithStorageOps;
+    use crate::utxo::rpc_clients::{NativeClient, NativeClientImpl, UtxoRpcClientEnum};
+    use crate::utxo::utxo_tests::{utxo_coin_fields_for_test, utxo_coin_from_fields};
+    use crate::utxo::{UtxoAddressFormat, UtxoHDAccount, UtxoHDWallet};
+
+    let connection = db_common::sqlite::rusqlite::Connection::open_in_memory().expect("an in-memory database");
+    let _ = ctx
+        .sqlite_connection
+        .pin(StdArc::new(std::sync::Mutex::new(connection)));
+    let hw_ctx = activation_hw_ctx(ctx);
+    let storage = block_on(HDWalletCoinStorage::init_for_device(ctx, "KMD".to_owned(), &hw_ctx))
+        .expect("the device's wallet storage opens");
+
+    let client = NativeClient(StdArc::new(NativeClientImpl {
+        coin_ticker: "KMD".to_owned(),
+        uri: node_url,
+        auth: "Basic dGVzdDp0ZXN0".to_owned(),
+        ..NativeClientImpl::default()
+    }));
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    fields.conf.ticker = "KMD".to_owned();
+    fields.conf.trezor_coin = Some(TrezorUtxoCoin::Komodo);
+    fields.priv_key_policy = crate::PrivKeyPolicy::Trezor;
+    fields.hw_ctx = Some(hw_ctx);
+
+    let coin_path = crypto::HDPathToCoin::from_str(UTXO_COIN_PATH).unwrap();
+    let account = UtxoHDAccount {
+        account_id: 0,
+        extended_pubkey: fetch_utxo_account_xpub(&material.client),
+        account_derivation_path: crypto::HDPathToAccount::from_str(UTXO_ACCOUNT_PATH).unwrap(),
+        external_addresses_number: 1,
+        internal_addresses_number: 0,
+    };
+    fields.derivation_method = DerivationMethod::HDWallet(UtxoHDWallet {
+        hd_wallet_storage: storage,
+        address_format: UtxoAddressFormat::Standard,
+        derivation_path: coin_path,
+        accounts: HDAccountsMutex::new(BTreeMap::from([(0, account.clone())])),
+        gap_limit: 20,
+    });
+    let coin = utxo_coin_from_fields(fields);
+    let DerivationMethod::HDWallet(wallet) = &coin.as_ref().derivation_method else {
+        unreachable!("an HD coin")
+    };
+    block_on(coin.upload_new_account(wallet, account.to_storage_item())).expect("account 0 is stored");
+    let coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
+    block_on(coins_ctx.add_coin(MmCoinEnum::UtxoCoin(coin.clone()))).unwrap();
+    coin
+}
+
+fn known_utxo_external_addresses(coin: &crate::utxo::utxo_standard::UtxoStandardCoin) -> u32 {
+    match &coin.as_ref().derivation_method {
+        DerivationMethod::HDWallet(wallet) => block_on(wallet.accounts.lock())[&0].external_addresses_number,
+        _ => unreachable!("an HD coin"),
+    }
+}
+
+fn start_get_new_address(ctx: &MmArc, coin: &str) -> u64 {
+    use crate::rpc_command::init_get_new_address::init_get_new_address;
+
+    let request = serde_json::from_value(serde_json::json!({ "coin": coin, "account_id": 0 })).unwrap();
+    block_on(init_get_new_address(ctx.clone(), request))
+        .unwrap_or_else(|e| panic!("init failed: {}", e))
+        .task_id
+}
+
+/// Waits until the device shows the address and returns the `expected_address` of the status.
+fn wait_for_confirm_address(ctx: &MmArc, task_id: u64) -> String {
+    let status = wait_for_status(ctx, task_id, Duration::from_secs(60), |status| {
+        status["status"] == "InProgress" && status["details"].get("ConfirmAddress").is_some()
+    });
+    status["details"]["ConfirmAddress"]["expected_address"]
+        .as_str()
+        .expect("the expected address")
+        .to_owned()
+}
+
+fn wait_for_end(ctx: &MmArc, task_id: u64, timeout: Duration) -> serde_json::Value {
+    wait_for_status(ctx, task_id, timeout, |status| {
+        matches!(status["status"].as_str(), Some("Ok") | Some("Error"))
+    })
+}
+
+/// T49.37 for a UTXO coin (CRD ch.49 R49.39, R49.40, R49.42): the device is asked with the coin's `trezor_coin` and
+/// the script type of its address format (a wrong pair would show another address), the status shows the address the
+/// daemon derived, nothing is recorded before the button, and the press completes the task with that address. The
+/// node is a Bitcoin-style stub that answers an empty `listunspent`. Needs the emulator.
+#[test]
+fn emulator_trezor_get_new_address_utxo_shows_the_address_and_records_it_after_the_button() {
+    if !emulator_available("emulator_trezor_get_new_address_utxo_shows_the_address_and_records_it_after_the_button") {
+        return;
+    }
+    emulator_setup();
+    let material = fetch_device_material();
+    let ctx = ctx_with_hw(material.client.clone(), material.internal_pubkey);
+    let node = spawn_empty_utxo_node();
+    let coin = trezor_utxo_coin_with_storage(&ctx, &material, node.url.clone());
+    assert_eq!(known_utxo_external_addresses(&coin), 1);
+
+    let task_id = start_get_new_address(&ctx, "KMD");
+    let expected = wait_for_confirm_address(&ctx, task_id);
+    assert!(expected.starts_with('R'), "a Komodo address: {expected}");
+    assert_eq!(
+        known_utxo_external_addresses(&coin),
+        1,
+        "nothing is recorded before the confirmation"
+    );
+
+    let _confirm = ConfirmLoop::spawn(60);
+    let status = wait_for_end(&ctx, task_id, Duration::from_secs(60));
+    assert_eq!(status["status"], "Ok", "{status}");
+    let new_address = &status["details"]["new_address"];
+    assert_eq!(new_address["address"], expected.as_str());
+    assert_eq!(new_address["derivation_path"], "m/44'/141'/0'/0/1");
+    assert_eq!(new_address["chain"], "External");
+    assert_eq!(
+        new_address["balance"],
+        serde_json::json!({ "KMD": { "spendable": "0", "unspendable": "0" } })
+    );
+    assert_eq!(
+        known_utxo_external_addresses(&coin),
+        2,
+        "the address is recorded after the press"
+    );
+}
+
+/// T49.38, the refusal (CRD ch.49 R49.41 item 4, ch.05 R35c): the user presses "no" on the device while it shows the
+/// address. The task ends with `HwError` `UserCancelled` and the known count is unchanged. The controller's NO button
+/// is `DebugLinkDecision` with `DebugButton.NO`. Needs the emulator.
+///
+/// `#[ignore]`d: on the pinned T2T1 emulator (`2-main`) the "Receive address" screen has a single confirm button and
+/// no cancel. The debug link's NO opens an "Address mismatch?" screen (a back button and a "Quit" button); YES there
+/// ("Quit") ends the emulator process, so the host never gets `UserCancelled`. The refusal is
+/// open, to be checked by hand on a Trezor (CRD ch.49 T49.38 as-built note). Run with `--ignored` to see it.
+#[test]
+#[ignore = "the T2T1 emulator's address screen has no cancel: NO opens an Address mismatch screen whose Quit ends the emulator (T49.38)"]
+fn emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled() {
+    if !emulator_available("emulator_trezor_get_new_address_refused_on_the_device_is_user_cancelled") {
+        return;
+    }
+    emulator_setup();
+    let material = fetch_device_material();
+    let ctx = ctx_with_hw(material.client.clone(), material.internal_pubkey);
+    let node = spawn_mock_node("0x56bc75e2d63100000", "0x0", "0x0");
+    let platform = trezor_platform_with_storage(&ctx, &material, node.url.clone());
+
+    let task_id = start_get_new_address(&ctx, "ETH");
+    wait_for_confirm_address(&ctx, task_id);
+
+    let _refuse = ConfirmLoop::spawn_deciding(60, "no");
+    let status = wait_for_end(&ctx, task_id, Duration::from_secs(60));
+    assert_eq!(status["status"], "Error", "{status}");
+    assert_eq!(status["details"]["error_type"], "HwError", "{status}");
+    assert_eq!(status["details"]["error_data"], "UserCancelled", "{status}");
+    assert_eq!(
+        known_external_addresses(&platform),
+        1,
+        "the refused address is not recorded"
+    );
+}
+
+/// T49.38, another seed (CRD ch.05 R58a): the emulator is wiped and loaded with another seed after the coin was
+/// activated. The device-identity check ends the task with `HwError` `FoundUnexpectedDevice` before the address is
+/// shown, and the known count is unchanged. The reconnect the check triggers reaches the emulator through the
+/// `TREZOR_EMULATOR_UDP` shim, so the test needs that variable; CI sets it, so the check never skips there.
+#[test]
+fn emulator_trezor_get_new_address_another_seed_is_found_unexpected_device() {
+    if !emulator_available("emulator_trezor_get_new_address_another_seed_is_found_unexpected_device") {
+        return;
+    }
+    if std::env::var("TREZOR_EMULATOR_UDP")
+        .map(|v| v.is_empty())
+        .unwrap_or(true)
+    {
+        println!("SKIP emulator_trezor_get_new_address_another_seed_is_found_unexpected_device: TREZOR_EMULATOR_UDP is not set");
+        return;
+    }
+    emulator_setup();
+    // Restore the clean SLIP-14 state on the way out (even on panic).
+    let _restore = Slip14Restore;
+    let material = fetch_device_material();
+    let ctx = ctx_with_hw(material.client.clone(), material.internal_pubkey);
+    let node = spawn_mock_node("0x56bc75e2d63100000", "0x0", "0x0");
+    let platform = trezor_platform_with_storage(&ctx, &material, node.url.clone());
+
+    emulator_setup_with_mnemonic(
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+
+    let task_id = start_get_new_address(&ctx, "ETH");
+    let status = wait_for_end(&ctx, task_id, Duration::from_secs(90));
+    assert_eq!(status["status"], "Error", "{status}");
+    assert_eq!(status["details"]["error_type"], "HwError", "{status}");
+    assert_eq!(status["details"]["error_data"], "FoundUnexpectedDevice", "{status}");
+    assert_eq!(known_external_addresses(&platform), 1);
+}
+
+/// Answers every passphrase request of the task in turn with the next of `passphrases` (the last one repeats), and
+/// starts a confirm loop after the first answer, as the withdraw driver does. Returns the terminal status and the
+/// number of passphrase requests seen.
+fn drive_with_passphrases(
+    ctx: &MmArc,
+    task_id: u64,
+    passphrases: &[&str],
+    timeout: Duration,
+) -> (serde_json::Value, usize) {
+    use crate::rpc_command::init_get_new_address::init_get_new_address_user_action;
+
+    let start = Instant::now();
+    let mut answered = 0usize;
+    let mut answer_pending = false;
+    let mut confirm: Option<ConfirmLoop> = None;
+    loop {
+        let status = get_new_address_status(ctx, task_id).expect("the task exists");
+        if matches!(status["status"].as_str(), Some("Ok") | Some("Error")) {
+            return (status, answered);
+        }
+        let awaiting = status["status"] == "UserActionRequired" && status["details"] == "EnterTrezorPassphrase";
+        if !awaiting {
+            answer_pending = false;
+        } else if !answer_pending {
+            let passphrase = passphrases[answered.min(passphrases.len() - 1)];
+            let request = serde_json::from_value(serde_json::json!({
+                "task_id": task_id,
+                "user_action": { "action_type": "TrezorPassphrase", "passphrase": passphrase }
+            }))
+            .unwrap();
+            block_on(init_get_new_address_user_action(ctx.clone(), request))
+                .unwrap_or_else(|e| panic!("the passphrase was refused: {}", e));
+            answered += 1;
+            answer_pending = true;
+            if confirm.is_none() {
+                confirm = Some(ConfirmLoop::spawn(120));
+            }
+        }
+        assert!(start.elapsed() < timeout, "the task did not end in {timeout:?}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// T49.38, the mismatch (decision: `DeviceAddressMismatch`). The same device answers for another passphrase than the
+/// one the coin was activated with. The task opens a device session twice (the identity check, then the address
+/// request) and the device asks for the passphrase in each, so the first is answered with the activation's
+/// passphrase (the check passes) and the second with another one: the device shows the address of the other hidden
+/// wallet, and after the button the task ends with `DeviceAddressMismatch` naming both addresses. The count is
+/// unchanged. If the device asks only once the task completes and the test fails with that message. Needs the
+/// emulator.
+#[test]
+fn emulator_trezor_get_new_address_another_passphrase_is_a_device_address_mismatch() {
+    if !emulator_available("emulator_trezor_get_new_address_another_passphrase_is_a_device_address_mismatch") {
+        return;
+    }
+    emulator_setup_passphrase();
+    // Restore the clean SLIP-14 state on the way out (even on panic).
+    let _restore = Slip14Restore;
+
+    let material = fetch_device_material_with_passphrase("pp-one");
+    let ctx = ctx_with_hw(material.client.clone(), material.internal_pubkey);
+    let node = spawn_mock_node("0x56bc75e2d63100000", "0x0", "0x0");
+    let platform = trezor_platform_with_storage(&ctx, &material, node.url.clone());
+
+    let task_id = start_get_new_address(&ctx, "ETH");
+    let (status, requests) = drive_with_passphrases(&ctx, task_id, &["pp-one", "pp-two"], Duration::from_secs(180));
+    let ended_in_error = status["status"] == "Error";
+    assert!(
+        ended_in_error,
+        "the task did not end in an error; a mismatch needs a second passphrase request"
+    );
+    assert!(
+        requests >= 2,
+        "the device asked for the passphrase fewer than two times"
+    );
+    assert_eq!(
+        status["details"]["error_type"], "DeviceAddressMismatch",
+        "the task ended with another error type"
+    );
+    let data = &status["details"]["error_data"];
+    let expected = data["expected_address"].as_str().expect("the expected address");
+    let device = data["device_address"].as_str().expect("the device's address");
+    let addresses_differ = !expected.eq_ignore_ascii_case(device);
+    assert!(addresses_differ, "the two addresses do not differ");
+    assert_eq!(known_external_addresses(&platform), 1, "nothing is recorded");
+}
+
+/// T49.38, a failing balance query after the confirmation (CRD ch.49 R49.37 item 3, R49.40 item 3): the node answers
+/// an error to the balance read once the button is pressed. The task ends with `Transport`, and the address stays
+/// known (the count is raised: no rollback). Needs the emulator.
+#[test]
+fn emulator_trezor_get_new_address_a_failing_balance_query_leaves_the_address_known() {
+    if !emulator_available("emulator_trezor_get_new_address_a_failing_balance_query_leaves_the_address_known") {
+        return;
+    }
+    emulator_setup();
+    let material = fetch_device_material();
+    let ctx = ctx_with_hw(material.client.clone(), material.internal_pubkey);
+    let node = spawn_failing_node();
+    let platform = trezor_platform_with_storage(&ctx, &material, node.url.clone());
+
+    let task_id = start_get_new_address(&ctx, "ETH");
+    wait_for_confirm_address(&ctx, task_id);
+    assert_eq!(known_external_addresses(&platform), 1);
+
+    let _confirm = ConfirmLoop::spawn(60);
+    let status = wait_for_end(&ctx, task_id, Duration::from_secs(120));
+    assert_eq!(status["status"], "Error", "{status}");
+    assert_eq!(status["details"]["error_type"], "Transport", "{status}");
+    assert_eq!(
+        known_external_addresses(&platform),
+        2,
+        "the address stays known after the failed balance query"
     );
 }
