@@ -6,8 +6,9 @@
 
 The chain reads that a refund step or a secret-using step rests on must agree between two nodes of the coin's
 node pool, or come from the node the operator trusts. An undetermined read makes the step wait; it never refunds
-or claims on it, and a running swap waits at most until its refund deadline. This plan brings the version 2 swap
-state machines (`lp_swap/maker_swap_v2.rs`, `lp_swap/taker_swap_v2.rs`) and their coin methods to that rule.
+or claims on it, and a running swap's wait has the bound of R100 item 9 with both its status notes of 2026-11-23.
+This plan brings the version 2 swap state machines (`lp_swap/maker_swap_v2.rs`, `lp_swap/taker_swap_v2.rs`) and
+their coin methods to that rule.
 
 ## Starting point (dev, 2026-11-23)
 
@@ -33,5 +34,8 @@ state machines (`lp_swap/maker_swap_v2.rs`, `lp_swap/taker_swap_v2.rs`) and thei
   - R100 binds swap protocol v2 in 0.5.0, in full.
   - `recover_funds_of_swap` also accepts a v2 swap and runs its refund again with fresh agreeing reads.
   - The taker's immediate funding refund counts as a secret-using step under R100. It waits for an agreeing
-    "funding not spent". After the funding locktime it takes the timelock branch, after an agreeing gate read. Its
-    bound is the funding locktime plus 3700 seconds; then it ends as above.
+    "funding not spent". After the funding locktime it takes the timelock branch, after an agreeing gate read; then
+    it ends as above.
+  - Every v2 wait, the taker's funding refund included, has the bound of R100 item 9 with both its status notes of
+    2026-11-23, as the legacy path: the later of the lock time plus 3700 seconds and 3700 seconds after the step
+    first could act.
