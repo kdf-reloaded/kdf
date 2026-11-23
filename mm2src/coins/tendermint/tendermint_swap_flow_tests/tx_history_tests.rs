@@ -2740,10 +2740,26 @@ fn seed_store(fx: &Fixture) -> SqliteTxHistoryStorage {
     storage
 }
 
-/// Stops a scripted node: its port stops accepting connections.
+/// Stops a scripted node and waits until its listener is closed: its port stops accepting connections. On Linux
+/// the port stays reserved, and refuses connections, until the node is dropped (see [`FakeNode`]).
 fn refuse_connections(node: &FakeNode) {
     node.stop.store(true, Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(100));
+    // A hang-up means the accept loop ended earlier.
+    if let Err(RecvTimeoutError::Timeout) = node.stopped.lock().unwrap().recv_timeout(Duration::from_secs(5)) {
+        panic!("the scripted node did not stop accepting connections within 5 s");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stopped_node_refuses_connections_and_keeps_its_port() {
+    let node = FakeNode::start();
+    TcpStream::connect(("127.0.0.1", node.port)).expect("a running node accepts");
+    refuse_connections(&node);
+    let connect = TcpStream::connect(("127.0.0.1", node.port));
+    assert_eq!(connect.err().map(|e| e.kind()), Some(ErrorKind::ConnectionRefused));
+    let bind = TcpListener::bind(("127.0.0.1", node.port));
+    assert_eq!(bind.err().map(|e| e.kind()), Some(ErrorKind::AddrInUse));
 }
 
 fn versioned_error(fx: &Fixture, coin: &str) -> MyTxHistoryErrorV2 {
