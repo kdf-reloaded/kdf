@@ -55,6 +55,9 @@ pub struct SolanaCompatPlatformRequest {
     path_to_address: Option<Json>,
     #[serde(default)]
     priv_key_policy: Option<PrivKeyActivationPolicy>,
+    /// The one node whose reads decide the refund and secret steps of a swap (CRD ch.40 R40.6D.16); one of `nodes`.
+    #[serde(default)]
+    swap_evidence_node: Option<String>,
 }
 
 impl SolanaCompatPlatformRequest {
@@ -62,7 +65,8 @@ impl SolanaCompatPlatformRequest {
     fn into_shared(self) -> SolanaWithTokensActivationRequest {
         let urls = self.nodes.iter().map(|node| node.url.as_str().to_owned()).collect();
         SolanaWithTokensActivationRequest {
-            platform_request: SolanaActivationParams::without_commitment(urls),
+            platform_request: SolanaActivationParams::without_commitment(urls)
+                .with_swap_evidence_node(self.swap_evidence_node),
             spl_tokens_requests: self
                 .tokens_params
                 .into_iter()

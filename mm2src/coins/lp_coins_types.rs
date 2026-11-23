@@ -119,6 +119,8 @@ pub enum TransactionEnum {
     ZTransaction(ZTransaction),
     SiaTransaction(siacoin::SiaTransaction),
     CosmosTransaction(tendermint::CosmosTransaction),
+    /// A Solana wire transaction (CRD ch.40 R40.6D.9): the swap's payment, claim, refund and dex fee.
+    SolanaTransaction(solana::SolanaSwapTx),
 }
 ifrom!(TransactionEnum, UtxoTx);
 ifrom!(TransactionEnum, SignedEthTx);
@@ -126,6 +128,9 @@ ifrom!(TransactionEnum, SignedEthTx);
 ifrom!(TransactionEnum, ZTransaction);
 impl From<siacoin::SiaTransaction> for TransactionEnum {
     fn from(t: siacoin::SiaTransaction) -> TransactionEnum { TransactionEnum::SiaTransaction(t) }
+}
+impl From<solana::SolanaSwapTx> for TransactionEnum {
+    fn from(t: solana::SolanaSwapTx) -> TransactionEnum { TransactionEnum::SolanaTransaction(t) }
 }
 impl From<tendermint::CosmosTransaction> for TransactionEnum {
     fn from(t: tendermint::CosmosTransaction) -> TransactionEnum { TransactionEnum::CosmosTransaction(t) }
@@ -140,6 +145,7 @@ impl Deref for TransactionEnum {
             TransactionEnum::ZTransaction(ref t) => t,
             TransactionEnum::SiaTransaction(ref t) => t,
             TransactionEnum::CosmosTransaction(ref t) => t,
+            TransactionEnum::SolanaTransaction(ref t) => t,
         }
     }
 }
