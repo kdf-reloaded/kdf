@@ -177,19 +177,26 @@ fn parse_node(addr: &str) -> Option<(String, Option<u16>)> {
 /// [`parse_node`] with the default port of an `http`, `https`, `ws` or `wss` scheme when none is written.
 fn host_and_port(addr: &str) -> Option<(String, Option<u16>)> {
     let (host, port) = parse_node(addr)?;
-    let port = port.or_else(|| match addr.trim().split_once("://").map(|(scheme, _)| scheme) {
-        Some("https") | Some("wss") => Some(443),
-        Some("http") | Some("ws") => Some(80),
-        _ => None,
+    let port = port.or_else(|| {
+        match addr
+            .trim()
+            .split_once("://")
+            .map(|(scheme, _)| scheme.to_ascii_lowercase())
+        {
+            Some(scheme) if scheme == "https" || scheme == "wss" => Some(443),
+            Some(scheme) if scheme == "http" || scheme == "ws" => Some(80),
+            _ => None,
+        }
     });
     Some((host, port))
 }
 
-/// The form in which an error or a log line names a node: `host[:port]`, lowercased, the port only when the address
-/// writes one. A scheme, userinfo, path and query (which may hold a credential) are dropped; an address with no host
+/// The form in which an error or a log line names a node, and in which a node is compared with the trusted node:
+/// `host[:port]`, lowercased, with the port the address writes or else the default of its scheme (`https`/`wss` 443,
+/// `http`/`ws` 80); an Electrum `host:port` or a bare host is unchanged. A scheme, userinfo, path and query (which may hold a credential) are dropped; an address with no host
 /// is rendered as [`crate::node_url::UNNAMED_NODE`].
 pub fn node_name(addr: &str) -> String {
-    match parse_node(addr) {
+    match host_and_port(addr) {
         Some((host, Some(port))) => format!("{host}:{port}"),
         Some((host, None)) => host,
         None => crate::node_url::UNNAMED_NODE.to_owned(),
@@ -391,7 +398,7 @@ where
         },
         SwapEvidencePolicy::Trusted { node } => (
             (0..nodes.len())
-                .filter(|index| node_matches(node, &labels[*index]))
+                .filter(|index| node_name(node) == node_name(&labels[*index]))
                 .collect(),
             1,
             UndeterminedReason::TrustedNodeSilent,
@@ -558,7 +565,34 @@ mod tests {
             !wire.contains("secret") && !wire.contains("KEY"),
             "the wire form carries a credential"
         );
-        assert_eq!(node_name("HTTPS://Node.Example.com/v3/KEY"), "node.example.com");
+        assert_eq!(node_name("HTTPS://Node.Example.com/v3/KEY"), "node.example.com:443");
+    }
+
+    /// One rule for the field match and the Trusted selection: the scheme's default port is written by `node_name`.
+    #[test]
+    fn node_name_writes_the_default_port_of_a_scheme() {
+        assert_eq!(node_name("https://a.example/x"), "a.example:443");
+        assert_eq!(node_name("wss://a.example/ws"), "a.example:443");
+        assert_eq!(node_name("http://a.example"), "a.example:80");
+        assert_eq!(node_name("https://a.example:8545"), "a.example:8545");
+        assert_eq!(node_name("a.example:50002"), "a.example:50002");
+        assert_eq!(node_name("A.Example"), "a.example");
+    }
+
+    /// A trusted https node without a port is found by its own label.
+    #[test]
+    fn agree_trusted_node_without_a_port_matches_its_label() {
+        let entry = "https://walletd.example/";
+        let policy = SwapEvidencePolicy::Trusted { node: entry.to_owned() };
+        let label = node_name(entry);
+        assert_eq!(label, "walletd.example:443");
+        let script: Script = vec![("other.example:443", Ok("none")), ("walletd.example:443", Ok("spent"))];
+        let (outcome, asked) = run(policy, &script, &[]);
+        assert_eq!(outcome, Agreement::Agreed {
+            answer: "spent",
+            decision: "spent".to_owned()
+        });
+        assert_eq!(asked, vec![label]);
     }
 
     #[test]
