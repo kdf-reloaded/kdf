@@ -305,11 +305,15 @@ pub fn undetermined(reason: &str, nodes: &[&str]) -> String {
 }
 
 /// The only test of an error text for an undetermined read. It looks for the prefix anywhere in the text, because
-/// `try_s!` and `ERR!` put a `file:line]` in front of it.
+/// `try_s!` and `ERR!` put a `file:line]` in front of it. It matches the prefix anywhere, so a lower-layer error
+/// that quotes it counts as undetermined; that errs toward waiting, the safe side.
 pub fn is_undetermined(err: &str) -> bool { err.contains(UNDETERMINED_PREFIX) }
 
 impl Undetermined {
-    /// The error text of this read, built by [`undetermined`]: the reason and the node labels.
+    /// The error text of this read: [`UNDETERMINED_PREFIX`], the reason, and what each node said, as
+    /// `(label: summary; label: summary)`. A summary is the decision or the fixed error text of the node's `ask`,
+    /// which carries no URL or credential by the contract of [`agree`]. [`undetermined`] builds the labels-only form
+    /// for callers without an `Undetermined` value; both start with the prefix.
     pub fn to_err_string(&self) -> String {
         let reason = match self.reason {
             UndeterminedReason::Disagree => "the nodes disagree",
@@ -317,8 +321,15 @@ impl Undetermined {
             UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
             UndeterminedReason::TipGap => "the tips of the nodes differ too much",
         };
-        let labels: Vec<&str> = self.per_node.iter().map(|(label, _)| label.as_str()).collect();
-        undetermined(reason, &labels)
+        if self.per_node.is_empty() {
+            return format!("{UNDETERMINED_PREFIX}{reason}");
+        }
+        let nodes: Vec<String> = self
+            .per_node
+            .iter()
+            .map(|(label, summary)| format!("{label}: {summary}"))
+            .collect();
+        format!("{UNDETERMINED_PREFIX}{reason} ({})", nodes.join("; "))
     }
 }
 
@@ -609,6 +620,22 @@ mod tests {
         };
         assert!(is_undetermined(&read.to_err_string()));
         assert_eq!(read.to_string(), read.to_err_string());
+        // the long form carries what each node said
+        let disagree = Undetermined {
+            reason: UndeterminedReason::Disagree,
+            per_node: vec![
+                ("a:1".to_owned(), "Claimed".to_owned()),
+                ("b:2".to_owned(), "NotSpent".to_owned()),
+            ],
+        };
+        let long = disagree.to_err_string();
+        assert_eq!(
+            long,
+            "swap evidence undetermined: the nodes disagree (a:1: Claimed; b:2: NotSpent)"
+        );
+        assert_eq!(disagree.to_string(), long);
+        assert!(is_undetermined(&long));
+        assert!(is_undetermined(&format!("x.rs:1] {long}")));
     }
 
     #[test]
