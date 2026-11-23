@@ -1370,6 +1370,9 @@ the previous version used. The safe way:
   standalone-coin family are built only for native targets, like the test helpers they use. A new CI job,
   `wasm32-test-check`, compiles the test code of `coins_activation`, `coins` and `mm2_main` for wasm32 and is part
   of the required `tests-passed` check. Only test code and CI changed. Detail: PR #511.
+- **The Windows CI jobs install a pinned protoc.** The Windows test job and the Windows build download protoc
+  27.3, check the archive's SHA-256, set `PROTOC` and check the version before the build, instead of installing
+  it through a package manager whose path update the build did not always see. Only CI changed. Detail: PR #517.
 
 ### Plans touched
 
