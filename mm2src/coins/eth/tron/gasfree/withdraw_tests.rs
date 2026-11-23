@@ -21,6 +21,7 @@ use super::binding::{gasfree_custody_address, GasFreeBinding};
 use super::networks::gasfree_network;
 use super::test_vectors::USERS;
 use super::withdraw::{submit, track, MIN_POLL_INTERVAL_MS, SETTLEMENT_GRACE_MS};
+use crate::closed_port::closed_url;
 use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
 use crate::eth::eth_tests::eth_coin_for_test;
 use crate::eth::{EthCoin, EthCoinType, EvmWithdrawSender};
@@ -1650,13 +1651,8 @@ fn t11_each_provider_failure_collapses_onto_its_arm() {
     let error = slow.refused(gasless(json!({})));
     assert!(matches!(error, WithdrawError::Transport(_)), "the timeout");
     assert_eq!(error.status_code().as_u16(), 502);
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("a loopback port")
-        .local_addr()
-        .expect("a local address")
-        .port();
     let unreachable = Lab::new(Setup {
-        provider_url: Some(format!("http://127.0.0.1:{port}")),
+        provider_url: Some(closed_url()),
         ..Setup::usual()
     });
     let error = unreachable.refused(gasless(json!({})));

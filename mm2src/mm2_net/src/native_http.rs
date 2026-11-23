@@ -270,6 +270,11 @@ mod tests {
         assert!(status.is_success(), "the request did not succeed");
     }
 
+    /// A loopback port on which nothing listens and which no stub server of a test can be given: the operating
+    /// system never hands out a port below 1024 for a bind to port 0, and nothing listens on port 1 of a build
+    /// host. A connection to it is refused at once.
+    const CLOSED_PORT: u16 = 1;
+
     /// Serves one canned HTTP/1.1 response on a loopback port and returns the port.
     fn serve_once(response: &'static [u8]) -> u16 {
         use std::io::{Read, Write};
@@ -297,12 +302,7 @@ mod tests {
 
     #[test]
     fn test_slurp_reports_the_cause_of_a_connect_failure() {
-        // Reserve a port and close it again, so that nothing listens there.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = CLOSED_PORT;
         let err = block_on(slurp_url(&format!("http://127.0.0.1:{port}/"))).unwrap_err();
         match err.into_inner() {
             SlurpError::Transport { error, .. } => {
@@ -556,12 +556,7 @@ mod tests {
 
     #[test]
     fn test_get_with_headers_names_no_header_value_when_nothing_listens() {
-        // Reserve a port and close it again, so that nothing listens there.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = CLOSED_PORT;
         let mut headers = http::HeaderMap::new();
         headers.insert("authorization", "ApiKey bob:hunter2".parse().unwrap());
         let err = block_on(super::slurp_url_with_headers_bounded(
@@ -760,12 +755,7 @@ mod tests {
     /// handshake against a plain-text peer) is the path on which they could repeat the URL.
     #[test]
     fn test_a_slurp_error_names_the_host_only_and_so_does_the_error_chain_under_it() {
-        // Nothing listens on the port.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = CLOSED_PORT;
         let request = || {
             http::Request::builder()
                 .uri(secret_url("http", port))
