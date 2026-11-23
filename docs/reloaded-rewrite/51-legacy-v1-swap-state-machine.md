@@ -655,6 +655,32 @@ locktime.
 > classification, and its difference from the baseline anchor, is §51.6E R90
 > items 2 and 5.
 
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100 a look lets the chain
+> continue only when it is a determined "not spent". A search that fails, or
+> does not finish within its bound, leaves the look undetermined. A spend that
+> the search on every server (status note of 2026-11-21) finds on one server is
+> handled on that one answer when its secret matches the swap's secret hash
+> (R100 item 3); a refund, or a spend whose secret does not match, found there
+> on one server is not acted on, and the look is undetermined. A spend found by
+> the coin's own search whose secret cannot be extracted continues as R31
+> states, unless the read behind it was undetermined. While the look is
+> undetermined the chain waits: it builds no refund, it does not emit
+> `TakerPaymentRefundFailed` after a rejection, and it looks again after the
+> chain's retry wait (30 seconds in the node), writing one warning, which names
+> the fix when the read is undetermined under R100. The look also runs at a
+> fourth point: each time the refundability check answers that the refund can be
+> sent, before the refund is built, which happens only after a determined "not
+> spent". An undetermined answer of the refundability check is retried the same
+> way. A look or a refundability check that is still undetermined at the
+> deadline of R100 item 9 ends the chain as chapter 51 R100 item 9 and its
+> status notes of 2026-11-23 state: the later of the taker payment's lock time
+> plus 3700 seconds and 3700 seconds after the refund step, in its current run,
+> first could act (the refundability check first answered that the refund can be
+> sent, or the check or a look first gave an undetermined answer at or after the
+> lock time). The event set, the resume map of R32 and the persisted log shape
+> are unchanged.
+
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
 stages.
@@ -3515,6 +3541,11 @@ reference rows alike.
   the maintainer's decision of 2026-11-22, the cleared §51.6E and this
   workspace's own QRC20 search code; no other reference input was consulted,
   the note makes no parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-23: the status note after the 2026-11-22 pointer
+  under R31a is a Reloaded addition written in a clean session from the
+  maintainer's decisions of 2026-11-22 and 2026-11-23, §51.6G and this
+  workspace's own refund chain code; no reference input was consulted, the
+  note makes no parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
