@@ -592,6 +592,7 @@ impl Lab {
                 required_confirmations: 1,
                 tx_history: false,
                 gasfree,
+                swap_contracts: None,
             };
             let conf = crate::coin_conf(&ctx, "TRX");
             let protocol = CoinProtocol::TRX { network: Network::Nile };

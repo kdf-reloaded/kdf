@@ -4,6 +4,7 @@
 //! # Sub-modules
 //! - `rpc_client` — KDF-original async JSON-RPC client (P14).
 //! - `rpc_pool` — failover-aware multi-endpoint dispatch layer (P14.11).
+//! - `swap_program`, `swap_decode`, `swap_sol` — the SOL legs of the legacy swap (CRD ch.40 §40.6D).
 //! - `solana_types` — constants, traits, errors, `SolanaCoin` struct.
 //! - `solana_common` — shared transfer/balance helpers.
 //! - `solana_helpers` — inherent methods on `SolanaCoin`.
@@ -83,5 +84,12 @@ mod solana_market_ops;
 mod solana_mm_coin;
 mod solana_swap_ops;
 mod solana_types;
+mod swap_decode;
+pub mod swap_program;
+mod swap_sol;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod swap_sol_tests;
+pub use swap_program::WalletOnlyReason;
+pub use swap_sol::{SolanaSwapConfig, SolanaSwapTx, SwapProgramState, SwapSide};
 
 pub use solana_types::*;
