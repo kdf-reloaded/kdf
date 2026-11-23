@@ -913,7 +913,7 @@ the previous version used. The safe way:
   search for the spend of the taker funding treats an unreachable node, or a node answer that cannot be decoded, as
   a passing error on every coin family and searches again after 30 seconds. On EVM coins the value read from the
   spend of the taker payment is used as the secret only when its hash equals the swap's secret hash.
-  - Detail: PR #N; CRD ch.52 R18, R19, R32, R33 and their status notes of 2026-11-23, ch.51 §51.6G R100.
+  - Detail: PR #532; CRD ch.52 R18, R19, R32, R33 and their status notes of 2026-11-23, ch.51 §51.6G R100.
 
 ### Fixed
 
