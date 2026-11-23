@@ -163,8 +163,8 @@ impl SolanaActivationParams {
     pub fn swap_evidence_node(&self) -> Option<&str> { self.swap_evidence_node.as_deref() }
 
     /// The swap-evidence policy of a coin activated with these parameters (CRD ch.51 R100): over the node list, a
-    /// `swap_evidence_node` matching one entry (same host, and the same port when the field names one, the scheme
-    /// ignored) is `Trusted` with that list entry, and a field outside the list is refused.
+    /// `swap_evidence_node` matching one entry (same host; ports are compared only when both the field and the entry
+    /// have one, after scheme defaults, and the scheme itself is ignored) is `Trusted` with that list entry, and a field outside the list is refused.
     pub fn swap_evidence_policy(
         &self,
         ticker: &str,
