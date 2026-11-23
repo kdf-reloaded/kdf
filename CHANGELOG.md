@@ -1309,6 +1309,14 @@ the previous version used. The safe way:
   current run, and at least until its payment's lock time plus 3700 seconds, ends as refund failed, with a text
   that gives the reason and, for a coin on the two-node rule, the fix. Detail: PR #523; CRD ch.51, status note of
   2026-11-23 under R31a.
+- **The maker's refund, the watcher and the payment checks wait on an undetermined answer.** The maker's refund
+  waits while its look at the taker payment, or the check whether the refund is possible, does not give a
+  determined answer, with the same bound and the same kind of text as the taker's. A watcher refunds the taker
+  payment only after a search that answered that the payment is not spent. When the check of the other side's
+  payment cannot be determined, the maker and the taker repeat it until the step's existing deadline instead of
+  giving up at once. The manual recovery names the fix when its read is undetermined. Detail: PR #527; CRD ch.51,
+  status notes of 2026-11-23 after the description of the maker's validation stage, after R28 and at the end of
+  §51.6C; ch.09, status note of 2026-11-23 after §9.6.
 
 ### Tests
 
