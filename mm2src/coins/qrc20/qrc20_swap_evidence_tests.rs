@@ -380,9 +380,9 @@ async fn refund_gate_error(coin: &Qrc20Coin, locktime: u64) -> String {
 }
 
 fn assert_undetermined(text: &str, reason: &str) {
-    assert!(is_undetermined(text), "{text}");
-    assert!(text.contains(reason), "{text}");
-    assert!(!text.contains("://"), "{text}");
+    assert!(is_undetermined(text), "the text is an undetermined read");
+    assert!(text.contains(reason), "the text names the expected reason");
+    assert!(!text.contains("://"), "the text holds no URL");
 }
 
 fn me(coin: &Qrc20Coin) -> H160 { coin.my_addr_as_contract_addr().unwrap() }
@@ -438,8 +438,11 @@ fn payment_that_both_hosts_show_as_not_sent_is_refused() {
             serve_payment(server, &payment, counterparty(), REFUNDED);
         }
         let error = validate(&coin, &payment, now()).await.unwrap_err();
-        assert!(error.contains("Payment state is not PAYMENT_STATE_SENT"), "{error}");
-        assert!(!is_undetermined(&error), "{error}");
+        assert!(
+            error.contains("Payment state is not PAYMENT_STATE_SENT"),
+            "the error names the payment state"
+        );
+        assert!(!is_undetermined(&error), "the error is not an undetermined read");
     });
 }
 
@@ -487,7 +490,10 @@ fn confirmation_wait_fails_when_both_hosts_show_the_call_as_failed() {
             .wait_for_confirmations_and_check_result(payment.clone(), 1, false, now() + 20, 1)
             .await
             .unwrap_err();
-        assert!(error.contains("Contract call failed with an error: Revert"), "{error}");
+        assert!(
+            error.contains("Contract call failed with an error: Revert"),
+            "the error names the failed contract call"
+        );
     });
 }
 
@@ -685,13 +691,19 @@ fn spend_wait_runs_to_its_deadline_on_not_spent_and_on_an_undetermined_read() {
             .wait_for_tx_spend_impl(payment.clone(), now(), 0)
             .await
             .unwrap_err();
-        assert!(error.contains("Waited too long"), "{error}");
+        assert!(
+            error.contains("Waited too long"),
+            "the error is the deadline of the wait"
+        );
         silence(hosts.b());
         let error = coin
             .wait_for_tx_spend_impl(payment.clone(), now(), 0)
             .await
             .unwrap_err();
-        assert!(error.contains("Waited too long"), "{error}");
+        assert!(
+            error.contains("Waited too long"),
+            "the error is the deadline of the wait"
+        );
     });
 }
 
@@ -725,7 +737,10 @@ fn the_makers_claim_rests_on_an_agreed_payment_state_and_the_takers_claim_is_not
             )
             .await;
         if let Err(error) = outcome {
-            assert!(!is_undetermined(&format!("{:?}", error)), "{:?}", error);
+            assert!(
+                !is_undetermined(&format!("{:?}", error)),
+                "the claim does not end as an undetermined read"
+            );
         }
     });
 }
@@ -912,11 +927,23 @@ fn one_capable_host_refuses_with_the_text_naming_the_hosts() {
             hosts: 1
         });
         let refusal = coin.swap_evidence_refusal().unwrap();
-        assert!(refusal.contains("blockchain.contract.event.get_history"), "{refusal}");
-        assert!(refusal.contains(&format!("served: {}", hosts.name(0))), "{refusal}");
-        assert!(refusal.contains(&format!("not served: {}", hosts.name(1))), "{refusal}");
-        assert!(refusal.contains("swap_evidence_node"), "{refusal}");
-        assert!(!refusal.contains("://"), "{refusal}");
+        assert!(
+            refusal.contains("blockchain.contract.event.get_history"),
+            "the refusal names the method"
+        );
+        assert!(
+            refusal.contains(&format!("served: {}", hosts.name(0))),
+            "the refusal lists the host that served the request"
+        );
+        assert!(
+            refusal.contains(&format!("not served: {}", hosts.name(1))),
+            "the refusal lists the host that did not serve the request"
+        );
+        assert!(
+            refusal.contains("swap_evidence_node"),
+            "the text names swap_evidence_node"
+        );
+        assert!(!refusal.contains("://"), "the refusal holds no URL");
 
         // A running swap of such a coin waits: its reads are undetermined.
         let payment = payment_tx(&coin, me(&coin));
@@ -1011,7 +1038,7 @@ fn an_error_answer_to_the_event_history_does_not_count() {
             hosts: 0
         });
         let refusal = coin.swap_evidence_refusal().unwrap();
-        assert!(refusal.contains("served: none"), "{refusal}");
+        assert!(refusal.contains("served: none"), "the refusal lists no host as served");
     });
 }
 
@@ -1032,11 +1059,17 @@ fn a_trusted_host_needs_the_capability_too() {
         let refusal = coin.swap_evidence_refusal().unwrap();
         assert!(
             refusal.contains(&format!("trusted Electrum server {}", hosts.name(0))),
-            "{refusal}"
+            "the refusal names the trusted host"
         );
-        assert!(refusal.contains("blockchain.contract.event.get_history"), "{refusal}");
-        assert!(refusal.contains("swap_evidence_node"), "{refusal}");
-        assert!(!refusal.contains("://"), "{refusal}");
+        assert!(
+            refusal.contains("blockchain.contract.event.get_history"),
+            "the refusal names the method"
+        );
+        assert!(
+            refusal.contains("swap_evidence_node"),
+            "the text names swap_evidence_node"
+        );
+        assert!(!refusal.contains("://"), "the refusal holds no URL");
         // A running swap's reads wait meanwhile.
         let payment = payment_tx(&coin, me(&coin));
         for server in hosts.both() {
@@ -1080,7 +1113,7 @@ fn a_trusted_host_that_answers_the_event_history_with_an_error_is_refused() {
         let refusal = coin.swap_evidence_refusal().unwrap();
         assert!(
             refusal.contains(&format!("trusted Electrum server {}", hosts.name(0))),
-            "{refusal}"
+            "the refusal names the trusted host"
         );
         // The refusals asked for a new probe, which is bounded to once a minute for the host, and the other host is
         // never probed.
@@ -1112,8 +1145,14 @@ fn two_ports_of_one_host_count_once() {
             hosts: 1
         });
         let refusal = coin.swap_evidence_refusal().unwrap();
-        assert!(refusal.contains("fewer than two nodes"), "{refusal}");
-        assert!(refusal.contains("swap_evidence_node"), "{refusal}");
+        assert!(
+            refusal.contains("fewer than two nodes"),
+            "the refusal says that the coin has fewer than two nodes"
+        );
+        assert!(
+            refusal.contains("swap_evidence_node"),
+            "the text names swap_evidence_node"
+        );
         Timer::sleep(0.3).await;
         assert_eq!(hosts.a().requests(GET_HISTORY), 0);
         assert_eq!(hosts.b().requests(GET_HISTORY), 0);
@@ -1146,13 +1185,22 @@ fn an_undetermined_qrc20_read_carries_the_prefix_and_names_hosts_only() {
         }
         serve_refund(hosts.b(), &refund_tx(&coin, me(&coin)));
         let error = search(&coin, &payment).await.unwrap_err();
-        assert!(error.starts_with(PREFIX), "{error}");
-        assert!(error.contains(&hosts.name(0)), "{error}");
-        assert!(error.contains(&hosts.name(1)), "{error}");
+        assert!(
+            error.starts_with(PREFIX),
+            "the error starts with the marker of an undetermined read"
+        );
+        assert!(error.contains(&hosts.name(0)), "the error names the first host");
+        assert!(error.contains(&hosts.name(1)), "the error names the second host");
         for forbidden in ["://", "tcp", "ssl", "wss", "@"] {
-            assert!(!error.to_lowercase().contains(forbidden), "{forbidden} in {error}");
+            assert!(
+                !error.to_lowercase().contains(forbidden),
+                "the error holds no URL, scheme or credential mark"
+            );
         }
-        assert!(error.contains("swap_evidence_node"), "{error}");
+        assert!(
+            error.contains("swap_evidence_node"),
+            "the text names swap_evidence_node"
+        );
     });
 }
 
@@ -1166,8 +1214,11 @@ fn the_undetermined_text_is_built_from_the_undetermined_value() {
         ],
     };
     let text = undetermined_text(&undetermined);
-    assert!(is_undetermined(&text), "{text}");
-    assert!(text.contains("a.test:50001") && text.contains("b.test:50001"), "{text}");
+    assert!(is_undetermined(&text), "the text is an undetermined read");
+    assert!(
+        text.contains("a.test:50001") && text.contains("b.test:50001"),
+        "the text names both hosts"
+    );
 }
 
 #[test]

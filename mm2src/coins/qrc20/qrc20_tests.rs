@@ -40,8 +40,11 @@ fn qrc20_coin_for_test_with_decimals(priv_key: &[u8], fallback_swap: Option<&str
 /// the probe after the activation asks for (CRD ch.51 R100 item 4).
 fn wait_for_swap_admission(coin: &Qrc20Coin) {
     let started = std::time::Instant::now();
-    while let Some(refusal) = coin.swap_evidence_refusal() {
-        assert!(started.elapsed().as_secs() < 30, "{refusal}");
+    while coin.swap_evidence_refusal().is_some() {
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "the token was not admitted for swaps within 30 seconds"
+        );
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
