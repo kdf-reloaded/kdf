@@ -17,22 +17,22 @@ use mm2_core::mm_ctx::MmCtxBuilder;
 use script::{Builder, Opcode};
 use serialization::serialize;
 
-const TIME_LOCK: u32 = 100_000;
-const SECRET: [u8; 32] = [7; 32];
+pub(crate) const TIME_LOCK: u32 = 100_000;
+pub(crate) const SECRET: [u8; 32] = [7; 32];
 const HOSTS: [&str; 3] = ["127.0.0.1", "127.0.0.2", "127.0.0.3"];
 
 /// The two keys, the swap's secret hash, and the transactions of one swap payment.
-struct Swap {
-    my_pub: Vec<u8>,
-    other_pub: Vec<u8>,
-    secret_hash: Vec<u8>,
-    payment: UtxoTx,
+pub(crate) struct Swap {
+    pub(crate) my_pub: Vec<u8>,
+    pub(crate) other_pub: Vec<u8>,
+    pub(crate) secret_hash: Vec<u8>,
+    pub(crate) payment: UtxoTx,
 }
 
-fn txid_hex(tx: &UtxoTx) -> String { format!("{:?}", tx.hash().reversed()) }
+pub(crate) fn txid_hex(tx: &UtxoTx) -> String { format!("{:?}", tx.hash().reversed()) }
 
 impl Swap {
-    fn new() -> Swap {
+    pub(crate) fn new() -> Swap {
         let my = KeyPair::random_compressed();
         let other = KeyPair::random_compressed();
         let secret_hash = dhash160(&SECRET).to_vec();
@@ -60,7 +60,7 @@ impl Swap {
         }
     }
 
-    fn redeem(&self) -> Vec<u8> {
+    pub(crate) fn redeem(&self) -> Vec<u8> {
         payment_script(
             TIME_LOCK,
             &self.secret_hash,
@@ -71,7 +71,7 @@ impl Swap {
     }
 
     /// A spend of the payment by the secret `secret`, or by the time lock path when it is `None`.
-    fn spend(&self, secret: Option<[u8; 32]>) -> UtxoTx {
+    pub(crate) fn spend(&self, secret: Option<[u8; 32]>) -> UtxoTx {
         let script_sig = match secret {
             Some(secret) => Builder::default()
                 .push_bytes(&[1; 9])
@@ -105,7 +105,7 @@ impl Swap {
 }
 
 /// The history of the payment's script hash a server shows: the payment, and the spend when there is one.
-fn show_history(server: &StubServer, swap: &Swap, spend: Option<&UtxoTx>) {
+pub(crate) fn show_history(server: &StubServer, swap: &Swap, spend: Option<&UtxoTx>) {
     let mut history = vec![json!({"tx_hash": txid_hex(&swap.payment), "height": 100})];
     server.set_params_result(
         "blockchain.transaction.get",
@@ -131,14 +131,14 @@ fn header_with_time(time: u32) -> String {
 }
 
 /// A chain of eleven headers ending at `tip`, every header with the time `time`.
-fn show_chain(server: &StubServer, tip: u64, time: u32) {
+pub(crate) fn show_chain(server: &StubServer, tip: u64, time: u32) {
     for height in tip - 10..=tip {
         server.set_chain_header(height, &header_with_time(time));
     }
     server.set_tip(tip);
 }
 
-async fn start_servers(count: usize) -> Vec<StubServer> {
+pub(crate) async fn start_servers(count: usize) -> Vec<StubServer> {
     let mut servers = Vec::new();
     for host in HOSTS.iter().take(count) {
         servers.push(StubServer::start_on(host, StubBehavior::Answer).await);
@@ -146,7 +146,7 @@ async fn start_servers(count: usize) -> Vec<StubServer> {
     servers
 }
 
-fn adopted_fields(servers: &[&StubServer], field: Option<&str>) -> UtxoCoinFields {
+pub(crate) fn adopted_fields(servers: &[&StubServer], field: Option<&str>) -> UtxoCoinFields {
     let addrs: Vec<String> = servers.iter().map(|server| server.addr()).collect();
     let addr_refs: Vec<&str> = addrs.iter().map(String::as_str).collect();
     // The client builder blocks on its own runtime, so it is built on a thread outside the test's runtime.

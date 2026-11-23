@@ -76,7 +76,7 @@ pub enum R100Adoption {
 pub const R100_ADOPTED: &[(SwapFamily, R100Adoption)] = &[
     (SwapFamily::Utxo, R100Adoption::Adopted),
     (SwapFamily::Bch, R100Adoption::Adopted),
-    (SwapFamily::Slp, R100Adoption::NotAdopted),
+    (SwapFamily::Slp, R100Adoption::Adopted),
     (SwapFamily::Qtum, R100Adoption::Adopted),
     (SwapFamily::Qrc20, R100Adoption::NotAdopted),
     (SwapFamily::Evm, R100Adoption::NotAdopted),
