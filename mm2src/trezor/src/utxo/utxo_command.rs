@@ -1,16 +1,20 @@
 use crate::client::TrezorSession;
 use crate::proto::messages_bitcoin as proto_bitcoin;
 use crate::result_handler::ResultHandler;
-use crate::utxo::TrezorUtxoCoin;
+use crate::utxo::{TrezorInputScriptType, TrezorUtxoCoin};
 use crate::{ecdsa_curve_to_string, serialize_derivation_path, TrezorResponse, TrezorResult};
 use hw_common::primitives::{DerivationPath, EcdsaCurve, XPub};
 
 // Bitcoin(UTXO) operations.
 impl<'a> TrezorSession<'a> {
+    /// Asks the device for the address at `path`. `script_type` is the kind of address to produce (the legacy
+    /// pay-to-public-key-hash form or native SegWit), `show_display` makes the device show the address and wait for
+    /// the button.
     pub async fn get_utxo_address<'b>(
         &'b mut self,
         path: DerivationPath,
         coin: TrezorUtxoCoin,
+        script_type: TrezorInputScriptType,
         show_display: bool,
     ) -> TrezorResult<TrezorResponse<'a, 'b, String>> {
         let req = proto_bitcoin::GetAddress {
@@ -18,7 +22,7 @@ impl<'a> TrezorSession<'a> {
             coin_name: Some(coin.to_string()),
             show_display: Some(show_display),
             multisig: None,
-            script_type: None,
+            script_type: Some(proto_bitcoin::InputScriptType::from(script_type) as i32),
             ignore_xpub_magic: None,
         };
         let result_handler = ResultHandler::new(|m: proto_bitcoin::Address| Ok(m.address));

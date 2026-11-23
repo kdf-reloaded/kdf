@@ -812,7 +812,7 @@ pub struct UtxoCoinFields {
     /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
     pub check_utxo_maturity: bool,
     /// The swap-evidence policy fixed at activation (CRD ch.51 R100). The coin answers it through
-    /// `MmCoin::swap_evidence_policy` once its family has adopted R100 (`swap_evidence::R100_ADOPTED`).
+    /// `MmCoin::swap_evidence_policy` once its family has adopted R100 (`swap_evidence::R100_ADOPTED` is `Adopted`).
     pub swap_evidence: crate::SwapEvidencePolicy,
 }
 

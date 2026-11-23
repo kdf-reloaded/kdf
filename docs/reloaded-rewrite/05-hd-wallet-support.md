@@ -1061,6 +1061,15 @@ cannot spend from.
 > are recorded in [Chapter 49](49-withdrawal-task-path.md) R49.37. This
 > note binds nothing of its own and changes nothing in R54.
 
+> **Pointer (2026-11-22), the task form of `get_new_address` follows R54.**
+> This repository serves `task::get_new_address::init` and its sibling
+> methods by the coin's key policy: the software path completes without any
+> device state, the `Trezor` path asks the device to show the address and
+> records it after the confirmation. What is built, and where it differs from
+> the reference, is recorded in [Chapter 49](49-withdrawal-task-path.md)
+> §49.2.3 (the status note "the task form of `get_new_address` (as built)").
+> This note binds nothing of its own and changes nothing in R54.
+
 **R55.** *Storage identity of a hardware-policy coin.* The per-coin HD
 account storage (the HD-account table of the wallet database) MUST namespace a `Trezor`-policy coin by the
 **device digest of R51** and a `ContextPrivKey` global-HD coin by the

@@ -881,7 +881,7 @@ fn the_evm_family_answers_its_stored_policy() {
 
 #[test]
 fn a_trusted_node_without_a_port_in_its_address_is_matched() {
-    // The address has no port, so the node is named by its host alone.
+    // The address writes no port, so the node is named by its host and the default port of its scheme.
     const PLAIN: &str = "https://plain.example/v3/KEY";
     let fx = Fixture::eth(&[A, PLAIN], trusting("plain.example", &[A, PLAIN]));
     fx.set(A, |node| node.states.clear());
@@ -892,6 +892,7 @@ fn a_trusted_node_without_a_port_in_its_address_is_matched() {
     fx.set(PLAIN, |node| node.down = true);
     let err = fx.validate(0).unwrap_err();
     assert_undetermined(&err, "the trusted node did not answer");
+    assert!(err.contains("plain.example:443"), "{err}");
     assert!(!err.contains("KEY") && !err.contains("https://"), "{err}");
 }
 

@@ -927,6 +927,16 @@ address it expects ([Chapter 49](49-withdrawal-task-path.md) R49.38 item 5,
 R49.42). The direct `get_new_address` and the other listed methods are not
 affected. The sentences of R21.10B.4 above are unchanged.
 
+*Reloaded note (2026-11-22), `task::get_new_address::init` for a TRON ticker
+is served here.* This repository serves the task form for a TRX and a TRC20
+ticker on the software path, the only path a TRON coin has, and it completes
+with the base58check address and the balance map of the direct method. The
+internal chain is refused with `InvalidBip44Chain`. The sentence of the
+Reloaded note of 2026-11-19 that this repository has no
+`task::get_new_address::init` is no longer true. The record is in
+[Chapter 49](49-withdrawal-task-path.md) §49.2.3, the status note "the task
+form of `get_new_address` (as built)". No sentence above is changed.
+
 *Reloaded note (2026-11-19), the HD methods for a TRC20 ticker in this
 repository (its own code, not the reference; PR #428).* Asked for a TRC20
 ticker, `get_new_address`, `account_balance`,
@@ -2456,6 +2466,20 @@ unnarrowed (chapter 51 R72A). Chapter 51 R72's list of forcing families
 then gains TRON; that amendment is part of the same change and MUST NOT
 be made for a contract with a 20-byte lock.
 
+*Status note (2026-11-22), R21.B6 as built.* D21.B2 selects the Tron-VM
+contract of §21.11B.2 (the note there), so the first half of this rule
+is built: the pair selection of the legacy V1 path
+(`select_secret_hash_algo`, chapter 51 R72 and its status note of this
+date) selects the 32-byte SHA-256 alternate whenever a TRX or TRC20 coin
+is the maker coin or the taker coin. An ETH or ERC20 coin keeps the
+20-byte default. The second half, the TRON payment path that passes the
+32-byte value through unnarrowed, is not built yet; it comes with the
+TRON swap operations. While `TRON_SWAPS_AVAILABLE` is `false` no TRON
+coin reaches a swap (the note at R21.B3), so no swap that can run today
+changes, and a saved swap keeps the secret hash it was started with.
+The TRON swap operations MUST refuse a secret hash that is not 32
+bytes, and the TRON swap switch is not turned on before they do.
+
 ### 21.11B.4 Open maintainer decisions
 
 **D21.B1 -- Activation-route parity.** The reference activates TRON only
@@ -2484,13 +2508,26 @@ wait for a reference release. Under (a) the MIT license is compatible
 verifiable on chain; the contract itself has no published audit at any
 tabled state.
 
+*Status note (2026-11-22), D21.B2 decided: (a).* Reloaded adopts the
+public MIT Tron-VM V1 contract of §21.11B.2, with Reloaded-operated
+deployments (maintainer decision of 2026-11-08).
+
 **D21.B3 -- Interop scope.** Reloaded-to-Reloaded only (R21.B1), with the
 compatibility documents saying so; cross-implementation rows in the lab
 only when a counterparty release appears.
 
+*Status note (2026-11-22), D21.B3 decided.* TRON swaps are
+Reloaded-to-Reloaded only (maintainer decision of 2026-11-08).
+
 **D21.B4 -- Hash arm and swap id.** With (a) of D21.B2: 32-byte SHA-256,
 chapter 51 R72 amended per R21.B6, swap id over the 32-byte secret hash.
 With (b): decided with the contract.
+
+*Status note (2026-11-22), D21.B4 decided.* As D21.B4 states for (a) of
+D21.B2: 32-byte SHA-256 and the swap id over the 32-byte secret hash
+(maintainer decision of 2026-11-08). The pair selection is built (the
+note at R21.B6); the swap id and the unnarrowed payment path come with
+the TRON swap operations.
 
 **D21.B5 -- Fee handling.** Native payment as a smart-contract trigger
 carrying the amount as call value (a plain transfer does not reach a
@@ -3043,3 +3080,10 @@ V3. The address encoding, protobuf transaction/contract formats,
   reference content of its own. No cleared sentence was edited. **KDF Dirty
   Gate: PASS on 2026-11-22, measure 0.03, no findings**, as recorded for
   §51.6F in chapter 51 §51.16.
+- *Status notes added 2026-11-22 (clean-side, Reloaded-original) -- the
+  32-byte secret-hash arm: the notes after R21.B6 and at D21.B2, D21.B3
+  and D21.B4 of §21.11B.4.* *Inputs:* the cleared text of §21.11B.2,
+  R21.B3, R21.B6 and D21.B2 -- D21.B4 above, the maintainer's decisions
+  of 2026-11-08 on D21.B2 -- D21.B4, the cleared text of chapter 51 R71,
+  R72 and R72A, and this repository's own code. *Forbidden corpus:* not
+  consulted for these notes. No cleared sentence was edited.

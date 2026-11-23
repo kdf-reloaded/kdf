@@ -32,7 +32,7 @@ use super::eth_logs_window::{LogsQuerier, PaymentKey, REORG_MARGIN_BLOCKS};
 use super::eth_swap_ops::{evm_refund_eligibility, secret_of_claim_call, secret_of_spent_logs};
 use super::*;
 use crate::node_url::{host_only, scrub_node_url, UNNAMED_NODE};
-use crate::swap_evidence::{agree, node_host, node_matches, node_name, Agreement, Undetermined, UndeterminedReason};
+use crate::swap_evidence::{agree, node_host, node_name, Agreement, Undetermined, UndeterminedReason};
 use crate::{CanRefundHtlc, SwapEvidencePolicy};
 use common::log::{debug, warn};
 use std::future::Future as StdFuture;
@@ -296,7 +296,7 @@ fn tip_candidates(policy: &SwapEvidencePolicy, names: &[String]) -> (Vec<usize>,
         },
         SwapEvidencePolicy::Trusted { node } => (
             (0..names.len())
-                .filter(|index| node_matches(node, &names[*index]))
+                .filter(|index| node_name(node) == names[*index])
                 .take(1)
                 .collect(),
             1,
@@ -390,36 +390,21 @@ impl EthCoin {
         }
     }
 
-    /// The nodes a read under `policy` may ask, and the policy in the form [`agree`] matches node names with.
-    ///
-    /// Under a trusted node the list holds that node (the instance of exactly the trusted address) and, when
-    /// `with_rest`, the nodes of other addresses: they are asked only for an answer that proves itself. The trusted
-    /// node is absent when it did not pass the activation probe; the read is then undetermined.
-    ///
-    /// The trusted node is found by its exact address here, not by [`agree`]'s own match of the policy's node
-    /// against a node name: an address without a written port takes its scheme's default port in that match, while
-    /// `node_name` writes no port for it, so the two would not match; and a node of the same host on another port
-    /// could be taken for the trusted one. [`agree`] is therefore given the trusted node in its `node_name` form
-    /// and a list without any other node that this form would match.
-    fn evidence_instances(
-        &self,
-        policy: &SwapEvidencePolicy,
-        with_rest: bool,
-    ) -> (SwapEvidencePolicy, Vec<Web3Instance>) {
+    /// The nodes a read under `policy` may ask: the coin's probe-passed nodes. Under a trusted node and without
+    /// `with_rest` only that node, found as [`agree`] finds it (by its `node_name`): the other nodes could only be
+    /// asked for an answer that proves itself, which such a read never has. The trusted node is absent when it did
+    /// not pass the activation probe; the read is then undetermined.
+    fn evidence_instances(&self, policy: &SwapEvidencePolicy, with_rest: bool) -> Vec<Web3Instance> {
         match policy {
-            SwapEvidencePolicy::Trusted { node } => {
+            SwapEvidencePolicy::Trusted { node } if !with_rest => {
                 let trusted_name = node_name(node);
-                let instances = self
-                    .web3_instances
+                self.web3_instances
                     .iter()
-                    .filter(|instance| {
-                        instance.url == *node || (with_rest && !node_matches(&trusted_name, &instance.node_name()))
-                    })
+                    .filter(|instance| instance.node_name() == trusted_name)
                     .cloned()
-                    .collect();
-                (SwapEvidencePolicy::Trusted { node: trusted_name }, instances)
+                    .collect()
             },
-            other => (other.clone(), self.web3_instances.clone()),
+            _ => self.web3_instances.clone(),
         }
     }
 
@@ -444,9 +429,9 @@ impl EthCoin {
         R: Fn(Web3Instance, u64) -> Fut,
         Fut: StdFuture<Output = Result<A, String>>,
     {
-        let (policy, instances) = self.evidence_instances(policy, with_rest);
+        let instances = self.evidence_instances(policy, with_rest);
         let names: Vec<String> = instances.iter().map(Web3Instance::node_name).collect();
-        let (candidates, needed) = tip_candidates(&policy, &names);
+        let (candidates, needed) = tip_candidates(policy, &names);
         let mut tips: Vec<Option<Result<u64, String>>> = vec![None; instances.len()];
         let (mut reported, mut asked) = (Vec::new(), 0);
         while reported.len() < needed && asked < candidates.len() {
@@ -481,7 +466,7 @@ impl EthCoin {
             .collect();
         let read = &read;
         agree(
-            &policy,
+            policy,
             &nodes,
             |node| node.name.clone(),
             |node| {
@@ -746,9 +731,9 @@ impl EthCoin {
                 per_node: Vec::new(),
             })
         } else {
-            let (policy, instances) = self.evidence_instances(policy, false);
+            let instances = self.evidence_instances(policy, false);
             let reading = agree(
-                &policy,
+                policy,
                 &instances,
                 |instance| instance.node_name(),
                 |instance| {

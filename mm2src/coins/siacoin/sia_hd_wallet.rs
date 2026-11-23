@@ -75,6 +75,7 @@ use crate::rpc_command::hd_account_balance_rpc_error::HDAccountBalanceRpcError;
 use crate::rpc_command::init_account_balance::{self as init_account_balance_mod, InitAccountBalanceParams,
                                                InitAccountBalanceRpcOps};
 use crate::rpc_command::init_create_account::{CreateNewAccountParams, CreatedAccount, InitCreateHDAccountRpcOps};
+use crate::rpc_command::init_get_new_address::{self, DeviceAddressRequest, InitGetNewAddressRpcOps};
 use crate::BalanceResult;
 use crypto::{Bip44Chain, ChildNumber, DerivationPath as CryptoDerivationPath, GlobalHDAccountArc, RpcDerivationPath};
 use ed25519_dalek_bip32::{ChildIndex, ExtendedSigningKey};
@@ -503,6 +504,34 @@ impl HDWalletRpcOps for SiaCoin {
         params: GetNewHDAddressParams,
     ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
         hd_wallet::common_impl::get_new_address_rpc(self, params).await
+    }
+}
+
+/// `task::get_new_address` for a Siacoin: served on the software path only, as the direct method is (CRD ch.49 R49.43
+/// item 5, a Reloaded extension). A Siacoin cannot be activated under the Trezor policy.
+#[async_trait]
+impl InitGetNewAddressRpcOps for SiaCoin {
+    async fn plan_new_address(
+        &self,
+        account_id: u32,
+        chain: Bip44Chain,
+        gap_limit: Option<u32>,
+    ) -> MmResult<hd_wallet::common_impl::PlannedNewAddress, HDWalletRpcError> {
+        init_get_new_address::common_impl::plan_new_address(self, account_id, chain, gap_limit).await
+    }
+
+    fn device_address_request(&self) -> MmResult<DeviceAddressRequest, HDWalletRpcError> {
+        MmError::err(HDWalletRpcError::Internal(
+            "A Siacoin does not support the Trezor hardware wallet".to_owned(),
+        ))
+    }
+
+    async fn record_new_address(
+        &self,
+        planned: &hd_wallet::common_impl::PlannedNewAddress,
+        on_recorded: &(dyn Fn() -> MmResult<(), HDWalletRpcError> + Sync),
+    ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
+        init_get_new_address::common_impl::record_new_address(self, planned, on_recorded).await
     }
 }
 
