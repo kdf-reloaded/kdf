@@ -546,6 +546,11 @@ the previous version used. The safe way:
   legacy swap's choice of the secret-hash width selects SHA-256 over 32 bytes for such a pair, as the TRON swap
   contract requires; ETH and ERC20 pairs keep the 20-byte hash. TRON swaps stay off, so nothing a user can run
   changes yet. Detail: PR #499; CRD ch.51 R72 status note, ch.21 R21.B6.
+- **The warning about `swap_contract_address` at a legacy TRON activation has a new text.** A TRON coin is still
+  wallet-only and still ignores the swap contracts of an `enable` or `electrum` request. The log line now reads
+  "swap_contract_address is ignored, the coin is wallet-only". Nothing else changes for a user: the groundwork for
+  TRON swaps added here (the contract interface, the transaction form and the contract binding at activation) is not
+  used by any order or swap while TRON swaps are off. Detail: PR #506; CRD ch.21 §21.11C, R21.B2.
 
 #### Tendermint (Cosmos) coins
 
@@ -1214,9 +1219,10 @@ the previous version used. The safe way:
   `sign_raw_transaction` no longer waits for a nonce first), `get_eth_estimated_fee_per_gas` with
   `CoinNotSupported` (HTTP 501), `stream::fee_estimator::enable` with `NotSupportedFor` (HTTP 501, no streamer
   is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
-  (HTTP 400), the legacy `get_trade_fee` with the text "TRON trade fee is not supported", and `trade_preimage`
-  with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
-  supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
+  (HTTP 400), and, for a TRON coin without a swap contract, which is every TRON coin while TRON swaps are off,
+  the legacy `get_trade_fee` and `trade_preimage` with that coin on the receiving side (`InternalError`), both
+  with the text "the coin has no swap contract: it cannot trade". EVM coins are unchanged. Detail: PRs #469,
+  #506; CRD ch.21 §21.11 (D7).
 
 #### Swap and order records
 

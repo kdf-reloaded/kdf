@@ -321,6 +321,21 @@ pub fn estimate_trc20_transfer_fee(
 /// the need would make the call fail on chain and still charge the limit, so such a transfer is not built.
 /// [`TronFeeError::Overflow`].
 pub fn trc20_fee_limit_sun(prices: &TronChainPrices, energy: u64) -> Result<u64, TronFeeError> {
+    fee_limit_sun_with_margin(prices, energy, TRC20_FEE_LIMIT_MARGIN_PERCENT)
+}
+
+/// The `fee_limit` of a contract call whose dry run used `energy`: the cost of that energy at the energy price plus
+/// `margin_percent` of it, rounded up to whole SUN, and never above [`TRC20_FEE_LIMIT_MAX_SUN`]. `margin_percent`
+/// is at most 100.
+///
+/// # Errors
+///
+/// As [`trc20_fee_limit_sun`].
+pub(crate) fn fee_limit_sun_with_margin(
+    prices: &TronChainPrices,
+    energy: u64,
+    margin_percent: u64,
+) -> Result<u64, TronFeeError> {
     let estimate_sun = energy
         .checked_mul(prices.energy_price_sun)
         .ok_or(TronFeeError::Overflow)?;
@@ -331,7 +346,7 @@ pub fn trc20_fee_limit_sun(prices: &TronChainPrices, energy: u64) -> Result<u64,
         });
     }
     // `estimate_sun` is at most the maximum here, so neither the product nor the sum can overflow.
-    let margin_sun = (estimate_sun * TRC20_FEE_LIMIT_MARGIN_PERCENT).div_ceil(100);
+    let margin_sun = (estimate_sun * margin_percent).div_ceil(100);
     Ok((estimate_sun + margin_sun).min(TRC20_FEE_LIMIT_MAX_SUN))
 }
 
