@@ -27,8 +27,8 @@ or undo, and every change that needs a step from you.
   - *What to do:* list a server on a second host in the activation request, or set the new activation field
     `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
     not answer, the step waits; no other node is asked in its place.
-  - *Coin families covered:* none yet. The rule is switched on family by family as each family's chain reads move
-    onto it, and this list grows with them.
+  - *Coin families covered:* EVM and ERC20. The rule is switched on family by family as each family's chain reads
+    move onto it, and this list grows with them.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
