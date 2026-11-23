@@ -6,7 +6,7 @@ use super::*;
 /// Sends the signed transaction `tx` exactly as it is. The pool resends the same bytes on the next node after a
 /// transport failure; the transaction is never rebuilt or re-signed (CRD ch.40 R40.1.5). When no node takes it, the
 /// error carries the transaction's signature, so that the caller can find out whether it landed.
-async fn send_signed(coin: &SolanaCoin, tx: &Transaction) -> Result<String, String> {
+pub(super) async fn send_signed(coin: &SolanaCoin, tx: &Transaction) -> Result<String, String> {
     match coin.rpc().send_transaction(tx).await {
         Ok(signature) => Ok(signature.to_string()),
         Err(e) => Err(match tx.signatures.first() {
@@ -68,31 +68,43 @@ impl MarketCoinOps for SolanaCoin {
         Box::new(fut.boxed().compat())
     }
 
+    /// R40.6D.8: a transaction counts when it is included, successful and `finalized`; the confirmation count and
+    /// notarization of the swap settings are not used.
     fn wait_for_confirmations(
         &self,
-        _tx: &[u8],
+        tx: &[u8],
         _confirmations: u64,
         _requires_nota: bool,
-        _wait_until: u64,
-        _check_every: u64,
+        wait_until: u64,
+        check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        Box::new(futures01::future::err(swaps_unsupported(&self.ticker)))
+        let coin = self.clone();
+        let tx = tx.to_vec();
+        let fut = async move { coin.wait_until_final(&tx, wait_until, check_every).await };
+        Box::new(fut.boxed().compat())
     }
 
     fn wait_for_tx_spend(
         &self,
-        _transaction: &[u8],
-        _wait_until: u64,
+        transaction: &[u8],
+        wait_until: u64,
         _from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        Box::new(futures01::future::err(TransactionErr::Plain(swaps_unsupported(
-            &self.ticker,
-        ))))
+        let coin = self.clone();
+        let transaction = transaction.to_vec();
+        let fut = async move {
+            coin.wait_for_spend(&transaction, wait_until)
+                .await
+                .map_err(TransactionErr::Plain)
+        };
+        Box::new(fut.boxed().compat())
     }
 
-    fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, String> {
-        Err(format!("Transaction decoding is not supported for {}", self.ticker))
+    fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> {
+        SolanaSwapTx::from_wire(bytes)
+            .map(TransactionEnum::from)
+            .map_err(|e| format!("{}: {e}", self.ticker))
     }
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> {

@@ -168,7 +168,8 @@ solana-keypair = { version = "3", default-features = false }
 solana-message = { version = "3", default-features = false, features = ["bincode"] }
 solana-native-token = { version = "3", default-features = false }
 solana-program-error = { version = "3", default-features = false }
-solana-pubkey = { version = "3", default-features = false, features = ["serde", "std"] }
+solana-pubkey = { version = "3", default-features = false, features = ["curve25519", "serde", "std"] }
+solana-sdk-ids = { version = "3", default-features = false }
 solana-signature = { version = "3", default-features = false, features = ["serde", "verify"] }
 solana-signer = { version = "3", default-features = false }
 solana-system-interface = { version = "2", default-features = false, features = ["bincode"] }

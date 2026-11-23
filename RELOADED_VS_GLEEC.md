@@ -943,6 +943,16 @@ These are divergences from GLEEC KDF that no compatibility switch reverses in th
   [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 3 (PR #490); CRD ch.51,
   status note of 2026-11-22 after §51.6E R92.
 
+- **A QRC20 swap's spend or refund is recognized only from its own successful contract call.** KDF Reloaded takes a
+  transaction as the spend (refund) of a QRC20 swap payment only when the `receiverSpend` (`senderRefund`) call of
+  the swap goes to the swap contract the payment used and the receipt of that same output reports no exception and
+  holds the swap contract's `ReceiverSpent` (`SenderRefunded`) event for the swap id; it looks for a refund in the
+  history of the payment's sender, so a refund of the other side's payment is found as well. GLEEC KDF's search is
+  recorded in CRD ch.51 §51.6E R89. No message and no transaction a peer validates changes, so no switch exists; row
+  in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). Plan
+  [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) step 4 (PR #496); CRD ch.51,
+  status note of 2026-11-22 after §51.6E R92.
+
 ### Removed / disabled in KDF Reloaded
 
 - iOS build target removed from the alpha release matrix.

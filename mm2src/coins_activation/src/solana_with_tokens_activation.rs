@@ -337,6 +337,13 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         };
         let node_order = solana_node_order(&ctx);
         let tx_history = activation_request.tx_history;
+        // R40.6D.2: the program of the entry, read once; the activation succeeds whatever the check finds.
+        let swap_program = coins::solana::swap_program_id_from_conf(&platform_conf).map_to_mm(|error| {
+            SolanaWithTokensActivationError::PlatformCoinCreationError {
+                ticker: ticker.clone(),
+                error,
+            }
+        })?;
         let platform_coin = solana_coin_with_node_order(
             &ticker,
             &platform_conf,
@@ -346,6 +353,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         )
         .await
         .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
+        platform_coin.check_swap_program(swap_program).await;
         // R40.6C.1: the history is enabled before the instance is registered, so no answer sees it half started; the
         // writer itself starts in `on_platform_registered`.
         if tx_history {

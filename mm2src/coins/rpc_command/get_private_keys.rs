@@ -879,9 +879,16 @@ mod tests {
         assert!(!startup.contains("opt-in full key export requested"));
     }
 
+    /// The captured lines with `text` that the calling thread wrote itself. The capture is process-wide and other
+    /// tests of this module write the same lines at the same time, so the counting tests below count only their
+    /// own thread's lines. Both lines are written on the caller's thread: the start-up line by a plain call, the
+    /// per-call line before the first await of a future that `block_on` polls on the calling thread.
     fn lines_containing(text: &str) -> Vec<String> {
-        use crate::eth::alloy_compat::transport::test_support::captured_log_lines;
-        captured_log_lines().into_iter().filter(|l| l.contains(text)).collect()
+        use crate::eth::alloy_compat::transport::test_support::captured_log_lines_of_this_thread;
+        captured_log_lines_of_this_thread()
+            .into_iter()
+            .filter(|l| l.contains(text))
+            .collect()
     }
 
     #[test]
@@ -892,7 +899,7 @@ mod tests {
 
         let capturing = install_log_capture();
         let text = insecure_key_export_startup_warning();
-        // The capture is process-wide; only this test writes this line, so the counts below are its own.
+        // `lines_containing` returns this thread's lines only, so the counts below are this test's own.
         let before = lines_containing(text).len();
 
         // Missing, false and a non-boolean value log nothing.
@@ -928,7 +935,8 @@ mod tests {
 
         let capturing = install_log_capture();
         let marker = "get_private_keys: opt-in full key export requested";
-        // One test function runs the three calls in order, so the counts are this test's own.
+        // `lines_containing` returns this thread's lines only, so a test that makes superset calls on another
+        // thread at the same time does not change the counts below.
         let before = lines_containing(marker).len();
         let superset = || GetPrivateKeysRequest {
             offline: true,

@@ -313,6 +313,16 @@ the previous version used. The safe way:
   answers an error that names it. The transaction history is the next item. Detail: PR #475; CRD
   ch.40 D40.4.
 
+- **Solana activation reads a swap program and an evidence node.** A `SOLANA` coins-file entry may name
+  the cluster's swap program in `protocol.protocol_data.swap_program_id` (base58). The activation reads that
+  program once: it must exist, be executable and have no upgrade authority, or the coin stays wallet-only.
+  A value that is not a base58 public key makes the entry unparsable (`CoinProtocolParseError`).
+  `enable_solana_with_tokens` and `experimental::enable_solana_with_assets` take an optional
+  `swap_evidence_node`, one URL of the coin's node list, which a swap uses as its one trusted node for the
+  reads before a refund or a secret step; a URL that is not in the list is refused. Solana and SPL tokens
+  still cannot be traded: the SOL side of the swap is built, and SPL and the switch-on follow after 0.5.0. Detail: PR #503;
+  CRD ch.40 §40.6D.
+
 - **Solana and SPL tokens have a transaction history.** With `tx_history: true` at the platform's
   activation (`enable_solana_with_tokens` or `experimental::enable_solana_with_assets`), the node
   reads the whole history of the wallet's address and of its token accounts from the coin's Solana
@@ -536,6 +546,11 @@ the previous version used. The safe way:
   legacy swap's choice of the secret-hash width selects SHA-256 over 32 bytes for such a pair, as the TRON swap
   contract requires; ETH and ERC20 pairs keep the 20-byte hash. TRON swaps stay off, so nothing a user can run
   changes yet. Detail: PR #499; CRD ch.51 R72 status note, ch.21 R21.B6.
+- **The warning about `swap_contract_address` at a legacy TRON activation has a new text.** A TRON coin is still
+  wallet-only and still ignores the swap contracts of an `enable` or `electrum` request. The log line now reads
+  "swap_contract_address is ignored, the coin is wallet-only". Nothing else changes for a user: the groundwork for
+  TRON swaps added here (the contract interface, the transaction form and the contract binding at activation) is not
+  used by any order or swap while TRON swaps are off. Detail: PR #506; CRD ch.21 §21.11C, R21.B2.
 
 #### Tendermint (Cosmos) coins
 
@@ -1204,9 +1219,10 @@ the previous version used. The safe way:
   `sign_raw_transaction` no longer waits for a nonce first), `get_eth_estimated_fee_per_gas` with
   `CoinNotSupported` (HTTP 501), `stream::fee_estimator::enable` with `NotSupportedFor` (HTTP 501, no streamer
   is started), `get_token_info` for an `ERC20` protocol on a TRON platform with `UnsupportedTokenProtocol`
-  (HTTP 400), the legacy `get_trade_fee` with the text "TRON trade fee is not supported", and `trade_preimage`
-  with a TRON coin on the receiving side with `InternalError` and the text "TRON V1 receiver trade fee is not
-  supported". EVM coins are unchanged. Detail: PR #469; CRD ch.21 §21.11 (D7).
+  (HTTP 400), and, for a TRON coin without a swap contract, which is every TRON coin while TRON swaps are off,
+  the legacy `get_trade_fee` and `trade_preimage` with that coin on the receiving side (`InternalError`), both
+  with the text "the coin has no swap contract: it cannot trade". EVM coins are unchanged. Detail: PRs #469,
+  #506; CRD ch.21 §21.11 (D7).
 
 #### Swap and order records
 
@@ -1254,9 +1270,17 @@ the previous version used. The safe way:
   payment can be refunded from the chain: an SLP token by the median time past of BCH, a QRC20 token by that of
   QTUM, and an ETH or ERC20 coin by the timestamp of the latest block, once the node's own clock is past the lock
   time. Detail: PR #490; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
+- **A QRC20 swap's spend or refund is recognized only from its own successful contract call.** The search ties the
+  swap event to the contract call it belongs to, requires that call to the swap contract to have succeeded, and
+  looks for a refund in the history of the payment's sender, so a refund of the other side's payment is found too.
+  Detail: PR #496; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
 
 ### Tests
 
+- **The `get_private_keys` warning tests no longer fail when the whole `coins` test suite runs in parallel.** The
+  test log capture is one list for the whole process, and another test writes the same warning line, so the line
+  counts of the per-call warning test were sometimes off. Each captured line now records the thread that wrote it,
+  and the two tests that count lines count only their own. No production code changes. Detail: PR #507.
 - **The Trezor emulator tests now run in CI.** The emulator job passed while every test was skipped: the
   container starts only the emulator's controller, and each test looked for the emulator before anything had
   started it. The job now starts and seeds the emulator and checks that it answers before the tests run, and in
@@ -1348,6 +1372,10 @@ the previous version used. The safe way:
   also states why a recorded but lost claim is answered differently by the automatic refund and by the manual
   recovery. Only test code and docs changed. Detail: PR #464; CRD ch.51, status notes of 2026-11-21 after
   R82 and R83, T35.
+- **The test code of the coin activation compiles for wasm32, and CI checks it.** The task-framework tests of the
+  standalone-coin family are built only for native targets, like the test helpers they use. A new CI job,
+  `wasm32-test-check`, compiles the test code of `coins_activation`, `coins` and `mm2_main` for wasm32 and is part
+  of the required `tests-passed` check. Only test code and CI changed. Detail: PR #511.
 
 ### Plans touched
 
@@ -1356,7 +1384,7 @@ the previous version used. The safe way:
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
   the closing note names what no row covers, in PR #497.
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 1 in PR #481,
-  step 2 in PR #488, step 3 in PR #490.
+  step 2 in PR #488, step 3 in PR #490, step 4 in PR #496.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the

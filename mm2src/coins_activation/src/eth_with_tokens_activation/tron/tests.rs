@@ -1764,6 +1764,102 @@ fn swap_contracts_follow_the_wallet_only_rule_and_take_both_tron_forms() {
     );
 }
 
+/// CRD ch.21 R21.B2: with the TRON swap switch on, a platform that can trade is bound to the swap contracts of the
+/// request, in every accepted form; with the switch off (this build) and for a wallet-only platform the members
+/// are validated as before and not bound.
+#[test]
+fn the_swap_contracts_are_bound_only_for_a_trading_platform_with_the_switch_on() {
+    use coins::SwapOps as _;
+    const { assert!(!coins::TRON_SWAPS_AVAILABLE) };
+
+    let node = untouched_stub();
+    let network = TronNetwork::Nile;
+    let contract = TronAddress::parse(USDT_CONTRACT).expect("valid");
+    let fallback = TronAddress::from_evm_address(Address::from([0x7f; 20]));
+    let forms_of = |address: &TronAddress| {
+        [
+            address.to_base58(),
+            address.to_hex(),
+            format!("0x{}", address.to_hex()),
+            format!("0x{}", hex::encode(address.to_evm_address())),
+        ]
+    };
+    let build = |ctx: &MmArc, ticker: &str, members: Json, swaps_available: bool| {
+        let req = request(ticker, std::slice::from_ref(&node.url), members);
+        let conf = coins::coin_conf(ctx, ticker);
+        block_on(enable_tron_platform_coin_with_switch(
+            ctx,
+            ticker,
+            &conf,
+            &req.request,
+            &network,
+            swaps_available,
+        ))
+    };
+    let bound_contract = |coin: &EthCoin| coin.swap_contract_address().map(|bytes| bytes.0);
+    let bound_fallback = |coin: &EthCoin| {
+        coin.negotiate_swap_contract_addr(None)
+            .ok()
+            .flatten()
+            .map(|bytes| bytes.0)
+    };
+    let payload = |address: &TronAddress| address.to_evm_address().as_bytes().to_vec();
+
+    let ctx = tron_ctx();
+    for (swap_form, fallback_form) in forms_of(&contract).into_iter().zip(forms_of(&fallback)) {
+        let members = json!({ "swap_contract_address": swap_form, "fallback_swap_contract": fallback_form });
+
+        // The switch on: the trading platform carries both contracts as 20-byte payloads.
+        let coin = build(&ctx, "TRXT", members.clone(), true).unwrap_or_else(|e| panic!("{swap_form}: {e}"));
+        assert_eq!(bound_contract(&coin), Some(payload(&contract)), "{swap_form}");
+        assert_eq!(bound_fallback(&coin), Some(payload(&fallback)), "{fallback_form}");
+
+        // The switch off: the same request activates and binds nothing.
+        let coin = build(&ctx, "TRXT", members.clone(), false).unwrap_or_else(|e| panic!("{swap_form}: {e}"));
+        assert_eq!(bound_contract(&coin), Some(vec![0u8; 20]), "{swap_form}");
+        assert_eq!(bound_fallback(&coin), None);
+
+        // A wallet-only platform ignores the members, with the switch on too.
+        let coin = build(&ctx, "TRX", members, true).unwrap_or_else(|e| panic!("{swap_form}: {e}"));
+        assert_eq!(bound_contract(&coin), Some(vec![0u8; 20]), "{swap_form}");
+        assert_eq!(bound_fallback(&coin), None);
+    }
+
+    // Without a fallback only the swap contract is bound.
+    let coin = build(&ctx, "TRXT", json!({ "swap_contract_address": USDT_CONTRACT }), true).expect("a coin");
+    assert_eq!(bound_contract(&coin), Some(payload(&contract)));
+    assert_eq!(bound_fallback(&coin), None);
+
+    // A trading platform without a usable contract is refused whatever the switch says (F21.B3).
+    let zero = TronAddress::from_evm_address(Address::default());
+    for swaps_available in [true, false] {
+        for members in [
+            json!({}),
+            json!({ "swap_contract_address": zero.to_base58() }),
+            json!({ "swap_contract_address": USDT_CONTRACT, "fallback_swap_contract": zero.to_hex() }),
+        ] {
+            let refused = build(&ctx, "TRXT", members.clone(), swaps_available);
+            assert!(
+                matches!(
+                    refused.map_err(|e| e.into_inner()),
+                    Err(ActivationErr::InvalidPayload(_))
+                ),
+                "{members}, switch {swaps_available}"
+            );
+        }
+    }
+    // The route itself reads the switch of this build: nothing is bound.
+    let req = request(
+        "TRXT",
+        std::slice::from_ref(&node.url),
+        json!({ "swap_contract_address": USDT_CONTRACT }),
+    );
+    let conf = coins::coin_conf(&ctx, "TRXT");
+    let coin = block_on(enable_tron_platform_coin(&ctx, "TRXT", &conf, &req.request, &network)).expect("a coin");
+    assert_eq!(bound_contract(&coin), Some(vec![0u8; 20]));
+    assert_eq!(node.count("/wallet/getnowblock"), 0);
+}
+
 /// An EVM platform reads the swap-contract members exactly as before: a TRON form fails request decoding (the
 /// dispatcher turns this error into `InvalidRequest`, HTTP 400, as on dev), while a TRON platform passes.
 #[test]
