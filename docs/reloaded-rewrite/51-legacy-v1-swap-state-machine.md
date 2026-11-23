@@ -3712,7 +3712,7 @@ reference rows alike.
   refund-failed event naming the fix). Reloaded-original; it records the
   maintainer's decision of 2026-11-23, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
-- *Clean-side addition of 2026-11-23 (PR #NNN):* the status note after T43,
+- *Clean-side addition of 2026-11-23 (PR #521):* the status note after T43,
   how the code of PRs #508 and #519 applies R100: nodes, the field, the policy
   per family, adoption and the release gate, asking two nodes, and reporting.
   It records the maintainer's decisions of 2026-11-22 and 2026-11-23 and
