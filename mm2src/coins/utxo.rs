@@ -27,7 +27,7 @@ mod bchd_grpc;
 #[path = "utxo/pb.rs"]
 mod bchd_pb;
 pub mod header_layout_fallback;
-mod header_time_only;
+pub(crate) mod header_time_only;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod slp;

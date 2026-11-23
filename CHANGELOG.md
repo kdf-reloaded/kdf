@@ -28,7 +28,13 @@ or undo, and every change that needs a step from you.
     `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
     not answer, the step waits; no other node is asked in its place.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
-    - none yet.
+    - QRC20 tokens over Electrum. The contract state of a payment, its receipt, the claim or refund found in the
+      contract-event history and the chain time of the refund are read from two servers on distinct hosts. A token
+      also needs two hosts that serve the contract-event history (`blockchain.contract.event.get_history`): each
+      host is asked once after activation, and until two have answered, the token is refused for swaps with a
+      reason that names the hosts. The QTUM servers of the published coins file do not serve that request, so with
+      them alone a QRC20 token starts no swap: add a server that serves it, or set `swap_evidence_node`. Detail:
+      PR #N; CRD ch.51 §51.6G, ch.38.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,

@@ -4344,13 +4344,24 @@ async fn already_sent(coin: &Qrc20Coin) -> Result<Option<TransactionEnum>, Strin
         .await
 }
 
+/// The token over one server that it trusts for its swap reads (CRD ch.51 R100 item 2): without the field the
+/// already-sent check of a token over one host is undetermined.
+async fn init_token_trusting(env: &TokenEnv, server: &StubServer) -> Qrc20Coin {
+    let mut request = electrum_request(&[server], false);
+    request["swap_evidence_node"] = json!(server.addr());
+    match lp_coininit(&env.ctx, TICKER, &request).await.unwrap() {
+        MmCoinEnum::Qrc20Coin(coin) => coin,
+        _ => panic!("a QRC20 coins-file entry must build a QRC20 coin"),
+    }
+}
+
 /// R39.11.5A.7: a state of `Uninitialized` answers "not sent" at once, without a history request.
 #[test]
 fn r39_11_5a_7_qrc20_uninitialized_state_is_not_sent_without_a_history_request() {
     block_on(async {
         let env = token_env(Some(8));
         let server = token_stub(1).await;
-        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let coin = init_token_trusting(&env, &server).await;
         serve_payment_state(&server, 0);
         server.set_result(GET_HISTORY, json!([]));
 
@@ -4367,7 +4378,7 @@ fn t39_11_5a_5_qrc20_state_without_matching_transaction_is_undetermined() {
     block_on(async {
         let env = token_env(Some(8));
         let server = token_stub(1).await;
-        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let coin = init_token_trusting(&env, &server).await;
         serve_payment_state(&server, 1);
         server.set_result(GET_HISTORY, json!([]));
 

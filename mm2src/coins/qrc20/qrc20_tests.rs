@@ -55,11 +55,18 @@ fn qrc20_coin_for_test_on_servers(
         "mature_confirmations":2000,
         "dust":72800,
     });
+    // A token over a single server trusts that server for its swap reads (CRD ch.51 R100 item 2); without the
+    // field its reads would be undetermined.
+    let swap_evidence_node = match servers.as_array().map(Vec::as_slice) {
+        Some([server]) => server["url"].clone(),
+        _ => Json::Null,
+    };
     let req = json!({
         "method": "electrum",
         "servers": servers,
         "swap_contract_address": "0xba8b71f3544b93e2f681f996da519a98ace0107a",
         "fallback_swap_contract": fallback_swap,
+        "swap_evidence_node": swap_evidence_node,
     });
     let contract_address = H160::from_slice(&hex::decode("d362e096e873eb7907e205fadc6175c6fec7bc44").unwrap());
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -1662,7 +1669,10 @@ fn r89_precheck_finds_the_swap_call_without_receipts() {
 
 fn qrc20_refund_gate_answer(mtp: u32, locktime: u64) -> CanRefundHtlc {
     Qrc20Coin::get_current_mtp.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(mtp))));
-    let (_ctx, coin) = qrc20_coin_for_test(&[1; 32], None);
+    let (_ctx, mut coin) = qrc20_coin_for_test(&[1; 32], None);
+    // The gate of a coin read through the operator's own daemon: one read, not agreed (CRD ch.51 R100 item 6). The
+    // gate agreed between servers is covered in `qrc20_swap_evidence_tests`.
+    Arc::get_mut(&mut coin.0).unwrap().utxo.swap_evidence = crate::SwapEvidencePolicy::OwnDaemon;
     block_on(coin.can_refund_htlc(locktime).compat()).unwrap()
 }
 
