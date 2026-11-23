@@ -385,8 +385,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # protoc is a pinned release, checked by its SHA-256, and found through
-      # PROTOC, so the build does not depend on a package manager's PATH update.
+      # protoc is a pinned release, checked by its SHA-256 and found through
+      # PROTOC; no package manager is involved.
       - name: Install protoc
         shell: powershell
         run: |

@@ -61,8 +61,8 @@ jobs:
           "profile=$profile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "features=$features" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      # protoc is a pinned release, checked by its SHA-256, and found through
-      # PROTOC, so the build does not depend on a package manager's PATH update.
+      # protoc is a pinned release, checked by its SHA-256 and found through
+      # PROTOC; no package manager is involved.
       - name: Install protoc
         shell: powershell
         run: |
