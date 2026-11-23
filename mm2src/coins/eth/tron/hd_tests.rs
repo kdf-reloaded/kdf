@@ -167,6 +167,7 @@ fn params(node_url: &str) -> TronCoinParams {
         tx_history: false,
         gasfree: None,
         swap_contracts: None,
+        swap_evidence_node: None,
     }
 }
 

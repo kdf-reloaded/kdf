@@ -23,6 +23,7 @@ pub mod ids;
 pub(crate) mod send;
 pub mod trigger;
 pub mod tx;
+pub mod watch;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod activation_tests;
@@ -34,6 +35,7 @@ mod fee_limit_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod send_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod trigger_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))] mod tx_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))] mod watch_tests;
 
 pub use contract_abi::{decode_allowance, decode_call, decode_event, decode_payments_output, encode_allowance_query,
                        encode_approve, encode_call, encode_payments_query, PaymentRecord, PaymentState, TronSwapCall,
@@ -122,6 +124,16 @@ pub enum TronSwapError {
         /// Why the broadcast did not end with an acceptance.
         error: TronApiError,
     },
+    /// Fewer than two nodes answered a read that needs two nodes to agree (CRD ch.51 R100).
+    NotEnoughAnswers {
+        /// The number of nodes that answered.
+        got: usize,
+    },
+    /// A search for the transaction that consumed a payment reached its cap without finding it (CRD ch.21 D21.B8).
+    SearchCapped {
+        /// The source that was read up to its cap.
+        source: &'static str,
+    },
 }
 
 impl fmt::Display for TronSwapError {
@@ -170,6 +182,14 @@ impl fmt::Display for TronSwapError {
                     "the broadcast of the TRON transaction {:x} failed: {error}",
                     tx.txid()
                 )
+            },
+            TronSwapError::NotEnoughAnswers { got } => write!(
+                f,
+                "{got} TRON node(s) answered, two must agree: add a node to the coin's node list or set \
+                 swap_evidence_node to the node to trust"
+            ),
+            TronSwapError::SearchCapped { source } => {
+                write!(f, "the search through the {source} reached its cap without an answer")
             },
         }
     }

@@ -157,6 +157,24 @@ impl MarketCoinOps for EthCoin {
         wait_until: u64,
         check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
+        if self.is_tron_family() {
+            let (coin, tx) = (self.clone(), tx.to_vec());
+            return Box::new(
+                async move {
+                    crate::eth::tron::swap::watch::wait_for_confirmations(
+                        &coin,
+                        &tx,
+                        confirmations,
+                        wait_until,
+                        check_every,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                }
+                .boxed()
+                .compat(),
+            );
+        }
         let ctx = try_fus!(MmArc::from_weak(&self.ctx).ok_or("No context"));
         let mut status = ctx.log.status_handle();
         status.status(&[&self.ticker], "Waiting for confirmations…");
@@ -242,11 +260,23 @@ impl MarketCoinOps for EthCoin {
         from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        if self.is_tron_family() {
+            let (coin, payment_tx, swap_contract) = (self.clone(), tx_bytes.to_vec(), swap_contract_address.clone());
+            return Box::new(
+                async move {
+                    crate::eth::tron::swap::watch::wait_for_spend(&coin, &payment_tx, wait_until, &swap_contract)
+                        .await
+                        .map(TransactionEnum::from)
+                        .map_err(|e| TransactionErr::Plain(e.to_string()))
+                }
+                .boxed()
+                .compat(),
+            );
+        }
         let func_name = match self.coin_type {
             EthCoinType::Eth => "ethPayment",
             EthCoinType::Erc20 { .. } => "erc20Payment",
-            // V1 ETH-style HTLC swaps don't apply to TRON. TRON coins are wallet-only while
-            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
+            // A TRON coin's spend watch is `tron::swap::watch::wait_for_spend`, taken above.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return Box::new(futures01::future::err(TransactionErr::Plain(
                     "TRON V1 swap spend watchers are not supported".to_string(),

@@ -28,7 +28,8 @@ or undo, and every change that needs a step from you.
     `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
     not answer, the step waits; no other node is asked in its place.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
-    - none yet.
+    - TRON (TRX, TRC20). TRON swaps stay off in this release; when they are switched on, their chain reads already
+      follow the rule. Detail: PR #509; CRD ch.21 §21.11D.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
@@ -575,6 +576,12 @@ the previous version used. The safe way:
   "swap_contract_address is ignored, the coin is wallet-only". Nothing else changes for a user: the groundwork for
   TRON swaps added here (the contract interface, the transaction form and the contract binding at activation) is not
   used by any order or swap while TRON swaps are off. Detail: PR #506; CRD ch.21 §21.11C, R21.B2.
+- **A TRON platform accepts `swap_evidence_node` at activation.** The field names one node of the request's own
+  node list to trust for swap evidence instead of the two-node agreement (see "Breaking changes and upgrade
+  notes"); a value that is not in the list refuses the activation with `SwapEvidenceNodeNotInList`. TRON swaps stay
+  off: the part of a TRON swap that reads the chain (checking the other side's payment and the DEX fee, this node's
+  claim and refund, the refund time, the search for a claim and its secret) is built and waits for the switch-on.
+  Detail: PR #509; CRD ch.21 §21.11D.
 
 #### Tendermint (Cosmos) coins
 
@@ -908,6 +915,11 @@ the previous version used. The safe way:
   such an order with `cancel_order`, which still sends its cancel message. A kept taker order still times out as
   before: fill-or-kill is removed, good-till-cancelled becomes a maker order that is kept and not announced.
   Detail: PR #485; CRD ch.60 R60.6.5.
+- **A wallet-only coin is refused as wallet-only before the two-node check.** `setprice`, `buy` and `sell` with a
+  coin that cannot trade (a wallet-only coin, every TRON coin while TRON swaps are off) now answer the wallet-only
+  error first. Before, a coin that also had fewer than two nodes was told to add a node or set `swap_evidence_node`
+  (see the R100 item under "Breaking changes and upgrade notes"), which would not have made it tradable.
+  Detail: PR #509.
 
 #### EVM, BCH, Sia and Lightning coins
 
