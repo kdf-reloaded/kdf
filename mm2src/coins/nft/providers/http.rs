@@ -171,11 +171,7 @@ mod tests {
         use common::block_on;
 
         // Transport: nothing listens on the port.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = crate::closed_port::CLOSED_PORT;
         let err = block_on(fetch_json::<Json>(&secret_url(port), &[])).unwrap_err();
         assert!(
             matches!(err.get_inner(), FetchError::Transport { .. }),

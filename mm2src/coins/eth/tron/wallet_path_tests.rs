@@ -8,6 +8,7 @@
 use super::test_node::{Reply, StubNode};
 use super::withdraw::withdraw_tron;
 use super::{tron_coin_from_conf_and_request, Network, TronAddress, TRX_DECIMALS};
+use crate::closed_port::{closed_url, CLOSED_PORT};
 use crate::eth::{EthCoin, EthCoinType, EvmWithdrawSender};
 use crate::{BalanceError, CoinProtocol, MarketCoinOps, MmCoin, MmCoinEnum, WithdrawError, WithdrawFee, WithdrawRequest};
 use bigdecimal::BigDecimal;
@@ -71,15 +72,6 @@ pub(super) async fn trc20_coin_over(node_urls: &[&str], decimals: u8) -> (MmArc,
 
 /// The coin's own address in the base58 form the node API is asked with.
 fn my_base58(coin: &EthCoin) -> String { TronAddress::from_evm_address(coin.my_address).to_base58() }
-
-/// A port on which nothing listens.
-fn closed_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind a loopback port")
-        .local_addr()
-        .expect("local address")
-        .port()
-}
 
 /// A node whose `getaccount` answers `reply` and which refuses every other endpoint.
 fn getaccount_node(status: u16, body: &'static str) -> StubNode {
@@ -149,7 +141,7 @@ fn trx_balance_of_a_non_2xx_answer_is_an_error_not_zero() {
 
 #[test]
 fn trx_balance_with_an_unreachable_node_is_an_error_not_zero() {
-    let url = format!("http://127.0.0.1:{}", closed_port());
+    let url = closed_url();
     let result = block_on(async {
         let (_ctx, coin) = trx_coin(&url).await;
         MarketCoinOps::my_balance(&coin).compat().await
@@ -494,7 +486,7 @@ fn send_raw_tx_rejects_input_that_is_not_hex_before_any_request() {
 
 #[test]
 fn broadcast_errors_name_no_node_url_or_key() {
-    let url = format!("http://user:secret@127.0.0.1:{}/APIKEY", closed_port());
+    let url = format!("http://user:secret@127.0.0.1:{CLOSED_PORT}/APIKEY");
     let results = block_on(async {
         let (_ctx, coin) = trx_coin(&url).await;
         vec![

@@ -87,6 +87,7 @@ pub fn solana_coin_for_test(seed: String, net_type: SolanaNet) -> (MmArc, Solana
         spl_tokens_infos,
         settings: SolanaCoinSettings::default(),
         history: SolanaHistoryStates::default(),
+        swap: SolanaSwapConfig::default(),
     }));
     (ctx, solana_coin)
 }

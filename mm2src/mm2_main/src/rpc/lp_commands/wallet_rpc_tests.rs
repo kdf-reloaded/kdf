@@ -698,6 +698,7 @@ fn my_balance_of_a_tron_coin_carries_the_gasfree_address_only_with_a_provider() 
             required_confirmations: 1,
             tx_history: false,
             gasfree,
+            swap_contracts: None,
         };
         let platform = block_on(tron_coin_from_params(
             &ctx,

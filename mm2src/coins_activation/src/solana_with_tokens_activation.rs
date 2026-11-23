@@ -237,7 +237,12 @@ impl CurrentBlock for SolanaWithTokensActivationResult {
 
 #[derive(Debug)]
 pub enum SolanaWithTokensActivationError {
-    PlatformCoinCreationError { ticker: String, error: String },
+    PlatformCoinCreationError {
+        ticker: String,
+        error: String,
+    },
+    /// A `swap_evidence_node` outside the node list (CRD ch.51 R100 item 2).
+    SwapEvidenceNodeNotInList(coins::swap_evidence::SwapEvidenceNodeNotInList),
     UnableToRetrieveMyAddress(String),
     Transport(String),
     Internal(String),
@@ -248,6 +253,9 @@ impl From<SolanaWithTokensActivationError> for EnablePlatformCoinWithTokensError
         match e {
             SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error } => {
                 EnablePlatformCoinWithTokensError::PlatformCoinCreationError { ticker, error }
+            },
+            SolanaWithTokensActivationError::SwapEvidenceNodeNotInList(error) => {
+                EnablePlatformCoinWithTokensError::SwapEvidenceNodeNotInList(error)
             },
             SolanaWithTokensActivationError::UnableToRetrieveMyAddress(e) => {
                 EnablePlatformCoinWithTokensError::Internal(e)
@@ -291,6 +299,11 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         let crypto_ctx =
             CryptoCtx::from_ctx(&ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
         reject_unsupported_policy(&ticker, &activation_request.priv_key_policy)?;
+        // A `swap_evidence_node` outside the node list is refused before any node is contacted (CRD ch.51 R100).
+        activation_request
+            .platform_request
+            .swap_evidence_policy(&ticker)
+            .map_err(|e| MmError::new(SolanaWithTokensActivationError::SwapEvidenceNodeNotInList(e)))?;
         // D40.6B.4: a Token-2022 inline token is refused before any node is contacted and nothing is
         // registered. A token whose protocol does not resolve, or that names another platform, is left to the
         // later token initialisation, which answers the error of its own row.
@@ -337,6 +350,13 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         };
         let node_order = solana_node_order(&ctx);
         let tx_history = activation_request.tx_history;
+        // R40.6D.2: the program of the entry, read once; the activation succeeds whatever the check finds.
+        let swap_program = coins::solana::swap_program_id_from_conf(&platform_conf).map_to_mm(|error| {
+            SolanaWithTokensActivationError::PlatformCoinCreationError {
+                ticker: ticker.clone(),
+                error,
+            }
+        })?;
         let platform_coin = solana_coin_with_node_order(
             &ticker,
             &platform_conf,
@@ -346,6 +366,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         )
         .await
         .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
+        platform_coin.check_swap_program(swap_program).await;
         // R40.6C.1: the history is enabled before the instance is registered, so no answer sees it half started; the
         // writer itself starts in `on_platform_registered`.
         if tx_history {

@@ -26,6 +26,9 @@ const SECRET: [u8; 32] = [0x44; 32];
 const OTHER_SECRET: [u8; 32] = [0x45; 32];
 const COIN_KEY: &str = "809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f";
 
+/// The timestamp of every node's latest block unless a test sets another.
+const TIP_TIME: u64 = 1_700_000_000;
+
 const SENT: u8 = 1;
 const SPENT: u8 = 2;
 const REFUNDED: u8 = 3;
@@ -94,8 +97,8 @@ fn rpc_tx(tx: &SignedEthTx) -> Json {
     })
 }
 
-/// The `eth_getBlockByNumber` result of an empty block with the given timestamp.
-fn rpc_block(timestamp: u64) -> Json {
+/// The `eth_getBlockByNumber` result of an empty block with the given height and timestamp.
+fn rpc_block(number: u64, timestamp: u64) -> Json {
     json!({
         "hash": format!("0x{}", "11".repeat(32)),
         "parentHash": format!("0x{}", "22".repeat(32)),
@@ -106,7 +109,7 @@ fn rpc_block(timestamp: u64) -> Json {
         "receiptsRoot": format!("0x{}", "66".repeat(32)),
         "logsBloom": format!("0x{}", "00".repeat(256)),
         "difficulty": "0x0",
-        "number": "0x64",
+        "number": format!("{:#x}", number),
         "gasLimit": "0x1c9c380",
         "gasUsed": "0x0",
         "timestamp": format!("{:#x}", timestamp),
@@ -136,7 +139,6 @@ fn answer(world: &World, call: &Call) -> Reply {
     }
     let payment = world.payment.lock().unwrap().clone().expect("the payment is set");
     let result = match call.method.as_str() {
-        "eth_blockNumber" => json!(format!("{:#x}", node.tip)),
         "eth_call" => {
             let block = block_of(&params[1]);
             if block > node.tip {
@@ -187,8 +189,8 @@ fn answer(world: &World, call: &Call) -> Reply {
             }
         },
         "eth_getBlockByNumber" => {
-            assert_eq!(params[0], json!("latest"), "the refund gate reads the latest block");
-            rpc_block(node.timestamp)
+            assert_eq!(params[0], json!("latest"), "only the latest block is read");
+            rpc_block(node.tip, node.timestamp)
         },
         other => panic!("the scripted node does not serve `{other}`"),
     };
@@ -254,7 +256,7 @@ impl Fixture {
             world.nodes.lock().unwrap().insert(host_of(url), Node {
                 down: false,
                 tip: 100,
-                timestamp: 0,
+                timestamp: TIP_TIME,
                 states: vec![(90, SENT)],
                 spend: None,
                 knows_payment: true,
@@ -478,10 +480,10 @@ fn assert_undetermined(text: &str, reason: &str) {
 fn payment_state_two_agreeing_nodes_validate_the_payment() {
     let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
     fx.validate(0).unwrap();
-    // The pair's tips, then the state at the common block and the transaction, on each node of the pair.
+    // Each node of the pair: its latest block, then the state at that block and the transaction.
     for node in [A, B] {
         assert_eq!(fx.asked(node), [
-            "eth_blockNumber",
+            "eth_getBlockByNumber",
             "eth_call",
             "eth_getTransactionByHash"
         ]);
@@ -553,22 +555,44 @@ fn two_entries_of_one_host_are_one_node_and_no_read_is_made() {
 }
 
 #[test]
-fn payment_state_is_read_at_the_lower_tip_of_the_pair() {
+fn payment_state_is_read_at_each_nodes_own_tip() {
     let fx = Fixture::eth(&[A, B], listed(&[A, B]));
-    // Node B is one block behind; both show the payment as sent at block 99.
-    fx.set(B, |node| node.tip = 99);
+    // Node B is one block and twelve seconds behind; each shows the payment as sent at its own tip.
+    fx.set(A, |node| node.tip = 101);
+    fx.set(B, |node| node.timestamp = TIP_TIME - 12);
     fx.validate(0).unwrap();
-    assert_eq!(fx.call_blocks(A), [99]);
-    assert_eq!(fx.call_blocks(B), [99]);
+    assert_eq!(fx.call_blocks(A), [101]);
+    assert_eq!(fx.call_blocks(B), [100]);
 
-    // The payment is only in node A's newest block: at the lower tip neither node shows it. That is the rule's
-    // outcome, the payment is not validated on node A alone; once node B has the block, it is.
-    fx.set(A, |node| node.states = vec![(100, SENT)]);
-    fx.set(B, |node| node.states = vec![(100, SENT)]);
-    let err = fx.validate(0).unwrap_err();
-    assert!(err.contains("Payment state is not PAYMENT_STATE_SENT, got 0"), "{err}");
-    fx.set(B, |node| node.tip = 100);
+    // The payment is only in node A's newest block: node B does not show it yet, so the two disagree and the
+    // payment is not validated on node A alone. Once node B has the block, it is.
+    fx.set(A, |node| node.states = vec![(101, SENT)]);
+    fx.set(B, |node| node.states = vec![(101, SENT)]);
+    assert_undetermined(&fx.validate(0).unwrap_err(), "the nodes disagree");
+    fx.set(B, |node| node.tip = 101);
     fx.validate(0).unwrap();
+}
+
+#[test]
+fn a_tip_gap_above_the_bound_is_undetermined() {
+    let fx = Fixture::eth(&[A, B], listed(&[A, B]));
+    // Node B's latest block is 61 seconds older than node A's; both show the same states.
+    fx.set(B, |node| node.timestamp = TIP_TIME - 61);
+    assert_undetermined(&fx.validate(0).unwrap_err(), "the tips of the nodes differ too much");
+    // Never "not spent", so nothing is ready for a refund.
+    assert_undetermined(&fx.search().unwrap_err(), "the tips of the nodes differ too much");
+    // A refund both nodes show is not taken across the gap either.
+    let refund = fx.refund(95);
+    fx.spent_on(A, REFUNDED, &refund);
+    fx.spent_on(B, REFUNDED, &refund);
+    assert_undetermined(&fx.search().unwrap_err(), "the tips of the nodes differ too much");
+
+    // At the bound itself the two answers are compared.
+    fx.set(B, |node| node.timestamp = TIP_TIME - 60);
+    let err = fx.validate(0).unwrap_err();
+    assert!(err.contains("Payment state is not PAYMENT_STATE_SENT, got 3"), "{err}");
+    assert_eq!(fx.search(), Ok(refunded(&refund)));
+    fx.assert_failover_unused();
 }
 
 #[test]
@@ -578,7 +602,11 @@ fn payment_state_of_the_trusted_node_is_taken_alone() {
     fx.set(A, |node| node.states.clear());
     fx.validate(0).unwrap();
     assert!(fx.asked(A).is_empty(), "{:?}", fx.asked(A));
-    assert_eq!(fx.asked(B), ["eth_blockNumber", "eth_call", "eth_getTransactionByHash"]);
+    assert_eq!(fx.asked(B), [
+        "eth_getBlockByNumber",
+        "eth_call",
+        "eth_getTransactionByHash"
+    ]);
 }
 
 #[test]
@@ -662,26 +690,54 @@ fn spend_state_one_answering_node_never_reads_as_not_spent() {
 }
 
 #[test]
-fn spend_state_is_read_at_the_lower_tip_of_the_pair() {
+fn spend_state_of_two_nodes_within_the_gap_that_agree_is_decided() {
     let fx = Fixture::eth(&[A, B], listed(&[A, B]));
-    // Node B is one block behind and both show the same claim at block 95.
+    // Node B is one block and twelve seconds behind.
+    fx.set(A, |node| node.tip = 101);
+    fx.set(B, |node| node.timestamp = TIP_TIME - 12);
+    assert_eq!(fx.search(), Ok(None));
+    assert_eq!(fx.call_blocks(A), [101]);
+    assert_eq!(fx.call_blocks(B), [100]);
+
+    // Both show the same claim, which does not carry the swap's secret.
     let claim = fx.claim(&OTHER_SECRET, 95);
     fx.spent_on(A, SPENT, &claim);
     fx.spent_on(B, SPENT, &claim);
-    fx.set(B, |node| node.tip = 99);
     assert_eq!(fx.search(), Ok(spent(&claim)));
-    assert_eq!(fx.call_blocks(A), [99]);
-    assert_eq!(fx.call_blocks(B), [99]);
+}
 
-    // A claim that is only in node A's newest block: both nodes are read at block 99, where neither shows it, so
-    // the two agree on "not spent" at that block. That is the rule's outcome; the step's own lock time and the
-    // contract's state check at the refund still apply.
+#[test]
+fn a_claim_with_the_matching_secret_at_the_newer_tip_is_taken() {
+    // The claim is only in node A's newest block; node B, one block behind, still shows "not spent".
     let fx = Fixture::eth(&[A, B], listed(&[A, B]));
-    let claim = fx.claim(&SECRET, 100);
+    let claim = fx.claim(&SECRET, 101);
+    fx.set(A, |node| node.tip = 101);
     fx.spent_on(A, SPENT, &claim);
-    fx.set(B, |node| node.tip = 99);
-    assert_eq!(fx.search(), Ok(None));
-    assert_eq!(fx.call_blocks(A), [99]);
+    fx.set(B, |node| node.timestamp = TIP_TIME - 12);
+    assert_eq!(fx.search(), Ok(spent(&claim)));
+    assert_eq!(fx.wait_for_spend().unwrap(), TransactionEnum::from(claim.tx.clone()));
+
+    // The same with node B beyond the gap: a lagging node does not hide the secret.
+    fx.set(B, |node| node.timestamp = TIP_TIME - 600);
+    assert_eq!(fx.search(), Ok(spent(&claim)));
+    assert_eq!(fx.wait_for_spend().unwrap(), TransactionEnum::from(claim.tx.clone()));
+}
+
+#[test]
+fn a_claim_with_another_secret_at_the_newer_tip_is_not_taken() {
+    let fx = Fixture::eth(&[A, B], listed(&[A, B]));
+    let claim = fx.claim(&OTHER_SECRET, 101);
+    fx.set(A, |node| node.tip = 101);
+    fx.spent_on(A, SPENT, &claim);
+    fx.set(B, |node| node.timestamp = TIP_TIME - 12);
+    // Node B does not show the claim yet: no claim, and no "not spent" either.
+    assert_undetermined(&fx.search().unwrap_err(), "the nodes disagree");
+    assert!(fx.wait_for_spend().is_err());
+
+    // Once node B shows it too, the pair decides.
+    fx.set(B, |node| node.tip = 101);
+    fx.spent_on(B, SPENT, &claim);
+    assert_eq!(fx.search(), Ok(spent(&claim)));
 }
 
 #[test]
@@ -910,9 +966,10 @@ fn an_undetermined_read_is_reported_once_at_warn_with_what_each_node_said() {
         first.contains("a.example:8545: payment state 1") && first.contains("b.example:8545: payment state 0"),
         "{first}"
     );
-    if !capturing {
-        return;
-    }
+    assert!(
+        capturing,
+        "the log capture is not installed (another logger owns the process), so the WARN-once rule is not checked"
+    );
     let id = hex::encode(&fx.id);
     let lines: Vec<String> = captured_log_lines()
         .into_iter()

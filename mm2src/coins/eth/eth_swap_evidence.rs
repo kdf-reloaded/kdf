@@ -9,7 +9,7 @@
 //!
 //! # Public exports
 //!
-//! - `Web3Instance::node_name` and the directed reads of one node: `block_number`, `payment_state_at`,
+//! - `Web3Instance::node_name` and the directed reads of one node: `latest_block`, `payment_state_at`,
 //!   `transaction_by_hash`, `transaction_block`, `swap_logs`, `block_timestamp`.
 //! - `EthCoin::agreed_swap_reads`: the policy the reads are agreed under, `None` while the coin reads as before.
 //! - `EthCoin::agreed_payment_read`, `EthCoin::agreed_swap_tx_spend`, `EthCoin::wait_for_agreed_payment_spend`,
@@ -18,9 +18,12 @@
 //! # Invariants
 //!
 //! - A directed read asks one node, never fails over, and gives up after the per-node cutoff of the failover path.
-//! - The payment-state read and the spend read of one attempt are made at one common block: the lower tip of the
-//!   attempt's pair (the trusted node's own tip under a trusted node). A node whose tip is below that block gives
-//!   no answer in the attempt. Only the pair's nodes are asked for a tip before the read.
+//! - The payment-state read and the spend read ask each node at its own latest block, and every answer carries that
+//!   block's height and timestamp. Two answers whose tip timestamps are more than [`MAX_TIP_GAP_SECS`] apart leave
+//!   the attempt undetermined.
+//! - A node that is a block behind and has not seen a claim, a refund or a payment yet disagrees with a node that
+//!   has. The read is then undetermined until both nodes show it. This is intended: no answer is taken at a block
+//!   below a node's own tip, so a claim that carries the swap's secret is never hidden by a lagging node.
 //! - One attempt takes one pair of answers. Two answers that differ leave the attempt undetermined; no further
 //!   node is asked to outvote them.
 //! - An undetermined read never yields "valid", "not spent" or an open refund gate.
@@ -32,7 +35,7 @@ use super::eth_logs_window::{LogsQuerier, PaymentKey, REORG_MARGIN_BLOCKS};
 use super::eth_swap_ops::{evm_refund_eligibility, secret_of_claim_call, secret_of_spent_logs};
 use super::*;
 use crate::node_url::{host_only, scrub_node_url, UNNAMED_NODE};
-use crate::swap_evidence::{agree, node_host, node_name, Agreement, Undetermined, UndeterminedReason};
+use crate::swap_evidence::{agree, agree_with_tips, node_name, Agreement, Undetermined, UndeterminedReason};
 use crate::{CanRefundHtlc, SwapEvidencePolicy};
 use common::log::{debug, warn};
 use std::future::Future as StdFuture;
@@ -40,9 +43,14 @@ use std::future::Future as StdFuture;
 /// A transaction as a node returns it.
 pub(crate) type NodeTransaction = alloy::rpc::types::eth::Transaction;
 
-/// Seconds between two attempts of the payment-state read while it is undetermined or the payment is not yet
-/// visible at the common block.
+/// Seconds between two attempts of the payment-state read while it is undetermined or the nodes do not show the
+/// payment yet.
 const PAYMENT_READ_RETRY_S: f64 = 10.;
+
+/// The largest difference, in seconds, between the timestamps of the tip blocks of two nodes whose answers are
+/// compared. A gap in time, not in blocks, fits every EVM chain whatever its block time: a node that is this far
+/// behind is not reading the chain the other node reads.
+pub(crate) const MAX_TIP_GAP_SECS: u64 = 60;
 
 /// How many undetermined reads are remembered as already reported at WARN.
 const REPORTED_CAP: usize = 256;
@@ -92,11 +100,20 @@ impl Web3Instance {
     /// The form in which a log line or an error text names this node: `host[:port]`.
     pub(crate) fn node_name(&self) -> String { node_name(&self.url) }
 
-    /// `eth_blockNumber` of this node.
-    pub(crate) async fn block_number(&self) -> Result<u64, String> {
+    /// The height and the timestamp of this node's latest block (`eth_getBlockByNumber`).
+    pub(crate) async fn latest_block(&self) -> Result<TipBlock, String> {
+        use alloy::eips::BlockNumberOrTag;
         use alloy::providers::Provider;
+        use std::future::IntoFuture;
 
-        within_node_cutoff(&self.url, "eth_blockNumber", self.web3.get_block_number()).await
+        let request = self.web3.get_block_by_number(BlockNumberOrTag::Latest).into_future();
+        match within_node_cutoff(&self.url, "eth_getBlockByNumber", request).await? {
+            Some(block) => Ok(TipBlock {
+                height: block.header.number,
+                time: block.header.timestamp,
+            }),
+            None => Err("the node returned no latest block".to_owned()),
+        }
     }
 
     /// The state of the legacy swap contract's payment `id` at `block`, as this node reports it.
@@ -269,39 +286,34 @@ enum ChainTime {
     NotPastTheLock,
 }
 
-/// One node of an attempt. `tip` is the tip the node reported when the attempt began, or its failure to report one;
-/// `None` for a node outside the attempt's pair, which is asked for its tip only when it is asked at all.
-struct EvidenceNode {
-    name: String,
-    instance: Web3Instance,
-    tip: Option<Result<u64, String>>,
+/// The latest block of a node when it answered.
+#[derive(Clone, Copy)]
+pub(crate) struct TipBlock {
+    pub(crate) height: u64,
+    /// The block's timestamp, in seconds.
+    pub(crate) time: u64,
 }
 
-/// The indexes of the nodes whose tips make the common block of an attempt, in the order they are asked, and how
-/// many tips are needed: under two nodes the first node of every distinct host and two tips; under a trusted node
-/// that node and its tip; otherwise none.
-fn tip_candidates(policy: &SwapEvidencePolicy, names: &[String]) -> (Vec<usize>, usize) {
-    match policy {
-        SwapEvidencePolicy::TwoNodes { .. } => {
-            let mut hosts: Vec<String> = Vec::new();
-            let mut candidates = Vec::new();
-            for (index, name) in names.iter().enumerate() {
-                let host = node_host(name).unwrap_or_else(|| name.to_ascii_lowercase());
-                if !hosts.contains(&host) {
-                    hosts.push(host);
-                    candidates.push(index);
-                }
-            }
-            (candidates, 2)
-        },
-        SwapEvidencePolicy::Trusted { node } => (
-            (0..names.len())
-                .filter(|index| node_name(node) == names[*index])
-                .take(1)
-                .collect(),
-            1,
-        ),
-        _ => (Vec::new(), 0),
+/// What a node shows at its own latest block.
+pub(crate) struct AtTip<T> {
+    pub(crate) tip: TipBlock,
+    pub(crate) read: T,
+}
+
+/// A decision with the height it was read at. Two of them are equal when the decisions are; the height is only
+/// shown, in the text of an undetermined read.
+struct AtHeight<D> {
+    decision: D,
+    height: u64,
+}
+
+impl<D: PartialEq> PartialEq for AtHeight<D> {
+    fn eq(&self, other: &Self) -> bool { self.decision == other.decision }
+}
+
+impl<D: fmt::Debug> fmt::Debug for AtHeight<D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?} at block {}", self.decision, self.height)
     }
 }
 
@@ -408,86 +420,44 @@ impl EthCoin {
         }
     }
 
-    /// One attempt of a read that is made at a common block.
-    ///
-    /// The tips of the attempt's pair are read first: the first two distinct hosts that report one, walking past a
-    /// node that does not (under a trusted node: that node's tip). The common block is the lower of the two tips.
-    /// `read` then runs on the nodes [`agree`] asks, at the common block. A node outside the pair is asked for its
-    /// own tip when [`agree`] turns to it, and gives no answer when that tip is below the common block. Without a
-    /// common block (too few tips, or a policy without one) a node reads at its own tip, and [`agree`] takes such an
-    /// answer only when it proves itself.
-    async fn agree_at_common_block<A, K, R, Fut>(
+    /// One attempt of a read that each node answers at its own latest block: the node's latest block is read
+    /// first, then `read` runs on that node at that block's height. The answers are compared by
+    /// [`agree_with_tips`] with the timestamps of the tip blocks, so two nodes more than [`MAX_TIP_GAP_SECS`] apart
+    /// leave the attempt undetermined, and an answer that proves itself is taken from any one node.
+    async fn agree_at_own_tips<T, D, R, Fut>(
         &self,
         policy: &SwapEvidencePolicy,
         with_rest: bool,
         read: R,
-        classify: impl Fn(&A) -> K,
-        proves_itself: impl Fn(&A) -> bool,
-    ) -> Agreement<A, K>
+        classify: impl Fn(&T) -> D,
+        proves_itself: impl Fn(&T) -> bool,
+    ) -> Agreement<AtTip<T>, AtHeight<D>>
     where
-        K: PartialEq + fmt::Debug,
+        D: PartialEq + fmt::Debug,
         R: Fn(Web3Instance, u64) -> Fut,
-        Fut: StdFuture<Output = Result<A, String>>,
+        Fut: StdFuture<Output = Result<T, String>>,
     {
         let instances = self.evidence_instances(policy, with_rest);
-        let names: Vec<String> = instances.iter().map(Web3Instance::node_name).collect();
-        let (candidates, needed) = tip_candidates(policy, &names);
-        let mut tips: Vec<Option<Result<u64, String>>> = vec![None; instances.len()];
-        let (mut reported, mut asked) = (Vec::new(), 0);
-        while reported.len() < needed && asked < candidates.len() {
-            let batch: Vec<usize> = candidates[asked..]
-                .iter()
-                .copied()
-                .take(needed - reported.len())
-                .collect();
-            asked += batch.len();
-            let answers = assert_send_future(join_all(batch.iter().map(|index| {
-                let instance = instances[*index].clone();
-                async move { instance.block_number().await }
-            })))
-            .await;
-            for (index, tip) in batch.into_iter().zip(answers) {
-                if let Ok(tip) = &tip {
-                    reported.push(*tip);
-                }
-                tips[index] = Some(tip);
-            }
-        }
-        let common = if needed > 0 && reported.len() == needed {
-            reported.iter().copied().min()
-        } else {
-            None
-        };
-        let nodes: Vec<EvidenceNode> = instances
-            .into_iter()
-            .zip(names)
-            .zip(tips)
-            .map(|((instance, name), tip)| EvidenceNode { name, instance, tip })
-            .collect();
         let read = &read;
-        agree(
+        agree_with_tips(
             policy,
-            &nodes,
-            |node| node.name.clone(),
-            |node| {
-                let (known_tip, instance) = (node.tip.clone(), node.instance.clone());
+            &instances,
+            |instance| instance.node_name(),
+            |instance| {
+                let instance = instance.clone();
                 async move {
-                    let tip = match known_tip {
-                        Some(tip) => tip?,
-                        None => instance.block_number().await?,
-                    };
-                    let at = match common {
-                        Some(common) if tip < common => {
-                            return Err(format!("its tip {tip} is below the common block {common}"))
-                        },
-                        Some(common) => common,
-                        None => tip,
-                    };
-                    read(instance, at).await
+                    let tip = instance.latest_block().await?;
+                    let read = read(instance, tip.height).await?;
+                    Ok(AtTip { tip, read })
                 }
             },
-            classify,
-            proves_itself,
+            |answer| AtHeight {
+                decision: classify(&answer.read),
+                height: answer.tip.height,
+            },
+            |answer| proves_itself(&answer.read),
+            |answer| Some(answer.tip.time),
+            MAX_TIP_GAP_SECS,
         )
         .await
     }
@@ -518,7 +488,7 @@ impl EthCoin {
         swap_contract_address: Address,
         id: &[u8],
         payment_hash: H256,
-    ) -> Agreement<PaymentRead, PaymentDecision> {
+    ) -> Agreement<AtTip<PaymentRead>, AtHeight<PaymentDecision>> {
         // Nothing can decide this read without two nodes or a trusted one, so no node is asked.
         if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
             return Agreement::Undetermined(Undetermined {
@@ -527,7 +497,7 @@ impl EthCoin {
             });
         }
         let (from, id) = (self.my_address, id.to_vec());
-        self.agree_at_common_block(
+        self.agree_at_own_tips(
             policy,
             false,
             move |node: Web3Instance, at: u64| {
@@ -545,11 +515,11 @@ impl EthCoin {
     }
 
     /// The counterparty's payment under `policy` (CRD ch.51 R100): the state of payment `id` and the payment
-    /// transaction, as two nodes agree on them at a common block, or as the trusted node shows them.
+    /// transaction, as two nodes agree on them, each at its own latest block, or as the trusted node shows them.
     ///
     /// The read is repeated until `wait_until` (UNIX seconds) while it is undetermined, and while the nodes agree
-    /// that the contract does not know the payment yet (a node one block behind makes the common block the block
-    /// before the payment's). It is made at least once.
+    /// that the contract does not know the payment yet. It is made at least once, and no attempt starts at or after
+    /// `wait_until`.
     ///
     /// # Errors
     ///
@@ -564,22 +534,29 @@ impl EthCoin {
     ) -> Result<PaymentRead, String> {
         loop {
             let attempt = assert_send_future(self.payment_read_once(policy, swap_contract_address, id, payment_hash));
-            match attempt.await {
+            // What the read answers when the deadline has passed.
+            let at_deadline = match attempt.await {
                 Agreement::Agreed { answer, .. } => {
-                    let not_visible_yet = answer.state == U256::from(PAYMENT_STATE_UNINITIALIZED);
-                    if !not_visible_yet || now_ms() / 1000 >= wait_until {
-                        return Ok(answer);
+                    if answer.read.state != U256::from(PAYMENT_STATE_UNINITIALIZED) {
+                        return Ok(answer.read);
                     }
+                    Ok(answer.read)
                 },
                 Agreement::Undetermined(undetermined) => {
                     let subject = format!("payment {}", hex::encode(id));
-                    let text = self.report_undetermined("payment state", &subject, &undetermined);
-                    if now_ms() / 1000 >= wait_until {
-                        return Err(text);
-                    }
+                    Err(self.report_undetermined("payment state", &subject, &undetermined))
                 },
+            };
+            // The wait never runs past the deadline: it is cut to the time that is left, and the deadline is
+            // checked again after it, so no attempt starts at or after `wait_until`.
+            let remaining = wait_until.saturating_sub(now_ms() / 1000);
+            if remaining == 0 {
+                return at_deadline;
             }
-            Timer::sleep(PAYMENT_READ_RETRY_S).await;
+            Timer::sleep(PAYMENT_READ_RETRY_S.min(remaining as f64)).await;
+            if now_ms() / 1000 >= wait_until {
+                return at_deadline;
+            }
         }
     }
 
@@ -611,7 +588,7 @@ impl EthCoin {
         id: &[u8],
         swap_contract_address: Address,
         search_from_block: u64,
-    ) -> Result<Agreement<SpendRead, SpendDecision>, String> {
+    ) -> Result<Agreement<AtTip<SpendRead>, AtHeight<SpendDecision>>, String> {
         let secret_hash = self.payment_secret_hash_arg(payment_tx)?;
         let coin = self.clone();
         let key: PaymentKey = (swap_contract_address, id.to_vec());
@@ -621,7 +598,7 @@ impl EthCoin {
         // an `Insufficient` policy too: `agree` then asks the coin's nodes for such a claim only and ignores every
         // other answer, so "not spent" and a claim without the secret stay undetermined.
         Ok(self
-            .agree_at_common_block(
+            .agree_at_own_tips(
                 policy,
                 true,
                 move |node: Web3Instance, at: u64| {
@@ -642,7 +619,7 @@ impl EthCoin {
     }
 
     /// Whether the payment `payment_tx` (swap id `id`) is claimed, refunded or not spent, under `policy`
-    /// (CRD ch.51 R100). "Not spent" is answered only when two nodes agree on it at a common block, or the trusted
+    /// (CRD ch.51 R100). "Not spent" is answered only when two nodes agree on it, each at its own tip, or the trusted
     /// node says so.
     ///
     /// # Errors
@@ -660,7 +637,7 @@ impl EthCoin {
         let attempt =
             assert_send_future(self.spend_read_once(policy, payment_tx, id, swap_contract_address, search_from_block));
         match attempt.await? {
-            Agreement::Agreed { answer, .. } => Ok(match answer {
+            Agreement::Agreed { answer, .. } => Ok(match answer.read {
                 SpendRead::NotSpent => None,
                 SpendRead::Claimed { tx, .. } => Some(FoundSwapTxSpend::Spent(TransactionEnum::from(*tx))),
                 SpendRead::Refunded { tx } => Some(FoundSwapTxSpend::Refunded(TransactionEnum::from(*tx))),
@@ -692,7 +669,11 @@ impl EthCoin {
                 assert_send_future(self.spend_read_once(policy, payment_tx, id, swap_contract_address, from_block));
             match attempt.await {
                 Ok(Agreement::Agreed {
-                    answer: SpendRead::Claimed { tx, .. },
+                    answer:
+                        AtTip {
+                            read: SpendRead::Claimed { tx, .. },
+                            ..
+                        },
                     ..
                 }) => return Ok(TransactionEnum::from(*tx)),
                 Ok(Agreement::Agreed { .. }) => (),

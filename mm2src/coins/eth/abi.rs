@@ -15,7 +15,7 @@
 //! rest of the eth module; conversion to/from alloy primitives happens only at
 //! the encode/decode boundary here.
 
-use alloy_dyn_abi::{DynSolType, DynSolValue, FunctionExt, JsonAbiExt};
+use alloy_dyn_abi::{DynSolType, DynSolValue, EventExt, FunctionExt, JsonAbiExt};
 use alloy_json_abi::JsonAbi;
 use ethereum_types::{Address, H256, U256};
 use std::collections::HashMap;
@@ -272,8 +272,8 @@ impl Contract {
     }
 }
 
-/// A contract event. Only the topic-0 signature hash is exposed — all KDF uses
-/// events for is building `eth_getLogs` topic filters.
+/// A contract event: its topic-0 signature hash, for `eth_getLogs` topic filters and for recognizing a log entry,
+/// and the decoding of a log entry's parameters.
 pub struct Event {
     inner: alloy_json_abi::Event,
 }
@@ -281,6 +281,30 @@ pub struct Event {
 impl Event {
     /// Topic-0: `keccak256` of the canonical event signature.
     pub fn signature(&self) -> H256 { H256::from_slice(self.inner.selector().as_slice()) }
+
+    /// Decode the parameters of a log entry of this event, in the order the event declares them: an indexed
+    /// parameter is read from its topic, the others from `data`. `topics` is the entry's whole topic list, with the
+    /// signature topic first unless the event is anonymous.
+    ///
+    /// # Errors
+    ///
+    /// [`AbiError::Decode`] when the signature topic is not this event's, the number of topics does not fit the
+    /// event, or `data` does not decode as the parameters that are not indexed.
+    pub fn decode_log(&self, topics: &[H256], data: &[u8]) -> Result<Vec<Token>, AbiError> {
+        let topics = topics.iter().map(|topic| alloy_primitives::B256::from(topic.0));
+        let decoded = self
+            .inner
+            .decode_log_parts(topics, data)
+            .map_err(|e| AbiError::Decode(e.to_string()))?;
+        let mut indexed = decoded.indexed.iter();
+        let mut body = decoded.body.iter();
+        self.inner
+            .inputs
+            .iter()
+            .map(|param| if param.indexed { indexed.next() } else { body.next() })
+            .map(|value| value.map(dyn_to_token).ok_or(AbiError::InvalidData))
+            .collect()
+    }
 }
 
 /// Free-standing ABI encoding of a token sequence (no function selector), the
@@ -386,6 +410,43 @@ mod tests {
             out,
             "decode_output"
         );
+    }
+
+    #[test]
+    fn facade_decodes_a_log_entry_in_declaration_order() {
+        // `Transfer(address indexed from, address indexed to, uint256 value)`: two topics and one data word.
+        let c = Contract::load(ERC20_ABI.as_bytes()).unwrap();
+        let event = c.event("Transfer").unwrap();
+        let topic_of = |a: Address| {
+            let mut word = [0u8; 32];
+            word[12..].copy_from_slice(a.as_bytes());
+            H256::from(word)
+        };
+        let topics = [event.signature(), topic_of(addr(0x11)), topic_of(addr(0x22))];
+        let data = encode(&[Token::Uint(U256::from(7u64))]);
+        assert_eq!(event.decode_log(&topics, &data).unwrap(), vec![
+            Token::Address(addr(0x11)),
+            Token::Address(addr(0x22)),
+            Token::Uint(U256::from(7u64)),
+        ]);
+
+        // `PaymentSent(bytes32 id)`: nothing indexed, the id is the data.
+        let c = Contract::load(SWAP_CONTRACT_ABI.as_bytes()).unwrap();
+        let event = c.event("PaymentSent").unwrap();
+        assert_eq!(event.decode_log(&[event.signature()], &[0x33; 32]).unwrap(), vec![
+            Token::FixedBytes(vec![0x33; 32])
+        ]);
+        // Another event's signature topic, a missing topic and short data are refused.
+        let other = c.event("SenderRefunded").unwrap().signature();
+        assert!(matches!(
+            event.decode_log(&[other], &[0x33; 32]),
+            Err(AbiError::Decode(_))
+        ));
+        assert!(matches!(event.decode_log(&[], &[0x33; 32]), Err(AbiError::Decode(_))));
+        assert!(matches!(
+            event.decode_log(&[event.signature()], &[0x33; 31]),
+            Err(AbiError::Decode(_))
+        ));
     }
 
     #[test]

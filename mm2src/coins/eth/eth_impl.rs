@@ -2684,12 +2684,10 @@ impl EthCoin {
                     U256::from(self.gas_limit.eth_send_erc20),
                 )
             },
-            // TRON has its own transfer pipeline (build TransactionRaw,
-            // sign with SHA-256+secp256k1, broadcast via TronApiClient).
-            // TRON coins are wallet-only while
-            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
+            // A TRON transfer is a signed protobuf transaction, which this function's EVM transaction type cannot
+            // carry. The swap's DEX fee of a TRON coin is sent by `tron::swap::send` (CRD ch.21 §21.11C).
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
-                ERRL!("TRON send_to_address not yet wired (pending P10.2.5)"),
+                ERRL!("A TRON coin does not send through the EVM transfer path"),
             ))),
         }
     }
@@ -2770,11 +2768,10 @@ impl EthCoin {
                     }
                 }))
             },
-            // V1 Ethereum HTLC swaps; TRON uses a separate atomic-swap flow.
-            // TRON coins are wallet-only while
-            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
+            // A TRON payment is a signed protobuf transaction, which this function's EVM transaction type cannot
+            // carry. The swap's payment of a TRON coin is sent by `tron::swap::send` (CRD ch.21 §21.11C).
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
-                ERRL!("TRON HTLC payment not yet wired (pending P10.2.5)"),
+                ERRL!("A TRON coin does not send its payment through the EVM payment path"),
             ))),
         }
     }
