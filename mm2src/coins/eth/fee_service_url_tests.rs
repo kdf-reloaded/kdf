@@ -92,6 +92,7 @@ fn the_fee_service_texts_name_the_service_host_only() {
 #[cfg(not(target_arch = "wasm32"))]
 mod loopback {
     use super::*;
+    use crate::closed_port::CLOSED_PORT;
     use std::io::{Read, Write};
 
     /// Serves one canned answer and returns the port.
@@ -107,22 +108,13 @@ mod loopback {
         port
     }
 
-    /// A port on which nothing listens.
-    fn closed_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-
     fn keyed_url(port: u16) -> String { format!("http://user:secret@127.0.0.1:{port}/v3/APIKEY?key=X") }
 
     const BAD_GATEWAY: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
     #[test]
     fn the_gas_station_request_errors_name_the_station_host_only() {
-        let port = closed_port();
+        let port = CLOSED_PORT;
         let url = keyed_url(port);
         let refused = block_on(make_gas_station_request(&url)).unwrap_err().to_string();
         assert_host_only_text(&refused, &format!("http://127.0.0.1:{port}"), &SECRETS);
@@ -134,7 +126,7 @@ mod loopback {
         assert_host_only_text(&status, &format!("http://127.0.0.1:{port}"), &SECRETS);
         // And as the caller of the gas-price estimation sees it.
         let web3 = Web3RpcError::from(
-            block_on(make_gas_station_request(&keyed_url(closed_port())).map_err(|e| e.into_inner())).unwrap_err(),
+            block_on(make_gas_station_request(&keyed_url(CLOSED_PORT)).map_err(|e| e.into_inner())).unwrap_err(),
         );
         for secret in SECRETS {
             assert!(!web3.to_string().contains(secret), "a credential part is rendered");
@@ -143,7 +135,7 @@ mod loopback {
 
     #[test]
     fn the_infura_request_errors_name_the_service_host_only() {
-        let port = closed_port();
+        let port = CLOSED_PORT;
         let refused = block_on(InfuraFeeFetcher::fetch_fee_estimation(&keyed_url(port)))
             .unwrap_err()
             .to_string();
@@ -159,7 +151,7 @@ mod loopback {
 
     #[test]
     fn the_blocknative_request_errors_name_the_service_host_only() {
-        let port = closed_port();
+        let port = CLOSED_PORT;
         let refused = block_on(BlocknativeFeeFetcher::fetch_fee_estimation(&keyed_url(port)))
             .unwrap_err()
             .to_string();

@@ -284,6 +284,10 @@ impl MarketCoinOps for EthCoin {
     }
 
     fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> {
+        // A TRON coin's transaction is the signed protobuf transaction, not RLP (CRD ch.21 §21.6, §21.11C).
+        if self.is_tron_family() {
+            return Ok(try_s!(crate::eth::tron::swap::TronSwapTx::from_bytes(bytes)).into());
+        }
         Ok(try_s!(signed_eth_tx_from_bytes(bytes)).into())
     }
 

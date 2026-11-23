@@ -217,6 +217,9 @@ macro_rules! ok_or_retry_after_sleep_sync {
 pub mod activation_locks;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod answer_stub;
+#[cfg(test)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) mod closed_port;
 pub mod coin_balance;
 pub mod coin_protocol_capability;
 pub mod coin_work;

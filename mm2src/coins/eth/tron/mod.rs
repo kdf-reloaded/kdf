@@ -16,6 +16,7 @@ pub mod history;
 pub mod nodes;
 pub mod proto;
 pub mod sign;
+pub mod swap;
 pub mod tx_builder;
 pub mod withdraw;
 
@@ -32,7 +33,8 @@ mod wallet_path_tests;
 mod withdraw_fee_tests;
 
 pub use activation::{parse_trc20_contract, tron_coin_from_conf_and_request, tron_coin_from_params,
-                     tron_coin_from_params_with_global_hd, tron_required_confirmations, TronCoinParams};
+                     tron_coin_from_params_with_global_hd, tron_required_confirmations, tron_swap_contracts,
+                     TronCoinParams, TronSwapContracts};
 pub use address::{TronAddress, TronAddressFormat};
 pub use gasfree::binding::{gasfree_custody_address, GasFreeBinding, GaslessConfigError, TronGaslessProviderRequest,
                            TronTokenGaslessRequest};

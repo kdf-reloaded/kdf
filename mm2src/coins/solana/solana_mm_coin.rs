@@ -113,10 +113,10 @@ impl MmCoin for SolanaCoin {
     /// `NotEnabled` without history (CRD ch.40 R40.6C.2), else the state the history process reports.
     fn history_sync_status(&self) -> HistorySyncState { self.history.state_of(&self.ticker) }
 
-    /// Get fee to be paid per 1 swap transaction
+    /// The fee of one payment: its transaction fee plus the rent it deposits (CRD ch.40 R40.6D.14).
     fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
-        let error = format!("get_trade_fee is not supported for {}", self.ticker);
-        Box::new(futures01::future::err(error))
+        let coin = self.clone();
+        Box::new(async move { coin.sol_sender_trade_fee().await }.boxed().compat())
     }
 
     async fn get_sender_trade_fee(
@@ -124,15 +124,19 @@ impl MmCoin for SolanaCoin {
         _value: TradePreimageValue,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        Err(MmError::new(TradePreimageError::InternalError(format!(
-            "Trade fees are not supported for {}",
-            self.ticker
-        ))))
+        self.sol_sender_trade_fee()
+            .await
+            .map_err(|e| MmError::new(TradePreimageError::InternalError(e)))
     }
 
     fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
-        let error = TradePreimageError::InternalError(format!("Trade fees are not supported for {}", self.ticker));
-        Box::new(futures01::future::err(MmError::new(error)))
+        let coin = self.clone();
+        let fut = async move {
+            coin.sol_receiver_trade_fee()
+                .await
+                .map_err(|e| MmError::new(TradePreimageError::InternalError(e)))
+        };
+        Box::new(fut.boxed().compat())
     }
 
     async fn get_fee_to_send_taker_fee(
@@ -140,10 +144,9 @@ impl MmCoin for SolanaCoin {
         _dex_fee_amount: BigDecimal,
         _stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        Err(MmError::new(TradePreimageError::InternalError(format!(
-            "Trade fees are not supported for {}",
-            self.ticker
-        ))))
+        self.sol_taker_fee_trade_fee()
+            .await
+            .map_err(|e| MmError::new(TradePreimageError::InternalError(e)))
     }
 
     fn required_confirmations(&self) -> u64 { self.settings.required_confirmations() }
@@ -154,8 +157,10 @@ impl MmCoin for SolanaCoin {
 
     fn set_requires_notarization(&self, requires_nota: bool) { self.settings.set_requires_notarization(requires_nota) }
 
-    /// No swap contract exists: Solana swaps are not supported.
-    fn swap_contract_address(&self) -> Option<BytesJson> { None }
+    /// The 32 bytes of the program address, when the coin can trade (CRD ch.40 R40.6D.3).
+    fn swap_contract_address(&self) -> Option<BytesJson> {
+        self.swap_program().map(|program| program.to_bytes().to_vec().into())
+    }
 
     fn mature_confirmations(&self) -> Option<u32> { None }
 

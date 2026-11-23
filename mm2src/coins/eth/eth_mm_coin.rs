@@ -213,9 +213,15 @@ impl MmCoin for EthCoin {
     fn history_sync_status(&self) -> HistorySyncState { self.history_sync_state.lock().unwrap().clone() }
 
     fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send> {
-        // A TRX or TRC20 coin has no EVM gas price to read (CRD ch.21 D7): refused before any node request.
+        // A TRX or TRC20 coin has no EVM gas price: its figure is the fee of a payment in TRX (CRD ch.21 §21.11C).
         if self.is_tron_family() {
-            return Box::new(futures01::future::err("TRON trade fee is not supported".to_string()));
+            let coin = self.clone();
+            let fut = async move {
+                crate::eth::tron::swap::send::flat_trade_fee(&coin)
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            return Box::new(fut.boxed().compat());
         }
         let coin = self.clone();
         Box::new(
@@ -244,10 +250,10 @@ impl MmCoin for EthCoin {
         value: TradePreimageValue,
         stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
-        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
-            return MmError::err(TradePreimageError::InternalError(
-                "TRON V1 sender trade fee is not supported".to_string(),
-            ));
+        // A TRX or TRC20 coin prices its payment in TRX from the payment's dry run (CRD ch.21 §21.11C).
+        if self.is_tron_family() {
+            let (TradePreimageValue::Exact(amount) | TradePreimageValue::UpperBound(amount)) = value;
+            return crate::eth::tron::swap::send::sender_trade_fee(self, &amount).await;
         }
 
         let gas_price = self.get_gas_price().compat().await.mm_err(Into::into)?;
@@ -292,7 +298,7 @@ impl MmCoin for EthCoin {
                     self.gas_limit.sender_preimage_gas(true)
                 }
             },
-            EthCoinType::Tron | EthCoinType::Trc20 { .. } => unreachable!("TRON rejected before gas-price request"),
+            EthCoinType::Tron | EthCoinType::Trc20 { .. } => unreachable!("a TRON coin is served above"),
         };
 
         let total_fee = gas_limit * gas_price;
@@ -313,12 +319,9 @@ impl MmCoin for EthCoin {
     fn get_receiver_trade_fee(&self, stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
         let coin = self.clone();
         let fut = async move {
-            // As `get_sender_trade_fee`: a TRX or TRC20 coin is refused before the gas price is asked for (CRD
-            // ch.21 D7).
+            // As `get_sender_trade_fee`: a TRX or TRC20 coin prices the spend in TRX (CRD ch.21 §21.11C).
             if coin.is_tron_family() {
-                return MmError::err(TradePreimageError::InternalError(
-                    "TRON V1 receiver trade fee is not supported".to_string(),
-                ));
+                return crate::eth::tron::swap::send::receiver_trade_fee(&coin).await;
             }
 
             let gas_price = coin.get_gas_price().compat().await.mm_err(Into::into)?;
@@ -373,13 +376,10 @@ impl MmCoin for EthCoin {
                 let data = function.encode_input(&[Token::Address(to_addr), Token::Uint(dex_fee_amount)])?;
                 (0.into(), data, token_addr, platform, self.gas_limit.eth_send_erc20)
             },
-            // ETH-style fee preimage; TRON dex-fee preimage flows through the
-            // dedicated TRON estimator. TRON coins are wallet-only while
-            // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
+            // A TRX or TRC20 coin prices the DEX-fee transfer in TRX (CRD ch.21 D21.B9, §21.11C).
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                return MmError::err(TradePreimageError::InternalError(
-                    "TRON dex-fee preimage not yet wired (pending P10.2.5)".to_owned(),
-                ));
+                let fee_address = crate::eth::tron::TronAddress::from_evm_address(to_addr);
+                return crate::eth::tron::swap::send::dex_fee_send_fee(self, &fee_address, dex_fee_amount).await;
             },
         };
 

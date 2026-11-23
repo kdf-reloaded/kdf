@@ -19,6 +19,9 @@ use tokio::time;
 
 use crate::node_url::host_only;
 
+/// The bound of one native Tendermint RPC request: sending it and reading the whole response body.
+pub const TENDERMINT_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Provides lightweight access to the Tendermint RPC. It gives access to all
 /// endpoints with the exception of the event subscription-related ones.
 #[async_trait]
@@ -260,12 +263,21 @@ impl HttpClient {
     where
         U: TryInto<HttpClientUrl, Error = Error>,
     {
+        Self::with_timeout(url, TENDERMINT_RPC_REQUEST_TIMEOUT)
+    }
+
+    /// Like [`HttpClient::new`] with a chosen bound for one request (the production bound is
+    /// [`TENDERMINT_RPC_REQUEST_TIMEOUT`]).
+    pub fn with_timeout<U>(url: U, timeout: Duration) -> Result<Self, Error>
+    where
+        U: TryInto<HttpClientUrl, Error = Error>,
+    {
         let url = url.try_into()?;
         Ok(Self {
             inner: if url.0.is_secure() {
-                sealed::HttpClient::new_https(url.try_into()?)
+                sealed::HttpClient::new_https(url.try_into()?, timeout)
             } else {
-                sealed::HttpClient::new_http(url.try_into()?)
+                sealed::HttpClient::new_http(url.try_into()?, timeout)
             },
         })
     }
@@ -352,6 +364,7 @@ mod sealed {
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::{TokioExecutor, TokioTimer};
     use std::fmt;
+    use std::time::Duration;
     use tendermint_rpc::{Error, Response, SimpleRequest};
 
     type RequestBody = Full<Bytes>;
@@ -368,6 +381,7 @@ mod sealed {
     pub struct HyperClient<C> {
         uri: Uri,
         inner: Client<C, RequestBody>,
+        timeout: Duration,
     }
 
     /// The debug form names the node by its host-only form (CRD ch.36 R36.5A.2).
@@ -380,7 +394,7 @@ mod sealed {
     }
 
     impl<C> HyperClient<C> {
-        pub fn new(uri: Uri, inner: Client<C, RequestBody>) -> Self { Self { uri, inner } }
+        pub fn new(uri: Uri, inner: Client<C, RequestBody>, timeout: Duration) -> Self { Self { uri, inner, timeout } }
     }
 
     impl<C> HyperClient<C>
@@ -393,12 +407,32 @@ mod sealed {
         {
             let kind = request.method().to_string();
             let request = self.build_request(request)?;
-            let response = self
-                .inner
-                .request(request)
-                .await
-                .map_err(|e| Error::client_internal(scrub_node_url(&e.to_string(), &self.uri.to_string())))?;
-            let response_body = response_to_string(response).await?;
+            // One bound covers sending the request and reading the whole response body. The error names the node by
+            // its host-only form (CRD ch.36 R36.5A.1).
+            let exchange = async {
+                let response = self
+                    .inner
+                    .request(request)
+                    .await
+                    .map_err(|e| Error::client_internal(scrub_node_url(&e.to_string(), &self.uri.to_string())))?;
+                response_to_string(response).await
+            };
+            let response_body = match tokio::time::timeout(self.timeout, exchange).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    debug!(
+                        "Tendermint RPC {} to {} timed out after {:?}",
+                        kind,
+                        host_only(&self.uri.to_string()),
+                        self.timeout
+                    );
+                    return Err(Error::client_internal(format!(
+                        "request to {} timed out after {:?}",
+                        host_only(&self.uri.to_string()),
+                        self.timeout
+                    )));
+                },
+            };
             // A node's response body is never logged (CRD ch.36 R36.5A.3): the kind, the node and the size.
             debug!(
                 "Tendermint RPC {} answered {} with {} bytes",
@@ -443,15 +477,19 @@ mod sealed {
     }
 
     impl HttpClient {
-        pub fn new_http(uri: Uri) -> Self {
+        pub fn new_http(uri: Uri, timeout: Duration) -> Self {
             let mut connector = http_connector();
             // What `Builder::build_http` does for the default pool: TCP keep-alive at the pool's idle timeout (90 s).
             connector.set_keepalive(Some(std::time::Duration::from_secs(90)));
-            Self::Http(HyperClient::new(uri, client_builder().build(connector)))
+            Self::Http(HyperClient::new(uri, client_builder().build(connector), timeout))
         }
 
-        pub fn new_https(uri: Uri) -> Self {
-            Self::Https(HyperClient::new(uri, client_builder().build(https_connector())))
+        pub fn new_https(uri: Uri, timeout: Duration) -> Self {
+            Self::Https(HyperClient::new(
+                uri,
+                client_builder().build(https_connector()),
+                timeout,
+            ))
         }
 
         pub async fn perform<R>(&self, request: R) -> Result<R::Response, Error>
@@ -600,5 +638,56 @@ mod tests {
                 assert!(!rendered.contains(secret), "a credential part is rendered");
             }
         }
+    }
+
+    /// Accepts connections and never answers; the sockets stay open for the life of the test process thread.
+    /// With `head_only` the stub sends a response head that promises a body and then holds.
+    fn hold_connections(head_only: bool) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept() {
+                if head_only {
+                    let mut request = [0u8; 8192];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n{");
+                }
+                held.push(stream);
+            }
+        });
+        port
+    }
+
+    /// A request to a node that accepts and never answers ends with an error within the bound, and the error
+    /// names the node host-only (CRD ch.36 R36.5A.1).
+    #[test]
+    fn a_request_to_a_holding_node_times_out_within_the_bound() {
+        for head_only in [false, true] {
+            let port = hold_connections(head_only);
+            let bound = Duration::from_millis(300);
+            let client = HttpClient::with_timeout(
+                format!("http://user:secret@127.0.0.1:{port}/rpc/APIKEY?token=X").as_str(),
+                bound,
+            )
+            .unwrap();
+            let started = std::time::Instant::now();
+            let err = common::block_on(async { client.health().await.unwrap_err() });
+            let elapsed = started.elapsed();
+            assert!(elapsed >= bound, "{elapsed:?}");
+            assert!(elapsed < bound + Duration::from_secs(5), "{elapsed:?}");
+            let text = err.to_string();
+            assert!(text.contains("timed out"), "{text}");
+            assert!(text.contains(&format!("http://127.0.0.1:{port} ")), "{text}");
+            for secret in ["user", "secret", "/rpc/", "APIKEY", "token=X"] {
+                assert!(!text.contains(secret), "the error names more than the host: {text}");
+            }
+        }
+    }
+
+    /// The production bound is 30 seconds and `new` uses it.
+    #[test]
+    fn the_production_bound_is_thirty_seconds() {
+        assert_eq!(TENDERMINT_RPC_REQUEST_TIMEOUT, Duration::from_secs(30));
     }
 }

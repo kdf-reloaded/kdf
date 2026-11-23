@@ -335,6 +335,43 @@ jobs:
         shell: bash
         run: cargo check --target wasm32-unknown-unknown -p mm2_main
 
+  # Compiles the test code of the crates below for wasm32 (`cargo check --tests`),
+  # which the library-only checks of `wasm32-check` do not. Runs in parallel with
+  # `wasm32-check`; it has its own cache key so the two do not fight over one entry.
+  wasm32-test-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Add wasm32 target
+        shell: bash
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasm32-tests-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo check --tests -p coins_activation (wasm32)
+        shell: bash
+        run: cargo check --tests --target wasm32-unknown-unknown -p coins_activation
+
+      - name: cargo check --tests -p coins (wasm32)
+        shell: bash
+        run: cargo check --tests --target wasm32-unknown-unknown -p coins
+
+      - name: cargo check --tests -p mm2_main (wasm32)
+        shell: bash
+        run: cargo check --tests --target wasm32-unknown-unknown -p mm2_main
+
   # Windows-only code in mm2_io: `write_json` and `write_json_durable` retry the final rename when Windows refuses it
   # (PermissionDenied, sharing violation, lock violation) because a virus scanner or indexer holds the file. That
   # `cfg(windows)` code, and its tests, are never compiled on the Linux jobs, so this job builds and runs them.
@@ -854,7 +891,7 @@ jobs:
     # bypass the rule. They are phase-2 candidates once there is reliability
     # data for them.
     if: always()
-    needs: [fmt, clippy, unit-tests, wasm32-check, evm-geth-tests]
+    needs: [fmt, clippy, unit-tests, wasm32-check, wasm32-test-check, evm-geth-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 

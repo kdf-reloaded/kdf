@@ -1,7 +1,7 @@
 //! TRON transaction builder.
 //!
-//! Constructs unsigned TRON transactions for native TRX transfers and
-//! TRC20 token transfers. The caller is responsible for signing the
+//! Constructs unsigned TRON transactions for native TRX transfers, TRC20
+//! token transfers and other smart-contract calls. The caller is responsible for signing the
 //! resulting `TransactionRaw` via [`super::sign::sign_transaction_raw`].
 
 use crate::eth::abi::Token;
@@ -78,6 +78,50 @@ pub fn build_trx_transfer(
     }
 }
 
+/// Build an unsigned smart-contract call (`TriggerSmartContract`).
+///
+/// - `from`: the caller's TRON address
+/// - `contract_addr`: the contract that is called
+/// - `data`: the ABI-encoded call data, selector first
+/// - `call_value_sun`: the TRX the call carries, in SUN (0 for a call that carries none)
+/// - `tapos`: TAPOS block data for anti-replay
+/// - `now_ms`: current timestamp in milliseconds since epoch
+/// - `expiration_ms`: the time the transaction expires at, in milliseconds since epoch
+/// - `fee_limit_sun`: maximum TRX fee in SUN (energy cost limit)
+#[allow(clippy::too_many_arguments)]
+pub fn build_trigger_smart_contract(
+    from: &TronAddress,
+    contract_addr: &TronAddress,
+    data: Vec<u8>,
+    call_value_sun: i64,
+    tapos: &TaposBlockData,
+    now_ms: i64,
+    expiration_ms: i64,
+    fee_limit_sun: i64,
+) -> TransactionRaw {
+    let trigger = TriggerSmartContract {
+        owner_address: from.to_bytes().to_vec(),
+        contract_address: contract_addr.to_bytes().to_vec(),
+        call_value: call_value_sun,
+        data,
+    };
+    let any = prost_types::Any {
+        type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
+        value: trigger.encode_to_vec(),
+    };
+    TransactionRaw {
+        ref_block_bytes: tapos.ref_block_bytes.clone(),
+        ref_block_hash: tapos.ref_block_hash.clone(),
+        expiration: expiration_ms,
+        contract: vec![TransactionContract {
+            r#type: ContractType::TriggerSmartContract as i32,
+            parameter: Some(any),
+        }],
+        timestamp: now_ms,
+        fee_limit: fee_limit_sun,
+    }
+}
+
 /// Build an unsigned TRC20 token transfer transaction.
 ///
 /// - `from`: sender TRON address
@@ -99,28 +143,16 @@ pub fn build_trc20_transfer(
     expiration_ms: i64,
     fee_limit_sun: i64,
 ) -> TransactionRaw {
-    let data = abi_encode_trc20_transfer(to, amount_units);
-    let trigger = TriggerSmartContract {
-        owner_address: from.to_bytes().to_vec(),
-        contract_address: contract_addr.to_bytes().to_vec(),
-        call_value: 0,
-        data,
-    };
-    let any = prost_types::Any {
-        type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
-        value: trigger.encode_to_vec(),
-    };
-    TransactionRaw {
-        ref_block_bytes: tapos.ref_block_bytes.clone(),
-        ref_block_hash: tapos.ref_block_hash.clone(),
-        expiration: expiration_ms,
-        contract: vec![TransactionContract {
-            r#type: ContractType::TriggerSmartContract as i32,
-            parameter: Some(any),
-        }],
-        timestamp: now_ms,
-        fee_limit: fee_limit_sun,
-    }
+    build_trigger_smart_contract(
+        from,
+        contract_addr,
+        abi_encode_trc20_transfer(to, amount_units),
+        0,
+        tapos,
+        now_ms,
+        expiration_ms,
+        fee_limit_sun,
+    )
 }
 
 #[cfg(test)]
@@ -266,6 +298,65 @@ mod tests {
         assert_eq!(inner.contract_address, contract_addr.to_bytes().to_vec());
         assert_eq!(inner.call_value, 0);
         assert_eq!(inner.data.len(), 68); // ABI-encoded transfer call
+    }
+
+    /// A contract call carries the caller, the contract, the data and the call value it was given; a TRC20
+    /// transfer is such a call with the transfer data and no call value.
+    #[test]
+    fn test_build_trigger_smart_contract_structure() {
+        let from = test_address_a();
+        let contract_addr = TronAddress::from_hex("410000000000000000000000000000000000000099").unwrap();
+        let tapos = dummy_tapos();
+        let now_ms = 1700000000000i64;
+        let data = vec![0xde, 0xad, 0xbe, 0xef, 0x01];
+
+        let raw = build_trigger_smart_contract(
+            &from,
+            &contract_addr,
+            data.clone(),
+            5_000_000,
+            &tapos,
+            now_ms,
+            expiry(now_ms),
+            30_000_000,
+        );
+        assert_eq!(raw.ref_block_bytes, tapos.ref_block_bytes);
+        assert_eq!(raw.ref_block_hash, tapos.ref_block_hash);
+        assert_eq!(raw.timestamp, now_ms);
+        assert_eq!(raw.expiration, expiry(now_ms));
+        assert_eq!(raw.fee_limit, 30_000_000);
+        assert_eq!(raw.contract.len(), 1);
+        assert_eq!(raw.contract[0].r#type, ContractType::TriggerSmartContract as i32);
+        let any = raw.contract[0].parameter.as_ref().unwrap();
+        assert_eq!(any.type_url, TRIGGER_SMART_CONTRACT_TYPE_URL);
+        let inner = TriggerSmartContract::decode(any.value.as_slice()).unwrap();
+        assert_eq!(inner.owner_address, from.to_bytes().to_vec());
+        assert_eq!(inner.contract_address, contract_addr.to_bytes().to_vec());
+        assert_eq!(inner.call_value, 5_000_000);
+        assert_eq!(inner.data, data);
+
+        let to = test_address_b();
+        let transfer = build_trc20_transfer(
+            &from,
+            &contract_addr,
+            &to,
+            U256::from(5_000_000u64),
+            &tapos,
+            now_ms,
+            expiry(now_ms),
+            30_000_000,
+        );
+        let as_call = build_trigger_smart_contract(
+            &from,
+            &contract_addr,
+            abi_encode_trc20_transfer(&to, U256::from(5_000_000u64)),
+            0,
+            &tapos,
+            now_ms,
+            expiry(now_ms),
+            30_000_000,
+        );
+        assert_eq!(transfer, as_call);
     }
 
     #[test]

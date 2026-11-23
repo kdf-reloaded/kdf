@@ -10,7 +10,8 @@
 //! # Invariants
 //!
 //! - A TRON coin activates as a wallet-only coin: while `coins::TRON_SWAPS_AVAILABLE` is `false` it reports
-//!   `wallet_only` whatever its coins-config entry says (CRD ch.21 R-D1, R21.B3).
+//!   `wallet_only` whatever its coins-config entry says (CRD ch.21 R-D1, R21.B3), and its swap-contract members are
+//!   validated and not bound. With the switch on, a coin that can trade is bound to them (CRD ch.21 R21.B2).
 //! - Every refusal of this module comes before any key is read and any node is contacted.
 //! - A node's headers and the API key are secrets: no error of this module renders one. Neither does it render a
 //!   value of the request's `tron_gasless_provider` (CRD ch.63 R9).
@@ -18,7 +19,7 @@
 use super::*;
 use coins::eth::tron::nodes::{parse_nodes, TronApiKey, TronNode, TronNodeConfigError};
 use coins::eth::tron::{tron_coin_from_params, tron_coin_from_params_with_global_hd, tron_required_confirmations,
-                       GasFreeBinding, TronCoinParams};
+                       tron_swap_contracts, GasFreeBinding, TronCoinParams};
 
 /// What the request says about its signing policy, reduced to the facts the TRON rules read. A separate value so
 /// that the rules can be tested on a native build, where the browser-only MetaMask policy does not exist.
@@ -171,8 +172,8 @@ pub(super) fn tron_precheck(request: &EthWithTokensActivationRequest) -> Result<
 }
 
 /// Builds the TRX platform coin of a `enable_eth_with_tokens` or `task::enable_eth` request (CRD ch.21 R-A1,
-/// R21.10B.2): the checks of [`tron_precheck`], the swap-contract rule of F21.B3, the GasFree provider binding of
-/// [`tron_gasfree_binding`], the node list, and the coin. The
+/// R21.10B.2): the checks of [`tron_precheck`], the swap-contract rule of F21.B3 and the binding of R21.B2, the
+/// GasFree provider binding of [`tron_gasfree_binding`], the node list, and the coin. The
 /// coin is the HD wallet of the coin's `derivation_path` under a global-HD login (R-A2, R21.10B.4), and the
 /// single-key coin of the node's internal key under an iguana login or for the `IguanaPrivKey` policy. The tokens
 /// of the request are enabled afterwards by the shared tail of the activation.
@@ -189,10 +190,38 @@ pub(super) async fn enable_tron_platform_coin(
     request: &EthWithTokensActivationRequest,
     network: &TronNetwork,
 ) -> Result<EthCoin, MmError<ActivationErr>> {
+    enable_tron_platform_coin_with_switch(
+        ctx,
+        ticker,
+        platform_conf,
+        request,
+        network,
+        coins::TRON_SWAPS_AVAILABLE,
+    )
+    .await
+}
+
+/// [`enable_tron_platform_coin`] with the TRON swap switch given, so a test can activate a coin that can trade.
+pub(super) async fn enable_tron_platform_coin_with_switch(
+    ctx: &MmArc,
+    ticker: &str,
+    platform_conf: &Json,
+    request: &EthWithTokensActivationRequest,
+    network: &TronNetwork,
+    swaps_available: bool,
+) -> Result<EthCoin, MmError<ActivationErr>> {
     tron_precheck(request)?;
-    // F21.B3: ignored for a wallet-only coin, required and non-zero for a trading coin. The coin itself keeps the
-    // swap-contract binding empty (R-A1 step 5); only the request is validated here.
-    activation_params(ctx, platform_conf, request, true)?;
+    // F21.B3: ignored for a wallet-only coin, required and non-zero for a trading coin. This validation reads the
+    // coin config alone, so it holds with the swap switch off too. The binding (R21.B2) is `None` for a wallet-only
+    // coin, which every TRON coin is while the switch is off.
+    let evm_params = activation_params(ctx, platform_conf, request, true)?;
+    let swap_contracts = tron_swap_contracts(
+        platform_conf,
+        evm_params.swap_contract_address,
+        evm_params.fallback_swap_contract,
+        swaps_available,
+    )
+    .mm_err(ActivationErr::from)?;
     let gasfree = tron_gasfree_binding(request, network)?;
     let nodes = tron_nodes(ctx, request)?;
 
@@ -203,6 +232,7 @@ pub(super) async fn enable_tron_platform_coin(
         // The history is enabled only when the node list also has a keyed TronGrid node (CRD ch.21 §21.10C).
         tx_history: request.tx_history(),
         gasfree,
+        swap_contracts,
     };
     let protocol = CoinProtocol::TRX {
         network: network.clone(),
