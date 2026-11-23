@@ -125,6 +125,86 @@ pub enum AbortReason {
     TakerPaymentRefundFailed(String),
 }
 
+/// Seconds between two reads of a confirmation (CRD ch.52 R19, R33).
+pub(super) const CONFIRMATION_POLL_SECS: u64 = 10;
+
+/// Seconds a bounded wait of a swap step lasts past its lock time, and at least from the moment the step
+/// first could act (CRD ch.51 §51.6G R100 item 9).
+pub(super) const OWN_CLAIM_CONFIRMATION_WAIT_SECS: u64 = 3700;
+
+/// Until when the confirmation of the node's own claim is read (CRD ch.52 R19, R33; ch.51 §51.6G R100
+/// item 9): the later of `lock_time` plus 3700 seconds and 3700 seconds after `entered_at`, the moment the
+/// state was entered in its current run. `entered_at` is not stored, so a restart starts a new wait.
+pub(super) fn own_claim_confirmation_deadline(lock_time: u64, entered_at: u64) -> u64 {
+    lock_time.max(entered_at) + OWN_CLAIM_CONFIRMATION_WAIT_SECS
+}
+
+/// Reads the confirmation of the node's own claim until it is read or `deadline` has passed (CRD ch.52 R19, R33).
+///
+/// `read` is given `deadline` as the time its attempt may wait until, and `now` is the clock in seconds. A
+/// failed attempt before `deadline` is repeated after `poll_secs`.
+///
+/// # Errors
+///
+/// The error of the last attempt, when it failed at or after `deadline`.
+pub(super) async fn await_own_claim_confirmation<F, Fut>(
+    deadline: u64,
+    poll_secs: u64,
+    now: impl Fn() -> u64,
+    mut read: F,
+) -> Result<(), String>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    loop {
+        match read(deadline).await {
+            Ok(()) => return Ok(()),
+            Err(e) if now() >= deadline => return Err(e),
+            Err(e) => {
+                warn!("Confirmation of the own claim could not be read, retrying in {poll_secs}s: {e}");
+                Timer::sleep(poll_secs as f64).await;
+            },
+        }
+    }
+}
+
+/// The fixed opening phrase of the abort text of a swap whose own claim was broadcast and whose confirmation
+/// could not be read (CRD ch.52 R19, R33). By this phrase a reader of the event log tells such an abort from
+/// one with nothing committed (CRD ch.52 R44); no other abort text starts with it.
+pub const OWN_CLAIM_NOT_CONFIRMED_PHRASE: &str = "Own claim was broadcast but its confirmation could not be read: ";
+
+/// The abort text of an own claim whose confirmation could not be read: [`OWN_CLAIM_NOT_CONFIRMED_PHRASE`],
+/// then the coin, the claim transaction and the last error. The transaction is named by its hash, or by its
+/// bytes when they do not parse.
+fn own_claim_not_confirmed_text(ticker: &str, claim_tx_hash: Result<String, String>, last_error: &str) -> String {
+    let claim = match claim_tx_hash {
+        Ok(hash) => format!("tx hash {hash}"),
+        Err(tx_bytes) => format!("tx bytes {tx_bytes}"),
+    };
+    format!("{OWN_CLAIM_NOT_CONFIRMED_PHRASE}{ticker} claim {claim}; last error: {last_error}")
+}
+
+/// The maker's abort reason when the confirmation of its claim of the taker payment could not be read
+/// (CRD ch.52 R19).
+pub(super) fn maker_own_claim_not_confirmed_reason(
+    ticker: &str,
+    claim_tx_hash: Result<String, String>,
+    last_error: &str,
+) -> AbortReason {
+    AbortReason::InternalError(own_claim_not_confirmed_text(ticker, claim_tx_hash, last_error))
+}
+
+/// The taker's abort reason when the confirmation of its claim of the maker payment could not be read
+/// (CRD ch.52 R33).
+pub(super) fn taker_own_claim_not_confirmed_reason(
+    ticker: &str,
+    claim_tx_hash: Result<String, String>,
+    last_error: &str,
+) -> AbortReason {
+    AbortReason::MakerPaymentSpendNotConfirmedInTime(own_claim_not_confirmed_text(ticker, claim_tx_hash, last_error))
+}
+
 /// Errors produced by the V2 state machine infrastructure itself.
 #[derive(Debug, Display)]
 pub enum SwapStateMachineError {
@@ -1320,6 +1400,146 @@ mod tests {
         ];
 
         assert_eq!(latest_maker_payment_from_taker_events(&events), Some(&latest_payment));
+    }
+
+    /// A scripted confirmation read: each attempt takes the next answer and moves the clock on by `step`.
+    fn run_own_claim_confirmation(
+        deadline: u64,
+        start: u64,
+        step: u64,
+        answers: Vec<Result<(), String>>,
+    ) -> (Result<(), String>, usize, Vec<u64>) {
+        use std::cell::{Cell, RefCell};
+
+        let clock = Cell::new(start);
+        let attempts = Cell::new(0usize);
+        let waits = RefCell::new(Vec::new());
+        let mut answers = answers.into_iter();
+        let result = common::block_on(await_own_claim_confirmation(
+            deadline,
+            0,
+            || clock.get(),
+            |wait_until| {
+                attempts.set(attempts.get() + 1);
+                waits.borrow_mut().push(wait_until);
+                clock.set(clock.get() + step);
+                let answer = answers.next().expect("no further attempt is expected");
+                async move { answer }
+            },
+        ));
+        (result, attempts.get(), waits.into_inner())
+    }
+
+    /// CRD ch.52 R19, R33: a confirmed own claim ends the wait at once.
+    #[test]
+    fn own_claim_confirmation_succeeds_on_the_first_read() {
+        let (result, attempts, waits) = run_own_claim_confirmation(1000, 100, 10, vec![Ok(())]);
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts, 1);
+        assert_eq!(waits, vec![1000]);
+    }
+
+    /// CRD ch.52 R19, R33: a failed read before the deadline is repeated, and a later success completes.
+    #[test]
+    fn own_claim_confirmation_is_read_again_after_a_failure_before_the_deadline() {
+        let answers = vec![Err("node down".to_string()), Err("node down".to_string()), Ok(())];
+        let (result, attempts, _) = run_own_claim_confirmation(1000, 100, 10, answers);
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts, 3);
+    }
+
+    /// CRD ch.52 R19, R33: a read that fails at or after the deadline ends the wait with its error, which the
+    /// state turns into `Aborted`.
+    #[test]
+    fn own_claim_confirmation_ends_with_the_last_error_once_the_deadline_has_passed() {
+        let answers = vec![Err("first".to_string()), Err("second".to_string())];
+        let (result, attempts, _) = run_own_claim_confirmation(1000, 985, 10, answers);
+        assert_eq!(result, Err("second".to_string()));
+        assert_eq!(attempts, 2);
+    }
+
+    /// CRD ch.51 R100 item 9: the wait lasts 3700 seconds past the lock time, and a state entered later, as
+    /// after a restart, has a full 3700 seconds.
+    #[test]
+    fn own_claim_confirmation_deadline_is_the_later_of_the_two_moments() {
+        assert_eq!(own_claim_confirmation_deadline(10_000, 2_000), 13_700);
+        assert_eq!(own_claim_confirmation_deadline(10_000, 10_000), 13_700);
+        assert_eq!(own_claim_confirmation_deadline(10_000, 50_000), 53_700);
+    }
+
+    /// The abort text opens with the fixed phrase and names the claim transaction by its hash, or by its bytes
+    /// when they do not parse.
+    #[test]
+    fn own_claim_reason_text_opens_with_the_phrase_and_names_the_claim_transaction() {
+        let by_hash = own_claim_not_confirmed_text("ETH", Ok("ab12".into()), "timed out");
+        assert_eq!(
+            by_hash,
+            "Own claim was broadcast but its confirmation could not be read: ETH claim tx hash ab12; last error: \
+             timed out"
+        );
+        let by_bytes = own_claim_not_confirmed_text("ETH", Err("f86b".into()), "timed out");
+        assert_eq!(
+            by_bytes,
+            format!("{OWN_CLAIM_NOT_CONFIRMED_PHRASE}ETH claim tx bytes f86b; last error: timed out")
+        );
+    }
+
+    /// CRD ch.52 R19, R44: the maker's abort after its own claim is `InternalError` with the phrase first.
+    #[test]
+    fn maker_own_claim_abort_is_an_internal_error_that_opens_with_the_phrase() {
+        match maker_own_claim_not_confirmed_reason("ETH", Ok("ab12".into()), "timed out") {
+            AbortReason::InternalError(text) => {
+                assert!(text.starts_with(OWN_CLAIM_NOT_CONFIRMED_PHRASE), "{text}");
+                assert!(text.contains("ETH") && text.contains("ab12"), "{text}");
+            },
+            other => panic!("unexpected reason: {other:?}"),
+        }
+    }
+
+    /// CRD ch.52 R33, R44: the taker's abort after its own claim is `MakerPaymentSpendNotConfirmedInTime` with
+    /// the phrase first.
+    #[test]
+    fn taker_own_claim_abort_is_a_spend_not_confirmed_reason_that_opens_with_the_phrase() {
+        match taker_own_claim_not_confirmed_reason("RIN", Ok("cd34".into()), "timed out") {
+            AbortReason::MakerPaymentSpendNotConfirmedInTime(text) => {
+                assert!(text.starts_with(OWN_CLAIM_NOT_CONFIRMED_PHRASE), "{text}");
+                assert!(text.contains("RIN") && text.contains("cd34"), "{text}");
+            },
+            other => panic!("unexpected reason: {other:?}"),
+        }
+    }
+
+    /// CRD ch.52 R44: the phrase is written in one place, and the reasons of both machines that carry it are
+    /// built there. An abort with nothing committed, such as the maker's `ConfirmationTimeout`, is built from
+    /// its own text and so never carries the phrase.
+    #[test]
+    fn only_the_own_claim_abort_carries_the_phrase() {
+        fn production(file: &str) -> &str {
+            let end = file.find("mod tests {").expect("the file has a test module");
+            &file[..end]
+        }
+        let phrase = OWN_CLAIM_NOT_CONFIRMED_PHRASE.trim_end();
+        let maker = production(include_str!("maker_swap_v2.rs"));
+        let taker = production(include_str!("taker_swap_v2.rs"));
+        let common = production(include_str!("swap_v2_common.rs"));
+
+        assert_eq!(common.matches(phrase).count(), 1);
+        assert_eq!(common.matches("own_claim_not_confirmed_text(").count(), 3);
+        for source in [maker, taker] {
+            assert!(!source.contains(phrase));
+            assert!(!source.contains("OWN_CLAIM_NOT_CONFIRMED_PHRASE"));
+            assert!(!source.contains("own_claim_not_confirmed_text"));
+        }
+        assert_eq!(maker.matches("maker_own_claim_not_confirmed_reason(").count(), 1);
+        assert_eq!(taker.matches("taker_own_claim_not_confirmed_reason(").count(), 1);
+
+        let timeouts: Vec<&str> = maker.split("AbortReason::ConfirmationTimeout(").skip(1).collect();
+        assert!(!timeouts.is_empty());
+        for after in timeouts {
+            assert!(after.starts_with("format!(\"Taker "), "{}", &after[..40]);
+        }
+        let nothing_committed = AbortReason::ConfirmationTimeout("Taker funding not confirmed in time: late".into());
+        assert!(!nothing_committed.to_string().contains(phrase));
     }
 
     #[test]
