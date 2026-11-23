@@ -186,6 +186,33 @@ the previous version used. The safe way:
 
 #### RPC interface
 
+- **`task::get_new_address::init`, `::status`, `::user_action` and `::cancel` make the next address of an HD account
+  as a task, by the coin's key policy.** The request is `coin`, `account_id`, an optional `chain` (default
+  `External`) and an optional `gap_limit`. It is served for standard UTXO coins, QTUM, EVM coins and ERC-20 tokens,
+  TRX and TRC20 tokens, and Siacoin; init answers only `NoSuchCoin` and `Internal`, and every other condition (also a
+  coin kind it does not serve, `CoinIsActivatedNotWithHDWallet`) shows in the task's `Error` status. Before it
+  derives an address the task runs the gap check: when the last `gap_limit` known addresses of the chain are all
+  unused it ends with `EmptyAddressesLimitReached` and the `gap_limit` (the wallet's gap limit when the request names
+  none). The direct `get_new_address` is unchanged and runs no gap check.
+  - *Software keys:* the task derives, records and queries without any device state, also when a hardware wallet is
+    connected beside a software login; its states are `Preparing` and `RequestingAccountBalance`, and it ends with
+    the same `{"new_address": ...}` answer as `get_new_address`. A TRX or TRC20 ticker completes this way, and so
+    does a Siacoin.
+  - *Hardware wallet (Trezor) keys:* the task needs the connected device (`HwContextNotInitialized` when none is
+    connected, `FoundUnexpectedDevice` for another device than the coin was activated with), asks the device to show
+    the address, and reports `{"ConfirmAddress": {"expected_address": "<address>"}}` while the device waits for the
+    button. The address is recorded only after the button was pressed. A refusal on the device ends the task with
+    `HwError` `UserCancelled`. If the device shows another address than the one the node derived, the task ends with
+    `DeviceAddressMismatch` and `{expected_address, device_address}` and records nothing; the comparison you make on
+    the device's screen is the check that matters.
+  - *Differences from GLEEC KDF:* GLEEC KDF runs this task on the device path only, so with software keys it ends
+    with `HwContextNotInitialized`; and it ends a device mismatch with `Internal`, accepts the `Internal` chain for
+    EVM coins, and has a scripthash-subscription step that has no counterpart here. The `Internal` chain is refused
+    for EVM and TRON coins with `InvalidBip44Chain`; UTXO and QTUM accept it.
+  - *No rollback:* an address whose balance query fails stays known, as with `get_new_address`; cancelling the task
+    during the balance query does the same, and cancelling it before the device confirmed records nothing.
+  Detail: PR #491; CRD ch.49 §49.2.3 (the status note "the task form of `get_new_address` (as built)"), ch.05 R54;
+  the maintainer decided on 2026-11-22 on the divergences.
 - **The legacy `disable_coin` makes a platform coin with active tokens passive, answers `passivized`, and takes
   `force_disable`.** A platform coin (an EVM, BCH, Tendermint, Solana or standard UTXO coin) that has at least one
   active token or layer-two coin, activated by a token activation method or as part of a platform-with-tokens
@@ -507,6 +534,10 @@ the previous version used. The safe way:
   be used now that TRON is switched on. The way to move tokens back from the GasFree address is a gasless withdraw to
   your own address, through the task form. Detail: PRs #445, #495; CRD ch.63 §63.3.4 to §63.3.6, §63.8, §63.8A,
   §63.8B (D63.9 and its status note), R29; RELOADED_VS_GLEEC.md.
+- **TRON swap groundwork: a swap with a TRX or TRC20 coin on either side will use the 32-byte secret hash.** The
+  legacy swap's choice of the secret-hash width selects SHA-256 over 32 bytes for such a pair, as the TRON swap
+  contract requires; ETH and ERC20 pairs keep the 20-byte hash. TRON swaps stay off, so nothing a user can run
+  changes yet. Detail: PR #499; CRD ch.51 R72 status note, ch.21 R21.B6.
 
 #### Tendermint (Cosmos) coins
 
@@ -1219,9 +1250,17 @@ the previous version used. The safe way:
   payment can be refunded from the chain: an SLP token by the median time past of BCH, a QRC20 token by that of
   QTUM, and an ETH or ERC20 coin by the timestamp of the latest block, once the node's own clock is past the lock
   time. Detail: PR #490; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
+- **A QRC20 swap's spend or refund is recognized only from its own successful contract call.** The search ties the
+  swap event to the contract call it belongs to, requires that call to the swap contract to have succeeded, and
+  looks for a refund in the history of the payment's sender, so a refund of the other side's payment is found too.
+  Detail: PR #496; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
 
 ### Tests
 
+- **The `get_private_keys` warning tests no longer fail when the whole `coins` test suite runs in parallel.** The
+  test log capture is one list for the whole process, and another test writes the same warning line, so the line
+  counts of the per-call warning test were sometimes off. Each captured line now records the thread that wrote it,
+  and the two tests that count lines count only their own. No production code changes. Detail: PR #507.
 - **The Trezor emulator tests now run in CI.** The emulator job passed while every test was skipped: the
   container starts only the emulator's controller, and each test looked for the emulator before anything had
   started it. The job now starts and seeds the emulator and checks that it answers before the tests run, and in
@@ -1229,6 +1268,10 @@ the previous version used. The safe way:
   setting, the tests still skip. The emulator image is pinned to a fixed version. Of the eleven tests, ten run and
   pass; the PIN test stays ignored. The TRON test had never run and failed in its own setup; only its setup
   changed. Detail: PR #498.
+- **Seven Trezor emulator tests of `task::get_new_address`.** They run in the emulator job, where an emulator that
+  does not answer fails them; six run and pass there. The test of a refusal on the device is ignored: the emulator's
+  screen that shows a new address has no cancel button, so that check stays a manual one on a Trezor.
+  Detail: PR #491.
 - **The legacy taker-swap unit tests now run in CI.** The 74 unit tests of the legacy taker swap (mocked coins, no
   network) run in the unit-test job with the maker-swap tests; all pass. The tests themselves are unchanged.
   Detail: PR #479.
@@ -1312,10 +1355,12 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`tron-swap-support`](docs/plans/tron-swap-support.md) — note of 2026-11-22: the TRON arm of the secret-hash
+  selection is built, in PR #499.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P9, the lab rows, all passed;
   the closing note names what no row covers, in PR #497.
 - [`swap-chain-reading-correctness`](docs/plans/swap-chain-reading-correctness.md) — in progress: step 1 in PR #481,
-  step 2 in PR #488, step 3 in PR #490.
+  step 2 in PR #488, step 3 in PR #490, step 4 in PR #496.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: Phase C item 5, the INFO
   lines for a shared QTUM Electrum client, in PR #476.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — in progress: P8, the subscriptions of the

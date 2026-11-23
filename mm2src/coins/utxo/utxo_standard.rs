@@ -2,6 +2,7 @@ use super::*;
 use crate::coin_balance::{self, EnableCoinBalanceError, HDAccountBalance, HDAddressBalance, HDWalletBalance,
                           HDWalletBalanceOps};
 use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError, HDXPubExtractor};
+use crate::hd_wallet::common_impl::PlannedNewAddress;
 use crate::hd_wallet::{self, AccountUpdatingError, AddressDerivingError, GetNewHDAddressParams,
                        GetNewHDAddressResponse, HDAccountMut, HDAddressId, HDWalletRpcError, HDWalletRpcOps,
                        NewAccountCreatingError, NewAccountIndex};
@@ -10,6 +11,7 @@ use crate::rpc_command::account_balance::{self, AccountBalanceParams, AccountBal
 use crate::rpc_command::hd_account_balance_rpc_error::HDAccountBalanceRpcError;
 use crate::rpc_command::init_account_balance::{self, InitAccountBalanceParams, InitAccountBalanceRpcOps};
 use crate::rpc_command::init_create_account::{self, CreateNewAccountParams, CreatedAccount, InitCreateHDAccountRpcOps};
+use crate::rpc_command::init_get_new_address::{self, DeviceAddressRequest, InitGetNewAddressRpcOps};
 use crate::rpc_command::init_scan_for_new_addresses::{self, InitScanAddressesRpcOps, ScanAddressesParams,
                                                       ScanAddressesResponse};
 use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawTaskHandle};
@@ -781,6 +783,30 @@ impl HDWalletCoinOps for UtxoStandardCoin {
         new_known_addresses_number: u32,
     ) -> MmResult<(), AccountUpdatingError> {
         utxo_common::set_known_addresses_number(self, hd_wallet, hd_account, chain, new_known_addresses_number).await
+    }
+}
+
+#[async_trait]
+impl InitGetNewAddressRpcOps for UtxoStandardCoin {
+    async fn plan_new_address(
+        &self,
+        account_id: u32,
+        chain: Bip44Chain,
+        gap_limit: Option<u32>,
+    ) -> MmResult<PlannedNewAddress, HDWalletRpcError> {
+        init_get_new_address::common_impl::plan_new_address(self, account_id, chain, gap_limit).await
+    }
+
+    fn device_address_request(&self) -> MmResult<DeviceAddressRequest, HDWalletRpcError> {
+        init_get_new_address::common_impl::utxo_device_address_request(self)
+    }
+
+    async fn record_new_address(
+        &self,
+        planned: &PlannedNewAddress,
+        on_recorded: &(dyn Fn() -> MmResult<(), HDWalletRpcError> + Sync),
+    ) -> MmResult<GetNewHDAddressResponse, HDWalletRpcError> {
+        init_get_new_address::common_impl::record_new_address(self, planned, on_recorded).await
     }
 }
 
