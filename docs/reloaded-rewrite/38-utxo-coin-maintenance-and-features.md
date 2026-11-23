@@ -6746,7 +6746,7 @@ R38.8.6 **Tests (two-direction, observable).**
   forbidden corpus, from the maintainer's decision, the cleared text of
   chapter 49 §49.2.2 and this repository's code. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
-- *Clean-side addition of 2026-11-23 (PR #NNN):* the status note before
+- *Clean-side addition of 2026-11-23 (PR #522):* the status note before
   §38.6.4Q on the swap evidence of ch.51 R100 for UTXO coins, BCH and QTUM over
   Electrum. Reloaded-original; written from this repository's code and tests;
   no reference input and no forbidden-class input; no sentence of the chapter
