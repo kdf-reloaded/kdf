@@ -330,8 +330,52 @@ pub struct TransactionInfoResponse {
     pub id: Option<String>,
     #[serde(rename = "blockNumber")]
     pub block_number: Option<u64>,
+    /// The time of the block the transaction is in, in milliseconds.
+    #[serde(rename = "blockTimeStamp")]
+    pub block_time_stamp: Option<i64>,
     pub receipt: Option<TransactionReceipt>,
     pub fee: Option<i64>,
+    /// The log entries of the transaction's execution, in order. Absent for a transaction that emits none.
+    #[serde(default)]
+    pub log: Vec<TransactionLog>,
+}
+
+/// A log entry of a transaction-info answer: the emitting contract as 20 bytes of hex (without the `41` prefix),
+/// the topics and the data as hex.
+#[derive(Debug, Deserialize)]
+pub struct TransactionLog {
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub data: String,
+}
+
+/// `/wallet/gettransactionbyid` answer: the transaction as the node keeps it. Only the raw body in hex, the
+/// signatures in hex and the id are read; an unknown transaction is the empty object.
+#[derive(Debug, Deserialize)]
+pub struct TransactionByIdResponse {
+    #[serde(rename = "txID")]
+    pub tx_id: Option<String>,
+    pub raw_data_hex: Option<String>,
+    #[serde(default)]
+    pub signature: Vec<String>,
+}
+
+/// `/wallet/gettransactioninfobyblocknum` request.
+#[derive(Serialize)]
+pub struct BlockNumRequest {
+    pub num: u64,
+}
+
+/// One page of the contract-event listing of an event service (`GET /v1/contracts/{address}/events`), the rows kept
+/// as JSON: each row is read on its own by the spend discovery.
+#[derive(Debug, Deserialize)]
+pub struct ContractEventsPage {
+    pub success: bool,
+    pub data: Vec<serde_json::Value>,
+    pub meta: Option<AccountListingMeta>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -563,14 +607,21 @@ struct Node {
     /// Whether the node is a keyed TronGrid node, the only kind the account listings are asked of (CRD ch.21
     /// §21.10C). Fixed when the client is built.
     history: bool,
+    /// Whether the node is an `https` TronGrid host, keyed or not: the nodes the event service is asked of.
+    trongrid: bool,
 }
 
 /// What a walk over the nodes asks of each node.
 enum Call<'a> {
     /// A POST of `json_body` to the endpoint `path`, asked of every node.
     Post { path: &'a str, json_body: String },
-    /// A GET of the endpoint `path` with `query`, asked of the keyed TronGrid nodes only.
-    GetKeyed { path: &'a str, query: &'a str },
+    /// A GET of the endpoint `path` with `query`, asked of the keyed TronGrid nodes only (`keyed_only`), or of every
+    /// TronGrid node, keyed or not (the key header is sent only when the node has one).
+    GetTrongrid {
+        path: &'a str,
+        query: &'a str,
+        keyed_only: bool,
+    },
 }
 
 impl std::fmt::Debug for TronApiClient {
@@ -605,6 +656,7 @@ impl TronApiClient {
             .zip(listed_nodes(ticker, urls))
             .map(|(node, listed)| Node {
                 history: node.is_keyed_trongrid(),
+                trongrid: node.is_trongrid(),
                 label: host_only(node.url()),
                 headers: node.headers().clone(),
                 url: listed.url,
@@ -636,6 +688,7 @@ impl TronApiClient {
         if let Some(inner) = Arc::get_mut(&mut client.inner) {
             for (node, flag) in inner.nodes.iter_mut().zip(history) {
                 node.history = *flag;
+                node.trongrid = *flag;
             }
         }
         client
@@ -703,7 +756,47 @@ impl TronApiClient {
                 "no TronGrid node with an API key is configured".to_owned(),
             ));
         }
-        self.walk(&Call::GetKeyed { path, query }, validate).await
+        self.walk(
+            &Call::GetTrongrid {
+                path,
+                query,
+                keyed_only: true,
+            },
+            validate,
+        )
+        .await
+    }
+
+    /// Like [`Self::try_get_keyed_validated`] for an endpoint of the TronGrid event service, which is served to a
+    /// request without a key too: every TronGrid node of the list is asked, keyed or not. No other node is asked.
+    ///
+    /// # Errors
+    ///
+    /// [`TronApiError::AllNodesFailed`] without any request when the client has no TronGrid node; the errors of a
+    /// walk otherwise.
+    async fn try_get_trongrid_validated<Resp>(
+        &self,
+        path: &str,
+        query: &str,
+        validate: fn(&Resp) -> Result<(), TronApiError>,
+    ) -> Result<Resp, TronApiError>
+    where
+        Resp: serde::de::DeserializeOwned + Send + 'static,
+    {
+        if !self.inner.nodes.iter().any(|node| node.trongrid) {
+            return Err(TronApiError::AllNodesFailed(
+                "no TronGrid node is configured".to_owned(),
+            ));
+        }
+        self.walk(
+            &Call::GetTrongrid {
+                path,
+                query,
+                keyed_only: false,
+            },
+            validate,
+        )
+        .await
     }
 
     /// The walk every request shares: the nodes the call is asked of are tried one at a time in the current order
@@ -732,8 +825,12 @@ impl TronApiClient {
                             .await;
                     (*path, url, attempt)
                 },
-                Call::GetKeyed { path, query } => {
-                    if !node.history {
+                Call::GetTrongrid {
+                    path,
+                    query,
+                    keyed_only,
+                } => {
+                    if !(if *keyed_only { node.history } else { node.trongrid }) {
                         continue;
                     }
                     let url = endpoint_url_with_query(&node.url, path, query);
@@ -784,6 +881,120 @@ impl TronApiClient {
                 ));
             }
             block.to_tapos().map(|_| ())
+        })
+        .await
+    }
+
+    /// The URLs of the nodes of the client, in the order configured. A credential: only handed to the evidence
+    /// agreement, which names a node by its host, and to [`Self::index_of_url`].
+    pub(crate) fn node_urls(&self) -> Vec<String> { self.inner.nodes.iter().map(|node| node.url.clone()).collect() }
+
+    /// The index of the node whose URL is `url`.
+    pub(crate) fn index_of_url(&self, url: &str) -> Option<usize> {
+        self.inner.nodes.iter().position(|node| node.url == url)
+    }
+
+    /// POST `request` to the endpoint `path` of the node `index` only, with the answer rules of a walk (status,
+    /// the node's error forms, decoding, `validate` inside the attempt) and no failover: the answer is that node's
+    /// or an error. The error text carries no URL.
+    pub(crate) async fn post_to_node<Req, Resp>(
+        &self,
+        index: usize,
+        path: &str,
+        request: &Req,
+        validate: fn(&Resp) -> Result<(), TronApiError>,
+    ) -> Result<Resp, TronApiError>
+    where
+        Req: Serialize,
+        Resp: serde::de::DeserializeOwned + Send + 'static,
+    {
+        let node = self
+            .inner
+            .nodes
+            .get(index)
+            .ok_or_else(|| TronApiError::AllNodesFailed("no such node".to_owned()))?;
+        let json_body = serde_json::to_string(request).map_err(|e| TronApiError::InvalidResponse(e.to_string()))?;
+        let url = endpoint_url(&node.url, path);
+        post_json_checked::<Resp>(&url, json_body, &node.headers, self.inner.cutoff_s, validate)
+            .await
+            .map_err(|e| e.without_node_urls(&[&url, &node.url]))
+    }
+
+    /// The transaction `tx_hash` as a node keeps it (`/wallet/gettransactionbyid`). An answer without a raw body (the
+    /// node's empty object for a transaction it does not know) is a bad answer and moves on to the next node.
+    pub(crate) async fn get_transaction_by_id(&self, tx_hash: &str) -> Result<TransactionByIdResponse, TronApiError> {
+        let req = TxByIdRequest {
+            value: tx_hash.to_string(),
+        };
+        self.try_post_validated(
+            "/wallet/gettransactionbyid",
+            &req,
+            |answer: &TransactionByIdResponse| {
+                if answer.raw_data_hex.is_some() {
+                    Ok(())
+                } else {
+                    Err(TronApiError::InvalidResponse(
+                        "gettransactionbyid answer carries no raw body".to_owned(),
+                    ))
+                }
+            },
+        )
+        .await
+    }
+
+    /// The transaction infos of the block `number` (`/wallet/gettransactioninfobyblocknum`), in block order; an empty
+    /// list for a block without transactions.
+    pub(crate) async fn get_transaction_infos_by_block_num(
+        &self,
+        number: u64,
+    ) -> Result<Vec<TransactionInfoResponse>, TronApiError> {
+        self.try_post("/wallet/gettransactioninfobyblocknum", &BlockNumRequest { num: number })
+            .await
+    }
+
+    /// One page of the events `event_name` of the contract `contract` that are confirmed and no older than
+    /// `min_block_timestamp_ms`, oldest first, from an event service (`GET /v1/contracts/{contract}/events`) of a
+    /// TronGrid node. `fingerprint` is the cursor of the previous page. Asked of the TronGrid nodes of the
+    /// list, keyed or not.
+    ///
+    /// # Errors
+    ///
+    /// [`TronApiError::InvalidResponse`] without any request for an event name or a cursor that is not made of
+    /// letters, digits, `-` and `_`; the errors of the walk otherwise.
+    pub(crate) async fn get_contract_events(
+        &self,
+        contract: &TronAddress,
+        event_name: &str,
+        min_block_timestamp_ms: i64,
+        fingerprint: Option<&str>,
+    ) -> Result<ContractEventsPage, TronApiError> {
+        let plain = |text: &str| {
+            !text.is_empty()
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        };
+        if !plain(event_name) || fingerprint.is_some_and(|cursor| !plain(cursor)) {
+            return Err(TronApiError::InvalidResponse(
+                "the name or the cursor of an event listing has an unexpected form".to_owned(),
+            ));
+        }
+        let path = format!("/v1/contracts/{}/events", contract.to_base58());
+        let mut query = format!(
+            "event_name={event_name}&only_confirmed=true&order_by=block_timestamp,asc&min_block_timestamp={min_block_timestamp_ms}&limit={LISTING_PAGE_LIMIT}"
+        );
+        if let Some(fingerprint) = fingerprint {
+            query.push_str("&fingerprint=");
+            query.push_str(fingerprint);
+        }
+        self.try_get_trongrid_validated(&path, &query, |page: &ContractEventsPage| {
+            if page.success {
+                Ok(())
+            } else {
+                Err(TronApiError::InvalidResponse(
+                    "event listing answer is not marked a success".to_owned(),
+                ))
+            }
         })
         .await
     }
@@ -1151,6 +1362,61 @@ fn all_failed(inner: &Inner, failures: Vec<Failure>) -> TronApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The event service is asked of every `https` TronGrid host, keyed or not, and of no other host; the account
+    /// listings stay with the keyed ones.
+    #[test]
+    fn the_event_service_nodes_are_the_https_trongrid_hosts_keyed_or_not() {
+        use super::super::nodes::{TronApiKey, TronNode};
+        let key = TronApiKey::from_conf(&serde_json::json!({ "tron_api_key": "k" })).unwrap();
+        let nodes = vec![
+            TronNode::plain("https://api.trongrid.io".to_owned()),
+            TronNode::plain("https://other.example.org".to_owned()),
+            TronNode::new(
+                "https://nile.trongrid.io".to_owned(),
+                http::HeaderMap::new(),
+                key.as_ref(),
+            ),
+            TronNode::plain("http://api.trongrid.io".to_owned()),
+        ];
+        let client = TronApiClient::new_with_cutoff_s("TRX", nodes, 1.0);
+        let flags: Vec<(bool, bool)> = client
+            .inner
+            .nodes
+            .iter()
+            .map(|node| (node.trongrid, node.history))
+            .collect();
+        assert_eq!(flags, [(true, false), (false, false), (true, true), (false, false)]);
+    }
+
+    /// The event query reaches a TronGrid node that has no key and sends no key header to it. The stub node poses
+    /// as such a node through the client's flags: a loopback stub cannot be an `https` TronGrid host.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_event_query_reaches_an_unkeyed_trongrid_node_without_a_key_header() {
+        use super::super::test_node::{Reply, StubNode};
+        let stub = StubNode::start(|path, _| {
+            if path.starts_with("/v1/contracts/") {
+                Reply::ok(r#"{"success":true,"data":[{"transaction_id":"ab"}],"meta":{}}"#)
+            } else {
+                Reply::status(404, "unexpected")
+            }
+        });
+        let mut client = TronApiClient::new_with_cutoff_s("TRX", vec![TronNode::plain(stub.url())], 2.0);
+        let inner = Arc::get_mut(&mut client.inner).expect("a fresh client is not shared");
+        inner.nodes[0].trongrid = true;
+        inner.nodes[0].history = false;
+        let contract = TronAddress::from_evm_address(ethereum_types::Address::from([0x10; 20]));
+        let page = common::block_on(client.get_contract_events(&contract, "ReceiverSpent", 0, None))
+            .expect("the unkeyed TronGrid node answers the event query");
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(stub.header_values("tron-pro-api-key"), vec![None]);
+        // The account listing is for keyed nodes only: it is not asked of this one.
+        let before = stub.requests().len();
+        let listing = common::block_on(client.get_account_listing(&contract, AccountListing::Transactions, None));
+        assert!(listing.is_err());
+        assert_eq!(stub.requests().len(), before);
+    }
 
     #[test]
     fn test_get_now_block_response_to_tapos() {

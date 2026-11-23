@@ -199,6 +199,9 @@ pub struct TronCoinParams {
     /// The swap-contract binding of [`tron_swap_contracts`]. `None` for a wallet-only coin: the coin then carries
     /// no swap contract.
     pub swap_contracts: Option<TronSwapContracts>,
+    /// The `swap_evidence_node` of the request: the one node whose answer alone is taken for the reads a refund or
+    /// a secret step rests on (CRD ch.51 R100). It must be one of the request's nodes.
+    pub swap_evidence_node: Option<String>,
 }
 
 /// Assemble the [`EthCoinImpl`] for a TRX or TRC20 coin and wrap it in
@@ -239,6 +242,7 @@ pub(crate) async fn tron_coin_from_conf_and_request_with_switch(
         tx_history: req["tx_history"].as_bool().unwrap_or(false),
         gasfree: None,
         swap_contracts,
+        swap_evidence_node: req["swap_evidence_node"].as_str().map(str::to_owned),
     };
     tron_coin_from_params(ctx, ticker, conf, params, priv_key, protocol)
         .await
@@ -325,12 +329,17 @@ async fn build_tron_coin(
         tx_history,
         gasfree,
         swap_contracts,
+        swap_evidence_node,
     } = params;
     let urls: Vec<String> = nodes.iter().map(|node| node.url().to_owned()).collect();
 
     let my_address = key_pair.address();
 
     let tron_api = TronApiClient::new(ticker, nodes);
+    // CRD ch.51 R100: the evidence policy of the coin, from the node list and `swap_evidence_node`. A node that is
+    // not in the list is refused here, before any node is asked.
+    let evidence_policy = crate::swap_evidence::swap_evidence_policy_from(ticker, swap_evidence_node.as_deref(), &urls)
+        .map_to_mm(EthCoinBuildError::from)?;
 
     let (coin_type, decimals, network) = match protocol {
         CoinProtocol::TRX { network } => (EthCoinType::Tron, TRX_DECIMALS, network),
@@ -400,7 +409,7 @@ async fn build_tron_coin(
         fallback_swap_contract: swap_contracts.and_then(|bound| bound.fallback_swap_contract),
         web3,
         web3_instances: Vec::new(),
-        swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
+        swap_evidence: evidence_policy,
         decimals,
         gas_station_url: None,
         gas_station_decimals: ETH_GAS_STATION_DECIMALS,

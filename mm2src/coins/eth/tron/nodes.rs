@@ -133,6 +133,10 @@ impl TronNode {
 
     pub(crate) fn headers(&self) -> &HeaderMap { &self.headers }
 
+    /// Whether the node is an `https` URL on a TronGrid host, keyed or not (CRD ch.21 §21.9): the nodes the event
+    /// service is asked of.
+    pub(crate) fn is_trongrid(&self) -> bool { is_trongrid_host(&self.url) }
+
     /// Whether the node is a keyed TronGrid node: an `https` URL on a TronGrid host (an exact host match) whose
     /// requests carry the `TRON-PRO-API-KEY` header, from the node's own entry or from `tron_api_key`. Only such
     /// a node is asked for the account listings of the transaction history (CRD ch.21 §21.10C).

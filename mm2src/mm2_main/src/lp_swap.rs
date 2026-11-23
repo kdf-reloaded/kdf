@@ -101,6 +101,7 @@ pub(crate) use refund_retry::{retried_refund_rejection, NON_FINAL_REFUND_RETRY_S
 #[allow(unused_imports)]
 pub use dex_fee::{compute_dex_fee, compute_dex_fee_with_taker_pubkey, dex_fee_amount, dex_fee_amount_from_taker_coin};
 pub(crate) use dex_fee::{compute_dex_fee_v2_with_taker_pubkey_from_coin, dex_fee_rate, dex_fee_threshold};
+#[path = "lp_swap/evidence_wait.rs"] mod evidence_wait;
 #[path = "lp_swap/maker_swap.rs"] mod maker_swap;
 #[path = "lp_swap/maker_swap_v2.rs"] pub mod maker_swap_v2;
 #[path = "lp_swap/max_maker_vol_rpc.rs"] mod max_maker_vol_rpc;
