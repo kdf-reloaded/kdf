@@ -38,7 +38,7 @@ or undo, and every change that needs a step from you.
     - **SLP tokens.** Affected: every SLP token whose BCH activation request lists fewer than two bchd servers on
       different hosts. It no longer starts a swap, and its running swaps wait at a refund or claim step. The check of
       the other side's token payment asks two bchd hosts, and the swap's other chain reads follow BCH. To fix it, add
-      a bchd server on a second host; `swap_evidence_node` does not replace the second bchd host. Detail: PR #NNN;
+      a bchd server on a second host; `swap_evidence_node` does not replace the second bchd host. Detail: PR #526;
       CRD ch.51 §51.6G R100.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
