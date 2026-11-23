@@ -2268,14 +2268,14 @@ impl TakerSwap {
                 ]);
             },
             Ok(Err(e)) => {
-                warn!(
+                debug!(
                     "Swap {}: could not look for a spend of the taker payment: {}",
                     self.uuid, e
                 );
                 RefundChainLook::Undetermined(e)
             },
             Err(timeout) => {
-                warn!(
+                debug!(
                     "Swap {}: the look for a spend of the taker payment did not finish: {}",
                     self.uuid, timeout
                 );
@@ -2302,7 +2302,7 @@ impl TakerSwap {
                 match spend_secret(&self.taker_coin, &secret_hash, &tx.tx_hex()).await {
                     Ok(bytes) => self.claim_outcome(tx, H256Json::from(bytes.as_slice())),
                     Err(e) => {
-                        warn!(
+                        debug!(
                             "Swap {}: one server shows a spend of the taker payment whose secret does not prove itself, waiting: {}",
                             self.uuid, e
                         );
@@ -2314,7 +2314,7 @@ impl TakerSwap {
                 }
             },
             Ok(Some(FoundSwapTxSpend::Refunded(_))) => {
-                warn!(
+                debug!(
                     "Swap {}: one server shows a refund of the taker payment; it is acted on only when the coin's own search agrees",
                     self.uuid
                 );
