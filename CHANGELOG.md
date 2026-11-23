@@ -1278,6 +1278,10 @@ the previous version used. The safe way:
 
 ### Tests
 
+- **A Tendermint history test no longer hangs when the whole `coins` test suite runs in parallel.** Once a test
+  stopped a scripted node, its port was free, and another test could be given it; a request to the stopped node
+  then reached a listener that never answered. On Linux a stopped scripted node now keeps its port until the test
+  ends, so connections to it are refused. No production code changes. Detail: PR #513.
 - **The `get_private_keys` warning tests no longer fail when the whole `coins` test suite runs in parallel.** The
   test log capture is one list for the whole process, and another test writes the same warning line, so the line
   counts of the per-call warning test were sometimes off. Each captured line now records the thread that wrote it,
