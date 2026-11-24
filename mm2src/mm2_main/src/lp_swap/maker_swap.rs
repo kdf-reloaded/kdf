@@ -1,7 +1,7 @@
 use super::check_balance::{check_base_coin_balance_for_swap, check_my_coin_balance_for_swap, CheckBalanceError,
                            CheckBalanceResult};
-use super::evidence_wait::{clock_secs, maker_refund_cap_text, maker_refund_gate_cap_text, retry_while_undetermined,
-                           undetermined_refund_deadline, with_fix_hint, Read, WaitLog};
+use super::evidence_wait::{clock_secs, maker_refund_cap_text, maker_refund_gate_cap_text, non_final_retry_text,
+                           retry_while_undetermined, undetermined_refund_deadline, with_fix_hint, Read, WaitLog};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
                              ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
@@ -1617,11 +1617,12 @@ impl MakerSwap {
                         self.wait_refund_until(),
                     ) {
                         warn!(
-                            "Swap {}: the {} refund of the maker payment was rejected as non-final, retrying in {} s: {}",
-                            self.uuid,
-                            self.maker_coin.ticker(),
-                            non_final_retry_secs,
-                            node_text
+                            "{}",
+                            non_final_retry_text(&self.uuid, self.maker_coin.ticker(), "maker", non_final_retry_secs)
+                        );
+                        debug!(
+                            "Swap {}: the node's text of the non-final rejection: {}",
+                            self.uuid, node_text
                         );
                         Timer::sleep(non_final_retry_secs).await;
                         continue;
