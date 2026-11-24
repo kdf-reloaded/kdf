@@ -2879,16 +2879,21 @@ fn polygon_check_if_my_payment_sent() {
         "swap_contract_address": "0x9130b257d37a52e52f21054c4da3450c72f595ce",
     });
 
+    // The node URL can carry an API key, and an error from a call to the node can
+    // carry that URL. So no assert or panic message in this test prints an error
+    // text: every `Result` of a network call is matched and fails with a fixed
+    // message instead of `unwrap()`.
     let priv_key = [1; 32];
-    let coin = block_on(eth_coin_from_conf_and_request(
+    let Ok(coin) = block_on(eth_coin_from_conf_and_request(
         &ctx,
         "MATIC",
         &conf,
         &request,
         &priv_key,
         CoinProtocol::ETH { chain_id: None },
-    ))
-    .unwrap();
+    )) else {
+        panic!("eth_coin_from_conf_and_request failed");
+    };
 
     // A known, immutable historical maker payment on Polygon mainnet (Dec 2021),
     // emitted in block 22_185_152. We start the scan two blocks before it with a
@@ -2907,7 +2912,7 @@ fn polygon_check_if_my_payment_sent() {
 
     let secret_hash = hex::decode("fc33114b389f0ee1212abf2867e99e89126f4860").unwrap();
     let swap_contract_address: BytesJson = "9130b257d37a52e52f21054c4da3450c72f595ce".into();
-    let my_payment = coin
+    let found = coin
         .check_if_my_payment_sent(
             1638764369,
             &[],
@@ -2916,40 +2921,77 @@ fn polygon_check_if_my_payment_sent() {
             from_block,
             &Some(swap_contract_address.clone()),
         )
-        .wait()
-        .unwrap()
-        .unwrap();
+        .wait();
+    let my_payment = match found {
+        Ok(Some(payment)) => payment,
+        Ok(None) => panic!("the known payment was not found"),
+        Err(_) => panic!("check_if_my_payment_sent failed"),
+    };
     let expected_hash = BytesJson::from("69a20008cea0c15ee483b5bbdff942752634aa072dfd2ff715fe87eec302de11");
     assert_eq!(expected_hash, my_payment.tx_hash());
 
-    // Negative case: crawl only the last several blocks for the same payment id.
-    // Its PaymentSent event is in 2021, so scanning a recent window must NOT find
-    // it — this exercises the "scanned the whole window, nothing found -> None"
-    // branch. The head is read via the alloy provider directly, NOT the coin's
-    // `current_block()` (the method the tested code uses), so the fixture stays
-    // independent of the code under test. The window is small (a handful of
-    // `logs_block_range` chunks), so it stays within free-tier getLogs limits.
+    // Undetermined case: scan only the last several blocks for the same payment id.
+    // The swap contract knows this payment (its state is not `Uninitialized`), but
+    // its PaymentSent event is in 2021, so the recent window holds no event for it.
+    // A contract state without the event is a contradiction, so the answer is
+    // undetermined (an error), never "not sent" (CRD ch.39 R39.11.5A.4). The head
+    // is read via the alloy provider directly, NOT the coin's `current_block()`
+    // (the method the tested code uses), so the fixture stays independent of the
+    // code under test. The window is small (a handful of `logs_block_range`
+    // chunks), so it stays within free-tier getLogs limits.
     let recent_head = {
         use alloy::providers::Provider as _;
-        block_on(coin.alloy_provider().get_block_number()).unwrap()
+        let Ok(head) = block_on(coin.alloy_provider().get_block_number()) else {
+            panic!("get_block_number failed");
+        };
+        head
     };
     let recent_from_block = recent_head.saturating_sub(20);
-    let not_found = coin
+    let undetermined = coin
         .check_if_my_payment_sent(
             1638764369,
             &[],
             &[],
             &secret_hash,
             recent_from_block,
-            &Some(swap_contract_address),
+            &Some(swap_contract_address.clone()),
         )
-        .wait()
-        .unwrap();
+        .wait();
+    let Err(undetermined) = undetermined else {
+        panic!("a payment the contract knows must not get an Ok answer in the recent window");
+    };
+    // The error text carries a source-location prefix, so the fixed leading phrase
+    // of the message is matched rather than the whole text. The text itself is not
+    // printed (see the note on error texts above).
     assert!(
-        not_found.is_none(),
-        "payment must not be found in the recent {}..{} window",
+        undetermined.contains("Undetermined whether the payment was sent"),
+        "a payment the contract knows must be undetermined in the recent {}..{} window",
         recent_from_block,
         recent_head
+    );
+
+    // Not-sent case: the same lock time with a secret hash whose last byte is
+    // flipped. The payment id is derived from the lock time and the secret hash,
+    // so this id differs from the known payment's and no payment was ever sent
+    // under it: the contract reports `Uninitialized`, and the answer is `None`.
+    let mut unknown_secret_hash = secret_hash.clone();
+    *unknown_secret_hash.last_mut().unwrap() ^= 0xff;
+    let not_sent = coin
+        .check_if_my_payment_sent(
+            1638764369,
+            &[],
+            &[],
+            &unknown_secret_hash,
+            recent_from_block,
+            &Some(swap_contract_address),
+        )
+        .wait();
+    let Ok(not_sent) = not_sent else {
+        panic!("check_if_my_payment_sent failed");
+    };
+    assert!(
+        not_sent.is_none(),
+        "a payment id unknown to the contract must be reported as not sent"
     );
 }
 
