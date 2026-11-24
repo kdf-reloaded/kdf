@@ -903,6 +903,18 @@ the previous version used. The safe way:
   status note of 2026-11-22;
   `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
 
+#### Swap protocol v2
+
+- **A v2 swap never refunds after its own claim, repeats a chain search after a node error, and takes an EVM secret
+  only when it matches the secret hash.** After the node's own claim of the other side's payment is broadcast, the
+  swap reads its confirmation again every 10 seconds and ends as completed when it is read. It waits until 3700
+  seconds past the lock time of its own payment, and at least 3700 seconds from the start of that wait (a restart
+  starts the wait anew); then it ends as aborted with a reason whose text names the claim transaction. The maker's
+  search for the spend of the taker funding treats an unreachable node, or a node answer that cannot be decoded, as
+  a passing error on every coin family and searches again after 30 seconds. On EVM coins the value read from the
+  spend of the taker payment is used as the secret only when its hash equals the swap's secret hash.
+  - Detail: PR #532; CRD ch.52 R18, R19, R32, R33 and their status notes of 2026-11-23, ch.51 §51.6G R100.
+
 ### Fixed
 
 #### Orders
