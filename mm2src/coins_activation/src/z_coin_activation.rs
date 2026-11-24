@@ -97,6 +97,9 @@ pub struct ZcoinActivationResult {
     /// supplied a `sync_params` it reflects that request, otherwise it reflects
     /// the height the shielded scan was actually anchored at.
     pub first_sync_block: FirstSyncBlock,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    pub swap_evidence_single_host: bool,
 }
 
 /// Details of the block from which the initial shielded sync was anchored,
@@ -898,7 +901,7 @@ impl InitStandaloneCoinActivationOps for ZCoin {
 
     async fn get_activation_result(
         &self,
-        _ctx: MmArc,
+        ctx: MmArc,
         task_handle: &ZcoinRpcTaskHandle,
         activation_request: &Self::ActivationRequest,
     ) -> MmResult<Self::ActivationResult, ZcoinInitError> {
@@ -934,6 +937,7 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         // single-address form with `"wallet_type": "Iguana"`, also when the shielded key is HD-derived.
         // Reloaded does the same: there is no per-account HD report and no ticker-keyed balance map.
         Ok(ZcoinActivationResult {
+            swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(&ctx, self.ticker()),
             ticker: self.ticker().to_owned(),
             current_block,
             wallet_balance: EnableCoinBalance::Iguana(IguanaWalletBalance {
@@ -1695,6 +1699,7 @@ mod tests {
     #[test]
     fn zcoin_activation_result_wire_shape_is_stable() {
         let result = ZcoinActivationResult {
+            swap_evidence_single_host: false,
             ticker: "ARRR".to_owned(),
             current_block: 5_678,
             wallet_balance: EnableCoinBalance::Iguana(IguanaWalletBalance {

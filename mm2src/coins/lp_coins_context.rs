@@ -283,6 +283,8 @@ pub struct CoinsContext {
     pub(crate) account_balance_task_manager: AccountBalanceTaskManagerShared,
     /// The fee estimates that order-posting requests obtained (CRD ch.38 R38.6.6j item 2).
     pub(crate) fee_estimate_cache: Arc<FeeEstimateCache>,
+    /// The tickers whose last activation relaxed their swap evidence to a single host (`swap_evidence_allow_single_host`).
+    single_host_relaxed: parking_lot::Mutex<BTreeSet<String>>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) tx_history_db: SharedDb<TxHistoryDb>,
     #[cfg(target_arch = "wasm32")]
@@ -343,6 +345,20 @@ impl CoinsContext {
         self.unfinished_swaps_view.lock().clone()
     }
 
+    /// Records whether the activation of `ticker` relaxed its swap evidence to a single host.
+    pub(crate) fn set_single_host_relaxed(&self, ticker: &str, relaxed: bool) {
+        let mut set = self.single_host_relaxed.lock();
+        if relaxed {
+            set.insert(ticker.to_owned());
+        } else {
+            set.remove(ticker);
+        }
+    }
+
+    pub(crate) fn is_single_host_relaxed(&self, ticker: &str) -> bool {
+        self.single_host_relaxed.lock().contains(ticker)
+    }
+
     pub(crate) fn has_unfinished_swaps_view(&self) -> bool { self.unfinished_swaps_view.lock().is_some() }
 
     pub(crate) fn set_unfinished_swaps_view(&self, view: Arc<dyn crate::z_coin::UnfinishedSwapsView>) {
@@ -367,6 +383,7 @@ impl CoinsContext {
                 scan_addresses_manager: ScanAddressesTaskManager::new_shared(),
                 account_balance_task_manager: AccountBalanceTaskManager::new_shared(),
                 fee_estimate_cache: Arc::new(FeeEstimateCache::for_node(ctx)),
+                single_host_relaxed: parking_lot::Mutex::new(BTreeSet::new()),
                 #[cfg(target_arch = "wasm32")]
                 tx_history_db: ConstructibleDb::new_shared(ctx),
                 #[cfg(target_arch = "wasm32")]

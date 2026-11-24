@@ -363,8 +363,21 @@ impl Node {
 }
 
 /// A TRX coin over the nodes, the node at `evidence` named as the evidence node when given.
+///
+/// The node's `swap_evidence_allow_single_host` switch is off, so that a one-node coin keeps the strict policy these
+/// tests exercise.
 fn coin_over(nodes: &[&Node], evidence: Option<usize>, confirmations: u64) -> (MmArc, EthCoin) {
-    let ctx = MmCtxBuilder::new().into_mm_arc();
+    coin_over_in(&strict_ctx(), nodes, evidence, confirmations)
+}
+
+fn strict_ctx() -> MmArc {
+    MmCtxBuilder::new()
+        .with_conf(json!({ "swap_evidence_allow_single_host": false }))
+        .into_mm_arc()
+}
+
+fn coin_over_in(ctx: &MmArc, nodes: &[&Node], evidence: Option<usize>, confirmations: u64) -> (MmArc, EthCoin) {
+    let ctx = ctx.clone();
     let urls: Vec<String> = nodes.iter().map(|node| node.url()).collect();
     let mut request = json!({ "urls": urls, "required_confirmations": confirmations });
     if let Some(index) = evidence {
@@ -818,6 +831,33 @@ fn the_evidence_node_alone_is_taken_and_a_silent_one_is_not_replaced() {
     a.edit(|w| w.solid_time_ms = None);
     let (_ctx, coin) = coin_over(&[&a, &b], Some(0), 1);
     assert!(gate(&coin).is_err());
+}
+
+/// The single-host switch on (the default): a TRX coin over one node is relaxed to `Trusted` on that node, and the
+/// warning of the relaxation names the ticker and no host.
+#[test]
+fn a_one_node_coin_is_relaxed_to_trusted_when_the_switch_is_on() {
+    let node = Node::start(0, World::new());
+    let ctx = MmCtxBuilder::new().into_mm_arc();
+    let (ctx, coin) = coin_over_in(&ctx, &[&node], None, 1);
+    assert_eq!(
+        crate::MmCoin::swap_evidence_policy(&coin),
+        crate::SwapEvidencePolicy::Trusted { node: node.url() }
+    );
+    assert!(crate::swap_evidence::single_host_relaxed(&ctx, "TRX"));
+    assert_eq!(crate::MmCoin::swap_evidence_refusal(&coin), None);
+    let warning = crate::swap_evidence::single_host_warning("TRX");
+    assert!(
+        warning.contains("TRX") && !warning.contains(&node.url()) && !warning.contains("127.0.0"),
+        "{warning}"
+    );
+    // the switch off: the strict policy
+    let (ctx, strict) = coin_over(&[&node], None, 1);
+    assert_eq!(
+        crate::MmCoin::swap_evidence_policy(&strict),
+        crate::SwapEvidencePolicy::Insufficient { hosts: 1 }
+    );
+    assert!(!crate::swap_evidence::single_host_relaxed(&ctx, "TRX"));
 }
 
 #[test]

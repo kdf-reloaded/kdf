@@ -257,6 +257,98 @@ pub fn swap_evidence_policy_from(
     }
 }
 
+/// The MM2.json key of the single-host switch.
+pub const ALLOW_SINGLE_HOST_KEY: &str = "swap_evidence_allow_single_host";
+
+/// Reads the MM2.json bool `swap_evidence_allow_single_host`: `true` when absent or `null`; a value that is not a
+/// bool is an error that names the key (the start-up refuses it like other MM2.json bools).
+pub fn allow_single_host_from_conf(conf: &serde_json::Value) -> Result<bool, String> {
+    match conf.get(ALLOW_SINGLE_HOST_KEY) {
+        None | Some(serde_json::Value::Null) => Ok(true),
+        Some(serde_json::Value::Bool(allow)) => Ok(*allow),
+        Some(other) => Err(format!(
+            "invalid '{ALLOW_SINGLE_HOST_KEY}' value {other}: the value must be a boolean"
+        )),
+    }
+}
+
+/// The switch of the node (the one place that reads it): `true` unless MM2.json sets it to `false`. A value that is
+/// not a bool was refused at start-up; here it reads as the default.
+pub fn allow_single_host(ctx: &mm2_core::mm_ctx::MmArc) -> bool {
+    allow_single_host_from_conf(&ctx.conf).unwrap_or(true)
+}
+
+/// Relaxes `policy` for a coin whose CONFIGURED node list names exactly one distinct host (maintainer decision of
+/// 2026-11-24, relaxing R100). Returns the possibly relaxed policy and `true` when it relaxed it.
+///
+/// The policy is relaxed only when `allow` is set, `field` (`swap_evidence_node`) is absent, `policy` is
+/// [`SwapEvidencePolicy::Insufficient`] and `configured` has exactly one distinct host ([`node_host`]; two ports or
+/// schemes of one host are one host). The result is `Trusted { node: <the first entry of that host> }`, exactly what
+/// a `swap_evidence_node` naming that entry gives. The judgement is by the configured list, never by the hosts that
+/// answer: a list of two hosts stays strict even when one of them is down. Every other policy is returned as it is.
+pub fn relax_single_host(
+    policy: SwapEvidencePolicy,
+    field: Option<&str>,
+    configured: &[String],
+    allow: bool,
+) -> (SwapEvidencePolicy, bool) {
+    if !allow || field.is_some() || !matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
+        return (policy, false);
+    }
+    let hosts = distinct_hosts(configured);
+    let [host] = hosts.as_slice() else {
+        return (policy, false);
+    };
+    match configured
+        .iter()
+        .find(|entry| node_host(entry).as_deref() == Some(host.as_str()))
+    {
+        Some(entry) => (SwapEvidencePolicy::Trusted { node: entry.clone() }, true),
+        None => (policy, false),
+    }
+}
+
+/// For `skip_serializing_if`: the response field `swap_evidence_single_host` is written only when it is `true`.
+pub fn is_false(value: &bool) -> bool { !*value }
+
+/// The one warning of a coin whose policy was relaxed at activation: the ticker and the kind, no host, no URL.
+pub fn single_host_warning(ticker: &str) -> String {
+    format!("{ticker}: swap evidence relaxed to a single host ({ALLOW_SINGLE_HOST_KEY})")
+}
+
+/// [`relax_single_host`] at an activation site: reads the switch, relaxes, and records the outcome
+/// ([`record_single_host_outcome`]). Call it after [`swap_evidence_policy_from`] with the node list as CONFIGURED.
+pub fn apply_single_host(
+    ctx: &mm2_core::mm_ctx::MmArc,
+    ticker: &str,
+    policy: SwapEvidencePolicy,
+    field: Option<&str>,
+    configured: &[String],
+) -> SwapEvidencePolicy {
+    let (policy, relaxed) = relax_single_host(policy, field, configured, allow_single_host(ctx));
+    record_single_host_outcome(ctx, ticker, relaxed);
+    policy
+}
+
+/// Writes the one warning of a relaxed coin and records the outcome of `ticker` for its activation response
+/// ([`single_host_relaxed`]); an activation that did not relax clears an earlier record of the ticker.
+pub fn record_single_host_outcome(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str, relaxed: bool) {
+    if relaxed {
+        common::log::warn!("{}", single_host_warning(ticker));
+    }
+    if let Ok(coins_ctx) = crate::CoinsContext::from_ctx(ctx) {
+        coins_ctx.set_single_host_relaxed(ticker, relaxed);
+    }
+}
+
+/// Whether the activation of `ticker` that just ran relaxed its swap evidence to a single host: the value of the
+/// response field `swap_evidence_single_host`.
+pub fn single_host_relaxed(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str) -> bool {
+    crate::CoinsContext::from_ctx(ctx)
+        .map(|coins_ctx| coins_ctx.is_single_host_relaxed(ticker))
+        .unwrap_or(false)
+}
+
 /// A `swap_evidence_node` set for a coin that has no node list (a coin served by its own daemon).
 pub fn swap_evidence_field_without_list(ticker: &str, field: Option<&str>) -> Result<(), SwapEvidenceNodeNotInList> {
     match field {
@@ -782,6 +874,119 @@ mod tests {
         assert_eq!(none, SwapEvidencePolicy::Insufficient { hosts: 0 });
         assert!(swap_evidence_field_without_list("T", None).is_ok());
         assert!(swap_evidence_field_without_list("T", Some("x")).is_err());
+    }
+
+    #[test]
+    fn the_single_host_switch_defaults_to_true_and_must_be_a_bool() {
+        assert!(allow_single_host_from_conf(&serde_json::json!({})).unwrap());
+        assert!(allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: null })).unwrap());
+        assert!(allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: true })).unwrap());
+        assert!(!allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: false })).unwrap());
+        for bad in [serde_json::json!("false"), serde_json::json!(0), serde_json::json!([])] {
+            let error = allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: bad })).unwrap_err();
+            assert!(error.contains(ALLOW_SINGLE_HOST_KEY), "{error}");
+        }
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        assert!(allow_single_host(&ctx));
+        let off = mm2_core::mm_ctx::MmCtxBuilder::new()
+            .with_conf(serde_json::json!({ ALLOW_SINGLE_HOST_KEY: false }))
+            .into_mm_arc();
+        assert!(!allow_single_host(&off));
+    }
+
+    #[test]
+    fn relax_single_host_cases() {
+        let relax = |field: Option<&str>, nodes: &[&str], allow: bool| {
+            let nodes = list(nodes);
+            let policy = swap_evidence_policy_from("T", field, &nodes).unwrap();
+            relax_single_host(policy, field, &nodes, allow)
+        };
+        // one host: relaxed to the first entry of the host
+        assert_eq!(
+            relax(None, &["a.example:50002"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "a.example:50002".to_owned()
+                },
+                true
+            )
+        );
+        // the switch off: today's behavior
+        assert_eq!(
+            relax(None, &["a.example:50002"], false),
+            (SwapEvidencePolicy::Insufficient { hosts: 1 }, false)
+        );
+        // two ports, and http plus wss of one host, are one host; the first entry is trusted
+        assert_eq!(
+            relax(None, &["a.example:50001", "A.example:50002"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "a.example:50001".to_owned()
+                },
+                true
+            )
+        );
+        assert_eq!(
+            relax(None, &["https://a.example", "wss://a.example/ws"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "https://a.example".to_owned()
+                },
+                true
+            )
+        );
+        // two distinct hosts stay strict
+        let (policy, relaxed) = relax(None, &["a.example:1", "b.example:1"], true);
+        assert!(matches!(policy, SwapEvidencePolicy::TwoNodes { .. }) && !relaxed);
+        // a field set: unchanged, not counted as relaxed
+        assert_eq!(
+            relax(Some("a.example"), &["a.example:50002"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "a.example:50002".to_owned()
+                },
+                false
+            )
+        );
+        // an empty list stays Insufficient
+        assert_eq!(
+            relax(None, &[], true),
+            (SwapEvidencePolicy::Insufficient { hosts: 0 }, false)
+        );
+        // the other policies are returned as they are
+        for policy in [SwapEvidencePolicy::OwnDaemon, SwapEvidencePolicy::NotAdopted] {
+            assert_eq!(
+                relax_single_host(policy.clone(), None, &list(&["a.example:1"]), true),
+                (policy, false)
+            );
+        }
+    }
+
+    #[test]
+    fn the_warning_names_the_ticker_and_no_host() {
+        let text = single_host_warning("RIN");
+        assert_eq!(
+            text,
+            "RIN: swap evidence relaxed to a single host (swap_evidence_allow_single_host)"
+        );
+        assert!(!text.contains("example") && !text.contains("://"), "{text}");
+    }
+
+    #[test]
+    fn the_outcome_is_recorded_per_ticker() {
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        assert!(!single_host_relaxed(&ctx, "RIN"));
+        let nodes = list(&["a.example:50002"]);
+        let policy = swap_evidence_policy_from("RIN", None, &nodes).unwrap();
+        let policy = apply_single_host(&ctx, "RIN", policy, None, &nodes);
+        assert!(matches!(policy, SwapEvidencePolicy::Trusted { .. }));
+        assert!(single_host_relaxed(&ctx, "RIN"));
+        assert!(!single_host_relaxed(&ctx, "OTHER"));
+        // a later activation that does not relax clears the record
+        let two = list(&["a.example:1", "b.example:1"]);
+        let policy = swap_evidence_policy_from("RIN", None, &two).unwrap();
+        apply_single_host(&ctx, "RIN", policy, None, &two);
+        assert!(!single_host_relaxed(&ctx, "RIN"));
     }
 
     #[test]

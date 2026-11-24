@@ -340,6 +340,8 @@ async fn build_tron_coin(
     // not in the list is refused here, before any node is asked.
     let evidence_policy = crate::swap_evidence::swap_evidence_policy_from(ticker, swap_evidence_node.as_deref(), &urls)
         .map_to_mm(EthCoinBuildError::from)?;
+    let evidence_policy =
+        crate::swap_evidence::apply_single_host(ctx, ticker, evidence_policy, swap_evidence_node.as_deref(), &urls);
 
     let (coin_type, decimals, network) = match protocol {
         CoinProtocol::TRX { network } => (EthCoinType::Tron, TRX_DECIMALS, network),

@@ -233,6 +233,9 @@ pub struct BchWithTokensActivationResult {
     current_block: u64,
     bch_addresses_infos: HashMap<String, BchAddressInfo<CoinBalance>>,
     slp_addresses_infos: HashMap<String, BchAddressInfo<TokenBalances>>,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    swap_evidence_single_host: bool,
 }
 
 impl GetPlatformBalance for BchWithTokensActivationResult {
@@ -470,7 +473,7 @@ impl PlatformWithTokensActivationOps for BchCoin {
 
     async fn get_activation_result<XPubExtractor>(
         &self,
-        _ctx: &MmArc,
+        ctx: &MmArc,
         activation_request: &Self::ActivationRequest,
         _xpub_extractor: Option<&XPubExtractor>,
     ) -> Result<BchWithTokensActivationResult, MmError<BchWithTokensActivationError>>
@@ -514,6 +517,7 @@ impl PlatformWithTokensActivationOps for BchCoin {
             current_block,
             bch_addresses_infos: HashMap::new(),
             slp_addresses_infos: HashMap::new(),
+            swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(ctx, self.ticker()),
         };
 
         result
@@ -707,6 +711,7 @@ mod tests {
             current_block: 7,
             bch_addresses_infos: bch,
             slp_addresses_infos: slp,
+            swap_evidence_single_host: false,
         };
         assert_eq!(
             serde_json::to_value(&result).unwrap(),
@@ -741,6 +746,7 @@ mod tests {
             current_block: 7,
             bch_addresses_infos: bch,
             slp_addresses_infos: slp,
+            swap_evidence_single_host: false,
         };
         assert_eq!(
             serde_json::to_value(&result).unwrap(),

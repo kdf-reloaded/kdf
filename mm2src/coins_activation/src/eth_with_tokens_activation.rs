@@ -517,6 +517,9 @@ pub struct IguanaEthWithTokensActivationResult {
     // The docs call `nfts_infos` a list; every docs example and the reference return an object map keyed
     // `<token_address>,<token_id>`, which is what Reloaded returns (CRD ch.35 R35.1.3, erratum (d)).
     nfts_infos: HashMap<String, NftInfo>,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    swap_evidence_single_host: bool,
 }
 
 /// The HD result of `enable_eth_with_tokens` (CRD R35.1.3(b)).
@@ -526,6 +529,9 @@ pub struct HDEthWithTokensActivationResult {
     ticker: String,
     wallet_balance: EnableCoinBalance,
     nfts_infos: HashMap<String, NftInfo>,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    swap_evidence_single_host: bool,
 }
 
 /// The result of `enable_eth_with_tokens`: one of two shapes, distinguished structurally (CRD R35.1.3).
@@ -833,6 +839,7 @@ impl PlatformWithTokensActivationOps for EthCoin {
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
+        let single_host = coins::swap_evidence::single_host_relaxed(ctx, self.ticker());
         // The inline NFT activation comes before the chain reads (CRD R35.1.2 phases 6 and 7).
         let nfts_infos = match &activation_request.nft_req {
             Some(nft_req) => activate_inline_nft(self, ctx, nft_req).await?,
@@ -855,7 +862,7 @@ impl PlatformWithTokensActivationOps for EthCoin {
 
         match &self.derivation_method {
             coins::DerivationMethod::Iguana(_) => {
-                iguana_activation_result(self, activation_request, current_block, nfts_infos).await
+                iguana_activation_result(self, activation_request, current_block, nfts_infos, single_host).await
             },
             coins::DerivationMethod::HDWallet(hd_wallet) => {
                 // The platform's tokens of this request are on its record already, so the scan and the report take
@@ -877,6 +884,7 @@ impl PlatformWithTokensActivationOps for EthCoin {
                     ticker: self.ticker().to_owned(),
                     wallet_balance: EnableCoinBalance::HD(wallet_balance),
                     nfts_infos,
+                    swap_evidence_single_host: single_host,
                 }))
             },
         }
@@ -965,6 +973,7 @@ async fn iguana_activation_result(
     activation_request: &EthWithTokensActivationRequest,
     current_block: u64,
     nfts_infos: HashMap<String, NftInfo>,
+    swap_evidence_single_host: bool,
 ) -> Result<EthWithTokensActivationResult, MmError<ActivationErr>> {
     let my_address = coin.my_address().map_to_mm(ActivationErr::Internal)?;
     let pubkey = coin.activation_public_key();
@@ -1003,6 +1012,7 @@ async fn iguana_activation_result(
             eth_addresses_infos,
             erc20_addresses_infos,
             nfts_infos,
+            swap_evidence_single_host,
         },
     ))
 }

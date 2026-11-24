@@ -9,6 +9,9 @@ pub struct UtxoStandardActivationResult {
     pub ticker: String,
     pub current_block: u64,
     pub wallet_balance: UtxoWalletBalance,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    pub swap_evidence_single_host: bool,
 }
 
 /// The wallet balance of a UTXO-family activation. Both forms key their balances by the activated ticker.

@@ -219,6 +219,9 @@ pub struct SolanaWithTokensActivationResult {
     pub(crate) current_block: u64,
     pub(crate) solana_addresses_infos: HashMap<String, CoinAddressInfo<CoinBalance>>,
     pub(crate) spl_addresses_infos: HashMap<String, CoinAddressInfo<TokenBalances>>,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    pub(crate) swap_evidence_single_host: bool,
 }
 
 impl GetPlatformBalance for SolanaWithTokensActivationResult {
@@ -300,10 +303,14 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
             CryptoCtx::from_ctx(&ctx).mm_err(|e| SolanaWithTokensActivationError::Internal(e.to_string()))?;
         reject_unsupported_policy(&ticker, &activation_request.priv_key_policy)?;
         // A `swap_evidence_node` outside the node list is refused before any node is contacted (CRD ch.51 R100).
-        activation_request
+        let platform_request = activation_request
             .platform_request
-            .swap_evidence_policy(&ticker)
+            .clone()
+            .with_allow_single_host(coins::swap_evidence::allow_single_host(&ctx));
+        let (_, single_host) = platform_request
+            .swap_evidence_policy_relaxed(&ticker)
             .map_err(|e| MmError::new(SolanaWithTokensActivationError::SwapEvidenceNodeNotInList(e)))?;
+        coins::swap_evidence::record_single_host_outcome(&ctx, &ticker, single_host);
         // D40.6B.4: a Token-2022 inline token is refused before any node is contacted and nothing is
         // registered. A token whose protocol does not resolve, or that names another platform, is left to the
         // later token initialisation, which answers the error of its own row.
@@ -357,15 +364,9 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
                 error,
             }
         })?;
-        let platform_coin = solana_coin_with_node_order(
-            &ticker,
-            &platform_conf,
-            activation_request.platform_request,
-            key,
-            node_order,
-        )
-        .await
-        .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
+        let platform_coin = solana_coin_with_node_order(&ticker, &platform_conf, platform_request, key, node_order)
+            .await
+            .map_to_mm(|error| SolanaWithTokensActivationError::PlatformCoinCreationError { ticker, error })?;
         platform_coin.check_swap_program(swap_program).await;
         // R40.6C.1: the history is enabled before the instance is registered, so no answer sees it half started; the
         // writer itself starts in `on_platform_registered`.
@@ -442,6 +443,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
             current_block,
             solana_addresses_infos: HashMap::new(),
             spl_addresses_infos: HashMap::new(),
+            swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(ctx, self.ticker()),
         };
         result
             .solana_addresses_infos

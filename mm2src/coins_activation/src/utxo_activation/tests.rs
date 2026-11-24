@@ -320,6 +320,7 @@ fn success_object_has_a_ticker_and_a_ticker_keyed_iguana_balance() {
         ticker: "RIN".to_owned(),
         current_block: 123,
         wallet_balance: UtxoWalletBalance::iguana("RIN", "Raddress".to_owned(), balance("1.5", "0")),
+        swap_evidence_single_host: false,
     };
     assert_eq!(
         serde_json::to_value(&result).unwrap(),
@@ -332,6 +333,26 @@ fn success_object_has_a_ticker_and_a_ticker_keyed_iguana_balance() {
                 "balance": { "RIN": { "spendable": "1.5", "unspendable": "0" } },
             },
         })
+    );
+}
+
+/// The relaxed swap evidence is reported by `swap_evidence_single_host: true`; every other response keeps its shape.
+#[test]
+fn success_object_reports_a_single_host_relaxation_only_when_relaxed() {
+    let mut result = UtxoStandardActivationResult {
+        ticker: "RIN".to_owned(),
+        current_block: 1,
+        wallet_balance: UtxoWalletBalance::iguana("RIN", "Raddress".to_owned(), balance("1", "0")),
+        swap_evidence_single_host: false,
+    };
+    assert!(serde_json::to_value(&result)
+        .unwrap()
+        .get("swap_evidence_single_host")
+        .is_none());
+    result.swap_evidence_single_host = true;
+    assert_eq!(
+        serde_json::to_value(&result).unwrap()["swap_evidence_single_host"],
+        json!(true)
     );
 }
 
@@ -357,6 +378,7 @@ fn success_object_hd_form_keys_every_balance_by_the_ticker() {
         ticker: "RIN".to_owned(),
         current_block: 5,
         wallet_balance: UtxoWalletBalance::HD(hd),
+        swap_evidence_single_host: false,
     };
     let wire = serde_json::to_value(&result).unwrap();
     assert_eq!(wire["wallet_balance"]["wallet_type"], json!("HD"));

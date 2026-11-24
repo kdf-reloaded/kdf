@@ -853,8 +853,15 @@ pub trait UtxoCoinBuilderCommonOps {
             },
             UtxoRpcMode::Electrum { servers, .. } => {
                 let urls: Vec<String> = servers.iter().map(|server| server.url.clone()).collect();
-                swap_evidence_policy_from(self.ticker(), field, &urls)
-                    .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))
+                let policy = swap_evidence_policy_from(self.ticker(), field, &urls)
+                    .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))?;
+                Ok(crate::swap_evidence::apply_single_host(
+                    self.ctx(),
+                    self.ticker(),
+                    policy,
+                    field,
+                    &urls,
+                ))
             },
         }
     }
@@ -1086,7 +1093,22 @@ mod swap_evidence_tests {
     }
 
     fn policy_of(params: &UtxoActivationParams) -> Result<SwapEvidencePolicy, UtxoCoinBuildError> {
-        let ctx = MmCtxBuilder::new().into_mm_arc();
+        policy_in(&MmCtxBuilder::new().into_mm_arc(), params)
+    }
+
+    fn strict_ctx() -> mm2_core::mm_ctx::MmArc {
+        MmCtxBuilder::new()
+            .with_conf(json!({ "swap_evidence_allow_single_host": false }))
+            .into_mm_arc()
+    }
+
+    /// The admission rule of R100 item 4, as `MmCoin::swap_evidence_refusal` applies it to a stored policy.
+    fn refused(policy: &SwapEvidencePolicy) -> bool { matches!(policy, SwapEvidencePolicy::Insufficient { .. }) }
+
+    fn policy_in(
+        ctx: &mm2_core::mm_ctx::MmArc,
+        params: &UtxoActivationParams,
+    ) -> Result<SwapEvidencePolicy, UtxoCoinBuildError> {
         let conf = json!({ "coin": "TST" });
         let builder = UtxoArcBuilder::new(
             &ctx,
@@ -1099,16 +1121,51 @@ mod swap_evidence_tests {
         builder.swap_evidence_policy().map_err(|e| e.into_inner())
     }
 
+    /// The single-host switch end to end through the builder: one server (or two ports of one host) is relaxed to
+    /// `Trusted` on the first entry and admitted; two hosts stay strict; the switch off refuses at admission; the
+    /// outcome is recorded for the activation response.
+    #[test]
+    fn one_configured_host_is_relaxed_and_admitted_by_default() {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let one = params(electrum(&["a.example:50002"]), None);
+        let policy = policy_in(&ctx, &one).unwrap();
+        assert_eq!(policy, SwapEvidencePolicy::Trusted {
+            node: "a.example:50002".to_owned()
+        });
+        assert!(!refused(&policy));
+        assert!(crate::swap_evidence::single_host_relaxed(&ctx, "TST"));
+        let ports = params(electrum(&["a.example:50001", "A.example:50002"]), None);
+        assert_eq!(policy_in(&ctx, &ports).unwrap(), SwapEvidencePolicy::Trusted {
+            node: "a.example:50001".to_owned()
+        });
+        let two = params(electrum(&["a.example:50002", "b.example:50002"]), None);
+        let policy = policy_in(&ctx, &two).unwrap();
+        assert!(matches!(policy, SwapEvidencePolicy::TwoNodes { .. }));
+        assert!(!crate::swap_evidence::single_host_relaxed(&ctx, "TST"));
+        let strict = strict_ctx();
+        let one_strict = policy_in(&strict, &one).unwrap();
+        assert!(refused(&one_strict));
+        assert!(!crate::swap_evidence::single_host_relaxed(&strict, "TST"));
+        // a field naming the entry is the same policy and is not counted as relaxed
+        let field = params(electrum(&["a.example:50002"]), Some("a.example:50002"));
+        assert_eq!(policy_in(&ctx, &field).unwrap(), policy_in(&ctx, &one).unwrap());
+    }
+
     /// CRD ch.51 R100 and the decisions of 2026-11-22: Electrum one host, two hosts, two ports of one host, the
     /// field set, a field outside the list, and the native mode.
     #[test]
     fn the_utxo_policy_per_mode_and_field() {
+        // the switch off: one host stays Insufficient (the behavior before the switch)
+        let strict = strict_ctx();
         let one = params(electrum(&["a.example:50002"]), None);
-        assert_eq!(policy_of(&one).unwrap(), SwapEvidencePolicy::Insufficient { hosts: 1 });
+        assert_eq!(policy_in(&strict, &one).unwrap(), SwapEvidencePolicy::Insufficient {
+            hosts: 1
+        });
+        assert!(refused(&policy_in(&strict, &one).unwrap()));
         let two = params(electrum(&["a.example:50002", "b.example:50002"]), None);
         assert!(matches!(policy_of(&two).unwrap(), SwapEvidencePolicy::TwoNodes { hosts } if hosts.len() == 2));
         let ports = params(electrum(&["a.example:50001", "A.example:50002"]), None);
-        assert_eq!(policy_of(&ports).unwrap(), SwapEvidencePolicy::Insufficient {
+        assert_eq!(policy_in(&strict, &ports).unwrap(), SwapEvidencePolicy::Insufficient {
             hosts: 1
         });
         let field = params(electrum(&["a.example:50002"]), Some("a.example:50002"));
