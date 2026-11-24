@@ -40,6 +40,13 @@ or undo, and every change that needs a step from you.
       request, or set `swap_evidence_node` to one of the coin's servers to trust that server alone. A coin in native
       mode reads your own daemon and needs nothing. Detail: PR #522; CRD ch.38 status note of 2026-11-23 before
       §38.6.4Q.
+    - **EVM coins and ERC20 tokens.** Affected: every such coin whose nodes that passed the activation probe name
+      fewer than two hosts, for example a coin activated with a single node URL; a legacy ERC20 `enable` counts its
+      own node list, and a token enabled with its platform counts the platform's. It no longer starts a swap:
+      `setprice`, `buy`, `sell` and the swap start refuse it, and its running swaps wait at a refund or claim step
+      until two nodes agree. To fix it, add a node on a second host to the activation request, or set
+      `swap_evidence_node` to one of the coin's nodes to trust that node alone. Detail: PR #512; CRD ch.51 §51.6G
+      R100.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
