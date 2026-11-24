@@ -381,6 +381,7 @@ impl SwapOps for EthCoin {
             &input.secret_hash,
             input.amount,
             swap_contract_address,
+            input.try_spv_proof_until,
         )
     }
 
@@ -397,6 +398,7 @@ impl SwapOps for EthCoin {
             &input.secret_hash,
             input.amount,
             swap_contract_address,
+            input.try_spv_proof_until,
         )
     }
 
@@ -638,6 +640,10 @@ impl SwapOps for EthCoin {
     /// The Tron family answers with the agreed solidified chain time of `tron::swap::watch` (CRD ch.51 R88, R100).
     /// Every other EVM coin reads the latest block's timestamp once the local clock is past the lock time
     /// (CRD ch.51 §51.6E R88). A failed read, or a block without a timestamp, is an error.
+    ///
+    /// Under an adopted swap-evidence policy the timestamp is read from single nodes and the gate opens only when
+    /// two of them (or the trusted node) show a time past the lock; an undetermined read is an error the swap
+    /// engine recognizes and reads again, never an open gate (CRD ch.51 §51.6G R100).
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
         let fut = async move {
             if self.is_tron_family() {
@@ -650,6 +656,9 @@ impl SwapOps for EthCoin {
             let now = now_ms() / 1000;
             if now < locktime {
                 return Ok(evm_refund_eligibility(now, locktime, None));
+            }
+            if let Some(policy) = self.agreed_swap_reads() {
+                return self.agreed_refund_gate(&policy, now, locktime).await;
             }
             let tip_ts = self.latest_block_timestamp().await?;
             Ok(evm_refund_eligibility(now, locktime, Some(tip_ts)))
@@ -954,7 +963,7 @@ mod refund_gate_tests {
 /// # Errors
 ///
 /// `secret_hash` has an unsupported width.
-fn secret_of_claim_call(input: &[u8], secret_hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn secret_of_claim_call(input: &[u8], secret_hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
     let function = try_s!(SWAP_CONTRACT.function("receiverSpend"));
     let Some((selector, args)) = input.split_at_checked(4) else {
         return Ok(None);
@@ -980,7 +989,10 @@ fn secret_of_claim_call(input: &[u8], secret_hash: &[u8]) -> Result<Option<Vec<u
 /// # Errors
 ///
 /// `secret_hash` has an unsupported width.
-fn secret_of_spent_logs(logs: &[(Option<Vec<u8>>, Vec<u8>)], secret_hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn secret_of_spent_logs(
+    logs: &[(Option<Vec<u8>>, Vec<u8>)],
+    secret_hash: &[u8],
+) -> Result<Option<Vec<u8>>, String> {
     let event_topic = try_s!(SWAP_CONTRACT.event("ReceiverSpent")).signature();
     for (topic, data) in logs {
         if topic.as_deref() != Some(event_topic.as_bytes()) || data.len() != 64 {

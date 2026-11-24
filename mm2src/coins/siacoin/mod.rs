@@ -121,6 +121,9 @@ pub struct SiaCoinGeneric<T: SiaApiClient + ApiClientHelpers> {
     pub derivation_method: Arc<DerivationMethod<Address, SiaHDWallet>>,
     /// The swap-evidence policy fixed at activation (CRD ch.51 R100): over the one walletd `server_url`.
     pub(crate) swap_evidence: crate::SwapEvidencePolicy,
+    /// The `host:port` form of the one walletd `server_url` (never the URL): the label the swap-evidence reads
+    /// ask and name it by (CRD ch.51 R100).
+    pub(crate) swap_evidence_node_name: String,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

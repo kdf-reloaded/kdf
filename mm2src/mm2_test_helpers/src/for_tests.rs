@@ -884,19 +884,22 @@ pub fn get_passphrase(path: &dyn AsRef<Path>, env: &str) -> Result<String, Strin
 /// Asks MM to enable the given currency in native mode.
 /// Returns the RPC reply containing the corresponding wallet address.
 pub async fn enable_native(mm: &MarketMakerIt, coin: &str, urls: &[&str]) -> Json {
-    let native = mm
-        .rpc(&json! ({
-            "userpass": mm.userpass,
-            "method": "enable",
-            "coin": coin,
-            "urls": urls,
-            // Dev chain swap contract address (EIP-55 checksummed; the ETH enable path
-            // validates the checksum via `valid_addr_from_str`, so a lowercase form is rejected).
-            "swap_contract_address": "0xa09aD3cD7e96586eBd05A2607EE56b56Fb2dB8FD",
-            "mm2": 1,
-        }))
-        .await
-        .unwrap();
+    let mut request = json! ({
+        "userpass": mm.userpass,
+        "method": "enable",
+        "coin": coin,
+        "urls": urls,
+        // Dev chain swap contract address (EIP-55 checksummed; the ETH enable path
+        // validates the checksum via `valid_addr_from_str`, so a lowercase form is rejected).
+        "swap_contract_address": "0xa09aD3cD7e96586eBd05A2607EE56b56Fb2dB8FD",
+        "mm2": 1,
+    });
+    // An EVM coin enabled over a single node trusts that node for its swap reads (CRD ch.51 R100 item 2);
+    // without the field the coin would be refused at order placement and at the swap start.
+    if let [node] = urls {
+        request["swap_evidence_node"] = json!(node);
+    }
+    let native = mm.rpc(&request).await.unwrap();
     assert_eq!(native.0, StatusCode::OK, "'enable' failed: {}", native.1);
     json::from_str(&native.1).unwrap()
 }

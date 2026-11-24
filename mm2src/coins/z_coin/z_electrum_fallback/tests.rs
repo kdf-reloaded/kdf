@@ -1271,3 +1271,283 @@ async fn electrum_servers_that_cannot_answer_are_each_named_in_the_refusal() {
     assert!(error.contains("silent: not scripted"), "{error}");
     assert!(error.contains("foreign: it is not on this coin's chain"), "{error}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// R100 (CRD ch.51 §51.6G, T42): the fallback agrees on two Electrum servers on distinct hosts
+// ---------------------------------------------------------------------------------------------
+
+mod r100 {
+    use super::*;
+    use crate::swap_evidence::SwapEvidencePolicy;
+    use crate::z_coin::z_lightwalletd::{AdmissionPolicy, LightwalletdBackend};
+
+    fn two_nodes() -> SwapEvidencePolicy {
+        SwapEvidencePolicy::TwoNodes {
+            hosts: vec!["lwd1".to_owned(), "lwd2".to_owned()],
+        }
+    }
+
+    /// A rig over healthy Electrum `servers` whose lightwalletd side judges its evidence by `policy`.
+    fn rig(servers: &[&str], policy: SwapEvidencePolicy) -> Rig {
+        let transport = Arc::new(FakeTransport::default());
+        for server in LWD_SERVERS {
+            transport.serve(server, lightwalletd_endpoint(TIP, hash_of(&full_header())));
+        }
+        let backend = LightwalletdBackend::new(
+            transport.clone(),
+            LWD_SERVERS.iter().map(|s| (*s).to_owned()).collect(),
+            AdmissionPolicy::from_params(&test_params_with_zip212()),
+            test_addressing(),
+        )
+        .with_swap_evidence(policy);
+        let electrum = ScriptedElectrum::healthy(servers, TIP, &full_header());
+        Rig {
+            lwd: LightwalletdClient(Arc::new(backend)),
+            transport,
+            fallback: ElectrumFallback::new("ARRR", electrum.clone()),
+            electrum,
+        }
+    }
+
+    /// `server` shows the funding and its spend.
+    fn show_spend(rig: &Rig, server: &str) {
+        let out = output();
+        let spend = spend_bytes(out.txid, out.vout);
+        rig.electrum.edit(server, |s| {
+            s.history = Some(Ok(vec![item(&funding_bytes(), 5), item(&spend, 9)]));
+        });
+        rig.electrum.serve_transaction(server, &spend);
+    }
+
+    /// `server` lists the funding output as unspent.
+    fn show_unspent(rig: &Rig, server: &str) {
+        rig.electrum
+            .edit(server, |s| s.history = Some(Ok(vec![item(&funding_bytes(), 5)])));
+        rig.electrum
+            .edit(server, |s| s.unspent = Some(Ok(vec![funding_unspent()])));
+    }
+
+    #[tokio::test]
+    async fn two_servers_that_show_the_same_spend_decide() {
+        let rig = rig(&["a", "b"], two_nodes());
+        show_spend(&rig, "a");
+        show_spend(&rig, "b");
+
+        assert!(matches!(rig.spent().await, Ok(SpendAnswer::Spent { .. })));
+    }
+
+    #[tokio::test]
+    async fn two_servers_that_list_the_output_unspent_decide_not_spent() {
+        let rig = rig(&["a", "b"], two_nodes());
+        show_unspent(&rig, "a");
+        show_unspent(&rig, "b");
+
+        assert!(matches!(rig.spent().await, Ok(SpendAnswer::NotSpent)));
+    }
+
+    /// Servers that differ leave the question undetermined, and no third server outvotes them.
+    #[tokio::test]
+    async fn servers_that_differ_are_undetermined_and_no_third_is_asked() {
+        let rig = rig(&["a", "b", "c"], two_nodes());
+        show_spend(&rig, "a");
+        show_unspent(&rig, "b");
+        show_spend(&rig, "c");
+
+        let reasons = conditions(rig.spent().await);
+
+        assert!(reasons.iter().any(|reason| reason.contains("disagree")), "{reasons:?}");
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("a says") && reason.contains("b says")),
+            "each server by name: {reasons:?}"
+        );
+        assert_eq!(rig.electrum.asked("c", "tip"), 0, "the third server is not even vetted");
+        assert_eq!(rig.electrum.asked("c", "history"), 0);
+
+        // A later attempt with a pair that agrees decides.
+        show_spend(&rig, "b");
+        assert!(matches!(rig.spent().await, Ok(SpendAnswer::Spent { .. })));
+    }
+
+    #[tokio::test]
+    async fn one_answering_server_is_undetermined() {
+        let rig = rig(&["a", "b"], two_nodes());
+        show_unspent(&rig, "a");
+        rig.electrum
+            .edit("b", |s| s.history = Some(Err("history too large".to_owned())));
+
+        let reasons = conditions(rig.spent().await);
+
+        assert!(reasons.iter().any(|r| r.contains("history too large")), "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| r.contains("fewer than two")),
+            "never decided: {reasons:?}"
+        );
+    }
+
+    /// Two entries on one host are one node (R100 item 7): the second port is not asked.
+    #[tokio::test]
+    async fn two_entries_on_one_host_count_as_one_server() {
+        let rig = rig(&["h:50001", "h:50002"], two_nodes());
+        show_unspent(&rig, "h:50001");
+        show_unspent(&rig, "h:50002");
+
+        let reasons = conditions(rig.spent().await);
+
+        assert!(reasons.iter().any(|r| r.contains("fewer than two")), "{reasons:?}");
+        assert_eq!(rig.electrum.asked("h:50002", "history"), 0);
+    }
+
+    /// A claim whose secret hashes to the hash in the HTLC's redeem script is taken on one server's answer; one
+    /// whose hash does not match is not.
+    #[tokio::test]
+    async fn a_claim_with_a_matching_secret_is_taken_on_one_server_and_a_non_matching_one_is_not() {
+        let secret = [9u8; 32];
+        for (revealed, taken) in [(secret, true), ([8u8; 32], false)] {
+            let mut redeem = vec![0xa9, 0x14];
+            redeem.extend_from_slice(dhash160(&secret).as_slice());
+            redeem.push(0x88);
+            redeem.extend_from_slice(&[0x5a; 40]);
+            let script = p2sh_script(&redeem);
+            let funding = transparent_tx(&[], &[(100_000, script.clone())]);
+            let out = OutputRef {
+                txid: *tx_of(&funding).txid().as_ref(),
+                vout: 0,
+                script_pubkey: script,
+            };
+            let mut sig = vec![0x01, 0xaa, 0x20];
+            sig.extend_from_slice(&revealed);
+            sig.push(0x00);
+            sig.push(redeem.len() as u8);
+            sig.extend_from_slice(&redeem);
+            let claim = transparent_tx(&[(out.txid, 0, sig)], &[]);
+
+            let rig = rig(&["a", "b"], two_nodes());
+            rig.electrum
+                .edit("a", |s| s.history = Some(Ok(vec![item(&funding, 5), item(&claim, 9)])));
+            rig.electrum.serve_transaction("a", &claim);
+            rig.electrum
+                .edit("b", |s| s.history = Some(Err("unreachable".to_owned())));
+
+            let answer = rig.fallback.spend(rig.lwd.backend(), &out, &LOG).await;
+            if taken {
+                assert!(matches!(answer, Ok(SpendAnswer::Spent { .. })), "{answer:?}");
+            } else {
+                assert!(
+                    conditions(answer).iter().any(|r| r.contains("fewer than two")),
+                    "a claim that does not prove itself needs the second server"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn already_sent_agrees_on_the_payment_or_on_not_sent() {
+        let funding = funding_bytes();
+        let sent = |rig: &Rig, server: &str| {
+            rig.electrum
+                .edit(server, |s| s.history = Some(Ok(vec![item(&funding, 5)])));
+            rig.electrum.serve_transaction(server, &funding);
+        };
+        let not_sent = |rig: &Rig, server: &str| rig.electrum.edit(server, |s| s.history = Some(Ok(vec![])));
+
+        let agreeing = rig(&["a", "b"], two_nodes());
+        sent(&agreeing, "a");
+        sent(&agreeing, "b");
+        assert!(matches!(agreeing.sent().await, Ok(SentAnswer::Sent(_))));
+
+        let agreeing = rig(&["a", "b"], two_nodes());
+        not_sent(&agreeing, "a");
+        not_sent(&agreeing, "b");
+        assert!(matches!(agreeing.sent().await, Ok(SentAnswer::NotSent)));
+
+        let differing = rig(&["a", "b", "c"], two_nodes());
+        sent(&differing, "a");
+        not_sent(&differing, "b");
+        sent(&differing, "c");
+        let reasons = conditions(differing.sent().await);
+        assert!(reasons.iter().any(|r| r.contains("disagree")), "{reasons:?}");
+        assert_eq!(differing.electrum.asked("c", "history"), 0);
+
+        let single = rig(&["a", "b"], two_nodes());
+        not_sent(&single, "a");
+        single
+            .electrum
+            .edit("b", |s| s.history = Some(Err("unreachable".to_owned())));
+        let reasons = conditions(single.sent().await);
+        assert!(reasons.iter().any(|r| r.contains("fewer than two")), "{reasons:?}");
+    }
+
+    /// Under a trusted node (a lightwalletd endpoint) or for a coin short of nodes the fallback decides nothing:
+    /// already-sent asks nothing, and a spend that does not prove itself is not taken.
+    #[tokio::test]
+    async fn the_fallback_decides_nothing_under_a_trusted_node_or_an_insufficient_coin() {
+        for policy in [
+            SwapEvidencePolicy::Trusted {
+                node: "lwd1".to_owned(),
+            },
+            SwapEvidencePolicy::Insufficient { hosts: 1 },
+        ] {
+            let rig = rig(&["a", "b"], policy);
+            show_spend(&rig, "a");
+            show_spend(&rig, "b");
+            show_unspent(&rig, "b");
+
+            assert_eq!(rig.sent().await.unwrap_err(), FallbackError::NotConfigured);
+            assert!(rig.electrum.calls().is_empty(), "{:?}", rig.electrum.calls());
+            assert_eq!(
+                rig.spent().await.unwrap_err(),
+                FallbackError::NotConfigured,
+                "neither a refund nor 'not spent' is taken from one server"
+            );
+        }
+    }
+
+    /// R100 item 3: a claim whose secret proves itself is taken from one Electrum server under those policies.
+    #[tokio::test]
+    async fn a_matching_secret_claim_is_taken_under_a_trusted_node_or_an_insufficient_coin() {
+        let secret = [9u8; 32];
+        let mut redeem = vec![0xa9, 0x14];
+        redeem.extend_from_slice(dhash160(&secret).as_slice());
+        redeem.push(0x88);
+        redeem.extend_from_slice(&[0x5a; 40]);
+        let script = p2sh_script(&redeem);
+        let funding = transparent_tx(&[], &[(100_000, script.clone())]);
+        let out = OutputRef {
+            txid: *tx_of(&funding).txid().as_ref(),
+            vout: 0,
+            script_pubkey: script,
+        };
+        let mut sig = vec![0x01, 0xaa, 0x20];
+        sig.extend_from_slice(&secret);
+        sig.push(0x00);
+        sig.push(redeem.len() as u8);
+        sig.extend_from_slice(&redeem);
+        let claim = transparent_tx(&[(out.txid, 0, sig)], &[]);
+        for policy in [
+            SwapEvidencePolicy::Trusted {
+                node: "lwd1".to_owned(),
+            },
+            SwapEvidencePolicy::Insufficient { hosts: 1 },
+        ] {
+            let rig = rig(&["a"], policy);
+            rig.electrum
+                .edit("a", |s| s.history = Some(Ok(vec![item(&funding, 5), item(&claim, 9)])));
+            rig.electrum.serve_transaction("a", &claim);
+
+            let answer = rig.fallback.spend(rig.lwd.backend(), &out, &LOG).await;
+            assert!(matches!(answer, Ok(SpendAnswer::Spent { .. })), "{answer:?}");
+        }
+    }
+
+    /// A family that has not adopted R100 keeps today's first-answer fallback.
+    #[tokio::test]
+    async fn without_adoption_the_first_answer_is_taken() {
+        let rig = rig(&["a", "b"], SwapEvidencePolicy::NotAdopted);
+        show_unspent(&rig, "a");
+
+        assert!(matches!(rig.spent().await, Ok(SpendAnswer::NotSpent)));
+        assert_eq!(rig.electrum.asked("b", "history"), 0);
+    }
+}

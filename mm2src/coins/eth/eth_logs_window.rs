@@ -17,7 +17,8 @@
 //!   [`LogsWindow`] state, so a token shares it with its platform.
 //! - [`range_refusal`]: classifies a JSON-RPC error as a refusal of the range's size (R17.8.2).
 //! - `EthCoinImpl::logs_window`, `EthCoinImpl::log_window_end`, `EthCoinImpl::logs_querier`: the current `W`,
-//!   the end of the window that starts at a block, and the owned handle that runs the bounded query.
+//!   the end of the window that starts at a block, and the owned handle that runs the bounded query
+//!   (`EthCoinImpl::logs_querier_on` over the provider of one node).
 //! - `EthCoin::wait_for_payment_spend`: the V1 spend wait (R17.8.3).
 //!
 //! # Invariants
@@ -321,9 +322,13 @@ impl EthCoinImpl {
     }
 
     /// An owned handle that runs bounded `eth_getLogs` queries of this coin.
-    pub(crate) fn logs_querier(&self) -> LogsQuerier {
+    pub(crate) fn logs_querier(&self) -> LogsQuerier { self.logs_querier_on(self.alloy_provider()) }
+
+    /// Like [`Self::logs_querier`] over `provider`: the queries of one node addressed on its own share the coin's
+    /// window `W`.
+    pub(crate) fn logs_querier_on(&self, provider: super::alloy_compat::KdfProvider) -> LogsQuerier {
         LogsQuerier {
-            provider: self.alloy_provider(),
+            provider,
             window: self.logs_window.clone(),
             cap: self.logs_block_range,
             ticker: self.ticker.clone(),
@@ -481,6 +486,20 @@ impl EthCoin {
         from_block: u64,
         poll_every: f64,
     ) -> Result<TransactionEnum, crate::TransactionErr> {
+        // CRD ch.51 §51.6G R100: under an adopted swap-evidence policy the spend is read from single nodes.
+        if let Some(policy) = self.agreed_swap_reads() {
+            return self
+                .wait_for_agreed_payment_spend(
+                    &policy,
+                    payment_tx,
+                    id,
+                    swap_contract_address,
+                    wait_until,
+                    from_block,
+                    poll_every,
+                )
+                .await;
+        }
         let mut wait = SpendWait {
             cursor: from_block,
             start: from_block,
