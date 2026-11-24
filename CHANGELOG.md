@@ -47,6 +47,9 @@ or undo, and every change that needs a step from you.
       until two nodes agree. To fix it, add a node on a second host to the activation request, or set
       `swap_evidence_node` to one of the coin's nodes to trust that node alone. Detail: PR #512; CRD ch.51 §51.6G
       R100.
+    - **Sia (SC).** A Sia coin reads one walletd node, so there is no second node to add: set `swap_evidence_node` to
+      the walletd `server_url` to trust it. Without the field, SC orders are refused and a running SC swap waits at
+      its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,

@@ -521,6 +521,9 @@ pub enum SiaCheckIfMyPaymentSentError {
          failed: {0}"
     )]
     EventsRequest(String),
+    /// CRD ch.51 R100: the swap-evidence read of the one node is undetermined; carries the reason text.
+    #[error("[chk-payment] Undetermined whether the payment was sent: {0}")]
+    Undetermined(String),
 }
 
 /// Errors raised while searching for the spend of an HTLC payment (CRD
@@ -539,6 +542,9 @@ pub enum SiaCoinSearchSwapTxSpendError {
     ParseSecretHash(#[from] Hash256Error),
     #[error("[search-swap-spend] walletd event fetch failed: {0}")]
     FetchEvents(#[from] SiaHistoryFetchError),
+    /// CRD ch.51 R100: the swap-evidence read of the one node is undetermined; carries the reason text.
+    #[error("[search-swap-spend] {0}")]
+    Undetermined(String),
 }
 
 /// Errors raised while extracting the HTLC preimage from a spend tx.
@@ -558,6 +564,9 @@ pub enum SiaCoinSiaExtractSecretError {
 pub enum SiaCoinSiaCanRefundHtlcError {
     #[error("[can-refund] median_timestamp fetch failed: {}", sia_text(.0))]
     FetchTimestamp(#[from] GetMedianTimestampError),
+    /// CRD ch.51 R100: the chain-time read of the one node is undetermined; carries the reason text.
+    #[error("[can-refund] {0}")]
+    Undetermined(String),
 }
 
 /// Errors raised while waiting for an HTLC to be spent.
