@@ -131,6 +131,14 @@ pub(crate) fn maker_refund_gate_cap_text(ticker: &str, reason: &str) -> String {
     cap_text(Read::Gate, ticker, reason, "maker")
 }
 
+/// The WARN line of a refund the node rejected as non-final: the swap, the ticker and the kind, never the node's
+/// text (CRD ch.51 R80); `side` is "maker" or "taker".
+pub(crate) fn non_final_retry_text(uuid: &Uuid, ticker: &str, side: &str, retry_secs: f64) -> String {
+    format!(
+        "Swap {uuid}: the {ticker} refund of the {side} payment was rejected as non-final, retrying in {retry_secs} s"
+    )
+}
+
 /// Logs one situation of a step: the first line at WARN, its repeats at DEBUG.
 #[derive(Default)]
 pub(crate) struct WaitLog {
@@ -373,5 +381,19 @@ mod tests {
         assert!(log.note(&uuid, "BTC", Read::Look, "x"));
         assert!(!log.note(&uuid, "BTC", Read::Look, "x"));
         assert!(!log.note(&uuid, "BTC", Read::Gate, "y"));
+    }
+
+    #[test]
+    fn non_final_warning_carries_no_node_text() {
+        let text = non_final_retry_text(&Uuid::nil(), "BTC", "maker", 30.0);
+        assert!(text.contains("BTC"), "the ticker is expected in the line");
+        assert!(
+            text.contains("rejected as non-final"),
+            "the kind is expected in the line"
+        );
+        assert!(
+            !text.contains("mandatory-script-verify"),
+            "the node text must stay out of the line"
+        );
     }
 }

@@ -991,6 +991,15 @@ pub async fn search_for_swap_tx_spend_my(
     .await
 }
 
+/// The WARN line of a failed look for a spend on the servers: an undetermined error is named by its kind only, any
+/// other error keeps its text.
+fn spend_look_failed_text(ticker: &str, err: &str) -> String {
+    match crate::swap_evidence::undetermined_reason_kind(err) {
+        Some(kind) => format!("{ticker}: the look for a spend on the servers is undetermined: {kind}"),
+        None => format!("{ticker}: the look for a spend on the servers: {err}"),
+    }
+}
+
 /// CRD ch.51 R31a, status note of 2026-11-21: [`search_for_swap_tx_spend_my`] on every usable server of an
 /// Electrum client at the same time, with the classification of [`search_for_swap_output_spend_of`]. `None` for a
 /// coin without an Electrum client, for a payment that does not pay the HTLC, and when no server finds a spend or
@@ -1054,7 +1063,8 @@ pub async fn search_for_swap_tx_spend_my_on_every_server(
         {
             Ok(spend) => spend?,
             Err(e) => {
-                warn!("{}: the look for a spend on the servers: {}", coin.conf.ticker, e);
+                warn!("{}", spend_look_failed_text(&coin.conf.ticker, &e));
+                debug!("{}: the look for a spend on the servers: {}", coin.conf.ticker, e);
                 return None;
             },
         };
@@ -3376,6 +3386,26 @@ fn test_extract_secret_finds_the_secret_against_a_32_byte_secret_hash() {
 #[cfg(test)]
 mod refund_wait_tests {
     use super::*;
+
+    #[test]
+    fn spend_look_warning_carries_no_node_label() {
+        let err = format!(
+            "x.rs:1] {}",
+            crate::swap_evidence::Undetermined {
+                reason: crate::swap_evidence::UndeterminedReason::Disagree,
+                per_node: vec![
+                    ("a.example:50002".to_owned(), "Claimed".to_owned()),
+                    ("b.example:50002".to_owned(), "NotSpent".to_owned()),
+                ],
+            }
+            .to_err_string()
+        );
+        let text = spend_look_failed_text("BTC", &err);
+        assert!(text.contains("BTC"), "the ticker is expected in the line");
+        assert!(text.contains("the nodes disagree"), "the kind is expected in the line");
+        assert!(!text.contains("a.example:50002"), "no node label may be in the line");
+        assert!(!text.contains("b.example:50002"), "no node label may be in the line");
+    }
 
     const NOW: u64 = 1_700_000_000;
 
