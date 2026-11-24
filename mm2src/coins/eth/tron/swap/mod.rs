@@ -59,8 +59,6 @@ use std::fmt;
 pub enum TronSwapError {
     /// A node request failed, or its answer was not usable.
     Node(TronApiError),
-    /// Two nodes gave different answers to the same question.
-    NodesDisagree,
     /// Call data, return data or a log entry does not fit the contract's ABI.
     Abi(AbiError),
     /// The call data does not start with the selector of a swap-contract method.
@@ -124,11 +122,11 @@ pub enum TronSwapError {
         /// Why the broadcast did not end with an acceptance.
         error: TronApiError,
     },
-    /// Fewer than two nodes answered a read that needs two nodes to agree (CRD ch.51 R100).
-    NotEnoughAnswers {
-        /// The number of nodes that answered.
-        got: usize,
-    },
+    /// A read that needs two nodes to agree (CRD ch.51 R100) is undetermined: the nodes disagree, fewer than two
+    /// answered, or the trusted node did not. Carries the core's text, [`crate::swap_evidence::Undetermined::to_err_string`],
+    /// so that the swap engine's [`crate::swap_evidence::is_undetermined`] recognizes it and waits (ch.51 R100
+    /// item 9, ch.21 R21.11D.1), followed by the fix for the reason. The text names nodes as `host[:port]` only.
+    Undetermined(String),
     /// A search for the transaction that consumed a payment reached its cap without finding it (CRD ch.21 D21.B8).
     SearchCapped {
         /// The source that was read up to its cap.
@@ -140,7 +138,6 @@ impl fmt::Display for TronSwapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TronSwapError::Node(e) => write!(f, "TRON node request failed: {e}"),
-            TronSwapError::NodesDisagree => write!(f, "TRON nodes disagree"),
             TronSwapError::Abi(e) => write!(f, "TRON swap contract data does not fit its ABI: {e}"),
             TronSwapError::WrongSelector => {
                 write!(f, "the call data is not a call of the expected swap contract method")
@@ -183,11 +180,9 @@ impl fmt::Display for TronSwapError {
                     tx.txid()
                 )
             },
-            TronSwapError::NotEnoughAnswers { got } => write!(
-                f,
-                "{got} TRON node(s) answered, two must agree: add a node to the coin's node list or set \
-                 swap_evidence_node to the node to trust"
-            ),
+            // The core text first and unchanged (so the engine's marker test passes), then the fix for the reason;
+            // both are built in `watch::evidence`.
+            TronSwapError::Undetermined(text) => f.write_str(text),
             TronSwapError::SearchCapped { source } => {
                 write!(f, "the search through the {source} reached its cap without an answer")
             },

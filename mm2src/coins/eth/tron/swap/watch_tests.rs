@@ -739,7 +739,7 @@ fn differing_answers_leave_the_step_waiting() {
     // One node is past the lock, the other is not.
     let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock - 5, 1));
     let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
-    assert!(matches!(gate(&coin), Err(TronSwapError::NodesDisagree)));
+    assert!(matches!(gate(&coin), Err(TronSwapError::Undetermined(_))));
 }
 
 #[test]
@@ -798,7 +798,7 @@ fn a_refund_is_never_sent_unless_the_agreed_state_is_payment_sent() {
     // The nodes disagree: undetermined, nothing is signed.
     let (a, b) = (own_payment_node(0, &own, 1), own_payment_node(1, &own, 2));
     let failure = refund(&[&a, &b]).expect_err("no refund");
-    assert!(matches!(failure.error, TronSwapError::NodesDisagree));
+    assert!(matches!(failure.error, TronSwapError::Undetermined(_)));
     assert!(a.world.lock().unwrap().broadcasts.is_empty() && b.world.lock().unwrap().broadcasts.is_empty());
     // A single node: no second answer.
     let a = own_payment_node(0, &own, 1);
@@ -942,7 +942,7 @@ fn a_payment_that_is_still_locked_is_not_spent_only_on_the_agreed_state() {
     let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
     assert!(matches!(
         search(&coin, &payment, CAPS),
-        Err(TronSwapError::NodesDisagree)
+        Err(TronSwapError::Undetermined(_))
     ));
 }
 
@@ -1159,7 +1159,7 @@ fn a_revealing_claim_is_not_sent_unless_the_agreed_state_is_payment_sent() {
     let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
     assert!(matches!(
         reveal(&coin, &payment).expect_err("no claim").error,
-        TronSwapError::NodesDisagree
+        TronSwapError::Undetermined(_)
     ));
 }
 
@@ -1576,4 +1576,222 @@ fn a_trc20_payment_is_accepted_when_the_transfer_fee_is_zero_or_the_token_has_no
     trc20_payment_validation(Some(0), Some(1_000_000)).expect("a zero rate");
     trc20_payment_validation(Some(10), Some(0)).expect("a zero maximum");
     trc20_payment_validation(None, None).expect("no getters");
+}
+
+// ---- the undetermined marker of the core (ch.51 R100 item 9, ch.21 R21.11D.1) -----------------------------------
+
+/// What every undetermined error of the watch side must be: it passes the engine's marker test, names no node URL and
+/// still names the fix.
+fn assert_marked(text: &str, nodes: &[&Node]) {
+    assert!(
+        crate::swap_evidence::is_undetermined(text),
+        "the error is not marked undetermined"
+    );
+    assert!(
+        text.starts_with(crate::swap_evidence::UNDETERMINED_PREFIX),
+        "the error does not start with the marker"
+    );
+    assert!(!text.contains("://"), "the error holds a URL scheme");
+    for node in nodes {
+        assert!(!text.contains(&node.url()), "the error holds a node URL");
+    }
+    assert!(
+        text.contains("swap_evidence_node"),
+        "the error does not name swap_evidence_node"
+    );
+    assert!(text.contains("another host"), "the error does not name another host");
+}
+
+/// The undetermined error of a trusted node that did not answer: marked, no URL, and the advice about that node.
+fn assert_trusted_silent(text: &str, nodes: &[&Node]) {
+    assert!(
+        crate::swap_evidence::is_undetermined(text),
+        "the error is not marked undetermined"
+    );
+    assert!(
+        text.starts_with(crate::swap_evidence::UNDETERMINED_PREFIX),
+        "the error does not start with the marker"
+    );
+    assert!(!text.contains("://"), "the error holds a URL scheme");
+    for node in nodes {
+        assert!(!text.contains(&node.url()), "the error holds a node URL");
+    }
+    assert!(
+        text.contains("the node named by swap_evidence_node did not answer"),
+        "the error does not name the silent trusted node"
+    );
+    assert!(
+        text.contains("remove swap_evidence_node"),
+        "the error does not advise removing swap_evidence_node"
+    );
+    assert!(
+        !text.contains("add a node on another host"),
+        "the error gives the two-node advice"
+    );
+}
+
+/// What a determined error is: no marker.
+fn assert_not_marked(text: &str) {
+    assert!(
+        !crate::swap_evidence::is_undetermined(text),
+        "the error is not marked undetermined"
+    );
+}
+
+#[test]
+fn the_refund_gate_error_of_an_undetermined_read_carries_the_marker() {
+    let lock = i64::from(LOCK_TIME);
+    // Two nodes that disagree.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock - 5, 1));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_marked(&gate(&coin).err().expect("undetermined").to_string(), &[&a, &b]);
+    // The same through the coin's `can_refund_htlc`, whose error is a string.
+    assert_marked(
+        &trait_gate(&coin, u64::from(LOCK_TIME)).err().expect("undetermined"),
+        &[&a, &b],
+    );
+    // One of two nodes does not answer.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock + 5, 1));
+    b.edit(|w| w.solid_time_ms = None);
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_marked(&gate(&coin).err().expect("undetermined").to_string(), &[&a, &b]);
+    // The trusted node does not answer: its own advice, not the two-node one.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock + 5, 1));
+    a.edit(|w| w.solid_time_ms = None);
+    let (_ctx, coin) = coin_over(&[&a, &b], Some(0), 1);
+    assert_trusted_silent(&gate(&coin).err().expect("undetermined").to_string(), &[&a, &b]);
+    assert_trusted_silent(
+        &trait_gate(&coin, u64::from(LOCK_TIME)).err().expect("undetermined"),
+        &[&a, &b],
+    );
+    // A single node.
+    let (a, b) = (gate_node(0, lock + 5, 1), gate_node(1, lock + 5, 1));
+    b.edit(|w| w.solid_time_ms = None);
+    let (_ctx, coin) = coin_over(&[&a], None, 1);
+    assert_marked(&gate(&coin).err().expect("undetermined").to_string(), &[&a]);
+    assert_marked(
+        &trait_gate(&coin, u64::from(LOCK_TIME)).err().expect("undetermined"),
+        &[&a],
+    );
+    // A determined outcome is no error at all: two agreeing nodes before the lock wait.
+    let (a, b) = (gate_node(0, lock - 100, 1), gate_node(1, lock - 40, 1));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert!(matches!(gate(&coin), Ok(CanRefundHtlc::HaveToWait(_))));
+}
+
+#[test]
+fn the_search_error_of_an_undetermined_read_carries_the_marker() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let (a, b) = (payment_node(0, &payment, &me, 1), payment_node(1, &payment, &me, 2));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_marked(
+        &search(&coin, &payment, CAPS).expect_err("undetermined").to_string(),
+        &[&a, &b],
+    );
+    // A single node.
+    let a = payment_node(0, &payment, &me, 1);
+    let (_ctx, coin) = coin_over(&[&a], None, 1);
+    assert_marked(
+        &search(&coin, &payment, CAPS).expect_err("undetermined").to_string(),
+        &[&a],
+    );
+    // A determined error: the payment is uninitialized on both nodes.
+    let (a, b) = (payment_node(0, &payment, &me, 0), payment_node(1, &payment, &me, 0));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_not_marked(&search(&coin, &payment, CAPS).expect_err("a mismatch").to_string());
+}
+
+#[test]
+fn the_validation_error_of_an_undetermined_read_carries_the_marker() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let (a, b) = (payment_node(0, &payment, &me, 1), payment_node(1, &payment, &me, 2));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_marked(
+        &validate(&coin, &payment, &contract())
+            .expect_err("undetermined")
+            .to_string(),
+        &[&a, &b],
+    );
+    // A single node.
+    let a = payment_node(0, &payment, &me, 1);
+    let (_ctx, coin) = coin_over(&[&a], None, 1);
+    assert_marked(
+        &validate(&coin, &payment, &contract())
+            .expect_err("undetermined")
+            .to_string(),
+        &[&a],
+    );
+    // Determined errors: a mismatch, and a reverted receipt.
+    let (a, b) = (payment_node(0, &payment, &me, 1), payment_node(1, &payment, &me, 1));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_not_marked(
+        &validate(&coin, &payment, &other_contract())
+            .expect_err("a mismatch")
+            .to_string(),
+    );
+    let reverted = |index| {
+        Node::start(
+            index,
+            World::new()
+                .with_state(expected_hash(&me), u64::from(LOCK_TIME), 1)
+                .with_tx(&payment, PAYMENT_BLOCK, "REVERT", vec![]),
+        )
+    };
+    let (a, b) = (reverted(0), reverted(1));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_not_marked(
+        &validate(&coin, &payment, &contract())
+            .expect_err("reverted")
+            .to_string(),
+    );
+}
+
+#[test]
+fn the_revealing_claim_error_of_an_undetermined_read_carries_the_marker() {
+    let me = my_address_of_test_coin();
+    let payment = good_payment(&me);
+    let (a, b) = (payment_node(0, &payment, &me, 1), payment_node(1, &payment, &me, 2));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    let text = assert_not_sent(reveal(&coin, &payment), &[&a, &b]);
+    assert_marked(&text, &[&a, &b]);
+    // A single node.
+    let a = payment_node(0, &payment, &me, 1);
+    let (_ctx, coin) = coin_over(&[&a], None, 1);
+    assert_marked(&assert_not_sent(reveal(&coin, &payment), &[&a]), &[&a]);
+    // A determined refusal: the agreed state is spent.
+    let (a, b) = (payment_node(0, &payment, &me, 2), payment_node(1, &payment, &me, 2));
+    let (_ctx, coin) = coin_over(&[&a, &b], None, 1);
+    assert_not_marked(&assert_not_sent(reveal(&coin, &payment), &[&a, &b]));
+}
+
+#[test]
+fn the_refund_error_of_an_undetermined_read_carries_the_marker() {
+    let me = my_address_of_test_coin();
+    let own = own_payment(&me);
+    let refund = |nodes: &[&Node]| {
+        let (_ctx, coin) = coin_over(nodes, None, 1);
+        let failure = block_on(refund_payment_with(
+            &coin,
+            &own.to_bytes(),
+            &secret_hash(),
+            &selected(&contract()),
+            FAST,
+        ))
+        .expect_err("no refund");
+        assert!(failure.tx.is_none());
+        // The text the engine sees is the one of the `TransactionErr` the failure becomes.
+        match TransactionErr::from(failure) {
+            TransactionErr::Plain(text) => text,
+            other => panic!("expected a plain error, got {other:?}"),
+        }
+    };
+    let (a, b) = (own_payment_node(0, &own, 1), own_payment_node(1, &own, 2));
+    assert_marked(&refund(&[&a, &b]), &[&a, &b]);
+    let a = own_payment_node(0, &own, 1);
+    assert_marked(&refund(&[&a]), &[&a]);
+    // A determined refusal: both nodes say the payment is spent.
+    let (a, b) = (own_payment_node(0, &own, 2), own_payment_node(1, &own, 2));
+    assert_not_marked(&refund(&[&a, &b]));
 }

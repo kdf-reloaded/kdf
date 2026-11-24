@@ -90,10 +90,7 @@ pub(super) fn is_foreign(error: &TronSwapError) -> bool {
 fn is_retryable(error: &TronSwapError) -> bool {
     matches!(
         error,
-        TronSwapError::Node(_)
-            | TronSwapError::NotEnoughAnswers { .. }
-            | TronSwapError::NodesDisagree
-            | TronSwapError::NotYetFinal
+        TronSwapError::Node(_) | TronSwapError::Undetermined(_) | TronSwapError::NotYetFinal
     )
 }
 
@@ -308,7 +305,7 @@ pub struct PaymentCheck<'a> {
 /// # Errors
 ///
 /// [`TronSwapError::Mismatch`] naming the value that differs; [`TronSwapError::Reverted`] for a receipt that is
-/// not a success; [`TronSwapError::NotEnoughAnswers`], [`TronSwapError::NodesDisagree`] or a node error when the
+/// not a success; [`TronSwapError::Undetermined`] or a node error when the
 /// evidence stays undetermined for the whole window.
 pub async fn validate_payment(coin: &EthCoin, check: &PaymentCheck<'_>) -> Result<(), TronSwapError> {
     validate_payment_with(coin, check, VALIDATION_WAITS).await
@@ -797,7 +794,7 @@ pub(super) fn revealing_claim_margin(chain_time_s: u64, lock_time: u64) -> Resul
 ///
 /// # Errors
 ///
-/// Undetermined evidence ([`TronSwapError::NodesDisagree`], [`TronSwapError::NotEnoughAnswers`], a node error):
+/// Undetermined evidence ([`TronSwapError::Undetermined`], a node error):
 /// the caller does not refund.
 pub async fn tron_can_refund_htlc(coin: &EthCoin, lock_time: u64) -> Result<CanRefundHtlc, TronSwapError> {
     let api = tron_api(coin)?;

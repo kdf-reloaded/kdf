@@ -3110,6 +3110,12 @@ undetermined, and no further node is asked to outvote it. With
 read never gives a refund, a claim or "not spent". A secret whose SHA-256 equals
 the swap's secret hash is used on one node's answer.
 
+*Status note (2026-11-23), the error of an undetermined read.* The error of an
+undetermined read of R21.11D.1 is the evidence core's undetermined error, whose
+text the swap engine recognizes as an undetermined read, so the step waits
+(chapter 51 R100 item 3). The text names the nodes as `host[:port]` and the fix:
+a node on another host, or `swap_evidence_node`.
+
 **R21.11D.2 (validation of the counterparty's payment).** The bytes the peer
 sends give only the transaction id. The transaction, its receipt and the
 `payments(id)` record are read from the node pool. The payment is valid only
@@ -3618,3 +3624,7 @@ V3. The address encoding, protobuf transaction/contract formats,
   `/walletsolidity/...` family and the transaction information of a block)
   and the TronGrid contract-event query (TRON Developer Hub, *Event*). No
   cleared sentence was edited.
+- *Clean-context addition (2026-11-23, forbidden corpus not consulted):* the
+  status note after R21.11D.1 on the error of an undetermined read describes
+  this repository's code and chapter 51 R100 item 3. No cleared sentence was
+  edited.

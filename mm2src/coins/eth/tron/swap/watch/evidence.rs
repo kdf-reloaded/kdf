@@ -15,7 +15,7 @@ use crate::eth::tron::api::{GetNowBlockResponse, TriggerConstantContractResponse
 use crate::eth::tron::swap::{decode_payments_output, encode_payments_query, PaymentRecord, PaymentState, TronSwapError};
 use crate::eth::tron::TronAddress;
 use crate::swap_evidence::{self, node_name, Agreement, SwapEvidencePolicy, Undetermined, UndeterminedReason};
-use common::log::warn;
+use common::log::debug;
 use serde::Serialize;
 
 /// The solidified head block of a node (CRD ch.21 D21.B8: only blocks the super-representative majority confirmed).
@@ -104,18 +104,23 @@ async fn read_node(
     })
 }
 
-/// The error of an undetermined evidence read: the step waits. The line names each node as `host[:port]`.
+/// The error of an undetermined evidence read: the step waits. Its text is the core's text for the read
+/// ([`Undetermined::to_err_string`]: the marker, the reason and what each node said, nodes named as `host[:port]`),
+/// unchanged and first, so the swap engine's `is_undetermined` recognizes it (CRD ch.51 R100 item 9, ch.21
+/// R21.11D.1), followed by the fix for the reason. The engine warns once per step; the per-node answers stay at DEBUG.
 fn undetermined(why: Undetermined) -> TronSwapError {
-    warn!("{why}");
-    match why.reason {
-        UndeterminedReason::Disagree => TronSwapError::NodesDisagree,
-        // Two tips too far apart to compare; the plain `agree` these reads use does not give it. The step waits.
-        UndeterminedReason::TipGap => TronSwapError::NodesDisagree,
-        // The trusted node did not answer, or fewer than two distinct hosts did: both name the fix.
-        UndeterminedReason::TooFewAnswers | UndeterminedReason::TrustedNodeSilent => {
-            TronSwapError::NotEnoughAnswers { got: 0 }
+    debug!("{why}");
+    let fix = match why.reason {
+        UndeterminedReason::TrustedNodeSilent => {
+            "the node named by swap_evidence_node did not answer; check that node, or remove swap_evidence_node to \
+             use two nodes on distinct hosts"
         },
-    }
+        UndeterminedReason::TooFewAnswers | UndeterminedReason::Disagree | UndeterminedReason::TipGap => {
+            "two TRON nodes on distinct hosts must agree; add a node on another host to the coin's node list or set \
+             swap_evidence_node to the node to trust"
+        },
+    };
+    TronSwapError::Undetermined(format!("{}: {fix}", why.to_err_string()))
 }
 
 /// The answer the nodes of the policy agree on, by the decision `classify` reduces each answer to (CRD ch.51 R100
@@ -123,7 +128,7 @@ fn undetermined(why: Undetermined) -> TronSwapError {
 ///
 /// # Errors
 ///
-/// [`TronSwapError::NodesDisagree`], or [`TronSwapError::NotEnoughAnswers`] whose text names the fix.
+/// [`TronSwapError::Undetermined`], whose text carries the core's marker and names the fix.
 async fn agreed_answer<A, K, Fut>(
     api: &TronApiClient,
     policy: &SwapEvidencePolicy,
