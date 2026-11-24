@@ -3253,6 +3253,10 @@ impl EthCoin {
         Box::new(fut.boxed().compat())
     }
 
+    /// Validates the counterparty's legacy payment `payment_tx`. `wait_until` (UNIX seconds) bounds the retries of
+    /// the payment read under an adopted swap-evidence policy (CRD ch.51 §51.6G R100); the read is made at least
+    /// once.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn validate_payment(
         &self,
         payment_tx: &[u8],
@@ -3261,6 +3265,7 @@ impl EthCoin {
         secret_hash: &[u8],
         amount: BigDecimal,
         expected_swap_contract_address: Address,
+        wait_until: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
         let unsigned: UnverifiedTransaction = try_fus!(rlp::decode(payment_tx));
         let tx = try_fus!(SignedEthTx::new(unsigned));
@@ -3271,16 +3276,6 @@ impl EthCoin {
         let fut = async move {
             // The swap id is computed over the shared value, as the sender computed it (ch.51 R72A).
             let swap_id = selfi.etomic_swap_id(time_lock, &secret_hash);
-            let status = try_s!(
-                selfi
-                    .payment_status(expected_swap_contract_address, Token::FixedBytes(swap_id.clone()))
-                    .compat()
-                    .await
-            );
-            if status != PAYMENT_STATE_SENT.into() {
-                return ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", status);
-            }
-
             // LP-17: alloy `Provider::get_transaction_by_hash` replaces
             // `web3.eth().transaction(...)`. The fetched alloy
             // `Transaction` carries the typed-envelope inner; field
@@ -3292,9 +3287,37 @@ impl EthCoin {
             use alloy::consensus::Transaction as _;
             use alloy::providers::Provider;
 
-            let provider = selfi.alloy_provider();
-            let alloy_hash = alloy::primitives::B256::from_slice(&tx.hash.0);
-            let tx_from_rpc = try_s!(assert_send_future(provider.get_transaction_by_hash(alloy_hash)).await);
+            let tx_from_rpc = match selfi.agreed_swap_reads() {
+                // CRD ch.51 §51.6G R100: each node answers the payment's state and its transaction at its own
+                // latest block, and the pair must agree within the 60 s tip gap, or the trusted node answers. An
+                // undetermined read is an error, never "valid".
+                Some(policy) => {
+                    let read = try_s!(
+                        selfi
+                            .agreed_payment_read(&policy, expected_swap_contract_address, &swap_id, tx.hash, wait_until)
+                            .await
+                    );
+                    if read.state != PAYMENT_STATE_SENT.into() {
+                        return ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", read.state);
+                    }
+                    read.tx
+                },
+                None => {
+                    let status = try_s!(
+                        selfi
+                            .payment_status(expected_swap_contract_address, Token::FixedBytes(swap_id.clone()))
+                            .compat()
+                            .await
+                    );
+                    if status != PAYMENT_STATE_SENT.into() {
+                        return ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", status);
+                    }
+
+                    let provider = selfi.alloy_provider();
+                    let alloy_hash = alloy::primitives::B256::from_slice(&tx.hash.0);
+                    try_s!(assert_send_future(provider.get_transaction_by_hash(alloy_hash)).await)
+                },
+            };
             let tx_from_rpc = match tx_from_rpc {
                 Some(t) => t,
                 None => return ERR!("Didn't find provided tx {:?} on ETH node", tx),
@@ -3488,6 +3511,14 @@ impl EthCoin {
         // the unscanned blocks from the tip downwards, so a late spend or refund near the tip is found within the
         // first few windows and a call cut short by its caller's budget loses no progress.
         let key: PaymentKey = (swap_contract_address, id);
+        // CRD ch.51 §51.6G R100: under an adopted swap-evidence policy each node answers at its own latest block,
+        // and the pair must agree within the 60 s tip gap, or the trusted node answers; "not spent" is never
+        // taken from an undetermined read.
+        if let Some(policy) = self.agreed_swap_reads() {
+            return self
+                .agreed_swap_tx_spend(&policy, &tx, &key.1, swap_contract_address, search_from_block)
+                .await;
+        }
         let mut current_block = try_s!(assert_send_future(self.current_block().compat()).await);
         let payment_block = match self.logs_window.receipt_block(&key) {
             Some(block) => Some(block),

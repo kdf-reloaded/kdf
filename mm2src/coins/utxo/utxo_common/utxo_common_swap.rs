@@ -1024,12 +1024,6 @@ pub async fn search_for_swap_tx_spend_my_on_every_server(
         tx.tx_hash_algo = coin.tx_hash_algo;
         let payment = PaymentOutputs {
             tx_hash: tx.hash(),
-            output0_script_pubkey: tx
-                .outputs
-                .first()
-                .ok_or_else(|| ERRL!("the payment has no outputs"))?
-                .script_pubkey
-                .clone(),
             spent_script_pubkey: tx
                 .outputs
                 .get(output_index)
@@ -1037,7 +1031,7 @@ pub async fn search_for_swap_tx_spend_my_on_every_server(
                 .script_pubkey
                 .clone(),
         };
-        ensure_payment_pays_htlc(time_lock, &first_pub, &second_pub, secret_hash, &payment)?;
+        ensure_payment_pays_htlc(time_lock, &first_pub, &second_pub, secret_hash, &payment, output_index)?;
         Ok(payment)
     };
     let payment = match search() {
@@ -1309,8 +1303,12 @@ async fn search_for_swap_output_spend(
     let mut tx: UtxoTx = try_s!(read_utxo_tx(tx).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
     let tx_hash = tx.hash();
-    let output0_script_pubkey = tx.outputs[0].script_pubkey.clone();
-    let spent_script_pubkey = tx.outputs[output_index].script_pubkey.clone();
+    let spent_script_pubkey = tx
+        .outputs
+        .get(output_index)
+        .ok_or_else(|| ERRL!("the payment has no output {}", output_index))?
+        .script_pubkey
+        .clone();
     search_for_swap_output_spend_of(
         coin,
         policy,
@@ -1320,7 +1318,6 @@ async fn search_for_swap_output_spend(
         secret_hash,
         PaymentOutputs {
             tx_hash,
-            output0_script_pubkey,
             spent_script_pubkey,
         },
         output_index,
@@ -1334,7 +1331,7 @@ async fn search_for_swap_output_spend(
 pub(crate) struct PaymentOutputs {
     /// Internal-order transaction hash, as `find_output_spend` takes it.
     pub(crate) tx_hash: H256,
-    pub(crate) output0_script_pubkey: Bytes,
+    /// The script of the output the search looks at: the HTLC output (0 for a plain UTXO payment, 1 for an SLP one).
     pub(crate) spent_script_pubkey: Bytes,
 }
 
@@ -1362,18 +1359,20 @@ pub(crate) fn classify_swap_spend(script: &Script) -> Option<SwapSpendKind> {
     None
 }
 
-/// The check that a payment transaction's output 0 pays the HTLC script this swap negotiated. A
-/// mismatch is a hard stop, not something to retry: see the message.
+/// The check that the payment output the search looks at (`output_index`, whose script is
+/// `payment.spent_script_pubkey`) pays the HTLC script this swap negotiated. A mismatch is a hard stop, not
+/// something to retry: see the message.
 pub(crate) fn ensure_payment_pays_htlc(
     time_lock: u32,
     first_pub: &Public,
     second_pub: &Public,
     secret_hash: &[u8],
     payment: &PaymentOutputs,
+    output_index: usize,
 ) -> Result<(), String> {
     let script = payment_script(time_lock, secret_hash, first_pub, second_pub);
     let expected_script_pubkey = Builder::build_p2sh(&dhash160(&script).into()).to_bytes();
-    if payment.output0_script_pubkey != expected_script_pubkey {
+    if payment.spent_script_pubkey != expected_script_pubkey {
         // Reached from `recover_funds`: the pubkeys/secret_hash/locktime this
         // recovery attempt reconstructed from the swap's own saved record
         // don't reproduce the HTLC script that's actually on chain in this
@@ -1387,12 +1386,13 @@ pub(crate) fn ensure_payment_pays_htlc(
         // the deserialized transaction, which said nothing a caller could
         // act on.
         return ERR!(
-            "Payment tx {:?} output 0 does not pay the HTLC script this swap negotiated \
+            "Payment tx {:?} output {} does not pay the HTLC script this swap negotiated \
              (found script_pubkey {:?}, expected {:?} from the swap's saved pubkeys/secret_hash/locktime) \
              -- this payment cannot be recovered automatically",
             // `payment.tx_hash` is in internal byte order; the transaction id is shown reversed.
             payment.tx_hash.reversed(),
-            payment.output0_script_pubkey,
+            output_index,
+            payment.spent_script_pubkey,
             expected_script_pubkey
         );
     }
@@ -1445,7 +1445,8 @@ pub(crate) async fn search_for_swap_output_spend_of(
         first_pub,
         second_pub,
         secret_hash,
-        &payment
+        &payment,
+        output_index
     ));
 
     // CRD ch.51 R100: the spend is agreed on two servers (None, claimed by a txid, refunded by a txid); a claim whose

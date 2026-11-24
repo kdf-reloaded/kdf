@@ -20,6 +20,7 @@
 //    eth_gas_limit  – per-coin `gas_limit` / `gas_limit_v2` overrides (CRD ch. 57)
 //    eth_impl       – EthCoinImpl methods, transaction helpers, utility fns
 //    eth_swap_ops   – SwapOps + WatcherOps trait impls
+//    eth_swap_evidence – directed per-node reads and the agreed legacy swap reads (CRD ch.51 R100)
 //    eth_market_ops – MarketCoinOps trait impl
 //    eth_mm_coin    – MmCoin, ParseCoinAssocTypes, V2 swap trait impls
 //
@@ -98,6 +99,7 @@ mod eth_impl;
 mod eth_logs_window;
 mod eth_market_ops;
 mod eth_mm_coin;
+mod eth_swap_evidence;
 mod eth_swap_ops;
 mod secret_hash_value;
 // EVM Trezor hardware-wallet activation (device-sourced address/pubkey). Native,
@@ -147,6 +149,7 @@ pub(crate) use abi::{AbiError, Contract, Function, Token};
 #[cfg(test)] mod eth_failover_tests;
 #[cfg(test)] mod eth_gas_limit_call_site_tests;
 #[cfg(test)] mod eth_secret_hash_tests;
+#[cfg(test)] mod eth_swap_evidence_tests;
 #[cfg(test)] mod eth_tests;
 #[cfg(test)] mod fee_service_url_tests;
 #[cfg(test)] mod typed_tx_vector_tests;
