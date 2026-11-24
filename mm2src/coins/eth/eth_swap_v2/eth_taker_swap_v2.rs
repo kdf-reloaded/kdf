@@ -410,7 +410,7 @@ impl EthCoin {
                 TAKER_PAYMENT_STATE_INDEX,
             )
             .await
-            .map_err(|e| SearchForFundingSpendErr::Internal(ERRL!("{}", e)))?;
+            .map_err(funding_spend_search_err)?;
 
         if taker_status == U256::from(TakerPaymentStateV2::TakerApproved as u8) {
             Ok(Some(FundingTxSpend::TransferredToTakerPayment(tx.clone())))
@@ -482,30 +482,14 @@ impl EthCoin {
     }
 
     /// Pulls the maker's secret out of the calldata of a
-    /// `spendTakerPayment` tx. Used by the maker-side recovery path.
-    pub(crate) async fn extract_secret_v2_impl(&self, spend_tx: &SignedEthTx) -> Result<[u8; 32], String> {
-        let function = try_s!(TAKER_SWAP_V2.function(FN_SPEND_TAKER_PAYMENT));
-        let expected_signature = function.short_signature();
-        if &spend_tx.data[0..4] != expected_signature {
-            return ERR!(
-                "Expected 'spendTakerPayment' contract call signature: {:?}, found {:?}",
-                expected_signature,
-                &spend_tx.data[0..4]
-            );
-        }
-
-        let decoded = try_s!(decode_contract_call(function, &spend_tx.data));
-        if decoded.len() < 7 {
-            return ERR!("Invalid arguments in 'spendTakerPayment' call: {:?}", decoded);
-        }
-
-        match &decoded[5] {
-            Token::FixedBytes(secret) => Ok(try_s!(secret.as_slice().try_into())),
-            other => ERR!(
-                "Expected secret to be fixed bytes, but decoded function data is {:?}",
-                other
-            ),
-        }
+    /// `spendTakerPayment` tx. The secret is returned only when its hash
+    /// equals `secret_hash`.
+    pub(crate) async fn extract_secret_v2_impl(
+        &self,
+        secret_hash: &[u8],
+        spend_tx: &SignedEthTx,
+    ) -> Result<[u8; 32], ExtractSecretV2Err> {
+        secret_of_taker_payment_spend(&spend_tx.data, secret_hash)
     }
 }
 
@@ -735,7 +719,9 @@ impl EthCoin {
             .compat()
             .await
             .map_err(|e| PaymentStatusErr::Transport(e.to_string()))?;
-        let decoded_tokens = function.decode_output(&bytes.0)?;
+        let decoded_tokens = function
+            .decode_output(&bytes.0)
+            .map_err(|e| PaymentStatusErr::NodeAnswer(e.to_string()))?;
 
         let state = decoded_tokens.get(state_index).ok_or_else(|| {
             PaymentStatusErr::Internal(format!(
@@ -760,6 +746,9 @@ enum PaymentStatusErr {
     ABIError(String),
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// The node answered, and its answer does not decode as the payment state.
+    #[display(fmt = "Undecodable answer of the node: {}", _0)]
+    NodeAnswer(String),
     #[display(fmt = "Internal error: {}", _0)]
     Internal(String),
     #[display(fmt = "Invalid data error: {}", _0)]
@@ -768,6 +757,81 @@ enum PaymentStatusErr {
 
 impl From<crate::eth::abi::AbiError> for PaymentStatusErr {
     fn from(err: crate::eth::abi::AbiError) -> Self { PaymentStatusErr::ABIError(err.to_string()) }
+}
+
+/// How a failed read of the payment state is reported by the search for the funding spend (CRD ch.52 R18).
+/// A failure to reach the node, and an answer of the node that does not decode, are the transient `Rpc`
+/// kind, after which the search is repeated. Every other failure is not a node error.
+fn funding_spend_search_err(err: PaymentStatusErr) -> SearchForFundingSpendErr {
+    match err {
+        PaymentStatusErr::Transport(_) | PaymentStatusErr::NodeAnswer(_) => {
+            SearchForFundingSpendErr::Rpc(err.to_string())
+        },
+        PaymentStatusErr::ABIError(_) | PaymentStatusErr::Internal(_) | PaymentStatusErr::InvalidData(_) => {
+            SearchForFundingSpendErr::Internal(err.to_string())
+        },
+    }
+}
+
+/// Why no secret is taken from a spend of the taker payment.
+#[derive(Debug, Display, PartialEq)]
+pub(crate) enum ExtractSecretV2Err {
+    /// The transaction is not a well-formed `spendTakerPayment` call.
+    #[display(fmt = "Invalid spend tx: {}", _0)]
+    InvalidSpendTx(String),
+    /// The value the call carries is not the secret of the swap's secret hash.
+    #[display(fmt = "The secret of the spend does not match the secret hash {}", _0)]
+    SecretHashMismatch(String),
+    /// The secret hash has an unsupported width.
+    #[display(fmt = "Invalid secret hash: {}", _0)]
+    InvalidSecretHash(String),
+}
+
+/// The secret of `secret_hash` in the call input of a `spendTakerPayment` transaction (CRD ch.52 R32). The
+/// value the call carries is returned only when its hash equals `secret_hash`: `sha256` for a 32-byte hash
+/// and `dhash160` for a 20-byte one, as for every swap secret.
+///
+/// # Errors
+///
+/// The input is not such a call, the value is not the secret of `secret_hash`, or `secret_hash` has an
+/// unsupported width.
+fn secret_of_taker_payment_spend(call_input: &[u8], secret_hash: &[u8]) -> Result<[u8; 32], ExtractSecretV2Err> {
+    let function = TAKER_SWAP_V2
+        .function(FN_SPEND_TAKER_PAYMENT)
+        .map_err(|e| ExtractSecretV2Err::InvalidSpendTx(e.to_string()))?;
+    let expected_signature = function.short_signature();
+    let found_signature = call_input.get(..4);
+    if found_signature != Some(expected_signature.as_slice()) {
+        return Err(ExtractSecretV2Err::InvalidSpendTx(format!(
+            "Expected 'spendTakerPayment' contract call signature: {expected_signature:?}, found {found_signature:?}"
+        )));
+    }
+
+    let decoded =
+        decode_contract_call(function, call_input).map_err(|e| ExtractSecretV2Err::InvalidSpendTx(e.to_string()))?;
+    if decoded.len() < 7 {
+        return Err(ExtractSecretV2Err::InvalidSpendTx(format!(
+            "Invalid arguments in 'spendTakerPayment' call: {decoded:?}"
+        )));
+    }
+
+    let secret = match &decoded[5] {
+        Token::FixedBytes(secret) => secret,
+        other => {
+            return Err(ExtractSecretV2Err::InvalidSpendTx(format!(
+                "Expected secret to be fixed bytes, but decoded function data is {other:?}"
+            )))
+        },
+    };
+    let matches = crypto::secret_hash_algo::secret_matches_hash(secret, secret_hash)
+        .map_err(ExtractSecretV2Err::InvalidSecretHash)?;
+    if !matches {
+        return Err(ExtractSecretV2Err::SecretHashMismatch(hex::encode(secret_hash)));
+    }
+    secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| ExtractSecretV2Err::InvalidSpendTx(format!("The secret is {} bytes long", secret.len())))
 }
 
 // Calldata verifiers -------------------------------------------------------
@@ -866,4 +930,100 @@ fn split_eth_payment_value(decoded: &[Token], tx_value: U256) -> Result<(U256, U
         .checked_sub(dex_fee)
         .ok_or_else(|| PrepareTxDataError::Internal("Underflow occurred while calculating amount".into()))?;
     Ok((dex_fee, amount))
+}
+
+#[cfg(test)]
+mod funding_spend_search_and_secret_tests {
+    use super::*;
+    use crypto::secret_hash_algo::SecretHashAlgo;
+
+    const SECRET: [u8; 32] = [0x44; 32];
+
+    /// The call input of a `spendTakerPayment` transaction that carries `secret`.
+    fn spend_call_input(secret: &[u8]) -> Vec<u8> {
+        TAKER_SWAP_V2
+            .function(FN_SPEND_TAKER_PAYMENT)
+            .unwrap()
+            .encode_input(&[
+                Token::FixedBytes(vec![0x11; 32]),
+                Token::Uint(U256::from(1000u64)),
+                Token::Uint(U256::from(10u64)),
+                Token::Address(Address::from([0x22; 20])),
+                Token::FixedBytes(vec![0x33; 32]),
+                Token::FixedBytes(secret.to_vec()),
+                Token::Address(Address::default()),
+            ])
+            .unwrap()
+    }
+
+    /// CRD ch.52 R18: a failure to reach the node is the transient kind of search error.
+    #[test]
+    fn node_error_of_the_payment_state_read_is_a_transient_search_error() {
+        for err in [
+            PaymentStatusErr::Transport("connection refused".into()),
+            PaymentStatusErr::NodeAnswer("empty answer".into()),
+        ] {
+            let mapped = funding_spend_search_err(err);
+            assert!(matches!(mapped, SearchForFundingSpendErr::Rpc(_)), "{mapped}");
+        }
+    }
+
+    /// CRD ch.52 R18: a failure that is not the node's is not the transient kind.
+    #[test]
+    fn other_error_of_the_payment_state_read_is_not_a_transient_search_error() {
+        for err in [
+            PaymentStatusErr::ABIError("no such function".into()),
+            PaymentStatusErr::Internal("no state token".into()),
+            PaymentStatusErr::InvalidData("state is not a number".into()),
+        ] {
+            let mapped = funding_spend_search_err(err);
+            assert!(matches!(mapped, SearchForFundingSpendErr::Internal(_)), "{mapped}");
+        }
+    }
+
+    /// CRD ch.52 R32: the secret of the secret hash is returned.
+    #[test]
+    fn secret_of_the_spend_is_returned_when_its_hash_matches() {
+        let secret_hash = SecretHashAlgo::SHA256.hash_secret(&SECRET);
+        assert!(
+            secret_of_taker_payment_spend(&spend_call_input(&SECRET), &secret_hash) == Ok(SECRET),
+            "the secret of a 32-byte hash is returned"
+        );
+        let short_hash = SecretHashAlgo::DHASH160.hash_secret(&SECRET);
+        assert!(
+            secret_of_taker_payment_spend(&spend_call_input(&SECRET), &short_hash) == Ok(SECRET),
+            "the secret of a 20-byte hash is returned"
+        );
+    }
+
+    /// CRD ch.52 R32: a value whose hash is not the secret hash is refused.
+    #[test]
+    fn secret_of_the_spend_is_refused_when_its_hash_does_not_match() {
+        let secret_hash = SecretHashAlgo::SHA256.hash_secret(&SECRET);
+        let other = [0x55u8; 32];
+        let refused = secret_of_taker_payment_spend(&spend_call_input(&other), &secret_hash);
+        assert!(
+            refused == Err(ExtractSecretV2Err::SecretHashMismatch(hex::encode(&secret_hash))),
+            "a non-matching secret is refused"
+        );
+    }
+
+    /// A secret hash of an unsupported width and an input that is not the spend call are refused.
+    #[test]
+    fn secret_of_the_spend_is_refused_for_a_bad_hash_width_or_a_foreign_call() {
+        let refused = secret_of_taker_payment_spend(&spend_call_input(&SECRET), &[0u8; 21]);
+        assert!(
+            matches!(refused, Err(ExtractSecretV2Err::InvalidSecretHash(_))),
+            "a secret hash of an unsupported width is refused"
+        );
+
+        let secret_hash = SecretHashAlgo::SHA256.hash_secret(&SECRET);
+        for input in [&[][..], &[0x01, 0x02][..], &[0xde, 0xad, 0xbe, 0xef, 0x00][..]] {
+            let refused = secret_of_taker_payment_spend(input, &secret_hash);
+            assert!(
+                matches!(refused, Err(ExtractSecretV2Err::InvalidSpendTx(_))),
+                "an input that is not the spend call is refused"
+            );
+        }
+    }
 }

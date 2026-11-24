@@ -2478,6 +2478,11 @@ over-config override (F21.B3); the coin configurations of the reference
 and of the lab use 1. Whether Reloaded waits for *solidified* blocks in
 addition is D21.B8.
 
+*Status note (2026-11-22), R21.B5 as built.* A TRON leg waits for its
+receipt at `required_confirmations`, with the request over the config as
+for the EVM family; the refund gate and the spend search read solidified
+data in addition (§21.11D R21.11D.7).
+
 **R21.B6 (secret-hash arm follows the contract).** If D21.B2 selects the
 Tron-VM contract of §21.11B.2, the TRON coin family MUST force the
 32-byte SHA-256 alternate of chapter 51 R71/R72 on whichever side it
@@ -2624,6 +2629,18 @@ for solidified data (the `/walletsolidity/...` endpoint family of the
 public HTTP API serves only blocks the super-representative majority has
 confirmed) or for `required_confirmations` only is part of this
 decision.
+
+*Status note (2026-11-22), D21.B8 decided and built.* Spend discovery
+follows the maintainer decision of 2026-11-08: the payment's state from
+the contract's `payments(id)` record through the ordinary node API, the
+consuming transaction from the contract-event query of TronGrid hosts,
+and a walk of the blocks since the payment when that query fails; an
+unavailable source is a typed error and never "not spent". Finality
+follows the maintainer decision of 2026-11-22: `required_confirmations`
+plus solidified data for the refund gate and for "spent", with the reads
+a refund or a claim rests on agreed by chapter 51 R100 (§21.11D R21.11D.1,
+R21.11D.6, R21.11D.7). While `TRON_SWAPS_AVAILABLE` is `false` none of it
+is reachable from an order or a swap.
 
 **D21.B9 -- DEX fee on TRON.** No tabled state has one. The EVM family's
 shape is a plain transfer of the fee amount to the fee address derived
@@ -3069,6 +3086,123 @@ the binding on the legacy route are tested in the TRON swap test modules
 of the coin crate; the binding on the mmrpc 2.0 route in the TRON
 activation tests of the activation crate.
 
+## 21.11D TRON V1 swap watch side as built (Reloaded-original, added 2026-11-22)
+
+Reloaded-original rules for the part of a TRON V1 swap that reads the chain: the
+validation of the counterparty's payment and of the DEX fee, this node's own
+spend and refund, the refund gate, the search for the consuming transaction of a
+payment, and the confirmation wait. They rest on the cleared text of §21.11B.2,
+R21.B5 and D21.B8, on §21.11C, on the chain-reading checks of chapter 51 §51.6E,
+on chapter 51 R98 and R100, on the maintainer decisions of 2026-11-08 (spend
+discovery) and 2026-11-22 (agreement of the reads and finality), and on this
+repository's own code. Nothing here was taken from the reference: it has no TRON
+swap client (F21.B1). While `TRON_SWAPS_AVAILABLE` is `false` none of it is
+reachable from an order or a swap.
+
+**R21.11D.1 (the reads a refund or a claim rests on).** TRON adopts chapter 51
+R100. The reads it covers are made on solidified data (the `/walletsolidity/...`
+family of the node API): the head block, whose timestamp in milliseconds divided
+by 1000 is the chain time, and the contract's `payments(id)` record. Two answers
+count only from nodes on distinct hosts. They agree when each on its own
+satisfies the step's condition; if any answering node disagrees the read is
+undetermined, and no further node is asked to outvote it. With
+`swap_evidence_node` set, that node's answer alone is taken. An undetermined
+read never gives a refund, a claim or "not spent". A secret whose SHA-256 equals
+the swap's secret hash is used on one node's answer.
+
+*Status note (2026-11-23), the error of an undetermined read.* The error of an
+undetermined read of R21.11D.1 is the evidence core's undetermined error, whose
+text the swap engine recognizes as an undetermined read, so the step waits
+(chapter 51 R100 item 3). The text names the nodes as `host[:port]` and the fix:
+a node on another host, or `swap_evidence_node`.
+
+**R21.11D.2 (validation of the counterparty's payment).** The bytes the peer
+sends give only the transaction id. The transaction, its receipt and the
+`payments(id)` record are read from the node pool. The payment is valid only
+when the receipt says SUCCESS at the required depth, the called contract is the
+swap contract selected for that coin at negotiation (chapter 51 R98), and the
+record agreed by R21.11D.1 is in state 1 with a stored payment hash equal to the
+one computed over the values the swap expects (receiver, sender, secret hash,
+token or TRX, amount; R21.11C.3), for the swap id of R21.11C.2 and the expected
+lock time. For a TRC20 payment the token's transfer fee must be zero, by the
+rule of R21.11C.14; a token that takes a fee, or a failed read, fails the
+validation. The decoded call is used only to name the field that differs. The
+read waits up to 180 seconds for the solidified data to reach the payment.
+
+**R21.11D.3 (DEX fee).** The fee transaction is valid when it is a TRX transfer
+or a TRC20 `transfer` from the counterparty to the fee address, paying at least
+the expected amount, with a SUCCESS receipt, in a block at or after the swap's
+first block.
+
+**R21.11D.4 (this node's spend and refund).** A spend or a refund is sent as a
+contract call (R21.11C.7) to the selected contract, with the `fee_limit` of
+R21.11C.7 (for a claim, see R21.11D.4A). It counts only once its receipt says
+SUCCESS at `required_confirmations`; a receipt that is not SUCCESS is a typed
+error that keeps the transaction. Before a refund is signed, the record agreed
+by R21.11D.1 MUST be in state 1; any other state, or an undetermined read, is a
+typed error and nothing is broadcast.
+
+**R21.11D.4A (the two claims).** The claim that reveals the secret (the maker
+claiming the taker payment) is signed only when all of these hold: the
+`payments(id)` record agreed by R21.11D.1 is in state 1; the chain time agreed
+by R21.11D.1 plus a margin of 300 seconds is below the record's stored lock
+time; the claim's dry run succeeded, which gives its `fee_limit` (R21.11C.7);
+and the coin's TRX balance covers that `fee_limit`. When any of these fails
+nothing is signed or broadcast and the swap goes on to its refund. The claim
+whose secret is already public (the taker claiming the maker payment) is sent
+while the `payments(id)` record does not show it claimed or refunded, whatever
+the chain time, also past the lock time, with no margin before or after it. Its
+`fee_limit` comes from the dry run when the dry run succeeds; when the dry run
+reverts, fails, or needs more than the cap, the call is sent with the fixed
+`fee_limit` of 100 TRX, the cap of R21.11C.7.
+
+**R21.11D.5 (refund gate).** The coin's answer to "can this payment be refunded
+now" follows this rule: a refund is allowed once the chain time agreed by
+R21.11D.1 is at or past the lock time; before that the swap waits (chapter 51
+§51.6E), and an undetermined read is an error, never a refund. The state check
+of R21.11D.4 is the second half of the gate.
+
+**R21.11D.6 (the consuming transaction of a payment).** Per the maintainer
+decision of 2026-11-08 on D21.B8:
+
+- *State.* The `payments(id)` record says whether the payment is unspent (1),
+  claimed (2) or refunded (3). A record in state 0 or in an unknown state is a
+  typed error.
+- *Primary source.* The contract-event query that TronGrid hosts serve at their
+  node address (`/v1/contracts/{contract}/events`), for `ReceiverSpent` or
+  `SenderRefunded`, from the payment's block time on, read from every TronGrid
+  host in the node list, keyed or not. The id is not indexed (§21.11C), so
+  events are filtered by the decoded id. At most 25 pages are read.
+- *Fallback.* When the event query fails, the blocks from the payment's block on
+  are read through the node API (the transaction information of each block); at
+  most 10,000 blocks.
+- *Candidate rule (chapter 51 §51.6E).* A transaction counts only when the
+  transaction read by its id is a `receiverSpend` (or `senderRefund`) call to
+  the selected contract for this id, with a SUCCESS receipt that carries the
+  matching event. Any other candidate is skipped.
+- *Secret.* The secret is taken from the event or the call and used only when
+  its SHA-256 equals the swap's secret hash.
+- *Window.* The search made by the wait for a spend starts at the last
+  block at which the record was read as unspent, one block earlier; when
+  that search finds nothing while the record shows the payment claimed or
+  refunded, it is made once more from the payment's block. The one-time
+  search starts at the payment's block. The caps count from the start of
+  each search.
+- *Failure.* When a source fails, or a cap is reached (logged as a warning
+  naming the payment), or the record says claimed but no consuming transaction
+  is found, the search gives a typed error, never "not spent". The wait for a
+  spend keeps polling until its deadline.
+
+**R21.11D.7 (confirmations).** A TRON leg waits for its receipt at
+`required_confirmations` (R21.B5); the refund gate and the search of R21.11D.6
+read solidified data in addition (the maintainer decision of 2026-11-22).
+
+**Tests.** The validation, the DEX fee, the agreement of the reads over two
+scripted nodes (chapter 51 T42), the refund gate and the state check before a
+refund, the search with both sources, its caps and its candidate rule, the
+secret check, and this node's spend and refund are tested in the TRON swap watch
+tests of the coin crate.
+
 ## 21.12 Baseline Verifications
 
 The following are verifiable from the baseline state defined in
@@ -3481,3 +3615,16 @@ V3. The address encoding, protobuf transaction/contract formats,
   fixed energy estimates are Reloaded's own figures, derived as
   R21.11C.12 says. No cleared sentence was edited, and R21.11C.1 to
   R21.11C.8 are unchanged.
+- *Clean-context addition (2026-11-22, forbidden corpus not consulted):*
+  §21.11D and the status notes of this date at R21.B5 and D21.B8 are
+  Reloaded-original. They rest on the cleared text of §21.11B.2, R21.B5
+  and D21.B8, on §21.11C, on chapter 51 §51.6E, R98 and R100, on the
+  maintainer decisions of 2026-11-08 and 2026-11-22, on this repository's
+  own code, and on the public TRON full-node HTTP API (§21.9; the
+  `/walletsolidity/...` family and the transaction information of a block)
+  and the TronGrid contract-event query (TRON Developer Hub, *Event*). No
+  cleared sentence was edited.
+- *Clean-context addition (2026-11-23, forbidden corpus not consulted):* the
+  status note after R21.11D.1 on the error of an undetermined read describes
+  this repository's code and chapter 51 R100 item 3. No cleared sentence was
+  edited.

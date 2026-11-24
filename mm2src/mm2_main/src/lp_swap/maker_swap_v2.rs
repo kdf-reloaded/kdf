@@ -721,8 +721,9 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionF
     for Completed<M, T>
 {
 }
+// The claim of the taker payment is broadcast in this state, so it has no transition to a refund state.
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<TakerPaymentSpent<M, T>>
-    for MakerPaymentRefundRequired<M, T>
+    for Aborted<M, T>
 {
 }
 
@@ -1717,6 +1718,12 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
 
 // MakerPaymentSentFundingSpendGenerated → (polling loop) ----------------
 
+/// Whether a failed search for the funding spend is a node or transport error. The search is repeated after
+/// such an error (CRD ch.52 R18); any other error ends the search.
+fn funding_spend_search_error_is_transient(err: &SearchForFundingSpendErr) -> bool {
+    matches!(err, SearchForFundingSpendErr::Rpc(_))
+}
+
 // Broadcast maker payment info, poll for taker funding spend on-chain.
 
 #[async_trait::async_trait]
@@ -1814,8 +1821,8 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                 Ok(None) => {
                     Timer::sleep(30.).await;
                 },
-                Err(SearchForFundingSpendErr::Rpc(e)) => {
-                    error!("RPC error in search_for_taker_funding_spend: {}", e);
+                Err(e) if funding_spend_search_error_is_transient(&e) => {
+                    error!("Transient error in search_for_taker_funding_spend: {}", e);
                     Timer::sleep(30.).await;
                 },
                 Err(e) => {
@@ -2139,31 +2146,39 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
 
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> StateResult<Self::StateMachine> {
         if sm.require_taker_payment_spend_confirm {
-            if let Err(e) = sm
-                .taker_coin
-                .wait_for_confirmations(
-                    &self.taker_payment_spend,
-                    confirmation_gate_confs(sm.conf_settings.taker_coin_confs),
-                    sm.conf_settings.taker_coin_nota,
-                    sm.maker_payment_locktime(),
-                    10,
-                )
-                .compat()
-                .await
-            {
-                let reason =
-                    AbortReason::ConfirmationTimeout(format!("Taker payment spend not confirmed in time: {}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+            // The claim of the taker payment is broadcast. Its confirmation is read until 3700 seconds past
+            // the maker payment locktime, and for at least 3700 seconds (CRD ch.52 R19; ch.51 R100 item 9). This
+            // state never leads to a refund.
+            let taker_coin = &sm.taker_coin;
+            let confs = confirmation_gate_confs(sm.conf_settings.taker_coin_confs);
+            let nota = sm.conf_settings.taker_coin_nota;
+            let claim_tx_hash = match sm.taker_coin.parse_tx(&self.taker_payment_spend) {
+                Ok(tx) => Ok(hex::encode(tx.tx_hash().0)),
+                Err(_) => Err(hex::encode(&self.taker_payment_spend.0)),
+            };
+            let claim = own_claim_name(sm.taker_coin.ticker(), claim_tx_hash);
+            let confirmed = await_own_claim_confirmation(
+                &claim,
+                own_claim_confirmation_deadline(sm.maker_payment_locktime(), now_ms() / 1000),
+                CONFIRMATION_POLL_SECS,
+                || now_ms() / 1000,
+                log_own_claim_line,
+                |wait_until| {
+                    taker_coin
+                        .wait_for_confirmations(
+                            &self.taker_payment_spend,
+                            confs,
+                            nota,
+                            wait_until,
+                            CONFIRMATION_POLL_SECS,
+                        )
+                        .compat()
+                },
+            )
+            .await;
+            if !confirmed {
+                let reason = maker_own_claim_not_confirmed_reason(&claim);
+                return Self::change_state(Aborted::new(reason), sm).await;
             }
         }
 
@@ -2273,5 +2288,50 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> LastState f
     type StateMachine = MakerSwapStateMachine<M, T>;
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> () {
         warn!("Swap {} was aborted with reason: {}", sm.uuid, self.reason);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `EthCoin` is a compile-time type parameter only; no coin instance is built.
+    use coins::eth::EthCoin;
+
+    /// CRD ch.52 R18: a node or transport error repeats the search for the funding spend.
+    #[test]
+    fn funding_spend_search_repeats_after_a_node_error() {
+        let node_error = SearchForFundingSpendErr::Rpc("connection refused".into());
+        assert!(funding_spend_search_error_is_transient(&node_error));
+    }
+
+    /// CRD ch.52 R18: an error that is not a node error ends the search.
+    #[test]
+    fn funding_spend_search_ends_on_an_error_that_is_not_a_node_error() {
+        for err in [
+            SearchForFundingSpendErr::InvalidInputTx("no output".into()),
+            SearchForFundingSpendErr::FailedToProcessSpendTx("no input".into()),
+            SearchForFundingSpendErr::FromBlockConversionErr("height".into()),
+            SearchForFundingSpendErr::Internal("contract not set".into()),
+        ] {
+            assert!(!funding_spend_search_error_is_transient(&err), "{err}");
+        }
+    }
+
+    /// CRD ch.52 R19: after the claim of the taker payment is broadcast, `TakerPaymentSpent` ends in `Completed`
+    /// or `Aborted` only. The transition markers are what `change_state` accepts, so a transition to the refund
+    /// state from this state does not compile.
+    #[test]
+    fn taker_payment_spent_has_no_transition_to_the_refund_state() {
+        fn accepts<Next: TransitionFrom<Prev>, Prev>() {}
+        accepts::<Completed<EthCoin, EthCoin>, TakerPaymentSpent<EthCoin, EthCoin>>();
+        accepts::<Aborted<EthCoin, EthCoin>, TakerPaymentSpent<EthCoin, EthCoin>>();
+
+        let whole_file = include_str!("maker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source: String = whole_file[..mod_tests_pos]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!source.contains("TransitionFrom<TakerPaymentSpent<M, T>> for MakerPaymentRefundRequired<M, T>"));
     }
 }

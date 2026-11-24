@@ -390,6 +390,15 @@ learns of the taker payment only by observing the chain. This is a
 deliberate difference from the legacy protocol, where the taker payment
 arrives as a message (chapter 51 R42).
 
+> *Status note (2026-11-23, Reloaded-original; maintainer decision of
+> 2026-11-23).* Chapter 51 §51.6G R100 binds the version-two machines in
+> full. For the search for the funding spend: a failure to reach the node,
+> and an answer of the node that cannot be decoded, are transient node
+> errors for every coin family, and the state sleeps thirty seconds and
+> polls again. Only an error that is not the node's (for example an input
+> transaction that is not valid, or a missing contract setting) is a
+> non-transient search error. No sentence of R18 is changed.
+
 **R19.** *Spend the taker payment.* `TakerPaymentReceived` MUST wait for
 the taker payment to reach the order's configured taker-coin
 confirmation and notarisation settings, with the ⅔ deadline of R11 as
@@ -406,6 +415,33 @@ identically except that it neither awaits, parses nor validates a
 preimage, and instead signs and broadcasts the spend directly. Its two
 failure paths are the confirmation wait and the broadcast, both routing
 to `MakerPaymentRefundRequired`.
+
+> *Status note (2026-11-23, Reloaded-original; maintainer decision of
+> 2026-11-23).* No refund follows the maker's own claim. In
+> `TakerPaymentSpent` the spend of the taker payment is broadcast, and the
+> state has no transition to `MakerPaymentRefundRequired`. When the
+> confirmation of the spend is awaited, a failed or timed-out read is
+> repeated at the ten-second poll interval. The state ends in `Completed`
+> when the confirmation is read. It ends in `Aborted` when the read still
+> fails at the later of two moments (chapter 51 §51.6G R100 item 9 with
+> its notes): the maker payment locktime plus 3700 seconds, and 3700
+> seconds after the state was entered in its current run. That moment of
+> entry is not stored, so a resumed swap starts a new wait of 3700
+> seconds. No discriminant is added to the reason vocabularies of R22
+> and R36. The maker's abort carries the existing `InternalError`
+> discriminant. Its text opens with one fixed phrase that both roles
+> share, "Own claim was broadcast but its confirmation could not be
+> read: " (one line in the text), and then names the coin and the claim
+> transaction by its hash. The text is stored with the swap and shown by
+> the status RPCs, so it carries no error text of a node read. While
+> the read is repeated, the log has one warning per wait, which names
+> the coin and the claim transaction and, as chapter 51 R80 says of its
+> warning, no server address, URL, host or response text; the error
+> text of a failed read is logged at debug level only. R44 applies:
+> this `Aborted` is reached with the claim on the network, and the
+> phrase is what tells it from an abort with nothing committed. No other
+> abort text carries the phrase; in particular the maker's aborts on a
+> confirmation timeout, which commit nothing, do not.
 
 **R20.** *The propagation gate.* Before committing its own payment, the
 maker MUST establish that the taker's funding transaction is actually on
@@ -646,12 +682,40 @@ Both of these abort paths are reached with the taker's payment already
 spent by the maker, i.e. with the taker having paid and not yet been
 paid. R44 binds the consequence.
 
+> *Status note (2026-11-23, Reloaded-original; maintainer decision of
+> 2026-11-23).* For every coin family, the value read from the spend of
+> the taker payment is the maker's secret only when its hash equals the
+> maker's secret hash: `sha256` of the value for a 32-byte hash,
+> `ripemd160(sha256)` of it for a 20-byte hash (chapter 51 R71). A value
+> that does not match is refused with a typed error, and the state goes
+> to `Aborted` with the secret-extraction reason as R32 says.
+
 **R33.** *Complete.* `MakerPaymentSpent` MUST, when the post-spend
 confirmation gate is enabled (the default), wait for the maker-payment
 spend to reach the order's configured maker-coin confirmation and
 notarisation settings, with the taker payment locktime as its cut-off
 and a ten-second poll interval. Failure MUST transition to
 `TakerPaymentRefundRequired`; success MUST transition to `Completed`.
+
+> *Status note (2026-11-23, Reloaded-original; maintainer decision of
+> 2026-11-23).* No refund follows the taker's own claim. In
+> `MakerPaymentSpent` the spend of the maker payment is broadcast, and the
+> state has no transition to `TakerPaymentRefundRequired`; of R35's list
+> for that state, `MakerPaymentSpent` no longer applies. A failed or
+> timed-out read of the confirmation is repeated at the ten-second poll
+> interval. The state ends in `Completed` when the confirmation is read.
+> It ends in `Aborted` when the read still fails at the later of two
+> moments (chapter 51 §51.6G R100 item 9 with its notes): the taker
+> payment locktime plus 3700 seconds, and 3700 seconds after the state
+> was entered in its current run. That moment of entry is not stored, so
+> a resumed swap starts a new wait of 3700 seconds. The abort carries
+> the existing discriminant of a maker-payment spend that was not
+> confirmed in time (`MakerPaymentSpendNotConfirmedInTime`), and its
+> text opens with the fixed phrase of the note after R19, followed by
+> the coin and the hash of the claim transaction; it carries no error
+> text of a node read, and the log follows the same rule as that note
+> states. R44 applies: this `Aborted` is reached with the claim on the
+> network.
 
 **R34.** *Two independent refund states.*
 `TakerFundingRefundRequired` MUST immediately broadcast the
@@ -1759,3 +1823,10 @@ divergence rather than resolving it.
   log or error string, or per-method internal table was copied; every
   rule above is stated as an externally observable behavioural, wire, or
   persisted-contract requirement.
+- *Clean-side addition of 2026-11-23:* the status notes after R18, R19,
+  R32 and R33, the maintainer's decision of 2026-11-23 that chapter 51
+  §51.6G R100 binds the version-two machines: transient node errors of
+  the search for the funding spend, no refund after the node's own
+  claim with the bound of R100 item 9 on the confirmation read, and the
+  secret of a spend checked against its hash for every coin family.
+  Reloaded-original; no forbidden-class input.
