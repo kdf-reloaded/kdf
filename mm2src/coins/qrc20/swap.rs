@@ -4,7 +4,7 @@ use common::log::debug;
 use script_pubkey::{extract_contract_addr_from_script, extract_contract_call_from_script, is_contract_call};
 
 /// `erc20Payment` call details consist of values obtained from [`TransactionOutput::script_pubkey`] and [`TxReceipt::logs`].
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Erc20PaymentDetails {
     pub output_index: u64,
     pub swap_id: Vec<u8>,
@@ -17,6 +17,17 @@ pub struct Erc20PaymentDetails {
     pub timelock: U256,
     /// Contract call bytes extracted from [`TransactionOutput::script_pubkey`] using `extract_contract_call_from_script`.
     pub contract_call_bytes: Vec<u8>,
+}
+
+/// What the read of a payment before its claim rests on (CRD ch.51 §51.6G R100).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimCheck {
+    /// The claim reveals a secret nobody has seen yet, so it rests on the counterparty's payment state: two servers
+    /// must agree on it, or the trusted server shows it.
+    AgreedPaymentState,
+    /// The secret is already public and proven by its hash: the claim needs no agreeing read, and an undetermined read
+    /// does not hold it back.
+    SecretAlreadyProven,
 }
 
 /// `receiverSpend` call details consist of values obtained from [`TransactionOutput::script_pubkey`].
@@ -63,17 +74,36 @@ impl Qrc20Coin {
         self.send_contract_calls(outputs).await
     }
 
+    /// Claims the payment `payment_tx` with `secret`. `check` says what the read of the payment before the claim
+    /// rests on (CRD ch.51 §51.6G R100).
     pub async fn spend_hash_time_locked_payment(
         &self,
         payment_tx: UtxoTx,
         swap_contract_address: H160,
         secret: Vec<u8>,
+        check: ClaimCheck,
     ) -> Result<TransactionEnum, TransactionErr> {
+        let agreed = match check {
+            ClaimCheck::AgreedPaymentState => self.agreed_swap_reads(),
+            ClaimCheck::SecretAlreadyProven => None,
+        };
+        let (details, status) = match agreed {
+            Some((policy, client)) => try_tx_s!(
+                self.agreed_payment_of_tx(&policy, &client, &payment_tx, &swap_contract_address)
+                    .await
+            ),
+            None => {
+                let details = try_tx_s!(self.erc20_payment_details_from_tx(&payment_tx).await);
+                let status = try_tx_s!(
+                    self.payment_status(&swap_contract_address, details.swap_id.clone())
+                        .await
+                );
+                (details, status)
+            },
+        };
         let Erc20PaymentDetails {
             swap_id, value, sender, ..
-        } = try_tx_s!(self.erc20_payment_details_from_tx(&payment_tx).await);
-
-        let status = try_tx_s!(self.payment_status(&swap_contract_address, swap_id.clone()).await);
+        } = details;
         if status != eth::PAYMENT_STATE_SENT.into() {
             return TX_PLAIN_ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", status);
         }
@@ -88,15 +118,28 @@ impl Qrc20Coin {
         swap_contract_address: H160,
         payment_tx: UtxoTx,
     ) -> Result<TransactionEnum, TransactionErr> {
+        // CRD ch.51 §51.6G R100: a refund rests on the payment being not spent, which two servers must agree on.
+        let (details, status) = match self.agreed_swap_reads() {
+            Some((policy, client)) => try_tx_s!(
+                self.agreed_payment_of_tx(&policy, &client, &payment_tx, &swap_contract_address)
+                    .await
+            ),
+            None => {
+                let details = try_tx_s!(self.erc20_payment_details_from_tx(&payment_tx).await);
+                let status = try_tx_s!(
+                    self.payment_status(&swap_contract_address, details.swap_id.clone())
+                        .await
+                );
+                (details, status)
+            },
+        };
         let Erc20PaymentDetails {
             swap_id,
             value,
             receiver,
             secret_hash,
             ..
-        } = try_tx_s!(self.erc20_payment_details_from_tx(&payment_tx).await);
-
-        let status = try_tx_s!(self.payment_status(&swap_contract_address, swap_id.clone()).await);
+        } = details;
         if status != eth::PAYMENT_STATE_SENT.into() {
             return TX_PLAIN_ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", status);
         }
@@ -106,6 +149,9 @@ impl Qrc20Coin {
         self.send_contract_calls(vec![refund_output]).await
     }
 
+    /// Validates the counterparty's payment `payment_tx`. `wait_until` (UNIX seconds) bounds the retries of the
+    /// payment read under an adopted swap-evidence policy (CRD ch.51 §51.6G R100); the read is made at least once.
+    #[allow(clippy::too_many_arguments)]
     pub async fn validate_payment(
         &self,
         payment_tx: UtxoTx,
@@ -114,15 +160,40 @@ impl Qrc20Coin {
         secret_hash: Vec<u8>,
         amount: BigDecimal,
         expected_swap_contract_address: H160,
+        wait_until: u64,
     ) -> Result<(), String> {
         let expected_swap_id = qrc20_swap_id(time_lock, &secret_hash);
-        let status = try_s!(
-            self.payment_status(&expected_swap_contract_address, expected_swap_id.clone())
-                .await
-        );
-        if status != eth::PAYMENT_STATE_SENT.into() {
-            return ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", status);
-        }
+        // CRD ch.51 §51.6G R100: the payment's state and its receipt are what two servers agree on, or what the
+        // trusted server shows. An undetermined read is an error, never "valid".
+        let agreed_details = match self.agreed_swap_reads() {
+            Some((policy, client)) => {
+                let read = try_s!(
+                    self.agreed_payment_read(
+                        &policy,
+                        &client,
+                        &payment_tx,
+                        &expected_swap_contract_address,
+                        &expected_swap_id,
+                        wait_until,
+                    )
+                    .await
+                );
+                if read.state != eth::PAYMENT_STATE_SENT.into() {
+                    return ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", read.state);
+                }
+                Some(read.details)
+            },
+            None => {
+                let status = try_s!(
+                    self.payment_status(&expected_swap_contract_address, expected_swap_id.clone())
+                        .await
+                );
+                if status != eth::PAYMENT_STATE_SENT.into() {
+                    return ERR!("Payment state is not PAYMENT_STATE_SENT, got {}", status);
+                }
+                None
+            },
+        };
 
         let expected_call_bytes = {
             let expected_value = try_s!(wei_from_big_decimal(&amount, self.utxo.decimals));
@@ -137,7 +208,10 @@ impl Qrc20Coin {
             ))
         };
 
-        let erc20_payment = try_s!(self.erc20_payment_details_from_tx(&payment_tx).await);
+        let erc20_payment = match agreed_details {
+            Some(details) => try_s!(details),
+            None => try_s!(self.erc20_payment_details_from_tx(&payment_tx).await),
+        };
         // CRD ch.51 R72A: the `secret_hash` slot of the payment is compared with the value derived from the shared one.
         eth::check_payment_secret_hash_arg(&Token::FixedBytes(erc20_payment.secret_hash.clone()), &secret_hash)?;
         if erc20_payment.contract_call_bytes != expected_call_bytes {
@@ -228,6 +302,22 @@ impl Qrc20Coin {
         tx: UtxoTx,
         search_from_block: u64,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
+        // CRD ch.51 §51.6G R100: under an adopted swap-evidence policy the decision is read from single servers, each
+        // at its own tip; "not spent" then needs two agreeing servers, or the trusted one.
+        if let Some((policy, client)) = self.agreed_swap_reads() {
+            let expected_swap_id = qrc20_swap_id(time_lock, &secret_hash);
+            let secret_hash = try_s!(eth::contract_secret_hash(&secret_hash));
+            return self
+                .agreed_swap_tx_spend(
+                    &policy,
+                    &client,
+                    &tx,
+                    Some(&expected_swap_id),
+                    &secret_hash,
+                    search_from_block,
+                )
+                .await;
+        }
         let tx_hash = tx.hash().reversed().into();
         let verbose_tx = try_s!(self.utxo.rpc_client.get_verbose_transaction(&tx_hash).compat().await);
         if verbose_tx.confirmations < 1 {
@@ -286,6 +376,12 @@ impl Qrc20Coin {
         swap_id: Vec<u8>,
         search_from_block: u64,
     ) -> Result<Option<TransactionEnum>, String> {
+        // CRD ch.51 §51.6G R100: "not sent" and "sent" are what two servers agree on, or what the trusted one shows.
+        if let Some((policy, client)) = self.agreed_swap_reads() {
+            return self
+                .agreed_payment_sent(&policy, &client, &swap_contract_address, &swap_id, search_from_block)
+                .await;
+        }
         let status = try_s!(self.payment_status(&swap_contract_address, swap_id.clone()).await);
         if status == eth::PAYMENT_STATE_UNINITIALIZED.into() {
             return Ok(None);
@@ -349,6 +445,13 @@ impl Qrc20Coin {
         wait_until: u64,
         from_block: u64,
     ) -> Result<TransactionEnum, String> {
+        // CRD ch.51 §51.6G R100: a claim that carries the swap's secret is taken from one server; nothing else ends
+        // the wait.
+        if let Some((policy, client)) = self.agreed_swap_reads() {
+            return self
+                .wait_for_agreed_payment_spend(&policy, &client, &tx, wait_until, from_block)
+                .await;
+        }
         let Erc20PaymentDetails {
             swap_id,
             receiver,
@@ -402,32 +505,23 @@ impl Qrc20Coin {
                 .compat()
                 .await
         );
-        let receipts = try_s!(self.utxo.rpc_client.get_transaction_receipts(&tx_hash).compat().await);
-
-        for receipt in receipts {
-            let output = try_s!(qtum_tx
-                .outputs
-                .get(receipt.output_index as usize)
-                .ok_or(ERRL!("TxReceipt::output_index out of bounds")));
-            let script_pubkey: Script = output.script_pubkey.clone().into();
-            if !is_contract_call(&script_pubkey) {
-                continue;
-            }
-
-            let contract_call_bytes = try_s!(extract_contract_call_from_script(&script_pubkey));
-
-            let call_type = try_s!(MutContractCallType::from_script_pubkey(&contract_call_bytes));
-            match call_type {
-                Some(MutContractCallType::Erc20Payment)
-                | Some(MutContractCallType::ReceiverSpend)
-                | Some(MutContractCallType::SenderRefund) => (),
-                _ => continue, // skip not etomic swap contract calls
-            }
-
-            try_s!(check_if_contract_call_completed(&receipt));
+        // CRD ch.51 §51.6G R100: the one polled server ended the wait; the decision is then what two servers agree
+        // on, or what the trusted server shows.
+        if let Some((policy, client)) = self.agreed_swap_reads() {
+            return self
+                .agreed_confirmation(
+                    &policy,
+                    &client,
+                    &qtum_tx,
+                    confirmations,
+                    requires_nota,
+                    wait_until,
+                    check_every,
+                )
+                .await;
         }
-
-        Ok(())
+        let receipts = try_s!(self.utxo.rpc_client.get_transaction_receipts(&tx_hash).compat().await);
+        swap_calls_completed(&qtum_tx, &receipts)
     }
 
     /// Generate `ContractCallOutput` outputs required to send a swap payment.
@@ -685,6 +779,17 @@ impl Qrc20Coin {
     async fn erc20_payment_details_from_tx(&self, qtum_tx: &UtxoTx) -> Result<Erc20PaymentDetails, String> {
         let tx_hash: H256Json = qtum_tx.hash().reversed().into();
         let receipts = try_s!(self.utxo.rpc_client.get_transaction_receipts(&tx_hash).compat().await);
+        self.erc20_payment_details_from_receipts(qtum_tx, receipts)
+    }
+
+    /// The `erc20Payment` call details of `qtum_tx` with the `receipts` a node returned for it.
+    /// Note returns an error if the contract call was excepted.
+    pub(super) fn erc20_payment_details_from_receipts(
+        &self,
+        qtum_tx: &UtxoTx,
+        receipts: Vec<TxReceipt>,
+    ) -> Result<Erc20PaymentDetails, String> {
+        let tx_hash: H256Json = qtum_tx.hash().reversed().into();
 
         for receipt in receipts {
             let output = try_s!(qtum_tx
@@ -889,6 +994,35 @@ impl Qrc20Coin {
     }
 }
 
+/// Whether every swap contract call of `qtum_tx` (`erc20Payment`, `receiverSpend`, `senderRefund`) that `receipts`
+/// cover completed.
+pub(super) fn swap_calls_completed(qtum_tx: &UtxoTx, receipts: &[TxReceipt]) -> Result<(), String> {
+    for receipt in receipts {
+        let output = try_s!(qtum_tx
+            .outputs
+            .get(receipt.output_index as usize)
+            .ok_or(ERRL!("TxReceipt::output_index out of bounds")));
+        let script_pubkey: Script = output.script_pubkey.clone().into();
+        if !is_contract_call(&script_pubkey) {
+            continue;
+        }
+
+        let contract_call_bytes = try_s!(extract_contract_call_from_script(&script_pubkey));
+
+        let call_type = try_s!(MutContractCallType::from_script_pubkey(&contract_call_bytes));
+        match call_type {
+            Some(MutContractCallType::Erc20Payment)
+            | Some(MutContractCallType::ReceiverSpend)
+            | Some(MutContractCallType::SenderRefund) => (),
+            _ => continue, // skip not etomic swap contract calls
+        }
+
+        try_s!(check_if_contract_call_completed(receipt));
+    }
+
+    Ok(())
+}
+
 /// Get `Transfer` events details from [`TxReceipt::logs`].
 fn transfer_events_from_receipt(receipt: &TxReceipt) -> Result<Vec<TransferEventDetails>, String> {
     receipt
@@ -1009,7 +1143,7 @@ pub(super) enum ExpectedSwapEvent<'a> {
 }
 
 impl ExpectedSwapEvent<'_> {
-    fn topic(&self) -> &'static str {
+    pub(super) fn topic(&self) -> &'static str {
         match self {
             ExpectedSwapEvent::ReceiverSpent { .. } => QRC20_RECEIVER_SPENT_TOPIC,
             ExpectedSwapEvent::SenderRefunded => QRC20_SENDER_REFUNDED_TOPIC,
@@ -1154,7 +1288,7 @@ pub(super) fn bound_swap_event_output(
     Err(reasons.join("; "))
 }
 
-fn find_swap_contract_call_with_swap_id(
+pub(super) fn find_swap_contract_call_with_swap_id(
     expected_call_type: MutContractCallType,
     tx: &UtxoTx,
     expected_swap_id: &[u8],
@@ -1231,7 +1365,7 @@ fn check_if_contract_call_completed(receipt: &TxReceipt) -> Result<(), String> {
     }
 }
 
-fn is_swap_event_log(event_topic: &str, log: &LogEntry) -> bool {
+pub(super) fn is_swap_event_log(event_topic: &str, log: &LogEntry) -> bool {
     let mut topics = log.topics.iter();
     match topics.next() {
         // every swap event should have only one topic in log

@@ -53,6 +53,14 @@ or undo, and every change that needs a step from you.
     - **ZCoin and ARRR (Light mode).** The coin's nodes are its `light_wallet_d_servers`, counted by host: list
       servers on two hosts, or set `swap_evidence_node` to one of them. A claim that reveals the swap's secret is
       still taken from one server. Detail: PR #515; CRD ch.39 (the status note at the end of 39.11.4).
+    - QRC20 tokens over Electrum. The contract state of a payment, its receipt, the claim or refund found in the
+      contract-event history and the chain time of the refund are read from two servers on distinct hosts. A token
+      also needs two hosts that serve the contract-event history (`blockchain.contract.event.get_history`), or, with
+      `swap_evidence_node`, needs that server to serve it: each host is asked once after activation, and until enough
+      have answered, the token is refused for swaps with a reason that names the hosts. When checked on 2026-11-23,
+      both QTUM servers of the published coins file answered that request with an error, so with them alone a QRC20
+      token starts no swap: list servers on two distinct hosts that serve it, or set `swap_evidence_node` to a listed
+      server that serves it. Detail: PR #524; CRD ch.51 §51.6G, ch.38.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,

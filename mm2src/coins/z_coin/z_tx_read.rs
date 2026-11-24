@@ -260,6 +260,16 @@ async fn find_spend_over_lightwalletd(
     }
 }
 
+/// The level of the fixed "could not tell; waiting" line of one spend wait: `warn` the first time in the
+/// wait, `info` at every later poll of the same wait. `warned` is the wait's own flag.
+fn spend_wait_log_level(warned: &mut bool) -> log::log_crate::Level {
+    if std::mem::replace(warned, true) {
+        log::log_crate::Level::Info
+    } else {
+        log::log_crate::Level::Warn
+    }
+}
+
 /// `wait_for_tx_spend` for a ZHTLC coin.
 pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, wait_until: u64) -> TransactionFut {
     let tx = try_tx_fus!(read_tx(tx_bytes));
@@ -270,6 +280,7 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
             // An undetermined read is reported when it starts and when what it says changes, not at every poll
             // (CRD ch.51 R100 item 9).
             let mut last_undetermined: Option<String> = None;
+            let mut warned = false;
             loop {
                 match find_spend_over_lightwalletd(&coin, &client, &output, from_block, true).await {
                     Ok(Some((spend, _))) => return Ok(TransactionEnum::from(spend)),
@@ -279,7 +290,11 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
                         if last_undetermined.as_deref() != Some(e.as_str()) {
                             // `e` names the endpoints; the log of the read itself says why, without a host.
                             log::debug!("HTLC spend detection of tx {} could not tell: {}", tx_debug, e);
-                            log::warn!("HTLC spend detection of tx {} could not tell; waiting", tx_debug);
+                            log::log_crate::log!(
+                                spend_wait_log_level(&mut warned),
+                                "HTLC spend detection of tx {} could not tell; waiting",
+                                tx_debug
+                            );
                             last_undetermined = Some(e);
                         }
                     },
@@ -694,6 +709,19 @@ mod tests {
     use kdf_crypto::dhash256;
     use serialization::deserialize;
     use zcash_primitives::transaction::TxVersion;
+
+    /// One spend wait warns once: the first undetermined poll is `warn`, every later poll of the same
+    /// wait is `info`; a new wait warns again.
+    #[test]
+    fn a_spend_wait_warns_only_at_its_first_undetermined_poll() {
+        use log::log_crate::Level;
+        let mut warned = false;
+        let levels: Vec<Level> = (0..4).map(|_| spend_wait_log_level(&mut warned)).collect();
+        assert_eq!(levels, vec![Level::Warn, Level::Info, Level::Info, Level::Info]);
+
+        let mut next_wait = false;
+        assert_eq!(spend_wait_log_level(&mut next_wait), Level::Warn);
+    }
 
     /// Internal-order identifier of the version-4 recording (height 176).
     const V4_TXID_INTERNAL: &str = "c4b5c4ebc84166dcecd6e682586d1fb0af8db05ddd948269b03f4adb4d5a8f81";

@@ -131,6 +131,7 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for Qrc20CoinBuilder<'a> {
             swap_contract_address: self.activation_params.swap_contract_address,
             fallback_swap_contract: self.activation_params.fallback_swap_contract,
             history_abort: HistoryAbort::new(),
+            capability_probes: CapabilityProbes::new(),
         };
         Ok(Qrc20Coin(Arc::new(inner)))
     }
@@ -154,7 +155,11 @@ pub async fn qrc20_coin_from_conf_and_params(
         platform.to_owned(),
         contract_address,
     );
-    Ok(try_s!(builder.build().await))
+    let coin = try_s!(builder.build().await);
+    // CRD ch.51 R100 item 4: a token over two or more Electrum hosts admits swaps once two of them have served the
+    // contract-event history; the probe asks each once, in the background.
+    coin.start_capability_probe();
+    Ok(coin)
 }
 
 impl Qrc20Coin {

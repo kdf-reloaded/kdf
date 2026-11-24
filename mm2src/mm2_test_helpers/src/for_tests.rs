@@ -806,17 +806,20 @@ pub async fn enable_electrum_json(mm: &MarketMakerIt, coin: &str, tx_history: bo
 
 pub async fn enable_qrc20(mm: &MarketMakerIt, coin: &str, urls: &[&str], swap_contract_address: &str) -> Json {
     let servers: Vec<_> = urls.iter().map(|url| json!({ "url": url })).collect();
-    let electrum = mm
-        .rpc(&json! ({
-            "userpass": mm.userpass,
-            "method": "electrum",
-            "coin": coin,
-            "servers": servers,
-            "mm2": 1,
-            "swap_contract_address": swap_contract_address,
-        }))
-        .await
-        .unwrap();
+    let mut request = json! ({
+        "userpass": mm.userpass,
+        "method": "electrum",
+        "coin": coin,
+        "servers": servers,
+        "mm2": 1,
+        "swap_contract_address": swap_contract_address,
+    });
+    // A QRC20 token enabled over a single server trusts that server for its swap reads (CRD ch.51 R100 item 2);
+    // without the field the token would be refused at order placement and at the swap start.
+    if let [server] = urls {
+        request["swap_evidence_node"] = json!(server);
+    }
+    let electrum = mm.rpc(&request).await.unwrap();
     assert_eq!(
         electrum.0,
         StatusCode::OK,
