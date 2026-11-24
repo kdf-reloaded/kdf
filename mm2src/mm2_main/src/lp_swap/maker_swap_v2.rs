@@ -1811,6 +1811,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             };
 
             match search_result {
+                // A taker payment that is found only after an undetermined wait and after the deadline is not
+                // claimed: the maker's secret stays unused and the maker payment is refunded.
+                Ok(Some(FundingTxSpend::TransferredToTakerPayment(_)))
+                    if answered_too_late(undetermined_wait.waited(), now_ms() / 1000, wait_until) =>
+                {
+                    let reason = AbortReason::FundingSpendError("Taker funding not spent in time".into());
+                    break self.abort_to_maker_payment_refund_required(reason, sm).await;
+                },
                 Ok(Some(FundingTxSpend::TransferredToTakerPayment(taker_payment))) => {
                     let taker_payment_bytes: BytesJson = taker_payment.tx_hex().into();
                     if sm.taker_coin.skip_taker_payment_spend_preimage() {
@@ -2428,5 +2436,19 @@ mod tests {
         assert_eq!(source.matches(".search_for_taker_funding_spend(").count(), 1);
         assert_eq!(source.matches(".can_refund_htlc(").count(), 1);
         assert_eq!(source.matches("await_taker_payment_confirmation(sm,").count(), 2);
+    }
+
+    /// CRD ch.52 R18: the search for the funding spend judges a found taker payment by its own wait and the ⅔
+    /// deadline before it is acted on, and the late case comes first.
+    #[test]
+    fn the_funding_spend_search_checks_a_found_taker_payment_for_being_too_late() {
+        let whole_file = include_str!("maker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source = &whole_file[..mod_tests_pos];
+        let guard = "if answered_too_late(undetermined_wait.waited(), now_ms() / 1000, wait_until) =>";
+        let guard_pos = source.find(guard).expect("the search has the late guard");
+        let acted_on = "Ok(Some(FundingTxSpend::TransferredToTakerPayment(taker_payment))) =>";
+        let acted_on_pos = source.find(acted_on).expect("the search acts on a found taker payment");
+        assert!(guard_pos < acted_on_pos);
     }
 }

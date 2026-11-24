@@ -348,18 +348,19 @@ pub(super) enum ConfirmationEnd {
     BoundPassed(String),
 }
 
-/// Whether a confirmation that was read only after undetermined reads came too late to act on: the step's own
-/// deadline for the confirmation has passed. A confirmation read without such a wait is taken as the coin gave it.
-fn confirmed_too_late(waited: bool, now: u64, deadline: u64) -> bool { waited && now > deadline }
+/// Whether an answer that was read only after undetermined reads came too late to act on: the step's own
+/// deadline for it has passed. This holds for a confirmation and for a funding spend that became the taker
+/// payment. An answer read without such a wait is taken as the coin gave it.
+pub(super) fn answered_too_late(waited: bool, now: u64, deadline: u64) -> bool { waited && now > deadline }
 
-/// The reason text of a confirmation that [`confirmed_too_late`] refuses.
+/// The reason text of a confirmation that [`answered_too_late`] refuses.
 const CONFIRMED_AFTER_DEADLINE: &str = "the confirmation was read only after its deadline";
 
 /// Turns the end of a confirmation read into what the step does. `waited` is whether a read of the wait was
 /// undetermined, `now` the time the read ended, and `deadline` the step's own deadline for the confirmation.
 fn confirmation_end(end: ReadEnd<(), String>, waited: bool, now: u64, deadline: u64) -> ConfirmationEnd {
     match end {
-        ReadEnd::Answer(()) if confirmed_too_late(waited, now, deadline) => {
+        ReadEnd::Answer(()) if answered_too_late(waited, now, deadline) => {
             ConfirmationEnd::NotConfirmed(CONFIRMED_AFTER_DEADLINE.to_string())
         },
         ReadEnd::Answer(()) => ConfirmationEnd::Confirmed,
@@ -2019,6 +2020,31 @@ mod tests {
 
         let (end, _, _) = run_read::<CanRefundHtlc, String>(10_000, 10_000, 30, vec![Err(NODE_ERROR.to_string())]);
         assert!(matches!(end, ReadEnd::Failed(_)));
+    }
+
+    /// CRD ch.52 R18: a funding spend that became the taker payment and is found after undetermined searches and
+    /// after the ⅔ deadline is not acted on, so the maker takes its refund path. Found without such a wait, or
+    /// before the deadline, it is acted on as the search gave it.
+    #[test]
+    fn a_taker_payment_found_after_a_wait_and_after_the_deadline_is_too_late() {
+        let deadline = 6_000;
+        assert!(answered_too_late(true, 6_001, deadline));
+        assert!(answered_too_late(true, 13_000, deadline));
+        assert!(!answered_too_late(true, 6_000, deadline));
+        assert!(!answered_too_late(true, 100, deadline));
+        assert!(!answered_too_late(false, 6_001, deadline));
+        assert!(!answered_too_late(false, 13_000, deadline));
+
+        // The same through a scripted search: the wait of the search is what makes a late find too late.
+        let found_late: Vec<Result<Option<u8>, String>> = vec![Err(undetermined_error()), Ok(Some(1))];
+        let (end, _, waited) = run_read(10_000, 6_500, 500, found_late);
+        assert!(matches!(end, ReadEnd::Answer(Some(1))));
+        assert!(answered_too_late(waited, 7_500, deadline));
+
+        let found_at_once: Vec<Result<Option<u8>, String>> = vec![Ok(Some(1))];
+        let (end, _, waited) = run_read(10_000, 6_500, 500, found_at_once);
+        assert!(matches!(end, ReadEnd::Answer(Some(1))));
+        assert!(!answered_too_late(waited, 7_000, deadline));
     }
 
     /// CRD ch.52 R19, R30: a confirmation read keeps its own outcome when it was determined at once; after

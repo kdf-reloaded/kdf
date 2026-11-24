@@ -413,7 +413,11 @@ arrives as a message (chapter 51 R42).
 > then `recover_funds_of_swap`) and carries no error text of a node
 > read; the log has one warning per wait, also without error text. R44
 > applies: the maker payment is on chain. A determined answer keeps the
-> transitions of the table. The notes of this date after R19, R21, R30,
+> transitions of the table, with one exception: a cooperative spend that
+> is found after an undetermined search and after the ⅔ deadline counts
+> as not found in time, and the state goes to
+> `MakerPaymentRefundRequired` as for a reached deadline, the maker's
+> secret unused. The notes of this date after R19, R21, R30,
 > R31 and R34 use the same wait, text and log rules. No sentence of R18
 > is changed.
 
