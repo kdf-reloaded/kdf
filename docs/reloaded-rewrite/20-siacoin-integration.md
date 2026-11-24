@@ -594,6 +594,24 @@ own exact-value check of item 3 against the reference's arithmetic.
 > run. The exact-value check of item 3 was reached and passed on both
 > netids.
 
+> **Status (2026-11-23, as built).** The chain reads of a Sia swap follow
+> ch.51 §51.6G R100. A Sia coin reads one walletd node, so it has no second
+> node: the maintainer decided on 2026-11-22 that Sia takes only the route of a
+> trusted node in this version. The coin trusts its node when
+> `swap_evidence_node` names its `server_url`. Without the field it has fewer
+> than two nodes: a new order or swap with SC is refused (R100 item 4), and a
+> running SC swap waits at its next chain read and logs the fix (R100 item 9).
+> The reads that follow R100 are the confirmation count of a payment, whether
+> the node's own payment was already sent, the search for the spend of a
+> payment, the wait for that spend, and the chain time of the refund gate. When
+> the node does not answer, the read is undetermined and the step waits; it
+> never refunds and never takes "not spent" as proven. A claim proves itself
+> and is taken on the node's one answer also without the field: it spends the
+> payment's HTLC output, satisfies the spend policy that the output's address
+> commits to, and reveals a preimage whose SHA-256 equals the hash in that
+> policy. A refund, and a spend without such a preimage, do not prove
+> themselves. The watcher's spend search is not yet covered.
+
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
 > table keyed to private helpers, no method bodies, and no

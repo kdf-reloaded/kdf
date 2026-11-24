@@ -81,7 +81,7 @@ pub const R100_ADOPTED: &[(SwapFamily, R100Adoption)] = &[
     (SwapFamily::Qrc20, R100Adoption::NotAdopted),
     (SwapFamily::Evm, R100Adoption::Adopted),
     (SwapFamily::Zcoin, R100Adoption::NotAdopted),
-    (SwapFamily::Sia, R100Adoption::NotAdopted),
+    (SwapFamily::Sia, R100Adoption::Adopted),
     (SwapFamily::Tendermint, R100Adoption::SwapsOff),
     (SwapFamily::Tron, R100Adoption::Adopted),
     (SwapFamily::Solana, R100Adoption::SwapsOff),
