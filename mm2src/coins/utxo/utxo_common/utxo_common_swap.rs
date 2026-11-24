@@ -1,6 +1,7 @@
 // utxo_common_swap — HTLC/swap operations, payment scripts, validation
 
 use super::*;
+use crate::swap_evidence::SwapEvidencePolicy;
 use crate::utxo::rpc_clients::SpentOutputInfo;
 use crate::utxo::zip317::{self, Zip317Bytes};
 use crate::{SpendSafeAmountError, SwapKeyDisagreement};
@@ -838,6 +839,7 @@ fn validate_burn_output(tx: &UtxoTx, index: usize, expected_script: &[u8], expec
 pub fn validate_maker_payment<T: UtxoCommonOps>(
     coin: &T,
     input: ValidatePaymentInput,
+    policy: &SwapEvidencePolicy,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let my_public = try_fus!(Public::from_slice(&input.taker_pub));
     let mut tx: UtxoTx = try_fus!(read_utxo_tx(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
@@ -854,12 +856,14 @@ pub fn validate_maker_payment<T: UtxoCommonOps>(
         input.time_lock,
         input.try_spv_proof_until,
         input.confirmations,
+        policy.clone(),
     )
 }
 
 pub fn validate_taker_payment<T: UtxoCommonOps>(
     coin: &T,
     input: ValidatePaymentInput,
+    policy: &SwapEvidencePolicy,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let my_public = try_fus!(Public::from_slice(&input.maker_pub));
     let mut tx: UtxoTx = try_fus!(read_utxo_tx(input.payment_tx.as_slice()).map_err(|e| ERRL!("{:?}", e)));
@@ -876,6 +880,7 @@ pub fn validate_taker_payment<T: UtxoCommonOps>(
         input.time_lock,
         input.try_spv_proof_until,
         input.confirmations,
+        policy.clone(),
     )
 }
 
@@ -885,7 +890,9 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
     my_pub: &[u8],
     other_pub: &[u8],
     secret_hash: &[u8],
+    policy: &SwapEvidencePolicy,
 ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+    let policy = policy.clone();
     let my_public = try_fus!(Public::from_slice(my_pub));
     let script = payment_script(
         time_lock,
@@ -897,6 +904,17 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
     let p2sh = Builder::build_p2sh(&hash.into());
     let script_hash = electrum_script_hash(&p2sh);
     let fut = async move {
+        // CRD ch.51 R100: the already-sent read is agreed on two servers, on the id of the payment found or on none.
+        if let Some(servers) = evidence_nodes(coin.as_ref(), &policy) {
+            return match agreed_payment_sent(&policy, &servers, &hex::encode(script_hash)).await? {
+                Some((_, tx_bytes)) => {
+                    let mut tx: UtxoTx = try_s!(read_utxo_tx(tx_bytes.0.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                    tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
+                    Ok(Some(tx.into()))
+                },
+                None => Ok(None),
+            };
+        }
         match &coin.as_ref().rpc_client {
             UtxoRpcClientEnum::Electrum(client) => {
                 let history = try_s!(client.scripthash_get_history(&hex::encode(script_hash)).compat().await);
@@ -950,6 +968,7 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
 
 pub async fn search_for_swap_tx_spend_my(
     coin: &UtxoCoinFields,
+    policy: &SwapEvidencePolicy,
     time_lock: u32,
     my_pub: &[u8],
     other_pub: &[u8],
@@ -960,6 +979,7 @@ pub async fn search_for_swap_tx_spend_my(
 ) -> Result<Option<FoundSwapTxSpend>, String> {
     search_for_swap_output_spend(
         coin,
+        policy,
         time_lock,
         &try_s!(Public::from_slice(my_pub)),
         &try_s!(Public::from_slice(other_pub)),
@@ -977,6 +997,7 @@ pub async fn search_for_swap_tx_spend_my(
 /// a refund.
 pub async fn search_for_swap_tx_spend_my_on_every_server(
     coin: &UtxoCoinFields,
+    policy: &SwapEvidencePolicy,
     time_lock: u32,
     my_pub: &[u8],
     other_pub: &[u8],
@@ -1017,6 +1038,30 @@ pub async fn search_for_swap_tx_spend_my_on_every_server(
             return None;
         },
     };
+    // CRD ch.51 R100: under an adopted policy the look is the agreed pair search of the single search, and then every
+    // usable server is asked for a proof only (a claim whose secret hashes to the swap's secret hash), so a claim
+    // on a third server is not missed. An undetermined look without a proof is no finding.
+    if let Some(servers) = evidence_nodes(coin, policy) {
+        let spend = match agreed_spend_with_proof_sweep(
+            coin.tx_hash_algo,
+            policy,
+            &servers,
+            &payment,
+            output_index,
+            secret_hash,
+        )
+        .await
+        {
+            Ok(spend) => spend?,
+            Err(e) => {
+                warn!("{}: the look for a spend on the servers: {}", coin.conf.ticker, e);
+                return None;
+            },
+        };
+        return found_swap_spend(spend, coin.tx_hash_algo)
+            .map_err(|e| debug!("{}: spend not classified: {}", coin.conf.ticker, e))
+            .ok();
+    }
     let tx_hash_algo = coin.tx_hash_algo;
     let ticker = coin.conf.ticker.clone();
     client
@@ -1036,6 +1081,7 @@ pub async fn search_for_swap_tx_spend_my_on_every_server(
 
 pub async fn search_for_swap_tx_spend_other(
     coin: &UtxoCoinFields,
+    policy: &SwapEvidencePolicy,
     time_lock: u32,
     my_pub: &[u8],
     other_pub: &[u8],
@@ -1046,6 +1092,7 @@ pub async fn search_for_swap_tx_spend_other(
 ) -> Result<Option<FoundSwapTxSpend>, String> {
     search_for_swap_output_spend(
         coin,
+        policy,
         time_lock,
         &try_s!(Public::from_slice(other_pub)),
         &try_s!(Public::from_slice(my_pub)),
@@ -1122,6 +1169,11 @@ pub(crate) fn extract_secret_from_script_sigs(
     ERR!("Couldn't extract secret")
 }
 
+/// Whether `bytes` are the serialization of `tx`, with or without witness data.
+fn payment_bytes_match(tx: &UtxoTx, bytes: &[u8]) -> bool {
+    serialize(tx).take() == bytes || serialize_with_flags(tx, SERIALIZE_TRANSACTION_WITNESS).take() == bytes
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn validate_payment<T: UtxoCommonOps>(
     coin: T,
@@ -1134,6 +1186,7 @@ pub fn validate_payment<T: UtxoCommonOps>(
     time_lock: u32,
     try_spv_proof_until: u64,
     confirmations: u64,
+    policy: SwapEvidencePolicy,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let amount = try_fus!(sat_from_big_decimal(&amount, coin.as_ref().decimals));
 
@@ -1141,18 +1194,34 @@ pub fn validate_payment<T: UtxoCommonOps>(
     let fut = async move {
         let mut attempts = 0;
         loop {
-            let tx_from_rpc = match coin
-                .as_ref()
-                .rpc_client
-                .get_transaction_bytes(&tx.hash().reversed().into())
-                .compat()
-                .await
-            {
+            let fetched = match evidence_nodes(coin.as_ref(), &policy) {
+                // CRD ch.51 R100: the payment is fetched from two servers, which must agree on whether its bytes
+                // are the provided ones.
+                Some(servers) => {
+                    let provided = tx.clone();
+                    agreed_payment_bytes(&policy, &servers, &tx.hash().reversed().into(), move |bytes| {
+                        payment_bytes_match(&provided, bytes)
+                    })
+                    .await
+                },
+                None => coin
+                    .as_ref()
+                    .rpc_client
+                    .get_transaction_bytes(&tx.hash().reversed().into())
+                    .compat()
+                    .await
+                    .map_err(|e| format!("{:?}", e)),
+            };
+            let tx_from_rpc = match fetched {
                 Ok(t) => t,
                 Err(e) => {
                     if attempts > 2 {
+                        // An undetermined read is surfaced as it is, for the engine to wait on.
+                        if crate::swap_evidence::is_undetermined(&e) {
+                            return Err(e);
+                        }
                         return ERR!(
-                            "Got error {:?} after 3 attempts of getting tx {:?} from RPC",
+                            "Got error {} after 3 attempts of getting tx {:?} from RPC",
                             e,
                             tx.tx_hash()
                         );
@@ -1163,9 +1232,7 @@ pub fn validate_payment<T: UtxoCommonOps>(
                     continue;
                 },
             };
-            if serialize(&tx).take() != tx_from_rpc.0
-                && serialize_with_flags(&tx, SERIALIZE_TRANSACTION_WITNESS).take() != tx_from_rpc.0
-            {
+            if !payment_bytes_match(&tx, &tx_from_rpc.0) {
                 return ERR!(
                     "Provided payment tx {:?} doesn't match tx data from rpc {:?}",
                     tx,
@@ -1220,6 +1287,7 @@ pub fn validate_payment<T: UtxoCommonOps>(
 #[allow(clippy::too_many_arguments)]
 async fn search_for_swap_output_spend(
     coin: &UtxoCoinFields,
+    policy: &SwapEvidencePolicy,
     time_lock: u32,
     first_pub: &Public,
     second_pub: &Public,
@@ -1235,6 +1303,7 @@ async fn search_for_swap_output_spend(
     let spent_script_pubkey = tx.outputs[output_index].script_pubkey.clone();
     search_for_swap_output_spend_of(
         coin,
+        policy,
         time_lock,
         first_pub,
         second_pub,
@@ -1352,6 +1421,7 @@ pub(crate) fn found_swap_spend(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn search_for_swap_output_spend_of(
     coin: &UtxoCoinFields,
+    policy: &SwapEvidencePolicy,
     time_lock: u32,
     first_pub: &Public,
     second_pub: &Public,
@@ -1368,17 +1438,32 @@ pub(crate) async fn search_for_swap_output_spend_of(
         &payment
     ));
 
-    let spend = try_s!(
-        coin.rpc_client
-            .find_output_spend(
-                payment.tx_hash,
-                &payment.spent_script_pubkey,
+    // CRD ch.51 R100: the spend is agreed on two servers (None, claimed by a txid, refunded by a txid); a claim whose
+    // secret hashes to the secret hash proves itself.
+    let spend = match evidence_nodes(coin, policy) {
+        Some(servers) => {
+            agreed_spend(
+                coin.tx_hash_algo,
+                policy,
+                &servers,
+                &payment,
                 output_index,
-                BlockHashOrHeight::Height(search_from_block as i64)
+                Some(secret_hash),
             )
-            .compat()
-            .await
-    );
+            .await?
+        },
+        None => try_s!(
+            coin.rpc_client
+                .find_output_spend(
+                    payment.tx_hash,
+                    &payment.spent_script_pubkey,
+                    output_index,
+                    BlockHashOrHeight::Height(search_from_block as i64)
+                )
+                .compat()
+                .await
+        ),
+    };
     match spend {
         Some(spent_output_info) => found_swap_spend(spent_output_info, coin.tx_hash_algo).map(Some),
         None => Ok(None),
@@ -1557,13 +1642,42 @@ fn refund_eligibility(now: u64, locktime: u64, p2sh_locktime_and_mtp: Option<(u3
     }
 }
 
-pub async fn can_refund_htlc<T>(coin: &T, locktime: u64) -> Result<CanRefundHtlc, MmError<UtxoRpcError>>
+/// The lock time of the transaction that spends an HTLC with the lock time `htlc_locktime`, from the median time
+/// past `mtp` (see [`p2sh_tx_locktime`]).
+fn p2sh_locktime_at(ticker: &str, mtp: u32, htlc_locktime: u32) -> u32 {
+    let lock_time = if ticker == "KMD" {
+        (now_ms() / 1000) as u32 - 3600 + 2 * 777
+    } else {
+        mtp - 1
+    };
+    lock_time.max(htlc_locktime)
+}
+
+pub async fn can_refund_htlc<T>(
+    coin: &T,
+    locktime: u64,
+    policy: &SwapEvidencePolicy,
+) -> Result<CanRefundHtlc, MmError<UtxoRpcError>>
 where
     T: UtxoCommonOps,
 {
     let now = now_ms() / 1000;
     if now < locktime {
         return Ok(refund_eligibility(now, locktime, None));
+    }
+
+    // CRD ch.51 R100: the median time past is read from two servers, each at its own tip, and the servers agree on
+    // whether it is past the lock time. Tips more than the gap apart are undetermined.
+    if let Some(servers) = evidence_nodes(coin.as_ref(), policy) {
+        let ticker = coin.as_ref().conf.ticker.clone();
+        let htlc_locktime = locktime as u32;
+        let mtp = agreed_mtp(coin.as_ref(), policy, &servers, |mtp| {
+            p2sh_locktime_at(&ticker, mtp, htlc_locktime) < mtp
+        })
+        .await
+        .map_err(|e| MmError::new(UtxoRpcError::Internal(e)))?;
+        let p2sh_locktime = p2sh_locktime_at(&ticker, mtp, htlc_locktime);
+        return Ok(refund_eligibility(now, locktime, Some((p2sh_locktime, mtp))));
     }
 
     let mtp = coin.get_current_mtp().await?;

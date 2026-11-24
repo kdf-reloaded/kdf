@@ -619,7 +619,7 @@ fn a_tip_gap_above_the_tolerance_is_undetermined() {
         for server in hosts.both() {
             serve_payment(server, &payment, counterparty(), SENT);
         }
-        let tolerance = client_of(&coin).tip_tolerance_blocks();
+        let tolerance = client_of(&coin).tolerance_blocks();
         set_tip(hosts.b(), 800 + tolerance + 1);
         let error = search(&coin, &payment).await.unwrap_err();
         assert_undetermined(&error, "the tips of the nodes differ too much");
@@ -795,28 +795,21 @@ fn refund_gate_stays_closed_when_one_mtp_is_not_past_the_lock() {
     });
 }
 
+/// The gate is the shared UTXO gate; what is the token's own is the policy it is given. While the capability of
+/// the contract-event history is missing, that policy is `Insufficient` and the gate stays closed.
 #[test]
-fn refund_gate_stays_closed_on_one_answering_host() {
+fn refund_gate_stays_closed_while_the_capability_is_missing() {
     block_on(async {
-        let (hosts, _ctx, coin) = two_host_token().await;
+        let hosts = Hosts::start(2).await;
+        hosts.b().set_error(GET_HISTORY, "unknown method");
+        let ctx = new_ctx();
+        let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
         let locktime = now() - 7200;
-        serve_mtp(hosts.a(), (locktime + 10) as u32);
-        hosts.b().set_error(HEADERS, "no headers");
+        for server in hosts.both() {
+            serve_mtp(server, (locktime + 10) as u32);
+        }
         let error = refund_gate_error(&coin, locktime).await;
         assert_undetermined(&error, "fewer than two nodes answered");
-    });
-}
-
-#[test]
-fn refund_gate_before_the_lock_time_asks_no_host() {
-    block_on(async {
-        let (hosts, _ctx, coin) = two_host_token().await;
-        let asked = hosts.a().requests(HEADERS);
-        assert!(matches!(
-            refund_gate(&coin, now() + 1000).await.unwrap(),
-            CanRefundHtlc::HaveToWait(_)
-        ));
-        assert_eq!(hosts.a().requests(HEADERS), asked);
     });
 }
 

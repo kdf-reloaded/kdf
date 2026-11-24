@@ -6230,11 +6230,20 @@ fn t38_5c_chain_view_one_change_reported_by_two_connections_gives_one_warn() {
         let mut events = client.pool.subscribe_chain_changes();
         join_with_heights(&client, &[&a, &b]).await;
         wait_until("the view", || client.pool.chain_view_for_test().len() == 1).await;
+        // Both connections have taken a tip before the next one is pushed. The view takes a tip from the first
+        // connection that reports it, so waiting for the view alone would let the other connection fall two blocks
+        // behind on a loaded machine, and the pool would then rightly log it as behind and as up to date again.
+        let both_report = |height: u64| {
+            [&a, &b]
+                .iter()
+                .all(|server| snap_of(&client, server).height == Some(height))
+        };
         for n in 1..=3u64 {
             a.set_tip(H + n);
             b.set_tip(H + n);
-            wait_until("the view to take the tip", || {
-                client.pool.chain_check_idle_for_test()
+            wait_until("both connections and the view to take the tip", || {
+                both_report(H + n)
+                    && client.pool.chain_check_idle_for_test()
                     && client.pool.chain_view_for_test().keys().next_back() == Some(&(H + n))
             })
             .await;
@@ -6251,7 +6260,9 @@ fn t38_5c_chain_view_one_change_reported_by_two_connections_gives_one_warn() {
             client.pool.chain_view_for_test().get(&(H + 4)) == Some(&hex::decode(chain_hdr(2, H + 4)).unwrap())
         })
         .await;
-        // Both reports have been dealt with.
+        // Both reports have arrived: the second connection's too, however late it comes on a loaded machine. The
+        // pause after it is spare time for a check that the second report might start; it cannot fail the test.
+        wait_until("both connections to report the new tip", || both_report(H + 4)).await;
         Timer::sleep(0.3).await;
         wait_until("the checks to end", || client.pool.chain_check_idle_for_test()).await;
         assert_eq!(events_in(&mut events), 1);

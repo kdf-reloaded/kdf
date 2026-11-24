@@ -15,7 +15,6 @@
 //! - `Qrc20Coin::agreed_payment_read`, `agreed_payment_of_tx`, `agreed_confirmation`, `agreed_payment_sent`: the
 //!   payment-state reads.
 //! - `Qrc20Coin::agreed_swap_tx_spend`, `wait_for_agreed_payment_spend`: the spend reads.
-//! - `Qrc20Coin::agreed_refund_gate`: the chain time of the refund gate.
 //! - `Qrc20Coin::evidence_policy`, `evidence_refusal`, `start_capability_probe`: the admission rule of the
 //!   contract-event history.
 //!
@@ -40,8 +39,7 @@ use super::swap::{bound_swap_event_output, find_swap_contract_call_with_swap_id,
 use super::*;
 use crate::swap_evidence::{agree_with_tips, distinct_hosts, effective_policy, insufficient_refusal, node_name,
                            Agreement, SwapFamily, Undetermined, UndeterminedReason};
-use crate::utxo::header_layout_fallback::HeaderReadPolicy;
-use crate::{CanRefundHtlc, SwapEvidencePolicy};
+use crate::SwapEvidencePolicy;
 use common::log::{debug, info};
 use std::fmt;
 use std::future::Future as StdFuture;
@@ -195,13 +193,6 @@ fn sent_decision(read: &SentRead) -> SentDecision {
 pub(super) struct ConfirmRead {
     enough: bool,
     completed: Result<(), String>,
-}
-
-/// What two chain times are compared on (CRD ch.51 R100 item 1).
-#[derive(Debug, PartialEq)]
-enum ChainTime {
-    PastTheLock,
-    NotPastTheLock,
 }
 
 /// The servers the capability rule of the contract-event history is about.
@@ -445,7 +436,7 @@ impl Qrc20Coin {
             },
             |answer| proves_itself(&answer.read),
             |answer| Some(answer.height),
-            client.tip_tolerance_blocks(),
+            client.tolerance_blocks(),
         )
         .await
     }
@@ -975,59 +966,6 @@ impl Qrc20Coin {
             Agreement::Undetermined(undetermined) => {
                 let subject = format!("payment {}", hex::encode(swap_id));
                 Err(self.report_undetermined("already-sent check", &subject, &undetermined))
-            },
-        }
-    }
-
-    /// The refund gate under `policy` once the local clock is past `locktime` (CRD ch.51 R100, §51.6E R88): each
-    /// server's median time past at its own tip is read, and the gate opens when two servers (or the trusted one)
-    /// show a time past the lock, whatever the two times are. Servers that agree on a time not past the lock leave
-    /// the gate closed with a wait.
-    ///
-    /// # Errors
-    ///
-    /// The read is undetermined; the gate stays closed.
-    pub(super) async fn agreed_refund_gate(
-        &self,
-        policy: &SwapEvidencePolicy,
-        client: &ElectrumClient,
-        locktime: u64,
-    ) -> Result<CanRefundHtlc, String> {
-        let count = self.utxo.conf.mtp_block_count;
-        let header_policy = HeaderReadPolicy::for_conf(&self.utxo.conf);
-        let header_policy = &header_policy;
-        let attempt = Self::agree_at_own_tips(
-            client,
-            policy,
-            false,
-            |server: String, tip: u64| async move {
-                client
-                    .qrc20_median_time_past_from(&server, tip, count, header_policy.clone())
-                    .await
-            },
-            // Strictly past the lock, as the single-server gate judges it (CRD ch.51 §51.6E R88).
-            |mtp: &u32| match u64::from(*mtp) > locktime {
-                true => ChainTime::PastTheLock,
-                false => ChainTime::NotPastTheLock,
-            },
-            |_| false,
-        )
-        .await;
-        match attempt {
-            Agreement::Agreed {
-                decision:
-                    AtHeight {
-                        decision: ChainTime::PastTheLock,
-                        ..
-                    },
-                ..
-            } => Ok(CanRefundHtlc::CanRefundNow),
-            Agreement::Agreed { answer, .. } => Ok(utxo_common::capped_refund_wait(
-                locktime.saturating_sub(u64::from(answer.read)) + 1,
-            )),
-            Agreement::Undetermined(undetermined) => {
-                let subject = format!("lock time {locktime}");
-                Err(self.report_undetermined("chain time of the refund gate", &subject, &undetermined))
             },
         }
     }

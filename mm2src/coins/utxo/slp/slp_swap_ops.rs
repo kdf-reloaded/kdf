@@ -256,7 +256,14 @@ impl SwapOps for SlpToken {
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        utxo_common::check_if_my_payment_sent(self.platform_coin.clone(), time_lock, my_pub, other_pub, secret_hash)
+        utxo_common::check_if_my_payment_sent(
+            self.platform_coin.clone(),
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            &self.swap_evidence_policy(),
+        )
     }
 
     async fn search_for_swap_tx_spend_my(
@@ -271,6 +278,7 @@ impl SwapOps for SlpToken {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_my(
             self.platform_coin.as_ref(),
+            &self.swap_evidence_policy(),
             time_lock,
             my_pub,
             other_pub,
@@ -294,6 +302,7 @@ impl SwapOps for SlpToken {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_other(
             self.platform_coin.as_ref(),
+            &self.swap_evidence_policy(),
             time_lock,
             my_pub,
             other_pub,
@@ -312,8 +321,9 @@ impl SwapOps for SlpToken {
     /// The refund of an SLP payment is a script spend on the platform chain, so the gate is the platform
     /// coin's (CRD ch.51 §51.6E R88).
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        let policy = self.swap_evidence_policy();
         Box::new(
-            utxo_common::can_refund_htlc(&self.platform_coin, locktime)
+            async move { utxo_common::can_refund_htlc(&self.platform_coin, locktime, &policy).await }
                 .boxed()
                 .map_err(|e| ERRL!("{}", e))
                 .compat(),

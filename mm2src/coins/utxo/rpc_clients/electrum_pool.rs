@@ -1146,9 +1146,6 @@ impl PoolShared {
         self.usable_slots().into_iter().map(|slot| slot.addr.clone()).collect()
     }
 
-    /// The coin's tolerance in blocks (R38.6.4o item 1).
-    pub(super) fn tolerance(&self) -> u64 { self.tolerance }
-
     /// The labels of the usable servers that have served the contract-event history read since the client was built,
     /// and of those that have not, each in priority order.
     pub(super) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>) {
@@ -3240,6 +3237,9 @@ impl PoolShared {
 
     /// Whether the tip checks are on for this coin (R38.6.4o item 11).
     pub(super) fn tip_checks_on(&self) -> bool { self.tip_checks }
+
+    /// The coin's tolerance in blocks (R38.6.4o item 1): the gap within which a server counts as up to date.
+    pub(super) fn tolerance_blocks(&self) -> u64 { self.tolerance }
 
     /// R38.6.4o item 6, status note of 2026-11-21: the server a wait that polls `addr` continues on when `addr` is
     /// now out of date (item 4). The polled server is left out; the choice is the first up-to-date maintained

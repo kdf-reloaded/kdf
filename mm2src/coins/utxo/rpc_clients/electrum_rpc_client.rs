@@ -545,6 +545,35 @@ struct WatchedSubscription {
     skipped_in: Option<u64>,
 }
 
+impl WatchedSubscription {
+    /// Whether a re-placement pass over the session `epoch` sends nothing for this subscription (CRD ch.38, status
+    /// note of 2026-11-23 after the D38.6.4Q.1 status notes, item 1). A subscription that is placed over that
+    /// session already is left alone: a pass places again what a change of session lost and never sends a second
+    /// subscription over the same session. One that has a request in flight in that session is left to the request,
+    /// and the skip is marked.
+    fn left_by_pass(&mut self, epoch: u64) -> bool {
+        if self.placed_in == Some(epoch) {
+            return true;
+        }
+        if self.in_flight.iter().any(|(sent, _)| *sent == epoch) {
+            self.skipped_in = Some(epoch);
+            return true;
+        }
+        false
+    }
+
+    /// The first placement of `owner` failed or was dropped, and `current` is the session epoch now. The owner is
+    /// forgotten, unless the subscription is placed over the current session: a pass over a newer session placed it
+    /// while the request was failing, the server holds it, and the owner keeps it (the same status note, item 2).
+    /// Returns whether no owner remains.
+    fn settle_failed_first_placement(&mut self, owner: ElectrumOwner, current: u64) -> bool {
+        if self.placed_in != Some(current) {
+            self.owners.remove(&owner);
+        }
+        self.owners.is_empty()
+    }
+}
+
 /// Settles a subscription request when it ends, whether it was answered or its future was dropped before the answer
 /// (a dropped request counts as a failed one). `ok` is set once an answer has arrived.
 struct SettleOnDrop<F: FnMut(bool)> {
@@ -656,10 +685,6 @@ impl ElectrumClientImpl {
     /// from it excluded. These are the names a directed request (R38.6.4g) is addressed to.
     pub fn server_addrs(&self) -> Vec<String> { self.pool.usable_addrs() }
 
-    /// The most blocks the tips of two servers may differ by when their answers to a swap read are compared (CRD
-    /// ch.51 R100): the pool's tolerance (R38.6.4o item 1).
-    pub(crate) fn tip_tolerance_blocks(&self) -> u64 { self.pool.tolerance() }
-
     /// The labels (`host:port`) of the usable servers that have served `blockchain.contract.event.get_history` since
     /// this client was built, and of those that have not.
     pub(crate) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>) { self.pool.contract_history_servers() }
@@ -676,6 +701,10 @@ impl ElectrumClientImpl {
     pub(crate) fn end_contract_history_probe(&self, server: &str) {
         self.pool.end_contract_history_probe(server, common::now_float())
     }
+
+    /// The coin's tolerance in blocks, the gap within which the pool judges a server up to date (CRD ch.38
+    /// R38.6.4o item 1). A swap read compares two servers' tips within the same gap (CRD ch.51 R100).
+    pub(crate) fn tolerance_blocks(&self) -> u64 { self.pool.tolerance_blocks() }
 
     /// Get available protocol versions.
     pub fn protocol_version(&self) -> &OrdRange<f32> { &self.protocol_version }
@@ -819,6 +848,13 @@ impl ElectrumClient {
     }
 }
 
+/// The tip height and the median time past one server reports (CRD ch.51 R100).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirectedMtp {
+    pub(crate) tip: u64,
+    pub(crate) mtp: u32,
+}
+
 /// The error answers of one server to the transaction request, in a row, that a confirmation wait counts as a failure
 /// of that server (CRD ch.38 R38.6.4o item 6, status note of 2026-11-21).
 const WAIT_ERROR_ANSWERS_LIMIT: u32 = 3;
@@ -831,6 +867,16 @@ impl ElectrumClient {
     /// `blockchain.block.header` of `server`.
     pub fn blockchain_block_header_from(&self, server: &str, height: u64) -> RpcRes<BytesJson> {
         rpc_func_from!(self, server, "blockchain.block.header", height)
+    }
+
+    /// `blockchain.block.headers` of `server` (CRD ch.51 R100: a directed read of a header window).
+    pub fn blockchain_block_headers_from(
+        &self,
+        server: &str,
+        start_height: u64,
+        count: NonZeroU64,
+    ) -> RpcRes<ElectrumBlockHeadersRes> {
+        rpc_func_from!(self, server, "blockchain.block.headers", start_height, count)
     }
 
     /// `blockchain.headers.subscribe` of `server`: its tip.
@@ -863,7 +909,7 @@ impl ElectrumClient {
     /// The spend of output `vout` of the transaction `tx_hash`, searched on one named server with directed
     /// requests (R38.6.4g): the history of the output's script hash, then each transaction of it, as
     /// [`UtxoRpcOps::find_output_spend`] does through the spread reads.
-    async fn find_output_spend_from(
+    pub(crate) async fn find_output_spend_from(
         &self,
         server: &str,
         tx_hash: H256,
@@ -890,6 +936,60 @@ impl ElectrumClient {
             }
         }
         Ok(None)
+    }
+
+    /// CRD ch.51 R100: the tip height and the median time past of ONE named server. The tip and the headers both
+    /// come from `server`, and the window ends at that server's own tip (never at a lower common height).
+    pub(crate) async fn median_time_past_from(
+        &self,
+        server: &str,
+        count: NonZeroU64,
+        policy: &HeaderReadPolicy,
+    ) -> Result<DirectedMtp, String> {
+        let tip = try_s!(self.blockchain_headers_subscribe_from(server).compat().await).block_height();
+        let from = if tip <= count.get() { 0 } else { tip - count.get() + 1 };
+        let res = try_s!(self.blockchain_block_headers_from(server, from, count).compat().await);
+        if res.count == 0 {
+            return ERR!("the server returned zero headers");
+        }
+        let header_count = try_s!(usize::try_from(res.count));
+        let mut timestamps = read_window_times(
+            policy,
+            &self.coin_ticker,
+            &res.hex.0,
+            header_count,
+            from,
+            now_ms() / 1000,
+            |height| async move {
+                self.blockchain_block_header_from(server, height)
+                    .compat()
+                    .await
+                    .map(|bytes| bytes.0)
+                    .map_to_mm(UtxoRpcError::from)
+            },
+        )
+        .await
+        .map_err(|e| ERRL!("{:?}", e))?;
+        // The window is not empty, so the median exists.
+        let mtp = median(timestamps.as_mut_slice()).ok_or_else(|| ERRL!("no header times"))?;
+        Ok(DirectedMtp { tip, mtp })
+    }
+
+    /// CRD ch.51 R100: the first transaction of the history of `script_hash` (hex) on ONE named server, with its
+    /// id, or `None` when the history is empty.
+    pub(crate) async fn first_history_tx_from(
+        &self,
+        server: &str,
+        script_hash: &str,
+    ) -> Result<Option<(H256Json, BytesJson)>, String> {
+        let history = try_s!(self.scripthash_get_history_from(server, script_hash).compat().await);
+        match history.first() {
+            Some(item) => {
+                let bytes = try_s!(self.transaction_get_from(server, &item.tx_hash).compat().await);
+                Ok(Some((item.tx_hash, bytes)))
+            },
+            None => Ok(None),
+        }
     }
 
     /// CRD ch.51 R31a, status note of 2026-11-21: the search of [`Self::find_output_spend_from`] on every usable
@@ -1295,8 +1395,9 @@ impl ElectrumClient {
     ///
     /// The owner is remembered before the request is sent, so that a removal that runs while it is in flight takes
     /// it out again; an answer that arrives for a forgotten owner adds nothing (CRD ch.38 D38.6.4Q.1 status note,
-    /// item 6). A subscription whose first placement failed is not remembered. One that `owner` placed in the current
-    /// session is not placed twice; one whose placement over a later session failed is sent again by the next
+    /// item 6). A subscription whose first placement failed is not remembered, unless a pass placed it over the
+    /// current session while the request was failing (status note of 2026-11-23, item 2). One that `owner` placed in
+    /// the current session is not placed twice; one whose placement over a later session failed is sent again by the next
     /// request of the same owner. At most one request is sent for each owner, key and session: a second request of
     /// the owner while one is in flight sends nothing. A request that gets no answer blocks its (owner, key) only
     /// until it is answered, until it fails at the end of its call's time budget (a request over a connection is
@@ -1346,12 +1447,14 @@ impl ElectrumClient {
                         }
                     } else if added {
                         // A failed (or abandoned) first placement is not remembered; an owner that was remembered
-                        // before stays.
-                        if let Some(entry) = watched.get_mut(&script_hash) {
-                            entry.owners.remove(&owner);
-                            if entry.owners.is_empty() {
-                                watched.remove(&script_hash);
-                            }
+                        // before stays, and so does one whose subscription a pass placed over the current session
+                        // meanwhile.
+                        let current = self.pool.session_epoch();
+                        if watched
+                            .get_mut(&script_hash)
+                            .is_some_and(|entry| entry.settle_failed_first_placement(owner, current))
+                        {
+                            watched.remove(&script_hash);
                         }
                     }
                     // A re-placement pass skipped the subscription while this request was in flight and left it to it:
@@ -1392,20 +1495,14 @@ impl ElectrumClient {
     /// A subscription that has a request of `subscribe_scripthash` in flight in the current session is left to that
     /// request and counts as neither placed nor failed here: no repeat is asked for it, because a request that fails
     /// asks for a pass itself (a skipped key would otherwise make the pool repeat the pass every second for as long
-    /// as the request hangs).
+    /// as the request hangs). A subscription that is placed over the current session already is left alone too: a
+    /// pass never sends a second subscription over the same session (status note of 2026-11-23, item 1).
     pub async fn resubscribe_watched_scripthashes(&self) -> bool {
         let epoch = self.pool.session_epoch();
         let hashes: Vec<String> = self
             .lock_watched_script_hashes()
             .iter_mut()
-            .filter_map(|(hash, watched)| {
-                if watched.in_flight.iter().any(|(sent, _)| *sent == epoch) {
-                    watched.skipped_in = Some(epoch);
-                    None
-                } else {
-                    Some(hash.clone())
-                }
-            })
+            .filter_map(|(hash, watched)| (!watched.left_by_pass(epoch)).then(|| hash.clone()))
             .collect();
         let mut all_placed = true;
         for script_hash in hashes {
@@ -1478,6 +1575,34 @@ impl ElectrumClient {
     #[cfg(test)]
     pub(crate) fn contract_event_subscriptions(&self) -> usize { self.lock_watched_contract_events().len() }
 
+    /// Tests: whether the script-hash subscription of `script_hash` is placed over the current session.
+    #[cfg(test)]
+    pub(crate) fn script_hash_placed_in_this_session(&self, script_hash: &str) -> bool {
+        let epoch = self.pool.session_epoch();
+        self.lock_watched_script_hashes()
+            .get(script_hash)
+            .is_some_and(|watched| watched.placed_in == Some(epoch))
+    }
+
+    /// Tests: leaves the script-hash subscription of `script_hash` remembered and not placed, as after a placement
+    /// that failed. Nothing is sent and no pass is asked for.
+    #[cfg(test)]
+    pub(crate) fn mark_script_hash_unplaced(&self, script_hash: &str) {
+        if let Some(watched) = self.lock_watched_script_hashes().get_mut(script_hash) {
+            watched.placed_in = None;
+        }
+    }
+
+    /// Tests: the number of contract-event subscriptions that are placed over the current session.
+    #[cfg(test)]
+    pub(crate) fn contract_events_placed_in_this_session(&self) -> usize {
+        let epoch = self.pool.session_epoch();
+        self.lock_watched_contract_events()
+            .iter()
+            .filter(|(_, watched)| watched.placed_in == Some(epoch))
+            .count()
+    }
+
     /// Asks the servers to notify this client when the contract event (`address`, `contract`, `topic`) is logged, and
     /// remembers the subscription for `owner` so that it is placed again over a newly maintained connection (CRD
     /// ch.38 D38.6.4Q.3 status note, item 1; R38.6.4h for the script-hash ones).
@@ -1485,7 +1610,8 @@ impl ElectrumClient {
     /// The owner is remembered before the request is sent, so that a removal that runs while it is in flight takes
     /// the owner out again, and an answer that arrives for a forgotten owner adds nothing (D38.6.4Q.1 status note,
     /// item 6). A failure is the caller's to ignore: nothing here retries, and a subscription whose first placement
-    /// failed is not remembered. A subscription that `owner` placed in the current session is not placed twice: no
+    /// failed is not remembered, unless a pass placed it over the current session while the request was failing
+    /// (status note of 2026-11-23, item 2). A subscription that `owner` placed in the current session is not placed twice: no
     /// request is sent, and the answer is `Json::Null`. One whose placement over a later session failed is sent again
     /// by the next request of the same owner. At most one request is sent for each owner, key and session, and a
     /// retired owner (`forget_owner`) sends and remembers nothing; the answer is `Json::Null` in these cases too. A
@@ -1556,9 +1682,10 @@ impl ElectrumClient {
                         }
                     } else if let (true, Some(i)) = (added, position) {
                         // A failed (or abandoned) first placement is not remembered; an owner that was remembered
-                        // before stays.
-                        watched[i].1.owners.remove(&owner);
-                        if watched[i].1.owners.is_empty() {
+                        // before stays, and so does one whose subscription a pass placed over the current session
+                        // meanwhile.
+                        let current = self.pool.session_epoch();
+                        if watched[i].1.settle_failed_first_placement(owner, current) {
                             watched.remove(i);
                         }
                     }
@@ -1603,20 +1730,14 @@ impl ElectrumClient {
     /// that has a request of `subscribe_contract_event` in flight in the current session is left to that request,
     /// which asks for one pass when it fails and the subscription stays remembered and unplaced (the skip is marked
     /// on the entry, and a failed request without a skip asks for none); that pass, like every other, does not ask
-    /// again.
+    /// again. A subscription that is placed over the current session already is left alone too: a pass never sends a
+    /// second subscription over the same session (status note of 2026-11-23, item 1).
     pub async fn resubscribe_watched_contract_events(&self) {
         let current = self.pool.session_epoch();
         let events: Vec<[Json; 3]> = self
             .lock_watched_contract_events()
             .iter_mut()
-            .filter_map(|(entry, watched)| {
-                if watched.in_flight.iter().any(|(sent, _)| *sent == current) {
-                    watched.skipped_in = Some(current);
-                    None
-                } else {
-                    Some(entry.clone())
-                }
-            })
+            .filter_map(|(entry, watched)| (!watched.left_by_pass(current)).then(|| entry.clone()))
             .collect();
         for entry in events {
             let epoch = self.pool.session_epoch();
@@ -2665,6 +2786,92 @@ pub(crate) fn address_balance_from_unspent_map(
     unspents.iter().fold(BigDecimal::from(0), |sum, unspent| {
         sum + big_decimal_from_sat_unsigned(unspent.value, decimals)
     })
+}
+
+#[cfg(test)]
+mod watched_subscription_tests {
+    use super::{ElectrumOwner, WatchedSubscription};
+    use std::collections::HashSet;
+
+    fn remembered_by(owner: ElectrumOwner) -> WatchedSubscription {
+        WatchedSubscription {
+            owners: HashSet::from([owner]),
+            ..WatchedSubscription::default()
+        }
+    }
+
+    /// A pass sends nothing for a subscription that is placed over the session of the pass, and marks no skip for
+    /// it; it places one again that was placed over an older session, or whose last placement failed.
+    #[test]
+    fn a_pass_leaves_a_subscription_placed_over_its_session_and_places_the_others() {
+        let owner = ElectrumOwner::new_unique();
+        let mut placed = WatchedSubscription {
+            placed_in: Some(7),
+            ..remembered_by(owner)
+        };
+        assert!(placed.left_by_pass(7));
+        assert_eq!(placed.skipped_in, None);
+        // The session changed: the server holds nothing over the new one.
+        assert!(!placed.left_by_pass(8));
+
+        let mut unplaced = remembered_by(owner);
+        assert!(!unplaced.left_by_pass(7));
+    }
+
+    /// A pass leaves a subscription to a request in flight in its session and marks the skip; a request that waits
+    /// on from an older session does not keep the pass from placing it.
+    #[test]
+    fn a_pass_leaves_a_subscription_to_a_request_in_flight_in_its_session_only() {
+        let owner = ElectrumOwner::new_unique();
+        let mut watched = WatchedSubscription {
+            in_flight: vec![(7, owner)],
+            ..remembered_by(owner)
+        };
+        assert!(watched.left_by_pass(7));
+        assert_eq!(watched.skipped_in, Some(7));
+
+        let mut older = WatchedSubscription {
+            in_flight: vec![(7, owner)],
+            ..remembered_by(owner)
+        };
+        assert!(!older.left_by_pass(8));
+        assert_eq!(older.skipped_in, None);
+    }
+
+    /// A failed first placement forgets its owner, and the subscription with the last owner.
+    #[test]
+    fn a_failed_first_placement_forgets_the_owner_of_an_unplaced_subscription() {
+        let (owner, other) = (ElectrumOwner::new_unique(), ElectrumOwner::new_unique());
+        let mut watched = remembered_by(owner);
+        assert!(watched.settle_failed_first_placement(owner, 7));
+        assert!(watched.owners.is_empty());
+
+        // Placed over an older session only: the server holds nothing over the current one.
+        let mut older = WatchedSubscription {
+            placed_in: Some(7),
+            ..remembered_by(owner)
+        };
+        assert!(older.settle_failed_first_placement(owner, 8));
+
+        // Another owner stays, and the subscription with it.
+        let mut shared = remembered_by(owner);
+        shared.owners.insert(other);
+        assert!(!shared.settle_failed_first_placement(owner, 7));
+        assert_eq!(shared.owners, HashSet::from([other]));
+    }
+
+    /// A failed first placement keeps its owner when a pass placed the subscription over the current session while
+    /// the request was failing: the server holds it, so the client goes on remembering it.
+    #[test]
+    fn a_failed_first_placement_keeps_the_owner_of_a_subscription_placed_over_the_current_session() {
+        let owner = ElectrumOwner::new_unique();
+        let mut watched = WatchedSubscription {
+            placed_in: Some(8),
+            ..remembered_by(owner)
+        };
+        assert!(!watched.settle_failed_first_placement(owner, 8));
+        assert_eq!(watched.owners, HashSet::from([owner]));
+    }
 }
 
 #[cfg(test)]

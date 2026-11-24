@@ -294,23 +294,18 @@ impl SwapOps for Qrc20Coin {
         self.extract_secret_impl(secret_hash, spend_tx)
     }
 
-    /// The gate reads the QTUM chain's median time past (CRD ch.51 §51.6E R88).
-    ///
-    /// Under an adopted swap-evidence policy the median time past is read from single servers and the gate opens only
-    /// when two of them (or the trusted server) show a time past the lock; an undetermined read is an error, never an
-    /// open gate (CRD ch.51 §51.6G R100).
+    /// The gate reads the QTUM chain's median time past (CRD ch.51 §51.6E R88). Under the token's swap-evidence
+    /// policy, which carries the capability rule of the contract-event history, the shared UTXO gate reads it from
+    /// two servers that must agree, or from the trusted one; an undetermined read is an error, never an open gate
+    /// (CRD ch.51 §51.6G R100).
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
-        let fut = async move {
-            if now_ms() / 1000 >= locktime {
-                if let Some((policy, client)) = self.agreed_swap_reads() {
-                    return self.agreed_refund_gate(&policy, &client, locktime).await;
-                }
-            }
-            utxo_common::can_refund_htlc(self, locktime)
-                .await
+        let policy = self.swap_evidence_policy();
+        Box::new(
+            async move { utxo_common::can_refund_htlc(self, locktime, &policy).await }
+                .boxed()
                 .map_err(|e| ERRL!("{}", e))
-        };
-        Box::new(fut.boxed().compat())
+                .compat(),
+        )
     }
 
     fn negotiate_swap_contract_addr(

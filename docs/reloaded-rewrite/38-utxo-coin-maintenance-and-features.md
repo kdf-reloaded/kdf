@@ -3949,6 +3949,40 @@ evaluated.
 > `CoinIsNotElectrum` and an inactive ticker for `NoSuchCoin`; its routing in the
 > dispatcher has no test of its own.
 
+*Status note (2026-11-23, clean side; Reloaded-original). The swap evidence of
+CRD ch.51 R100 for UTXO coins, BCH and QTUM over Electrum.* It changes no
+sentence above.
+
+1. *Directed reads.* Each read a swap step rests on under R100 goes to one named
+   server and reads that server at its own tip: the counterparty's payment by
+   its txid (compared byte for byte), the first history entry of the payment
+   address (whether the own payment was sent), the spend of the payment's output
+   (the searches and the wait for a spend), the confirmations of a payment, and
+   the median time past of the refund gate, whose tip and headers come from the
+   same server.
+2. *Which servers.* The pool's usable servers, in the pool's own order of
+   preference, one per host. Each is named by host and port only.
+3. *Tip gap.* Two servers whose tips lie further apart than the pool's own
+   tolerance in blocks, the one that judges a server up to date, leave the
+   refund gate's read undetermined when they agree.
+4. *A claim proves itself from the payment.* A spend of the payment's output
+   proves itself when it takes the claim path, its redeem script hashes to the
+   payment output's script hash, and its secret satisfies the hash that redeem
+   script commits to. Where the swap's secret hash is known, the secret is
+   checked against it. Such a claim is taken from one server.
+5. *Confirmations.* The wait for confirmations stays on one server as before;
+   its final decision that a payment has enough confirmations must then be
+   agreed by two servers, or given by the trusted node.
+6. *Native mode.* A coin served by its own daemon reads that daemon as before
+   (ch.51 R100 item 6).
+7. *Every server.* The look on every server that follows a failed spend search
+   is, under R100, the agreed search of a pair, and in addition every other
+   server is asked for a claim that proves itself; such a claim is taken from
+   any server, and every other answer of those servers is ignored. When the
+   pair's search is undetermined and no server shows such a claim, the look
+   finds no spend, and the step stays undetermined and waits: the answer is
+   never "not spent" (ch.51 R100 item 3).
+
 ### 38.6.4Q QTUM and QRC20 over Electrum: clients, methods and shared wallet state
 
 > **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
@@ -4462,6 +4496,28 @@ per instance as follows.
 4. *First placement.* A subscription whose first placement for an instance
    failed or was dropped is not remembered for that instance.
 
+*Status note (2026-11-23, Reloaded-original).* Two rules of the note above
+are refined; both are defect fixes of this tree.
+
+1. *Placing again.* The placing again after a change of session leaves
+   alone a subscription that is already placed over the current session. It
+   places again only what the change of session lost, and it never sends a
+   second subscription over the same session. For a contract-event
+   subscription this keeps the bound of the D38.6.4Q.3 status note, item 2:
+   at most once per session. Before, a placing again that came after an
+   instance's own request over the same session sent the subscription a
+   second time.
+2. *First placement that failed.* Item 4 above holds unless the subscription
+   is placed over the current session when the request fails or is dropped.
+   That happens when the session changes while the request waits and the
+   placing again places the subscription over the new session. The server
+   then holds the subscription, so the instance stays remembered for it: a
+   later request of that instance sends nothing, and the subscription is
+   placed again after later changes of session. Before, the instance was
+   forgotten, and the server held a subscription that the client no longer
+   remembered. The rule of item 2 above, that the placing again is asked for
+   once more after a request it left alone has failed, is unchanged.
+
 D38.6.4Q.2 *(Open, 2026-11-15.)* **An error answer to a QTUM contract read.**
 In the reference it is final (R38.6.4Q.3), and one server's error fails an
 activation, deregisters the token or fails a balance read although other
@@ -4933,10 +4989,10 @@ token's swap paths were read only for the set of methods they send
 >    probe ends when the token that started it is disabled or dropped, and
 >    none starts for a disabled token. One log line names the hosts that
 >    have and have not served the request.
-> 7. *Pending.* The directed header-list read and the per-server median
->    time past live with the QRC20 reads for now. The directed reads are to
->    be deduplicated onto the directed reads of the UTXO Electrum client,
->    and the refund gate onto that client's refund gate, once those land.
+> 7. *Refund gate.* The refund gate of a token is the gate of the UTXO
+>    Electrum client (chapter 51 §51.6G R100), given the token's policy of
+>    item 5: the median time past is read through that client's directed
+>    header reads, and the tips are compared within its tolerance.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
@@ -6788,3 +6844,16 @@ R38.8.6 **Tests (two-direction, observable).**
   forbidden corpus, from the maintainer's decision, the cleared text of
   chapter 49 §49.2.2 and this repository's code. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Defect fix (2026-11-23), Reloaded-original, clean side -- status note
+  after the status note of 2026-11-22 on the subscriptions of a shared client
+  (the placing again leaves a subscription placed over the current session
+  alone; a failed first placement keeps an instance whose subscription was
+  placed over the current session meanwhile).* Written by a session that
+  never read the forbidden corpus, from this repository's code and its tests.
+  It takes no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.
+- *Clean-side addition of 2026-11-23 (PR #522):* the status note before
+  §38.6.4Q on the swap evidence of ch.51 R100 for UTXO coins, BCH and QTUM over
+  Electrum. Reloaded-original; written from this repository's code and tests;
+  no reference input and no forbidden-class input; no sentence of the chapter
+  is changed.
