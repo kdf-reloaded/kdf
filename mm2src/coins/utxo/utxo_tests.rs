@@ -16142,7 +16142,6 @@ mod swap_spend_by_consumed_input_tests {
             &SECRET_HASH,
             PaymentOutputs {
                 tx_hash: payment.hash(),
-                output0_script_pubkey: payment.outputs[0].script_pubkey.clone(),
                 spent_script_pubkey: payment.outputs[0].script_pubkey.clone(),
             },
             0,
