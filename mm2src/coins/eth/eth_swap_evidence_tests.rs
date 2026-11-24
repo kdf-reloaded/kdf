@@ -1024,7 +1024,7 @@ fn a_trusted_node_without_a_port_in_its_address_is_matched() {
 }
 
 #[test]
-fn an_undetermined_read_is_reported_once_at_warn_with_what_each_node_said() {
+fn an_undetermined_read_is_warned_about_once_without_a_node_and_logged_in_full_at_debug() {
     let capturing = install_log_capture();
     // A lock time of its own gives this test a payment id no other test reports.
     let fx = Fixture::new(EthCoinType::Eth, &[A, B], listed(&[A, B]), TIME_LOCK + 77);
@@ -1046,10 +1046,27 @@ fn an_undetermined_read_is_reported_once_at_warn_with_what_each_node_said() {
         .into_iter()
         .filter(|line| line.contains(&id) && line.contains("is undetermined"))
         .collect();
-    assert_eq!(
-        lines.iter().filter(|line| line.starts_with("WARN")).count(),
-        1,
-        "{lines:?}"
+    let warnings: Vec<&String> = lines.iter().filter(|line| line.starts_with("WARN")).collect();
+    assert_eq!(warnings.len(), 1, "{lines:?}");
+    // The warning names the kind and the fixes, and no node: no host, no label, no answer of a node.
+    let warning = warnings[0];
+    assert!(
+        warning.contains("the nodes disagree") && warning.contains("swap_evidence_node"),
+        "{warning}"
     );
-    assert!(lines.iter().any(|line| line.starts_with("DEBUG")), "{lines:?}");
+    for node_text in ["a.example", "b.example", "8545", "payment state 1", "payment state 0"] {
+        assert!(
+            !warning.contains(node_text),
+            "the warning carries `{node_text}`: {warning}"
+        );
+    }
+    // What each node said is in the DEBUG lines, one per undetermined read.
+    let debug_lines: Vec<&String> = lines.iter().filter(|line| line.starts_with("DEBUG")).collect();
+    assert_eq!(debug_lines.len(), 2, "{lines:?}");
+    for line in debug_lines {
+        assert!(
+            line.contains("a.example:8545: payment state 1") && line.contains("b.example:8545: payment state 0"),
+            "{line}"
+        );
+    }
 }

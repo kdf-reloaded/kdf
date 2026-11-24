@@ -476,22 +476,29 @@ impl EthCoin {
 
     /// The error text of an undetermined read: the core's text of it ([`Undetermined::to_err_string`], which the
     /// swap engine recognizes by `swap_evidence::is_undetermined`), with the coin, the read, its subject and the
-    /// two ways to fix it (CRD ch.51 R100 item 9). The first time a read of `subject` is undetermined the text is
-    /// logged at WARN, afterwards at DEBUG.
+    /// two ways to fix it (CRD ch.51 R100 item 9).
+    ///
+    /// The text, which names what each node said, is logged at DEBUG every time. The first time a read of `subject`
+    /// is undetermined, one WARN line is written as well. It names the kind only: the coin, the read, its subject,
+    /// the reason and the two fixes, and no node, since a refund wait's warning carries no node identity
+    /// (CRD ch.51 R80, R81).
     fn report_undetermined(&self, read: &str, subject: &str, undetermined: &Undetermined) -> String {
-        let text = format!(
-            "[{}] the {} of {} is undetermined and the step waits: {}. To fix it, add a node on another host to \
-             the coin's node list or set swap_evidence_node",
+        const FIXES: &str = "To fix it, add a node on another host to the coin's node list or set swap_evidence_node";
+        let head = format!(
+            "[{}] the {} of {} is undetermined and the step waits",
             self.ticker(),
             read,
-            subject,
-            undetermined.to_err_string()
+            subject
         );
+        let text = format!("{head}: {}. {FIXES}", undetermined.to_err_string());
         if first_report(format!("{}:{}:{}", self.ticker(), read, subject)) {
-            warn!("{}", text);
-        } else {
-            debug!("{}", text);
+            let kind = Undetermined {
+                reason: undetermined.reason,
+                per_node: Vec::new(),
+            };
+            warn!("{head}: {}. {FIXES}", kind.to_err_string());
         }
+        debug!("{}", text);
         text
     }
 
