@@ -24,6 +24,7 @@ mod utxo_common_read;
 mod utxo_common_spv;
 mod utxo_common_swap;
 mod utxo_common_tx;
+mod utxo_swap_agreement;
 
 pub use utxo_common_hd::*;
 pub use utxo_common_helpers::*;
@@ -31,6 +32,7 @@ pub use utxo_common_history::*;
 pub use utxo_common_read::*;
 pub use utxo_common_spv::*;
 pub use utxo_common_swap::*;
+#[allow(unused_imports)] pub(crate) use utxo_swap_agreement::*;
 // `UtxoMergeParams` (defined in `utxo_common_tx`) is also reachable through the
 // broad `pub(crate) use super::*;` shared-import re-export below, so rustc flags
 // an ambiguous glob re-export. Both paths resolve to the single definition, so

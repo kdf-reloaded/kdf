@@ -33,7 +33,21 @@ or undo, and every change that needs a step from you.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
     - TRON (TRX, TRC20). TRON swaps stay off in this release; when they are switched on, their chain reads already
       follow the rule. Detail: PR #509; CRD ch.21 §21.11D.
-    - Sia (SC). A Sia coin reads one walletd node, so there is no second node to add: set `swap_evidence_node` to
+    - **UTXO coins over Electrum, BCH and QTUM.** Affected: every such coin whose Electrum server list names fewer
+      than two hosts (two ports of one host count as one), for example a coin activated with a single server. It no
+      longer starts a swap: `setprice`, `buy`, `sell` and the swap start refuse it, and its running swaps wait at a
+      refund or claim step until two servers agree. To fix it, add a server on a second host to the activation
+      request, or set `swap_evidence_node` to one of the coin's servers to trust that server alone. A coin in native
+      mode reads your own daemon and needs nothing. Detail: PR #522; CRD ch.38 status note of 2026-11-23 before
+      §38.6.4Q.
+    - **EVM coins and ERC20 tokens.** Affected: every such coin whose nodes that passed the activation probe name
+      fewer than two hosts, for example a coin activated with a single node URL; a legacy ERC20 `enable` counts its
+      own node list, and a token enabled with its platform counts the platform's. It no longer starts a swap:
+      `setprice`, `buy`, `sell` and the swap start refuse it, and its running swaps wait at a refund or claim step
+      until two nodes agree. To fix it, add a node on a second host to the activation request, or set
+      `swap_evidence_node` to one of the coin's nodes to trust that node alone. Detail: PR #512; CRD ch.51 §51.6G
+      R100.
+    - **Sia (SC).** A Sia coin reads one walletd node, so there is no second node to add: set `swap_evidence_node` to
       the walletd `server_url` to trust it. Without the field, SC orders are refused and a running SC swap waits at
       its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
   - Detail: PR #508; CRD ch.51 §51.6G R100.

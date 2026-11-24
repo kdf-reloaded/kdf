@@ -281,8 +281,9 @@ impl SwapOps for Qrc20Coin {
 
     /// The gate reads the QTUM chain's median time past (CRD ch.51 §51.6E R88).
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        let policy = self.swap_evidence_policy();
         Box::new(
-            utxo_common::can_refund_htlc(self, locktime)
+            async move { utxo_common::can_refund_htlc(self, locktime, &policy).await }
                 .boxed()
                 .map_err(|e| ERRL!("{}", e))
                 .compat(),

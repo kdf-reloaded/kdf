@@ -262,6 +262,8 @@ where
     Box::new(fut.boxed().compat())
 }
 
+use crate::swap_evidence::SwapEvidencePolicy;
+
 pub fn wait_for_confirmations(
     coin: &UtxoCoinFields,
     tx: &[u8],
@@ -269,17 +271,45 @@ pub fn wait_for_confirmations(
     requires_nota: bool,
     wait_until: u64,
     check_every: u64,
+    policy: &SwapEvidencePolicy,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let mut tx: UtxoTx = try_fus!(read_utxo_tx(tx).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
-    coin.rpc_client.wait_for_confirmations(
-        tx.hash().reversed().into(),
+    let txid: H256Json = tx.hash().reversed().into();
+    let single_server_wait = coin.rpc_client.wait_for_confirmations(
+        txid,
         tx.expiry_height,
         confirmations as u32,
         requires_nota,
         wait_until,
         check_every,
-    )
+    );
+    // CRD ch.51 R100: the wait polls one server; its final decision "confirmations at least required" is taken
+    // from two servers that agree. A decision that is not confirmed or not determined is asked again every
+    // `check_every` seconds until `wait_until`.
+    let Some(servers) = evidence_nodes(coin, policy) else {
+        return single_server_wait;
+    };
+    let policy = policy.clone();
+    let fut = async move {
+        single_server_wait.compat().await?;
+        loop {
+            let last = match agreed_confirmed(&policy, &servers, &txid, confirmations as u32, requires_nota).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => ERRL!(
+                    "the servers agree that {:?} is not confirmed {} times",
+                    txid,
+                    confirmations
+                ),
+                Err(e) => e,
+            };
+            if now_ms() / 1000 > wait_until {
+                return Err(last);
+            }
+            Timer::sleep(check_every as f64).await;
+        }
+    };
+    Box::new(fut.boxed().compat())
 }
 
 pub fn wait_for_output_spend(
@@ -288,6 +318,7 @@ pub fn wait_for_output_spend(
     output_index: usize,
     from_block: u64,
     wait_until: u64,
+    policy: &SwapEvidencePolicy,
 ) -> TransactionFut {
     let mut tx: UtxoTx = try_tx_fus!(read_utxo_tx(tx_bytes).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.tx_hash_algo;
@@ -302,12 +333,14 @@ pub fn wait_for_output_spend(
         output_index,
         from_block,
         wait_until,
+        policy,
     )
 }
 
 /// The wait loop of [`wait_for_output_spend`] over the facts about the watched output alone, so a coin
 /// that reads its transactions with a different parser (ZHTLC, CRD ch.39 R39.11.16a) shares the loop.
 /// `tx_debug` is only the transaction's rendering for the timeout message.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wait_for_output_spend_of(
     coin: &UtxoCoinFields,
     tx_hash: H256,
@@ -316,21 +349,36 @@ pub(crate) fn wait_for_output_spend_of(
     output_index: usize,
     from_block: u64,
     wait_until: u64,
+    policy: &SwapEvidencePolicy,
 ) -> TransactionFut {
     let client = coin.rpc_client.clone();
     let tx_hash_algo = coin.tx_hash_algo;
+    // CRD ch.51 R100: the spend that ends the wait is agreed on two servers. No secret hash is known here, so a claim
+    // proves itself from the payment alone (its redeem script is the payment's and its secret satisfies the hash in
+    // that script); a read that is undetermined waits for the next round.
+    let servers = evidence_nodes(coin, policy);
+    let policy = policy.clone();
+    let payment = PaymentOutputs {
+        tx_hash,
+        output0_script_pubkey: script_pubkey.clone(),
+        spent_script_pubkey: script_pubkey.clone(),
+    };
     let fut = async move {
         loop {
-            match client
-                .find_output_spend(
-                    tx_hash,
-                    &script_pubkey,
-                    output_index,
-                    BlockHashOrHeight::Height(from_block as i64),
-                )
-                .compat()
-                .await
-            {
+            let found = match &servers {
+                Some(servers) => agreed_spend(tx_hash_algo, &policy, servers, &payment, output_index, None).await,
+                None => client
+                    .find_output_spend(
+                        tx_hash,
+                        &script_pubkey,
+                        output_index,
+                        BlockHashOrHeight::Height(from_block as i64),
+                    )
+                    .compat()
+                    .await
+                    .map_err(|e| format!("{:?}", e)),
+            };
+            match found {
                 Ok(Some(spent_output_info)) => {
                     let mut tx = spent_output_info.spending_tx;
                     tx.tx_hash_algo = tx_hash_algo;
