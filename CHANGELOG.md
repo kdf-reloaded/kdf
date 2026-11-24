@@ -924,7 +924,7 @@ the previous version used. The safe way:
   reason whose text names the read, the coin and the fix: add a server on a second host to the coin's node list or
   set `swap_evidence_node`, then run `recover_funds_of_swap`. The log has one warning per wait. A read that fails
   in another way is handled as the step's own rule says.
-  - Detail: PR #N; CRD ch.52 R18, R19, R21, R30, R31, R34 and their status notes of 2026-11-24, ch.51 §51.6G R100.
+  - Detail: PR #533; CRD ch.52 R18, R19, R21, R30, R31, R34 and their status notes of 2026-11-24, ch.51 §51.6G R100.
 
 ### Fixed
 
