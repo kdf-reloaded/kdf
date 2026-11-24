@@ -13,8 +13,8 @@
 //! the wait loop) that part is the shared one, called with the facts this module read.
 
 use super::z_electrum_fallback::{FallbackError, SentAnswer, SpendAnswer};
-use super::z_lightwalletd::{DetectionLog, FundingFound, HtlcIndexError, LightwalletdClient, OutputRef, SentOutcome,
-                            SpendOutcome};
+use super::z_lightwalletd::{txid_display_to_internal, DetectionLog, FundingFound, HtlcIndexError, LightwalletdClient,
+                            OutputRef, SentOutcome, SpendOutcome};
 use super::ZCoin;
 use crate::utxo::rpc_clients::{UtxoRpcClientEnum, UtxoRpcClientOps};
 use crate::utxo::utxo_common::{self, classify_swap_spend, ensure_payment_pays_htlc, payment_script, PaymentOutputs,
@@ -127,7 +127,7 @@ pub(crate) fn validate_payment(
     let fut = async move {
         let mut attempts = 0;
         let tx_from_rpc = loop {
-            match coin.as_ref().rpc_client.get_transaction_bytes(&txid).compat().await {
+            match fetch_payment_bytes(&coin, &txid).await {
                 Ok(t) => break t,
                 Err(e) => {
                     if attempts > 2 {
@@ -139,17 +139,39 @@ pub(crate) fn validate_payment(
                 },
             }
         };
-        if payment_bytes != tx_from_rpc.0 {
+        if payment_bytes != tx_from_rpc {
             return ERR!(
-                "Provided payment tx {:?} doesn't match tx data from rpc {:?}",
+                "Provided payment tx {:?} doesn't match tx data from rpc {}",
                 txid,
-                tx_from_rpc
+                hex::encode(&tx_from_rpc)
             );
         }
 
         check_payment_output(&tx, expected_script_pubkey.as_slice(), amount)
     };
     Box::new(fut.boxed().compat())
+}
+
+/// The bytes of the payment `txid` (display order) as the chain serves them. Over lightwalletd under R100, two
+/// endpoints on distinct hosts must return the same bytes, or the trusted endpoint answers alone; an undetermined
+/// read is an error the caller retries (CRD ch.51 R100 item 3).
+async fn fetch_payment_bytes(coin: &ZCoin, txid: &H256Json) -> Result<Vec<u8>, String> {
+    if let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client {
+        if client.0.reads_agree() {
+            return client
+                .0
+                .payment_agreed(txid_display_to_internal(txid))
+                .await
+                .map(|raw| raw.data);
+        }
+    }
+    coin.as_ref()
+        .rpc_client
+        .get_transaction_bytes(txid)
+        .compat()
+        .await
+        .map(|bytes| bytes.0)
+        .map_err(|e| format!("{:?}", e))
 }
 
 /// `wait_for_confirmations` for a ZHTLC coin. A ZHTLC coin has no notarized confirmation count, so
@@ -219,16 +241,32 @@ async fn find_spend_over_lightwalletd(
         Ok(SpendOutcome::NotSpent(_)) => Ok(None),
         Ok(SpendOutcome::Spent(spend)) => Ok(Some((read_tx(&spend.tx)?, spend.input_index))),
         // No admitted endpoint gave an answer: the activation's Electrum servers are asked (R39.11.25).
-        Err(e) => match coin
-            .z_fields
-            .electrum_fallback
-            .spend(client.backend(), output, &log)
-            .await
-        {
-            Ok(SpendAnswer::Spent { tx, input_index }) => Ok(Some((tx, input_index))),
-            Ok(SpendAnswer::NotSpent) => Ok(None),
-            Err(fallback) => Err(report_undetermined(coin, e, fallback)),
+        Err(e) => {
+            // Two lightwalletd endpoints that differ end the attempt: no other pair is asked in it (R100 item 8).
+            let asked = if e.is_disagreement() {
+                Err(FallbackError::NotConfigured)
+            } else {
+                coin.z_fields
+                    .electrum_fallback
+                    .spend(client.backend(), output, &log)
+                    .await
+            };
+            match asked {
+                Ok(SpendAnswer::Spent { tx, input_index }) => Ok(Some((tx, input_index))),
+                Ok(SpendAnswer::NotSpent) => Ok(None),
+                Err(fallback) => Err(report_undetermined(coin, e, fallback)),
+            }
         },
+    }
+}
+
+/// The level of the fixed "could not tell; waiting" line of one spend wait: `warn` the first time in the
+/// wait, `info` at every later poll of the same wait. `warned` is the wait's own flag.
+fn spend_wait_log_level(warned: &mut bool) -> log::log_crate::Level {
+    if std::mem::replace(warned, true) {
+        log::log_crate::Level::Info
+    } else {
+        log::log_crate::Level::Warn
     }
 }
 
@@ -239,12 +277,27 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
         let output = try_tx_fus!(watched_output(&tx, DEFAULT_SWAP_VOUT));
         let (coin, client, tx_debug) = (coin.clone(), client.clone(), format!("{:?}", tx));
         let fut = async move {
+            // An undetermined read is reported when it starts and when what it says changes, not at every poll
+            // (CRD ch.51 R100 item 9).
+            let mut last_undetermined: Option<String> = None;
+            let mut warned = false;
             loop {
                 match find_spend_over_lightwalletd(&coin, &client, &output, from_block, true).await {
                     Ok(Some((spend, _))) => return Ok(TransactionEnum::from(spend)),
-                    Ok(None) => (),
+                    Ok(None) => last_undetermined = None,
                     // Undetermined is not a spend and not an answer: keep waiting, say why.
-                    Err(e) => log::error!("HTLC spend detection of tx {} could not tell: {}", tx_debug, e),
+                    Err(e) => {
+                        if last_undetermined.as_deref() != Some(e.as_str()) {
+                            // `e` names the endpoints; the log of the read itself says why, without a host.
+                            log::debug!("HTLC spend detection of tx {} could not tell: {}", tx_debug, e);
+                            log::log_crate::log!(
+                                spend_wait_log_level(&mut warned),
+                                "HTLC spend detection of tx {} could not tell; waiting",
+                                tx_debug
+                            );
+                            last_undetermined = Some(e);
+                        }
+                    },
                 }
                 if common::now_ms() / 1000 > wait_until {
                     return TX_PLAIN_ERR!(
@@ -329,11 +382,17 @@ pub(crate) fn check_payment_pays_htlc(
     let tx = read_tx(payment_tx)?;
     let payment = PaymentOutputs {
         tx_hash: txid_internal(&tx),
-        output0_script_pubkey: script_pubkey_at(&tx, 0)?.into(),
         spent_script_pubkey: script_pubkey_at(&tx, DEFAULT_SWAP_VOUT)?.into(),
     };
     Ok(
-        match ensure_payment_pays_htlc(time_lock, first_pub, second_pub, secret_hash, &payment) {
+        match ensure_payment_pays_htlc(
+            time_lock,
+            first_pub,
+            second_pub,
+            secret_hash,
+            &payment,
+            DEFAULT_SWAP_VOUT,
+        ) {
             Ok(()) => HtlcPaymentCheck::Pays,
             Err(_) => HtlcPaymentCheck::PaysAnotherScript {
                 payment_id: format!("{:?}", payment.tx_hash.reversed()),
@@ -363,15 +422,20 @@ pub(crate) async fn search_for_swap_tx_spend(
     search_from_block: u64,
 ) -> Result<Option<FoundSwapTxSpend>, String> {
     let tx = read_tx(tx)?;
-    let output0_script_pubkey = script_pubkey_at(&tx, 0)?;
     let spent_script_pubkey = script_pubkey_at(&tx, DEFAULT_SWAP_VOUT)?;
     let payment = PaymentOutputs {
         tx_hash: txid_internal(&tx),
-        output0_script_pubkey: output0_script_pubkey.into(),
         spent_script_pubkey: spent_script_pubkey.into(),
     };
     if let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client {
-        ensure_payment_pays_htlc(time_lock, first_pub, second_pub, secret_hash, &payment)?;
+        ensure_payment_pays_htlc(
+            time_lock,
+            first_pub,
+            second_pub,
+            secret_hash,
+            &payment,
+            DEFAULT_SWAP_VOUT,
+        )?;
         let output = watched_output(&tx, DEFAULT_SWAP_VOUT)?;
         return match find_spend_over_lightwalletd(coin, client, &output, search_from_block, false).await? {
             None => Ok(None),
@@ -464,31 +528,74 @@ async fn recorded_own_send(coin: &ZCoin, client: &LightwalletdClient, script_pub
     if unmined.is_empty() {
         return None;
     }
-    let tip = match client.0.confirmation_tip().await {
-        Ok(tip) => tip,
-        Err(e) => {
-            log::warn!(
-                "ZCoin {}: the tip could not be read to judge the expiry of the recorded send ({}); \
-                 asking the servers",
-                ticker,
-                e
-            );
-            return None;
-        },
-    };
-    let tx = unmined.into_iter().find(|tx| {
-        let expiry = u64::from(u32::from(tx.expiry_height()));
-        expiry == 0 || tip <= expiry
-    })?;
+    let (tx, tip) = counting_unmined(client, ticker, unmined).await?;
     log::info!(
         "ZCoin {}: the wallet's own send record answers the already-sent question: payment {} \
-         (unmined, within its expiry height {} at tip {}); no address query made",
+         (unmined, not past its expiry height {}{}); no address query made",
         ticker,
         hex::encode(txid_display(&tx).0),
         u32::from(tx.expiry_height()),
-        tip
+        tip.map_or_else(String::new, |tip| format!(" at tip {}", tip))
     );
     Some(tx)
+}
+
+/// The first of the unmined recorded sends that still counts, and the tip that judged it when the routed tip did.
+async fn counting_unmined(
+    client: &LightwalletdClient,
+    ticker: &str,
+    unmined: Vec<ZTransaction>,
+) -> Option<(ZTransaction, Option<u64>)> {
+    // Under R100 a record stops counting only when two hosts (or the trusted endpoint) put the tip past its expiry
+    // height, each reading its own tip. One answer, a disagreement, an `Insufficient` coin or a silent trusted node
+    // keep the record counting.
+    if client.0.reads_agree() {
+        let mut counting = None;
+        for tx in unmined {
+            let expiry = u64::from(u32::from(tx.expiry_height()));
+            let expired = expiry != 0
+                && match client.0.tip_past_agreed(expiry).await {
+                    Ok(past) => past,
+                    Err(e) => {
+                        // `e` names the endpoints; it is for the debug log only.
+                        log::debug!(
+                            "ZCoin {}: the expiry of the recorded send could not be decided: {}",
+                            ticker,
+                            e
+                        );
+                        log::warn!(
+                            "ZCoin {}: the expiry of the recorded send {} could not be decided; the record still counts",
+                            ticker,
+                            hex::encode(txid_display(&tx).0)
+                        );
+                        false
+                    },
+                };
+            if !expired {
+                counting = Some(tx);
+                break;
+            }
+        }
+        Some((counting?, None))
+    } else {
+        let tip = match client.0.confirmation_tip().await {
+            Ok(tip) => tip,
+            Err(e) => {
+                log::warn!(
+                    "ZCoin {}: the tip could not be read to judge the expiry of the recorded send ({}); \
+                     asking the servers",
+                    ticker,
+                    e
+                );
+                return None;
+            },
+        };
+        let tx = unmined.into_iter().find(|tx| {
+            let expiry = u64::from(u32::from(tx.expiry_height()));
+            expiry == 0 || tip <= expiry
+        })?;
+        Some((tx, Some(tip)))
+    }
 }
 
 /// `check_if_my_payment_sent` for a ZHTLC coin. Yields the Zcash-transaction arm.
@@ -529,12 +636,16 @@ pub(crate) fn check_if_my_payment_sent(
                     // No admitted endpoint gave an answer: the activation's Electrum servers are asked
                     // (R39.11.25); their "sent" carries the payment itself.
                     Err(e) => {
-                        return match coin
-                            .z_fields
-                            .electrum_fallback
-                            .already_sent(client.backend(), &script_pubkey, &log)
-                            .await
-                        {
+                        // Two lightwalletd endpoints that differ end the attempt (R100 item 8).
+                        let asked = if e.is_disagreement() {
+                            Err(FallbackError::NotConfigured)
+                        } else {
+                            coin.z_fields
+                                .electrum_fallback
+                                .already_sent(client.backend(), &script_pubkey, &log)
+                                .await
+                        };
+                        return match asked {
                             Ok(SentAnswer::Sent(tx)) => Ok(Some(TransactionEnum::from(tx))),
                             Ok(SentAnswer::NotSent) => Ok(None),
                             Err(fallback) => Err(report_undetermined(&coin, e, fallback)),
@@ -547,7 +658,12 @@ pub(crate) fn check_if_my_payment_sent(
                         Ok(Some(TransactionEnum::from(read_tx(&tx)?)))
                     },
                     SentOutcome::Sent(FundingFound::Listed { txid }) => {
-                        let raw = client.0.transaction(txid).await.map_err(|e| {
+                        let raw = if client.0.reads_agree() {
+                            client.0.payment_agreed(txid).await
+                        } else {
+                            client.0.transaction(txid).await.map_err(|e| e.to_string())
+                        }
+                        .map_err(|e| {
                             format!("the payment was found but its transaction could not be fetched: {}", e)
                         })?;
                         Ok(Some(TransactionEnum::from(read_tx(&raw.data)?)))
@@ -593,6 +709,19 @@ mod tests {
     use kdf_crypto::dhash256;
     use serialization::deserialize;
     use zcash_primitives::transaction::TxVersion;
+
+    /// One spend wait warns once: the first undetermined poll is `warn`, every later poll of the same
+    /// wait is `info`; a new wait warns again.
+    #[test]
+    fn a_spend_wait_warns_only_at_its_first_undetermined_poll() {
+        use log::log_crate::Level;
+        let mut warned = false;
+        let levels: Vec<Level> = (0..4).map(|_| spend_wait_log_level(&mut warned)).collect();
+        assert_eq!(levels, vec![Level::Warn, Level::Info, Level::Info, Level::Info]);
+
+        let mut next_wait = false;
+        assert_eq!(spend_wait_log_level(&mut next_wait), Level::Warn);
+    }
 
     /// Internal-order identifier of the version-4 recording (height 176).
     const V4_TXID_INTERNAL: &str = "c4b5c4ebc84166dcecd6e682586d1fb0af8db05ddd948269b03f4adb4d5a8f81";
@@ -886,7 +1015,6 @@ mod tests {
         let tx = read_tx(&bytes_of(LIVE_PAYMENT_HEX.trim())).expect("the live payment is readable");
         PaymentOutputs {
             tx_hash: txid_internal(&tx),
-            output0_script_pubkey: script_pubkey_at(&tx, 0).expect("output 0").into(),
             spent_script_pubkey: script_pubkey_at(&tx, DEFAULT_SWAP_VOUT).expect("output 0").into(),
         }
     }
@@ -903,6 +1031,7 @@ mod tests {
             &live_key(LIVE_MAKER_KEY),
             &bytes_of(LIVE_SECRET_HASH),
             &payment,
+            DEFAULT_SWAP_VOUT,
         );
         assert_eq!(verdict, Ok(()));
     }
@@ -919,6 +1048,7 @@ mod tests {
             &live_key(LIVE_MAKER_KEY),
             &bytes_of(LIVE_SECRET_HASH),
             &payment,
+            DEFAULT_SWAP_VOUT,
         )
         .unwrap_err();
         assert!(
@@ -1085,5 +1215,139 @@ mod tests {
             }
         }
         assert_eq!((v4, v6), (1, 18));
+    }
+}
+
+/// R100: the expiry of the wallet's own unmined send record is judged by the endpoints' own tips.
+#[cfg(test)]
+mod own_send_expiry_tests {
+    use super::*;
+    use crate::swap_evidence::SwapEvidencePolicy;
+    use crate::z_coin::z_coin_wallet_db::tests::test_params_with_zip212;
+    use crate::z_coin::z_lightwalletd::tests::{info, test_addressing, FakeTransport, Script};
+    use crate::z_coin::z_lightwalletd::{LightwalletdBackend, EXPIRY_MAX_TIP_GAP_BLOCKS};
+    use std::sync::Arc;
+
+    /// The expiry height every fixture transaction of this crate carries.
+    const EXPIRY: u64 = 1_000_000;
+
+    fn record() -> ZTransaction {
+        let mut b = Vec::new();
+        b.extend_from_slice(&0x8000_0004u32.to_le_bytes());
+        b.extend_from_slice(&0x892F_2085u32.to_le_bytes());
+        b.push(1);
+        b.extend_from_slice(&[0x11; 32]);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&[1, 0x51]);
+        b.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+        b.push(1);
+        b.extend_from_slice(&1_000u64.to_le_bytes());
+        b.extend_from_slice(&[1, 0x51]);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&(EXPIRY as u32).to_le_bytes());
+        b.extend_from_slice(&0i64.to_le_bytes());
+        b.extend_from_slice(&[0, 0, 0]);
+        let tx = read_tx(&b).expect("a readable transaction");
+        assert_eq!(u64::from(u32::from(tx.expiry_height())), EXPIRY);
+        tx
+    }
+
+    fn endpoint(tip: u64) -> Script {
+        let mut server_info = info(u32::from(BranchId::Canopy), tip);
+        server_info.sapling_activation_height = 2;
+        Script {
+            info: Some(Ok(server_info)),
+            tip_floor: Some(tip),
+            ..Script::default()
+        }
+    }
+
+    /// A client whose endpoints `a`, `b` are at the given tips (`None`: no tip answers) under `policy`.
+    fn rig(tips: &[Option<u64>], policy: SwapEvidencePolicy) -> (LightwalletdClient, Arc<FakeTransport>) {
+        let transport = Arc::new(FakeTransport::default());
+        let names = ["a", "b"];
+        for (name, tip) in names.iter().zip(tips) {
+            let mut script = endpoint(tip.unwrap_or(EXPIRY));
+            if tip.is_none() {
+                script.tip_floor = None;
+            }
+            transport.serve(name, script);
+        }
+        let backend = LightwalletdBackend::new(
+            transport.clone(),
+            names.iter().take(tips.len()).map(|s| (*s).to_owned()).collect(),
+            crate::z_coin::z_lightwalletd::AdmissionPolicy::from_params(&test_params_with_zip212()),
+            test_addressing(),
+        )
+        .with_swap_evidence(policy);
+        (LightwalletdClient(Arc::new(backend)), transport)
+    }
+
+    fn two_nodes() -> SwapEvidencePolicy {
+        SwapEvidencePolicy::TwoNodes {
+            hosts: vec!["a".to_owned(), "b".to_owned()],
+        }
+    }
+
+    async fn counts(client: &LightwalletdClient) -> bool {
+        counting_unmined(client, "ARRR", vec![record()]).await.is_some()
+    }
+
+    #[tokio::test]
+    async fn the_record_stops_counting_only_when_two_hosts_put_the_tip_past_its_expiry() {
+        let (client, _) = rig(&[Some(EXPIRY + 1), Some(EXPIRY + 2)], two_nodes());
+        assert!(!counts(&client).await);
+    }
+
+    /// Two hosts whose tips are further apart than the gap are no pair: the record keeps counting.
+    #[tokio::test]
+    async fn two_hosts_beyond_the_tip_gap_keep_the_record_counting() {
+        let (client, _) = rig(
+            &[Some(EXPIRY + 1), Some(EXPIRY + 1 + EXPIRY_MAX_TIP_GAP_BLOCKS + 1)],
+            two_nodes(),
+        );
+        assert!(counts(&client).await);
+    }
+
+    #[tokio::test]
+    async fn one_host_past_and_one_not_keeps_the_record_counting() {
+        let (client, _) = rig(&[Some(EXPIRY + 1), Some(EXPIRY - 1)], two_nodes());
+        assert!(counts(&client).await, "a disagreement leaves the answer 'sent'");
+    }
+
+    #[tokio::test]
+    async fn one_answering_host_keeps_the_record_counting() {
+        let (client, _) = rig(&[Some(EXPIRY + 1), None], two_nodes());
+        assert!(counts(&client).await);
+    }
+
+    #[tokio::test]
+    async fn two_hosts_that_are_not_past_the_expiry_keep_the_record_counting() {
+        let (client, _) = rig(&[Some(EXPIRY - 1), Some(EXPIRY)], two_nodes());
+        assert!(counts(&client).await);
+    }
+
+    #[tokio::test]
+    async fn a_trusted_endpoint_past_the_expiry_stops_the_record_counting_and_a_silent_one_does_not() {
+        let trusted = SwapEvidencePolicy::Trusted { node: "a".to_owned() };
+        let (client, _) = rig(&[Some(EXPIRY + 1), Some(EXPIRY - 1)], trusted.clone());
+        assert!(!counts(&client).await);
+
+        let (client, _) = rig(&[None, Some(EXPIRY + 1)], trusted);
+        assert!(counts(&client).await, "no other endpoint's tip is taken in its place");
+    }
+
+    #[tokio::test]
+    async fn an_insufficient_coin_keeps_the_record_counting_and_reads_no_tip() {
+        let (client, transport) = rig(&[Some(EXPIRY + 1)], SwapEvidencePolicy::Insufficient { hosts: 1 });
+        assert!(counts(&client).await);
+        assert_eq!(transport.called("a", "tip"), 0);
+    }
+
+    /// Without adoption the routed tip judges, as before.
+    #[tokio::test]
+    async fn without_adoption_the_routed_tip_judges() {
+        let (client, _) = rig(&[Some(EXPIRY + 1)], SwapEvidencePolicy::NotAdopted);
+        assert!(!counts(&client).await);
     }
 }

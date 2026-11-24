@@ -685,6 +685,23 @@ impl ElectrumClientImpl {
     /// from it excluded. These are the names a directed request (R38.6.4g) is addressed to.
     pub fn server_addrs(&self) -> Vec<String> { self.pool.usable_addrs() }
 
+    /// The labels (`host:port`) of the usable servers that have served `blockchain.contract.event.get_history` since
+    /// this client was built, and of those that have not.
+    pub(crate) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>) { self.pool.contract_history_servers() }
+
+    /// The servers a probe of `blockchain.contract.event.get_history` may ask now, each marked as being probed until
+    /// [`Self::end_contract_history_probe`]: a server is given at most once per `min_gap_secs` and never while a probe
+    /// of it runs. With `only`, a server label (`host:port`), no other server is given.
+    pub(crate) fn claim_contract_history_probes(&self, min_gap_secs: f64, only: Option<&str>) -> Vec<String> {
+        self.pool
+            .claim_contract_history_probes(common::now_float(), min_gap_secs, only)
+    }
+
+    /// Ends the probe of `server`.
+    pub(crate) fn end_contract_history_probe(&self, server: &str) {
+        self.pool.end_contract_history_probe(server, common::now_float())
+    }
+
     /// The coin's tolerance in blocks, the gap within which the pool judges a server up to date (CRD ch.38
     /// R38.6.4o item 1). A swap read compares two servers' tips within the same gap (CRD ch.51 R100).
     pub(crate) fn tolerance_blocks(&self) -> u64 { self.pool.tolerance_blocks() }

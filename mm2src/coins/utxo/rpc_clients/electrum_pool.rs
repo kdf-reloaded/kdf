@@ -444,9 +444,33 @@ pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
 /// it (CRD ch.38 D38.6.4Q.2 status note, item 1). The third method is spelled as the server spells it.
 const ERROR_FAILOVER_METHODS: &[&str] = &[
     "blockchain.contract.call",
-    "blockchain.contract.event.get_history",
+    CONTRACT_EVENT_HISTORY_METHOD,
     "blochchain.transaction.get_receipt",
 ];
+
+/// The Qtum contract-event history read. A QRC20 token admits swaps over two hosts only when two hosts have served
+/// it in this session (CRD ch.51 R100 item 4, CRD ch.38 clean-side addition of 2026-11-23).
+const CONTRACT_EVENT_HISTORY_METHOD: &str = "blockchain.contract.event.get_history";
+
+/// Whether `response` is a result answer to a single [`CONTRACT_EVENT_HISTORY_METHOD`] request: a list, which may be
+/// empty. An error answer, `history too large` among them, is not.
+fn served_contract_event_history(request: &JsonRpcRequestEnum, response: &JsonRpcResponseEnum) -> bool {
+    let (JsonRpcRequestEnum::Single(request), JsonRpcResponseEnum::Single(response)) = (request, response) else {
+        return false;
+    };
+    request.method == CONTRACT_EVENT_HISTORY_METHOD && response.error.is_null() && response.result.is_array()
+}
+
+/// What the pool knows about one server and the contract-event history read.
+#[derive(Default)]
+struct ContractHistoryState {
+    /// The server answered the read with a result at least once since the client was built.
+    served: bool,
+    /// A probe of the server is running.
+    probing: bool,
+    /// When the last probe of the server ended (seconds since the epoch).
+    probed_at: Option<f64>,
+}
 
 /// The failure of a server that answered `request` with a JSON-RPC error, when that answer moves the request on
 /// (D38.6.4Q.2 status note): `request` is a single request of [`ERROR_FAILOVER_METHODS`], `response` is an error
@@ -599,6 +623,7 @@ struct SlotState {
     /// The header request over the server's connection has ended, answered or not (the activation waits for it, R38.6.4o
     /// item 12).
     header_resolved: bool,
+    contract_history: ContractHistoryState,
 }
 
 /// One server of the pool. `id` is its place in the list of the pool and never changes. `rank` is its place
@@ -644,6 +669,7 @@ impl ServerSlot {
                 quality: ServerQuality::default(),
                 probing: false,
                 header_resolved: false,
+                contract_history: ContractHistoryState::default(),
             }),
         }
     }
@@ -1118,6 +1144,47 @@ impl PoolShared {
     /// The addresses of the servers not removed from the pool, in priority order.
     pub(super) fn usable_addrs(&self) -> Vec<String> {
         self.usable_slots().into_iter().map(|slot| slot.addr.clone()).collect()
+    }
+
+    /// The labels of the usable servers that have served the contract-event history read since the client was built,
+    /// and of those that have not, each in priority order.
+    pub(super) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>) {
+        let (served, not_served): (Vec<_>, Vec<_>) = self
+            .usable_slots()
+            .into_iter()
+            .partition(|slot| slot.state().contract_history.served);
+        let labels = |slots: Vec<Arc<ServerSlot>>| slots.into_iter().map(|slot| slot.label.clone()).collect();
+        (labels(served), labels(not_served))
+    }
+
+    /// Takes the usable servers a probe of the contract-event history read may ask now: those that have not served
+    /// it, have no probe running and whose last probe ended at least `min_gap_secs` before `now`. With `only`, a
+    /// server name (`host:port`, lowercased), no other server is taken. Each is marked as being probed until
+    /// [`Self::end_contract_history_probe`].
+    pub(super) fn claim_contract_history_probes(&self, now: f64, min_gap_secs: f64, only: Option<&str>) -> Vec<String> {
+        let mut claimed = Vec::new();
+        for slot in self.usable_slots() {
+            if only.map_or(false, |label| crate::swap_evidence::node_name(&slot.label) != label) {
+                continue;
+            }
+            let mut state = slot.state();
+            let history = &mut state.contract_history;
+            let due = history.probed_at.map_or(true, |at| now - at >= min_gap_secs);
+            if !history.served && !history.probing && due {
+                history.probing = true;
+                claimed.push(slot.addr.clone());
+            }
+        }
+        claimed
+    }
+
+    /// Ends the probe of `addr` that [`Self::claim_contract_history_probes`] started.
+    pub(super) fn end_contract_history_probe(&self, addr: &str, now: f64) {
+        if let Some(slot) = self.slot_by_addr(addr) {
+            let mut state = slot.state();
+            state.contract_history.probing = false;
+            state.contract_history.probed_at = Some(now);
+        }
     }
 
     /// The ceiling of the maintained set; a ceiling above the list length behaves as the list length.
@@ -3315,6 +3382,9 @@ impl PoolShared {
         match session.request(request, timeout).await {
             Ok(response) => {
                 self.record_sample(slot, session.id(), (now_float() - started) * 1000.);
+                if served_contract_event_history(request, &response) {
+                    slot.state().contract_history.served = true;
+                }
                 Ok(response)
             },
             Err(e) => {

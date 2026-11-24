@@ -4445,6 +4445,8 @@ async fn test_qrc20_history_impl() {
             "method": "electrum",
             "coin": "QRC20",
             "servers": qtum_electrums(),
+            // One server: it is trusted for the swap reads (CRD ch.51 R100 item 2).
+            "swap_evidence_node": qtum_electrums()[0]["url"],
             "mm2": 1,
             "tx_history": true,
             "swap_contract_address": "0xd362e096e873eb7907e205fadc6175c6fec7bc44",

@@ -10,9 +10,7 @@ use crate::utxo::rpc_clients::electrum_stub_server::StubBehavior;
 use crate::utxo::utxo_swap_evidence_tests::{adopted_fields, show_chain, show_history, start_servers, txid_hex, Swap,
                                             SECRET, TIME_LOCK};
 use crate::{CanRefundHtlc, MarketCoinOps, SwapOps};
-use chain::{OutPoint, TransactionInput};
 use common::block_on;
-use script::Builder;
 use serialization::serialize;
 
 const TWO_BCHD: [&str; 2] = ["https://bchd1.example", "https://bchd2.example"];
@@ -33,31 +31,6 @@ async fn can_refund(token: &SlpToken) -> Result<bool, String> {
         .compat()
         .await
         .map(|gate| matches!(gate, CanRefundHtlc::CanRefundNow))
-}
-
-/// The payment of an SLP swap: the OP_RETURN at output 0 and the HTLC at output 1.
-fn slp_payment(swap: &Swap) -> UtxoTx {
-    let mut payment = swap.payment.clone();
-    payment.outputs.insert(0, TransactionOutput {
-        value: 0,
-        script_pubkey: Builder::default().push_opcode(script::Opcode::OP_RETURN).into_bytes(),
-    });
-    payment
-}
-
-/// A spend of output 1 of `payment` by the claim path.
-fn slp_claim(swap: &Swap, payment: &UtxoTx) -> UtxoTx {
-    let mut claim = swap.spend(Some(SECRET));
-    claim.inputs = vec![TransactionInput {
-        previous_output: OutPoint {
-            hash: payment.hash(),
-            index: 1,
-        },
-        script_sig: claim.inputs[0].script_sig.clone(),
-        sequence: 0,
-        script_witness: vec![],
-    }];
-    claim
 }
 
 #[test]
@@ -182,20 +155,15 @@ fn slp_refund_gate_below_two_bchd_hosts_never_opens() {
 fn slp_wait_for_spend_takes_an_agreed_claim() {
     block_on(async {
         let servers = start_servers(2).await;
-        let swap = Swap::new();
-        let payment = slp_payment(&swap);
-        let claim = slp_claim(&swap, &payment);
-        let mut shown = Swap {
-            payment: payment.clone(),
-            ..swap
-        };
-        shown.payment = payment.clone();
-        show_history(&servers[0], &shown, Some(&claim));
-        show_history(&servers[1], &shown, Some(&claim));
+        // The payment of an SLP swap: the OP_RETURN at output 0 and the HTLC at output 1; the claim spends output 1.
+        let swap = Swap::slp_shaped();
+        let claim = swap.spend(Some(SECRET));
+        show_history(&servers[0], &swap, Some(&claim));
+        show_history(&servers[1], &swap, Some(&claim));
         let token = slp_token(adopted_fields(&[&servers[0], &servers[1]], None), &TWO_BCHD);
         let wait_until = common::now_ms() / 1000 + 60;
         let taken = token
-            .wait_for_tx_spend(&serialize(&payment).take(), wait_until, 0, &None)
+            .wait_for_tx_spend(&serialize(&swap.payment).take(), wait_until, 0, &None)
             .compat()
             .await
             .expect("the claim is taken");

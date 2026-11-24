@@ -40,6 +40,27 @@ or undo, and every change that needs a step from you.
       request, or set `swap_evidence_node` to one of the coin's servers to trust that server alone. A coin in native
       mode reads your own daemon and needs nothing. Detail: PR #522; CRD ch.38 status note of 2026-11-23 before
       §38.6.4Q.
+    - **EVM coins and ERC20 tokens.** Affected: every such coin whose nodes that passed the activation probe name
+      fewer than two hosts, for example a coin activated with a single node URL; a legacy ERC20 `enable` counts its
+      own node list, and a token enabled with its platform counts the platform's. It no longer starts a swap:
+      `setprice`, `buy`, `sell` and the swap start refuse it, and its running swaps wait at a refund or claim step
+      until two nodes agree. To fix it, add a node on a second host to the activation request, or set
+      `swap_evidence_node` to one of the coin's nodes to trust that node alone. Detail: PR #512; CRD ch.51 §51.6G
+      R100.
+    - **Sia (SC).** A Sia coin reads one walletd node, so there is no second node to add: set `swap_evidence_node` to
+      the walletd `server_url` to trust it. Without the field, SC orders are refused and a running SC swap waits at
+      its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
+    - **ZCoin and ARRR (Light mode).** The coin's nodes are its `light_wallet_d_servers`, counted by host: list
+      servers on two hosts, or set `swap_evidence_node` to one of them. A claim that reveals the swap's secret is
+      still taken from one server. Detail: PR #515; CRD ch.39 (the status note at the end of 39.11.4).
+    - QRC20 tokens over Electrum. The contract state of a payment, its receipt, the claim or refund found in the
+      contract-event history and the chain time of the refund are read from two servers on distinct hosts. A token
+      also needs two hosts that serve the contract-event history (`blockchain.contract.event.get_history`), or, with
+      `swap_evidence_node`, needs that server to serve it: each host is asked once after activation, and until enough
+      have answered, the token is refused for swaps with a reason that names the hosts. When checked on 2026-11-23,
+      both QTUM servers of the published coins file answered that request with an error, so with them alone a QRC20
+      token starts no swap: list servers on two distinct hosts that serve it, or set `swap_evidence_node` to a listed
+      server that serves it. Detail: PR #524; CRD ch.51 §51.6G, ch.38.
     - **SLP tokens.** Affected: every SLP token whose BCH activation request lists fewer than two bchd servers on
       different hosts. It no longer starts a swap, and its running swaps wait at a refund or claim step. The check of
       the other side's token payment asks two bchd hosts, and the swap's other chain reads follow BCH. To fix it, add
@@ -1322,6 +1343,11 @@ the previous version used. The safe way:
 
 #### Legacy swaps
 
+- **The claim or refund of an SLP swap payment is found again.** When the node looked for the claim or refund of
+  an SLP token's swap payment, before a refund or in `recover_funds_of_swap`, it compared the wrong output of the
+  payment with the swap's script, so every such search stopped with an error (since 0.3.0-beta.1). It now compares
+  the output that holds the swap's script: output 1 for SLP tokens, and output 0 for other UTXO coins, as before.
+  Detail: PR #534; CRD ch.51 R90.
 - **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;

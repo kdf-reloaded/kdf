@@ -102,6 +102,60 @@ pub struct Qrc20CoinFields {
     /// Ends the history collector of this instance at once when the token is disabled (CRD ch.38 D38.6.4Q.5 status
     /// note, R38.6.4Q.10 item 1).
     pub(crate) history_abort: HistoryAbort,
+    /// The running probes of the contract-event history that this instance started (CRD ch.51 R100 item 4).
+    pub(crate) capability_probes: CapabilityProbes,
+}
+
+/// The probes of the contract-event history that one token instance started. They end when the token is disabled
+/// ([`CapabilityProbes::end`]) and when the instance is dropped, and none starts afterwards.
+#[derive(Debug)]
+pub(crate) struct CapabilityProbes {
+    /// The handles of the probes started; `None` once the instance was disabled.
+    handles: std::sync::Mutex<Option<Vec<futures::future::AbortHandle>>>,
+}
+
+impl CapabilityProbes {
+    /// The most handles kept; a probe is bounded by the request timeout, so older ones have ended.
+    const KEPT: usize = 8;
+
+    pub(crate) fn new() -> CapabilityProbes {
+        CapabilityProbes {
+            handles: std::sync::Mutex::new(Some(Vec::new())),
+        }
+    }
+
+    fn handles(&self) -> std::sync::MutexGuard<'_, Option<Vec<futures::future::AbortHandle>>> {
+        self.handles.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether the instance was disabled.
+    pub(crate) fn ended(&self) -> bool { self.handles().is_none() }
+
+    /// Keeps the handle of a probe about to start. `false` when the instance was disabled: the probe must not start.
+    pub(crate) fn add(&self, handle: futures::future::AbortHandle) -> bool {
+        match &mut *self.handles() {
+            Some(handles) => {
+                if handles.len() >= Self::KEPT {
+                    // Aborting a probe that has ended does nothing.
+                    handles.remove(0).abort();
+                }
+                handles.push(handle);
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Aborts the running probes; no probe starts afterwards.
+    pub(crate) fn end(&self) {
+        if let Some(handles) = self.handles().take() {
+            handles.iter().for_each(|handle| handle.abort());
+        }
+    }
+}
+
+impl Drop for CapabilityProbes {
+    fn drop(&mut self) { self.end(); }
 }
 
 /// The abort of the history collector of one token instance. The collector is started once per instance
@@ -137,6 +191,9 @@ impl HistoryAbort {
 impl Qrc20Coin {
     /// Ends the history collector of this instance (the disable of the token, CRD ch.38 D38.6.4Q.5 status note).
     pub(crate) fn end_history_collector(&self) { self.history_abort.abort(); }
+
+    /// Ends the probes of the contract-event history that this instance started (the disable of the token).
+    pub(crate) fn end_capability_probes(&self) { self.capability_probes.end(); }
 }
 
 #[derive(Clone, Debug)]
