@@ -395,6 +395,14 @@ and emits `TakerPaymentSpent` plus `TakerPaymentSpendConfirmStarted`.
 `STAGE-CONFIRM-SPEND` waits for the spend's confirmations with the
 refund deadline as its cut-off and emits `TakerPaymentSpendConfirmed`.
 
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100, when the validation of the
+> taker payment in `STAGE-VALIDATE-TAKER-PAYMENT` answers that its read is
+> undetermined, the maker repeats the validation every 15 seconds until the
+> deadline of that stage (the swap start time plus four fifths of the lock
+> duration). At the deadline, or on any other error, it emits
+> `TakerPaymentValidateFailed` and goes into the refund chain as stated above.
+
 ## 51.5 Bound Taker Stage Graph
 
 **R20.** *Stage set.* The taker machine MUST have exactly thirteen
@@ -495,6 +503,13 @@ confirmations with the maker-payment wait deadline of R22 as its cut-off
 payment, emitting `MakerPaymentValidateFailed` on rejection. Both
 transition to `STAGE-FINISH`: up to and including this point the taker
 has committed only the dex fee, and there is nothing to refund.
+
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100, when the validation of the
+> maker payment answers that its read is undetermined, the taker repeats the
+> validation every 15 seconds until the maker-payment wait deadline of R22. At
+> the deadline, or on any other error, it emits `MakerPaymentValidateFailed` as
+> this rule states.
 
 **R29.** *Send taker payment.* `STAGE-SEND-TAKER-PAYMENT` MUST first
 search the chain for a taker payment it may already have broadcast. Only
@@ -1098,6 +1113,24 @@ dropped and the taker refunded) is not part of this rule.
 > reached the chain. A second send that is accepted records the claim, and the
 > wait for its confirmation decides as before. T35 pins this path. No code is
 > changed.
+
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100, a look of item 3 that
+> fails or cannot decide, and an undetermined answer of the refundability check,
+> are held as item 3 states, with one warning that names the fix when the read
+> is undetermined under R100. Its bound is the one of R100 item 9 and its status
+> notes of 2026-11-23: the later of the maker payment's lock time plus 3700
+> seconds and 3700 seconds after the refund step, in its current run, first
+> could act (the refundability check first answered that the refund can be sent,
+> or the check or a look first gave an undetermined answer at or after the lock
+> time). At that bound `MakerPaymentRefundFailed` names the kind of failure and,
+> for a read undetermined under R100, the cause and the fix, and asks for
+> `recover_funds_of_swap`; as R80 requires, neither the warning nor this text
+> carries a server address, URL, host or response text, and the full reason goes
+> to the debug log. A look held for another reason (a spend found but not
+> confirmed) keeps the text and the deadline of item 3. The manual recovery of
+> R83 and R84, and the taker's, answer as before; an error whose read is
+> undetermined under R100 also names the fix.
 
 ## 51.6D Bound Manual Refund After a Lost Claim
 
@@ -3546,6 +3579,12 @@ reference rows alike.
   maintainer's decisions of 2026-11-22 and 2026-11-23, §51.6G and this
   workspace's own refund chain code; no reference input was consulted, the
   note makes no parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-23, a second one: the status notes after the
+  description of `STAGE-VALIDATE-TAKER-PAYMENT`, after R28 and at the end
+  of §51.6C are a Reloaded addition written in a clean session from the
+  maintainer's decisions of 2026-11-22 and 2026-11-23, §51.6G and this
+  workspace's own swap engine code; no reference input was consulted, the
+  notes make no parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
