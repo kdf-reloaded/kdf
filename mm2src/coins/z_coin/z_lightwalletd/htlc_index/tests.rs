@@ -1484,3 +1484,614 @@ fn t39_6_5a_the_history_reader_accepts_a_mainnet_transaction_with_ironwood_actio
         assert!(!has_output_with_script(&tx, None, &htlc_script()));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// R100 (CRD ch.51 §51.6G, T42): the reads agree between two endpoints on distinct hosts
+// ---------------------------------------------------------------------------------------------
+
+fn two_nodes() -> SwapEvidencePolicy {
+    SwapEvidencePolicy::TwoNodes {
+        hosts: vec!["a".to_owned(), "b".to_owned()],
+    }
+}
+
+fn agreeing_backend(transport: &Arc<Scripted>, servers: &[&str], policy: SwapEvidencePolicy) -> LightwalletdBackend {
+    backend(transport, servers).with_swap_evidence(policy)
+}
+
+/// An endpoint whose index shows the funding and its spend.
+fn spent_endpoint() -> Endpoint {
+    let mut endpoint = healthy_endpoint();
+    endpoint.funding_lookup = Some(Ok(raw(funding_bytes(), FUNDING_HEIGHT)));
+    endpoint.history.insert(form_address(IndexEncoding::PubkeyHash), vec![
+        raw(funding_bytes(), FUNDING_HEIGHT),
+        raw(spend_bytes(output().txid, 0), SPEND_HEIGHT),
+    ]);
+    endpoint
+}
+
+/// An endpoint whose index lists the funding output as unspent.
+fn unspent_endpoint() -> Endpoint {
+    let mut endpoint = healthy_endpoint();
+    endpoint.funding_lookup = Some(Ok(raw(funding_bytes(), FUNDING_HEIGHT)));
+    endpoint
+        .utxos
+        .insert(form_address(IndexEncoding::PubkeyHash), vec![listed_row(htlc_script())]);
+    endpoint
+}
+
+/// An endpoint whose index shows the payment to the HTLC script.
+fn funded_endpoint() -> Endpoint {
+    let mut endpoint = healthy_endpoint();
+    endpoint
+        .history
+        .insert(form_address(IndexEncoding::PubkeyHash), vec![raw(
+            funding_bytes(),
+            FUNDING_HEIGHT,
+        )]);
+    endpoint
+}
+
+fn evidence_text(error: &HtlcIndexError) -> &str {
+    match error {
+        HtlcIndexError::SwapEvidence(undetermined) => &undetermined.text,
+        other => panic!("expected an undetermined swap-evidence read, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn r100_two_endpoints_that_show_the_same_spend_decide() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", spent_endpoint());
+    transport.serve("b", spent_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn r100_two_endpoints_that_both_list_the_output_unspent_decide_not_spent() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", unspent_endpoint());
+    transport.serve("b", unspent_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, SpendOutcome::NotSpent(_)), "{outcome:?}");
+}
+
+/// T42: answers that differ leave the step waiting, no third endpoint outvotes them in the attempt, and a later
+/// attempt with a pair that agrees decides.
+#[tokio::test]
+async fn r100_endpoints_that_differ_are_undetermined_no_third_is_asked_and_a_new_pair_decides_later() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", spent_endpoint());
+    transport.serve("b", unspent_endpoint());
+    transport.serve("c", spent_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b", "c"], two_nodes());
+
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+
+    assert!(error.is_disagreement(), "{error:?}");
+    assert!(error.is_named_condition());
+    let text = evidence_text(&error);
+    assert!(
+        text.contains("a: ") && text.contains("b: "),
+        "each node by host: {text}"
+    );
+    assert!(text.contains("swap_evidence_node"), "the fix is named: {text}");
+    assert!(
+        transport.asked("c", "utxos").is_empty() && transport.asked("c", "history").is_empty(),
+        "no third endpoint outvotes the pair in this attempt"
+    );
+
+    // A later attempt: b now shows the spend too, and the new pair agrees.
+    transport.serve("b", spent_endpoint());
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn r100_one_answering_endpoint_is_undetermined_never_not_spent() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", unspent_endpoint());
+    transport.serve("b", Endpoint::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(!error.is_disagreement(), "{error:?}");
+    assert!(evidence_text(&error).contains("fewer than two"), "{error:?}");
+
+    let error = backend
+        .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(evidence_text(&error).contains("fewer than two"), "{error:?}");
+}
+
+/// R100 item 7: two entries on one host (two ports) are one node.
+#[tokio::test]
+async fn r100_two_entries_on_one_host_count_as_one_node() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a:9067", unspent_endpoint());
+    transport.serve("a:443", unspent_endpoint());
+    let backend = agreeing_backend(&transport, &["a:9067", "a:443"], two_nodes());
+
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, HtlcIndexError::SwapEvidence(_)), "{error:?}");
+    // The second port is the same node: its "not spent" is no second answer.
+    assert!(evidence_text(&error).contains("fewer than two"), "{error:?}");
+}
+
+#[tokio::test]
+async fn r100_already_sent_agrees_on_the_payment_or_on_not_sent() {
+    // Both show the payment: decided.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", funded_endpoint());
+    transport.serve("b", funded_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let outcome = backend
+        .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SentOutcome::Sent(_)), "{outcome:?}");
+
+    // Both show nothing over a clean window: not sent.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", healthy_endpoint());
+    transport.serve("b", healthy_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    assert_eq!(
+        backend
+            .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+            .await
+            .unwrap(),
+        SentOutcome::NotSent
+    );
+
+    // One shows the payment and one does not: undetermined, not "not sent" and not "sent".
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", funded_endpoint());
+    transport.serve("b", healthy_endpoint());
+    transport.serve("c", funded_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b", "c"], two_nodes());
+    let error = backend
+        .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(error.is_disagreement(), "{error:?}");
+    assert!(
+        transport.asked("c", "history").is_empty(),
+        "no third endpoint outvotes the pair"
+    );
+}
+
+/// The HTLC of a swap whose redeem script carries the hash of `secret`, funded and claimed with `revealed`.
+struct ClaimFixture {
+    htlc_hash: [u8; 20],
+    script: Vec<u8>,
+    funding: Vec<u8>,
+    claim: Vec<u8>,
+}
+
+impl ClaimFixture {
+    fn new(secret: [u8; 32], revealed: [u8; 32]) -> Self {
+        // OP_HASH160 <hash of the secret> OP_EQUALVERIFY, then bytes that stand in for the rest of the script.
+        let mut redeem = vec![0xa9, 0x14];
+        redeem.extend_from_slice(dhash160(&secret).as_slice());
+        redeem.push(0x88);
+        redeem.extend_from_slice(&[0x5a; 40]);
+        let htlc_hash: [u8; 20] = dhash160(&redeem).as_slice().try_into().unwrap();
+        let script = p2sh_script_pubkey(&htlc_hash);
+        let funding = transparent_tx(&[], &[(100_000, script.clone())]);
+        let mut sig = vec![0x01, 0xaa, 0x20];
+        sig.extend_from_slice(&revealed);
+        sig.push(0x00);
+        sig.push(redeem.len() as u8);
+        sig.extend_from_slice(&redeem);
+        let claim = transparent_tx(&[(txid_of(&funding), 0, sig)], &[]);
+        ClaimFixture {
+            htlc_hash,
+            script,
+            funding,
+            claim,
+        }
+    }
+
+    fn output(&self) -> OutputRef {
+        OutputRef {
+            txid: txid_of(&self.funding),
+            vout: 0,
+            script_pubkey: self.script.clone(),
+        }
+    }
+
+    fn endpoint_showing_the_claim(&self) -> Endpoint {
+        let mut endpoint = healthy_endpoint();
+        endpoint.funding_lookup = Some(Ok(raw(self.funding.clone(), FUNDING_HEIGHT)));
+        let address = addressing()
+            .address(IndexEncoding::PubkeyHash, self.htlc_hash)
+            .to_string();
+        endpoint.history.insert(address, vec![
+            raw(self.funding.clone(), FUNDING_HEIGHT),
+            raw(self.claim.clone(), SPEND_HEIGHT),
+        ]);
+        endpoint
+    }
+}
+
+#[test]
+fn r100_a_claim_proves_itself_only_when_its_secret_hashes_to_the_hash_in_the_redeem_script() {
+    let secret = [9u8; 32];
+    let matching = ClaimFixture::new(secret, secret);
+    let claim = ZTransaction::read(matching.claim.as_slice(), BranchId::Sapling).unwrap();
+    assert!(spend_proves_itself(&claim, 0, &matching.htlc_hash));
+    assert!(!spend_proves_itself(&claim, 1, &matching.htlc_hash), "no such input");
+    assert!(
+        !spend_proves_itself(&claim, 0, &[0u8; 20]),
+        "a redeem script that is not the output's proves nothing"
+    );
+
+    let wrong = ClaimFixture::new(secret, [8u8; 32]);
+    let claim = ZTransaction::read(wrong.claim.as_slice(), BranchId::Sapling).unwrap();
+    assert!(!spend_proves_itself(&claim, 0, &wrong.htlc_hash));
+
+    // A refund (the timelock path) reveals no secret.
+    let refund_sig = {
+        let mut redeem = vec![0xa9, 0x14];
+        redeem.extend_from_slice(dhash160(&secret).as_slice());
+        redeem.push(0x88);
+        let mut sig = vec![0x01, 0xaa, 0x51];
+        sig.push(redeem.len() as u8);
+        sig.extend_from_slice(&redeem);
+        sig
+    };
+    let refund = transparent_tx(&[([0x11; 32], 0, refund_sig)], &[]);
+    let refund = ZTransaction::read(refund.as_slice(), BranchId::Sapling).unwrap();
+    assert!(!spend_proves_itself(&refund, 0, &[0u8; 20]));
+}
+
+/// T42: a secret whose hash matches is used on one node's answer, and one whose hash does not is not.
+#[tokio::test]
+async fn r100_a_claim_with_a_matching_secret_is_taken_on_one_endpoint_and_a_non_matching_one_is_not() {
+    let secret = [9u8; 32];
+
+    let matching = ClaimFixture::new(secret, secret);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", matching.endpoint_showing_the_claim());
+    transport.serve("b", Endpoint::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let outcome = backend
+        .detect_output_spend(&matching.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .expect("a matching secret needs one answer");
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
+
+    let wrong = ClaimFixture::new(secret, [8u8; 32]);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", wrong.endpoint_showing_the_claim());
+    transport.serve("b", Endpoint::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let error = backend
+        .detect_output_spend(&wrong.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, HtlcIndexError::SwapEvidence(_)),
+        "a claim whose secret does not hash to the swap's hash needs the second answer: {error:?}"
+    );
+}
+
+/// T42: with `swap_evidence_node` naming one of the nodes, that node's answer alone is taken; when it does not
+/// answer the step waits and no other node is asked.
+#[tokio::test]
+async fn r100_a_trusted_endpoint_answers_alone_and_when_silent_no_other_is_asked() {
+    let trusted = SwapEvidencePolicy::Trusted { node: "a".to_owned() };
+
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", unspent_endpoint());
+    transport.serve("b", Endpoint::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], trusted.clone());
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SpendOutcome::NotSpent(_)), "{outcome:?}");
+    assert!(
+        transport.asked("b", "utxos").is_empty(),
+        "the other endpoint is not asked"
+    );
+
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", Endpoint::default());
+    transport.serve("b", unspent_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b"], trusted);
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(
+        evidence_text(&error).contains("trusted node did not answer"),
+        "{error:?}"
+    );
+    // The other endpoint is asked only for a secret that proves itself; its "not spent" is not taken in the
+    // trusted node's place (the result above stays undetermined).
+}
+
+/// Under `Insufficient` the reads that rest on agreement ask nothing and stay undetermined: "not sent", a refund
+/// ("not spent") and a spend that does not prove itself.
+#[tokio::test]
+async fn r100_an_insufficient_coin_stays_undetermined_for_not_sent_and_a_refund() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", unspent_endpoint());
+    let backend = agreeing_backend(&transport, &["a"], SwapEvidencePolicy::Insufficient { hosts: 1 });
+
+    let error = backend
+        .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HtlcIndexError::SwapEvidence(_)), "{error:?}");
+    assert!(
+        transport.requests.lock().is_empty(),
+        "already-sent asks nothing: {:?}",
+        transport.requests.lock()
+    );
+
+    // The only endpoint lists the output unspent: that is no proof, so no "not spent" and no refund.
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HtlcIndexError::SwapEvidence(_)), "{error:?}");
+
+    // A claim that does not prove itself is ignored too.
+    let wrong = ClaimFixture::new([9u8; 32], [8u8; 32]);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", wrong.endpoint_showing_the_claim());
+    let backend = agreeing_backend(&transport, &["a"], SwapEvidencePolicy::Insufficient { hosts: 1 });
+    let error = backend
+        .detect_output_spend(&wrong.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HtlcIndexError::SwapEvidence(_)), "{error:?}");
+}
+
+/// R100 item 3: a secret that proves itself is taken from one endpoint even when the coin has too few nodes.
+#[tokio::test]
+async fn r100_an_insufficient_coin_takes_a_matching_secret_claim_on_one_answer() {
+    let secret = [9u8; 32];
+    let matching = ClaimFixture::new(secret, secret);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", matching.endpoint_showing_the_claim());
+    let backend = agreeing_backend(&transport, &["a"], SwapEvidencePolicy::Insufficient { hosts: 1 });
+
+    let outcome = backend
+        .detect_output_spend(&matching.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .expect("a matching secret is taken on one answer");
+
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
+}
+
+/// The same for a trusted node that is silent: a matching-secret claim of another endpoint is taken, nothing else.
+#[tokio::test]
+async fn r100_a_silent_trusted_node_does_not_hold_back_a_matching_secret_claim() {
+    let secret = [9u8; 32];
+    let matching = ClaimFixture::new(secret, secret);
+    let trusted = SwapEvidencePolicy::Trusted { node: "a".to_owned() };
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", Endpoint::default());
+    transport.serve("b", matching.endpoint_showing_the_claim());
+    let backend = agreeing_backend(&transport, &["a", "b"], trusted.clone());
+    assert!(matches!(
+        backend
+            .detect_output_spend(&matching.output(), FUNDING_HEIGHT, &LOG)
+            .await,
+        Ok(SpendOutcome::Spent(_))
+    ));
+
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", Endpoint::default());
+    transport.serve("b", unspent_endpoint());
+    let backend = agreeing_backend(&transport, &["a", "b"], trusted);
+    assert!(backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .is_err());
+}
+
+/// An undetermined read is logged once per step, then again only when what it says changes.
+#[tokio::test]
+async fn r100_an_undetermined_read_is_logged_once_per_step() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", unspent_endpoint());
+    transport.serve("b", Endpoint::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    for _ in 0..3 {
+        backend
+            .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+            .await
+            .unwrap_err();
+    }
+    assert_eq!(backend.undetermined_logged.lock().len(), 1, "one step is tracked");
+    transport.serve("b", unspent_endpoint());
+    backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(
+        backend.undetermined_logged.lock().is_empty(),
+        "a decided read ends the step's undetermined state"
+    );
+}
+
+/// The record of logged undetermined steps is bounded: a step that never settles is forgotten, oldest first.
+#[test]
+fn r100_the_undetermined_log_record_does_not_grow_past_its_bound() {
+    let transport = Arc::new(Scripted::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    for step in 0..(UNDETERMINED_LOGGED_MAX * 3) {
+        assert!(backend.note_undetermined(&format!("step {step}"), "text"));
+    }
+    assert_eq!(backend.undetermined_logged.lock().len(), UNDETERMINED_LOGGED_MAX);
+    // The newest steps are kept and the oldest forgotten; a kept step with the same text is not logged again.
+    let newest = format!("step {}", UNDETERMINED_LOGGED_MAX * 3 - 1);
+    assert!(!backend.note_undetermined(&newest, "text"));
+    assert!(backend.note_undetermined(&newest, "changed"));
+    assert!(
+        backend.note_undetermined("step 0", "text"),
+        "a forgotten step is logged again"
+    );
+    assert_eq!(backend.undetermined_logged.lock().len(), UNDETERMINED_LOGGED_MAX);
+}
+
+/// An endpoint of `endpoint`'s kind whose tip is `tip` (the scripted endpoints answer `TIP` unless told otherwise).
+fn at_tip(mut endpoint: Endpoint, tip: u64) -> Endpoint {
+    endpoint.tips = VecDeque::from([tip]);
+    endpoint
+}
+
+fn is_tip_gap(error: &HtlcIndexError) -> bool {
+    matches!(error, HtlcIndexError::SwapEvidence(u) if u.text.contains("tips of the nodes differ too much"))
+}
+
+/// A pair whose tips are within the gap decides; one beyond it is undetermined (TipGap), whatever it says.
+#[tokio::test]
+async fn r100_a_pair_inside_the_tip_gap_decides_and_one_beyond_it_is_undetermined() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), TIP));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP + SPEND_READ_MAX_TIP_GAP_BLOCKS));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SpendOutcome::NotSpent(_)), "{outcome:?}");
+
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), TIP));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP + SPEND_READ_MAX_TIP_GAP_BLOCKS + 1));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(is_tip_gap(&error), "{error:?}");
+    assert!(
+        !error.is_disagreement(),
+        "a tip gap is equal answers, so it is no disagreement: {error:?}"
+    );
+
+    // The same for the already-sent read.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(funded_endpoint(), TIP));
+    transport.serve("b", at_tip(funded_endpoint(), TIP + 50));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let error = backend
+        .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(is_tip_gap(&error), "{error:?}");
+}
+
+/// A claim that proves itself is taken from one endpoint however far the other endpoint's tip is.
+#[tokio::test]
+async fn r100_a_self_proving_claim_wins_with_a_large_tip_gap() {
+    let secret = [9u8; 32];
+    let matching = ClaimFixture::new(secret, secret);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(matching.endpoint_showing_the_claim(), TIP));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP + 1_000));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+
+    let outcome = backend
+        .detect_output_spend(&matching.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .expect("the proof is taken");
+
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
+}
+
+/// A field `a:443` names the bare-host list entry `a`: the trusted node is that entry, and its label matches it.
+#[tokio::test]
+async fn r100_a_field_with_a_port_names_a_bare_host_entry_and_the_trusted_node_answers() {
+    let entries = vec!["a".to_owned(), "b".to_owned()];
+    let policy = crate::swap_evidence::swap_evidence_policy_from("ARRR", Some("a:443"), &entries).unwrap();
+    assert_eq!(policy, SwapEvidencePolicy::Trusted { node: "a".to_owned() });
+
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", unspent_endpoint());
+    transport.serve("b", Endpoint::default());
+    let backend = agreeing_backend(&transport, &["a", "b"], policy);
+    let outcome = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SpendOutcome::NotSpent(_)), "{outcome:?}");
+    assert!(transport.asked("b", "utxos").is_empty());
+}
+
+/// Beyond the tip gap, differing answers are a disagreement (no other pair is asked, R100 item 8) and equal answers
+/// are a tip gap (not a disagreement); a self-proving claim is taken across the gap.
+#[tokio::test]
+async fn r100_beyond_the_tip_gap_differing_answers_disagree_equal_answers_are_a_gap_and_a_proof_wins() {
+    let far = TIP + SPEND_READ_MAX_TIP_GAP_BLOCKS + 1;
+
+    // The higher endpoint says "not spent", the lagging one shows the spend: they differ.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), far));
+    transport.serve("b", at_tip(spent_endpoint(), TIP));
+    transport.serve("c", at_tip(spent_endpoint(), TIP));
+    let backend = agreeing_backend(&transport, &["a", "b", "c"], two_nodes());
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(error.is_disagreement() && !is_tip_gap(&error), "{error:?}");
+
+    // Equal answers beyond the gap: a tip gap, which is no disagreement.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), far));
+    transport.serve("b", at_tip(unspent_endpoint(), TIP));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let error = backend
+        .detect_output_spend(&output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    assert!(is_tip_gap(&error) && !error.is_disagreement(), "{error:?}");
+
+    // A self-proving claim across the gap is still taken.
+    let secret = [9u8; 32];
+    let matching = ClaimFixture::new(secret, secret);
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", at_tip(unspent_endpoint(), far));
+    transport.serve("b", at_tip(matching.endpoint_showing_the_claim(), TIP));
+    let backend = agreeing_backend(&transport, &["a", "b"], two_nodes());
+    let outcome = backend
+        .detect_output_spend(&matching.output(), FUNDING_HEIGHT, &LOG)
+        .await
+        .expect("the proof is taken");
+    assert!(matches!(outcome, SpendOutcome::Spent(_)), "{outcome:?}");
+}

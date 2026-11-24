@@ -5994,6 +5994,27 @@ that:
   is still bisected and reported as a gap with the transaction-index
   explanation.
 
+> **Status (2026-11-23, as built).** The swap reads of a Light-mode coin
+> follow ch.51 §51.6G R100. The coin's nodes for this rule are its
+> `light_wallet_d_servers`, counted by host; `swap_evidence_node` names one of
+> them. Spend detection and already-sent detection (R39.11.4d), the payment
+> bytes a validation reads, the confirmation count (R39.11.4e) and the median
+> time past of the refund gate (R39.11.4f) are decided only when two endpoints
+> on two hosts agree, each read over its own endpoint (its own tip, its own
+> blocks), or by the trusted endpoint alone. Two medians that differ but are
+> both past the lock open the gate. A pair whose tips are more than two blocks
+> apart, a disagreement or a single answer leaves the read undetermined, the
+> step waits, and the next attempt asks a new pair.
+> A claim whose script reveals a secret that hashes to the HTLC's own hash
+> proves itself and is taken on one answer, also when the coin has too few
+> nodes or the trusted endpoint does not answer; a refund, "not spent" and
+> "not sent" never are. The Electrum fallback agrees on two Electrum servers
+> on two hosts; a lightwalletd answer is never paired with an Electrum answer.
+> With `swap_evidence_node` set, or with too few nodes, the fallback takes
+> only a claim that proves itself. The wallet's own unmined send record
+> (R39.11.26) stops answering "sent" only when the agreed tip of two hosts,
+> or the trusted endpoint's tip, is past its expiry height.
+
 ### 39.11.2 What activation requires of the backend
 
 R39.11.5 **A non-empty `light_wallet_d_servers` list is mandatory for Light mode;

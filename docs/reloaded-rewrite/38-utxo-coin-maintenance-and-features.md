@@ -4922,6 +4922,78 @@ token's swap paths were read only for the set of methods they send
 > transaction is found. The pointer is a Spec Reader addition and passed the
 > KDF Dirty Gate with that subsection on 2026-11-22.
 
+> **Clean-side addition of 2026-11-23 (Reloaded-original; as built; no claim
+> about the reference).** The swap reads of a QRC20 token over Electrum
+> follow [chapter 51](51-legacy-v1-swap-state-machine.md) §51.6G R100. A
+> token read through the operator's own daemon reads as before.
+>
+> 1. *Directed reads.* `blockchain.contract.call`,
+>    `blochchain.transaction.get_receipt` and
+>    `blockchain.contract.event.get_history` each have a form addressed to
+>    one named server (R38.6.4g). It is answered by that server or fails
+>    naming it, and it does not move on to another server. Every swap read
+>    first reads the server's own tip (`blockchain.headers.subscribe`), then
+>    the read itself on the same server. Two answers whose tips are further
+>    apart than the tolerance of R38.6.4o item 1 do not decide.
+> 2. *Decisions.* Two answers are compared on a decision, never on a height,
+>    a confirmation count or a time:
+>    - payment: the state of `payments(id)` and the payment call details
+>      read from the server's receipt of the payment transaction. The
+>      validation repeats the read until its deadline while it is
+>      undetermined or the servers agree that the contract does not know the
+>      payment yet;
+>    - confirmation wait: the wait polls one server as before (R38.6.4o item
+>      6); its end is then confirmed by a pair: "has the required
+>      confirmations" and "the swap contract calls completed";
+>    - already sent: "not sent" (the contract does not know the payment), or
+>      the payment transaction;
+>    - spend: the state of `payments(id)` decides. "Not spent" is the state
+>      `sent` on both servers. Only a server whose state is `spent` or
+>      `refunded` is asked for the event history, to name the transaction,
+>      which is bound to its call and receipt as chapter 51 §51.6E R89
+>      binds it. A claim so found carries a secret whose hash is the
+>      payment's secret hash and is taken from one server;
+>    - refund gate: each server's median time past at its own tip is past
+>      the lock time or is not.
+> 3. *Claims and refunds.* The claim of the side that reveals its own secret,
+>    and a refund, check the payment (state and call details) on a pair
+>    first. The claim made with a secret that a claim on the other chain
+>    already revealed is read from one routed server and is not held back by
+>    an undetermined read.
+> 4. *Undetermined.* An undetermined read is an error whose text starts with
+>    `swap evidence undetermined: ` and names servers by host and port only.
+>    It is never answered as valid, not sent, not spent or an open gate.
+> 5. *Capability.* A token whose server list has two or more hosts and no
+>    `swap_evidence_node` is admitted for swaps only once two distinct hosts
+>    of its client have answered `blockchain.contract.event.get_history`
+>    with a result since the client was built. A token with
+>    `swap_evidence_node` is admitted only once its trusted server has
+>    answered that request with a result: under a trusted server the spend
+>    read of a claimed payment still needs that server's event history to
+>    name the claim and read the secret. An error answer does not count.
+>    The client records it per server for every such request, routed or
+>    directed, so the instances that share a client (D38.6.4Q.1) share the
+>    record. Until then the token answers as a coin with too few nodes:
+>    orders and swap starts are refused, and the reads of a running swap
+>    wait. The refusal text lists the hosts that have and have not served
+>    the request, or names the trusted server that has not. Only a token in
+>    native mode needs no such proof.
+> 6. *Probe.* After the activation of such a token, each server concerned
+>    that has not served the request is asked once, in the background, for
+>    the token's own transfer history: every server of a token over two or
+>    more hosts, and the trusted server alone of a token with
+>    `swap_evidence_node`. The activation does not wait for it and does not
+>    fail on it. While the proof is missing, a refusal and an undetermined
+>    read start the probe again for the servers still missing. One server
+>    is probed at most once a minute and never while a probe of it runs. A
+>    probe ends when the token that started it is disabled or dropped, and
+>    none starts for a disabled token. One log line names the hosts that
+>    have and have not served the request.
+> 7. *Refund gate.* The refund gate of a token is the gate of the UTXO
+>    Electrum client (chapter 51 §51.6G R100), given the token's policy of
+>    item 5: the median time past is read through that client's directed
+>    header reads, and the tips are compared within its tolerance.
+
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
 events over the streaming infrastructure, registering the addresses to be watched

@@ -62,6 +62,26 @@ or undo, and every change that needs a step from you.
       (`swap_evidence_allow_single_host`) the walletd node is trusted as if `swap_evidence_node` named it. With that
       switch set to `false`, set `swap_evidence_node` to the walletd `server_url`; without the field, SC orders are
       refused and a running SC swap waits at its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
+    - **ZCoin and ARRR (Light mode).** The coin's nodes are its `light_wallet_d_servers`, counted by host: list
+      servers on two hosts, or set `swap_evidence_node` to one of them; a coin configured with one host trusts it by
+      default (`swap_evidence_allow_single_host`). A claim that reveals the swap's secret is still taken from one
+      server. Detail: PR #515; CRD ch.39 (the status note at the end of 39.11.4).
+    - QRC20 tokens over Electrum. The contract state of a payment, its receipt, the claim or refund found in the
+      contract-event history and the chain time of the refund are read from two servers on distinct hosts. A token
+      also needs two hosts that serve the contract-event history (`blockchain.contract.event.get_history`), or, with
+      `swap_evidence_node` or a QTUM platform configured with one host (trusted by default through
+      `swap_evidence_allow_single_host`), needs that server to serve it: each host is asked once after activation,
+      and until enough have answered, the token is refused for swaps with a reason that names the hosts. When checked
+      on 2026-11-23, both QTUM servers of the published coins file answered that request with an error, so with them
+      alone a QRC20 token starts no swap: list servers on two distinct hosts that serve it, or set
+      `swap_evidence_node` to a listed server that serves it. Detail: PR #524; CRD ch.51 §51.6G, ch.38.
+    - **SLP tokens.** Affected: every SLP token whose BCH activation request lists two or more bchd servers on
+      different hosts: the check of the other side's token payment waits until two bchd hosts agree, and the swap's
+      other chain reads follow BCH. A token whose request lists exactly one bchd host trusts that host by default
+      (`swap_evidence_allow_single_host`); with the switch set to `false`, a token with fewer than two bchd hosts no
+      longer starts a swap, and its running swaps wait at a refund or claim step. To fix it, add a bchd server on a
+      second host; `swap_evidence_node` does not replace the second bchd host. Detail: PR #526; CRD ch.51 §51.6G
+      R100.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,

@@ -1,5 +1,6 @@
 // qrc20_swap_ops — SwapOps and WatcherOps trait implementations.
 
+use super::swap::ClaimCheck;
 use super::*;
 use crate::CanRefundHtlc;
 
@@ -84,8 +85,14 @@ impl SwapOps for Qrc20Coin {
 
         let selfi = self.clone();
         let fut = async move {
+            // The maker reveals its own secret here.
             selfi
-                .spend_hash_time_locked_payment(payment_tx, swap_contract_address, secret)
+                .spend_hash_time_locked_payment(
+                    payment_tx,
+                    swap_contract_address,
+                    secret,
+                    ClaimCheck::AgreedPaymentState,
+                )
                 .await
         };
         Box::new(fut.boxed().compat())
@@ -106,8 +113,14 @@ impl SwapOps for Qrc20Coin {
 
         let selfi = self.clone();
         let fut = async move {
+            // The taker claims with the secret the maker's claim revealed.
             selfi
-                .spend_hash_time_locked_payment(payment_tx, swap_contract_address, secret)
+                .spend_hash_time_locked_payment(
+                    payment_tx,
+                    swap_contract_address,
+                    secret,
+                    ClaimCheck::SecretAlreadyProven,
+                )
                 .await
         };
         Box::new(fut.boxed().compat())
@@ -195,6 +208,7 @@ impl SwapOps for Qrc20Coin {
                     input.secret_hash,
                     input.amount,
                     swap_contract_address,
+                    input.try_spv_proof_until,
                 )
                 .await
         };
@@ -216,6 +230,7 @@ impl SwapOps for Qrc20Coin {
                     input.secret_hash,
                     input.amount,
                     swap_contract_address,
+                    input.try_spv_proof_until,
                 )
                 .await
         };
@@ -279,7 +294,10 @@ impl SwapOps for Qrc20Coin {
         self.extract_secret_impl(secret_hash, spend_tx)
     }
 
-    /// The gate reads the QTUM chain's median time past (CRD ch.51 §51.6E R88).
+    /// The gate reads the QTUM chain's median time past (CRD ch.51 §51.6E R88). Under the token's swap-evidence
+    /// policy, which carries the capability rule of the contract-event history, the shared UTXO gate reads it from
+    /// two servers that must agree, or from the trusted one; an undetermined read is an error, never an open gate
+    /// (CRD ch.51 §51.6G R100).
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
         let policy = self.swap_evidence_policy();
         Box::new(
