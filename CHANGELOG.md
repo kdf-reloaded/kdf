@@ -50,6 +50,9 @@ or undo, and every change that needs a step from you.
     - **Sia (SC).** A Sia coin reads one walletd node, so there is no second node to add: set `swap_evidence_node` to
       the walletd `server_url` to trust it. Without the field, SC orders are refused and a running SC swap waits at
       its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
+    - **ZCoin and ARRR (Light mode).** The coin's nodes are its `light_wallet_d_servers`, counted by host: list
+      servers on two hosts, or set `swap_evidence_node` to one of them. A claim that reveals the swap's secret is
+      still taken from one server. Detail: PR #515; CRD ch.39 (the status note at the end of 39.11.4).
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,

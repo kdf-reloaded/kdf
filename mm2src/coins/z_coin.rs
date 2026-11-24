@@ -3267,6 +3267,13 @@ impl<'a> UtxoCoinBuilderCommonOps for ZCoinBuilder<'a> {
                             // Every shielded-coin family is double-SHA256.
                             checksum_type: kdf_crypto::ChecksumType::DSHA256,
                         },
+                        // The reads of a swap step judge their evidence by this policy once the family has
+                        // adopted R100 (CRD ch.51 R100); until then they are today's reads.
+                        crate::swap_evidence::effective_policy(
+                            crate::swap_evidence::SwapFamily::Zcoin,
+                            &self.swap_evidence_policy()?,
+                        ),
+                        self.ticker,
                     )))
                 }
             },

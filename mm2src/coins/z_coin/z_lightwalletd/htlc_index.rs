@@ -27,10 +27,12 @@
 //! an HTLC address is exactly where its spend lives.
 
 use super::*;
+use crate::swap_evidence::SwapEvidencePolicy;
 use kdf_crypto::dhash160;
 use kdf_crypto::ChecksumType;
 use keys::hash::H160;
 use keys::AddressFormat as UtxoAddressFormat;
+use script::{Opcode, Script};
 
 /// The two address forms the same twenty bytes can be filed under (R39.11.4d).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -190,12 +192,174 @@ pub(crate) enum HtlcIndexError {
                delivered; this is neither \"not spent\" nor a spend that can be read"
     )]
     SpenderNotDelivered,
+    /// The read is undetermined under CRD ch.51 R100: two endpoints on distinct hosts did not agree, fewer than
+    /// two answered, or the named `swap_evidence_node` did not answer. Never a negative answer.
+    #[display(fmt = "{}", _0)]
+    SwapEvidence(EvidenceUndetermined),
+}
+
+/// An undetermined read of the swap evidence (CRD ch.51 R100 item 3), with the text that names what each
+/// endpoint said by host and the two ways to fix it (item 9).
+#[derive(Clone, Debug, Display, PartialEq)]
+#[display(fmt = "{}", text)]
+pub(crate) struct EvidenceUndetermined {
+    /// The two endpoints answered with different decisions. A second pair (the Electrum fallback) is not asked
+    /// in the same attempt (item 8).
+    pub(crate) disagree: bool,
+    /// The reason class as a fixed text, which names no node: what a log line may say.
+    pub(crate) class: &'static str,
+    pub(crate) text: String,
 }
 
 impl HtlcIndexError {
+    /// Whether the endpoints answered and differed: the attempt is over and no other pair is asked (R100 item 8).
+    pub(crate) fn is_disagreement(&self) -> bool {
+        matches!(self, HtlcIndexError::SwapEvidence(undetermined) if undetermined.disagree)
+    }
+
     /// Whether the condition is one the sync-error channel carries (R39.8.0au): everything except an
     /// outright lookup failure, which already surfaces as a failed call.
     pub(crate) fn is_named_condition(&self) -> bool { !matches!(self, HtlcIndexError::Lookup(_)) }
+}
+
+// ---------------------------------------------------------------------------------------------
+// What two endpoints must agree on (CRD ch.51 R100 item 1)
+// ---------------------------------------------------------------------------------------------
+
+/// The decision of a spend read that two endpoints are compared on: the same spending transaction, or both
+/// "not spent". Whether a spend claims or refunds follows from the transaction, so the same transaction is the
+/// same kind.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum SpendDecision {
+    Spent {
+        txid: [u8; 32],
+    },
+    /// The output is not spent. `funded` is whether the endpoint shows the funding transaction (the unspent
+    /// listing names the output); an endpoint that shows no funding does not agree with one that does.
+    NotSpent {
+        funded: bool,
+    },
+}
+
+impl fmt::Debug for SpendDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SpendDecision::Spent { txid } => write!(f, "spent by {:?}", txid_internal_to_display(*txid)),
+            SpendDecision::NotSpent { funded: true } => f.write_str("not spent"),
+            SpendDecision::NotSpent { funded: false } => f.write_str("not spent (funding not mined)"),
+        }
+    }
+}
+
+/// The decision of an already-sent read: the same payment transaction, or both "not sent".
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum SentDecision {
+    Sent { txid: [u8; 32] },
+    NotSent,
+}
+
+impl fmt::Debug for SentDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SentDecision::Sent { txid } => write!(f, "sent by {:?}", txid_internal_to_display(*txid)),
+            SentDecision::NotSent => f.write_str("not sent"),
+        }
+    }
+}
+
+impl SpendDecision {
+    /// The decision of an endpoint's spend answer. `None` when the spending transaction cannot be read.
+    pub(crate) fn of(outcome: &SpendOutcome) -> Option<Self> {
+        match outcome {
+            SpendOutcome::Spent(spend) => Some(SpendDecision::Spent {
+                txid: txid_of(&spend.tx)?,
+            }),
+            SpendOutcome::NotSpent(NotSpentProof::UnspentOutputListed { .. }) => {
+                Some(SpendDecision::NotSpent { funded: true })
+            },
+            SpendOutcome::NotSpent(NotSpentProof::FundingNotMined) => Some(SpendDecision::NotSpent { funded: false }),
+        }
+    }
+}
+
+impl SentDecision {
+    /// The decision of an endpoint's already-sent answer. `None` when the payment transaction cannot be read.
+    pub(crate) fn of(outcome: &SentOutcome) -> Option<Self> {
+        match outcome {
+            SentOutcome::Sent(FundingFound::Listed { txid }) => Some(SentDecision::Sent { txid: *txid }),
+            SentOutcome::Sent(FundingFound::Transaction { tx, .. }) => Some(SentDecision::Sent { txid: txid_of(tx)? }),
+            SentOutcome::NotSent => Some(SentDecision::NotSent),
+        }
+    }
+}
+
+/// Whether a spend proves itself (CRD ch.51 R100, the last sentence of its head): it claims the HTLC, and the
+/// secret it reveals hashes to the hash its redeem script carries. The redeem script is the one the output's
+/// script-hash commits to, so the hash it carries is the swap's secret hash. A node cannot be wrong about such a
+/// spend, and it is used on one node's answer.
+///
+/// The claim's input script is `<signature> <32-byte secret> OP_0 <redeem script>`.
+pub(crate) fn spend_proves_itself(spend: &ZTransaction, input_index: usize, htlc_hash: &[u8; 20]) -> bool {
+    let Some(input) = spend
+        .transparent_bundle()
+        .and_then(|bundle| bundle.vin.get(input_index))
+    else {
+        return false;
+    };
+    let script = Script::from(input.script_sig().0 .0.clone());
+    let instruction = |n: usize| script.get_instruction(n).and_then(Result::ok);
+    let (Some(secret), Some(path), Some(redeem)) = (instruction(1), instruction(2), instruction(3)) else {
+        return false;
+    };
+    let (Some(secret), Some(redeem)) = (secret.data, redeem.data) else {
+        return false;
+    };
+    if secret.len() != 32 || path.opcode != Opcode::OP_0 || dhash160(redeem).as_slice() != htlc_hash.as_slice() {
+        return false;
+    }
+    let comparator = dhash160(secret);
+    let redeem = Script::from(redeem.to_vec());
+    let mut instructions = redeem.iter().map_while(Result::ok);
+    while let Some(instruction) = instructions.next() {
+        if instruction.opcode == Opcode::OP_HASH160 {
+            return instructions
+                .next()
+                .and_then(|pushed| pushed.data)
+                .is_some_and(|pushed| pushed == comparator.as_slice());
+        }
+    }
+    false
+}
+
+/// [`spend_proves_itself`] for a spend as an endpoint delivered it.
+fn found_spend_proves_itself(spend: &FoundSpend, htlc_hash: &[u8; 20]) -> bool {
+    ZTransaction::read(spend.tx.as_slice(), BranchId::Sapling)
+        .is_ok_and(|tx| spend_proves_itself(&tx, spend.input_index, htlc_hash))
+}
+
+/// The identifier, in internal byte order, of a transaction as an endpoint delivered it.
+fn txid_of(bytes: &[u8]) -> Option<[u8; 32]> {
+    ZTransaction::read(bytes, BranchId::Sapling)
+        .ok()
+        .map(|tx| *tx.txid().as_ref())
+}
+
+/// One endpoint's answer to the spend question under R100, with the decision two endpoints are compared on.
+pub(crate) struct EndpointSpend {
+    outcome: SpendOutcome,
+    decision: SpendDecision,
+    /// The claim's secret hashes to the swap's secret hash ([`spend_proves_itself`]).
+    proves_itself: bool,
+    /// The tip height the endpoint answered at.
+    tip: u64,
+}
+
+/// One endpoint's answer to the already-sent question under R100.
+pub(crate) struct EndpointSent {
+    outcome: SentOutcome,
+    decision: SentDecision,
+    /// The tip height the endpoint answered at.
+    tip: u64,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -803,6 +967,21 @@ impl LightwalletdBackend {
         }
     }
 
+    /// `server`'s own view of the funding transaction, for a read that must come from that endpoint alone.
+    async fn server_funding_state(&self, server: &str, txid: [u8; 32]) -> FundingState {
+        match self.server_transaction(server, txid).await {
+            Ok(raw) => raw.height.map_or(FundingState::Unmined, FundingState::Mined),
+            Err(e) => {
+                common::log::debug!(
+                    "the funding transaction could not be looked up on {}: {}",
+                    self.name(server),
+                    self.scrub(&e.to_string(), server)
+                );
+                FundingState::Unknown
+            },
+        }
+    }
+
     /// The history window of a detection, from the Sapling floor (below which no block is read).
     ///
     /// A spend cannot precede its funding, so when the funding transaction is reported mined the
@@ -853,6 +1032,9 @@ impl LightwalletdBackend {
         from_block: u64,
         log: &DetectionLog<'_>,
     ) -> Result<SpendOutcome, HtlcIndexError> {
+        if self.reads_agree() {
+            return self.detect_output_spend_agreed(output, hash, from_block, log).await;
+        }
         let admitted = self
             .admitted_ordered()
             .await
@@ -908,6 +1090,184 @@ impl LightwalletdBackend {
         result
     }
 
+    /// The admitted endpoints a read under R100 may ask. Under `Insufficient` only a read whose answer can prove
+    /// itself (`proof_possible`: the spend of an HTLC, whose claim reveals the secret) asks them, and then only for
+    /// that proof; any other read asks nothing.
+    async fn evidence_servers(&self, proof_possible: bool) -> Result<Vec<String>, HtlcIndexError> {
+        if !proof_possible && matches!(self.swap_evidence, SwapEvidencePolicy::Insufficient { .. }) {
+            return Ok(Vec::new());
+        }
+        let admitted = self
+            .admitted_ordered()
+            .await
+            .map_err(|e| HtlcIndexError::Lookup(e.to_string()))?;
+        self.all_without_address_index(&admitted)?;
+        Ok(admitted)
+    }
+
+    /// One endpoint's answer to the spend question, from that endpoint alone: its own tip, its own view of the
+    /// funding transaction and its own address index. A failure of any read is an error, never a negative answer.
+    async fn spend_on_endpoint(
+        &self,
+        server: &str,
+        output: &OutputRef,
+        hash: [u8; 20],
+        from_block: u64,
+        log: &DetectionLog<'_>,
+    ) -> Result<EndpointSpend, String> {
+        if let Some(message) = self.no_address_index_message(server) {
+            return Err(format!("skipped: no address index (node message: {})", message));
+        }
+        let tip = self.server_tip(server).await?;
+        let funding = self.server_funding_state(server, output.txid).await;
+        let (from, to) = self.history_window(from_block, tip, Some(funding));
+        log.line(format!(
+            "HTLC spend detection for {}: {} funding {:?}, history blocks {}..={}",
+            log.coin,
+            self.name(server),
+            funding,
+            from,
+            to
+        ));
+        let forms = self.form_evidence(server, hash, from, to, log).await;
+        self.mark_if_no_address_index(server, &forms);
+        self.note_encodings(server, &forms);
+        let outcome = decide_spend(output, funding, &forms).map_err(|e| e.to_string())?;
+        let decision =
+            SpendDecision::of(&outcome).ok_or_else(|| "the spending transaction cannot be read".to_owned())?;
+        let proves_itself = matches!(&outcome, SpendOutcome::Spent(spend) if found_spend_proves_itself(spend, &hash));
+        Ok(EndpointSpend {
+            outcome,
+            decision,
+            proves_itself,
+            tip,
+        })
+    }
+
+    /// HTLC spend detection under R100: two endpoints on distinct hosts must agree (or the named trusted
+    /// endpoint answers alone); a claim whose secret hashes to the swap's secret hash is taken on one endpoint's
+    /// answer.
+    async fn detect_output_spend_agreed(
+        &self,
+        output: &OutputRef,
+        hash: [u8; 20],
+        from_block: u64,
+        log: &DetectionLog<'_>,
+    ) -> Result<SpendOutcome, HtlcIndexError> {
+        let step = format!(
+            "the spend of the HTLC output {:?}:{} of {}",
+            txid_internal_to_display(output.txid),
+            output.vout,
+            log.coin
+        );
+        let servers = self.evidence_servers(true).await?;
+        log.line(format!(
+            "HTLC spend detection for {}: output {:?}:{}, {} admitted endpoint(s), {:?}",
+            log.coin,
+            txid_internal_to_display(output.txid),
+            output.vout,
+            servers.len(),
+            self.swap_evidence.kind()
+        ));
+        let agreement = self
+            .agree_on_with_tips(
+                &servers,
+                |server| {
+                    let server = server.to_owned();
+                    async move { self.spend_on_endpoint(&server, output, hash, from_block, log).await }
+                },
+                |answer| answer.decision.clone(),
+                |answer| answer.proves_itself,
+                |answer| Some(answer.tip),
+                SPEND_READ_MAX_TIP_GAP_BLOCKS,
+            )
+            .await;
+        let result = self
+            .settle(&step, agreement)
+            .map(|(answer, _)| answer.outcome)
+            .map_err(HtlcIndexError::SwapEvidence);
+        log.line(format!("HTLC spend detection for {}: {}", log.coin, match &result {
+            Err(HtlcIndexError::SwapEvidence(undetermined)) => format!("undetermined ({})", undetermined.class),
+            other => format!("decision {}", describe_spend_decision(other)),
+        }));
+        result
+    }
+
+    /// One endpoint's answer to the already-sent question, from that endpoint alone.
+    async fn funding_on_endpoint(
+        &self,
+        server: &str,
+        script_pubkey: &[u8],
+        hash: [u8; 20],
+        from_block: u64,
+        log: &DetectionLog<'_>,
+    ) -> Result<EndpointSent, String> {
+        if let Some(message) = self.no_address_index_message(server) {
+            return Err(format!("skipped: no address index (node message: {})", message));
+        }
+        let tip = self.server_tip(server).await?;
+        let (from, to) = self.history_window(from_block, tip, None);
+        let forms = self.form_evidence(server, hash, from, to, log).await;
+        self.mark_if_no_address_index(server, &forms);
+        self.note_encodings(server, &forms);
+        let outcome = decide_sent(script_pubkey, &forms).map_err(|e| e.to_string())?;
+        let decision = SentDecision::of(&outcome).ok_or_else(|| "the payment transaction cannot be read".to_owned())?;
+        Ok(EndpointSent { outcome, decision, tip })
+    }
+
+    /// Already-sent detection under R100: two endpoints on distinct hosts must agree on the payment transaction
+    /// or on "not sent" (or the named trusted endpoint answers alone).
+    async fn detect_funding_agreed(
+        &self,
+        script_pubkey: &[u8],
+        hash: [u8; 20],
+        from_block: u64,
+        log: &DetectionLog<'_>,
+    ) -> Result<SentOutcome, HtlcIndexError> {
+        let step = format!(
+            "the payment to the HTLC script {} of {}",
+            hex::encode(script_pubkey),
+            log.coin
+        );
+        let servers = self.evidence_servers(false).await?;
+        log.line(format!(
+            "HTLC already-sent detection for {}: payment script {}, {} admitted endpoint(s), {:?}",
+            log.coin,
+            hex::encode(script_pubkey),
+            servers.len(),
+            self.swap_evidence.kind()
+        ));
+        let agreement = self
+            .agree_on_with_tips(
+                &servers,
+                |server| {
+                    let server = server.to_owned();
+                    async move {
+                        self.funding_on_endpoint(&server, script_pubkey, hash, from_block, log)
+                            .await
+                    }
+                },
+                |answer| answer.decision.clone(),
+                |_| false,
+                |answer| Some(answer.tip),
+                SPEND_READ_MAX_TIP_GAP_BLOCKS,
+            )
+            .await;
+        let result = self
+            .settle(&step, agreement)
+            .map(|(answer, _)| answer.outcome)
+            .map_err(HtlcIndexError::SwapEvidence);
+        log.line(format!(
+            "HTLC already-sent detection for {}: {}",
+            log.coin,
+            match &result {
+                Err(HtlcIndexError::SwapEvidence(undetermined)) => format!("undetermined ({})", undetermined.class),
+                other => format!("decision {}", describe_sent_decision(other)),
+            }
+        ));
+        result
+    }
+
     /// Already-sent detection (R39.11.4d): is there a payment to `script_pubkey` on chain?
     pub(crate) async fn detect_funding(
         &self,
@@ -930,6 +1290,9 @@ impl LightwalletdBackend {
         from_block: u64,
         log: &DetectionLog<'_>,
     ) -> Result<SentOutcome, HtlcIndexError> {
+        if self.reads_agree() {
+            return self.detect_funding_agreed(script_pubkey, hash, from_block, log).await;
+        }
         let admitted = self
             .admitted_ordered()
             .await
