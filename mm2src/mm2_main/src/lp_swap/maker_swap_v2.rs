@@ -1792,7 +1792,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                     Read::Look,
                     30,
                     || now_ms() / 1000,
-                    || {
+                    |_| {
                         sm.taker_coin.search_for_taker_funding_spend(
                             &taker_funding,
                             self.taker_coin_start_block,
@@ -1892,13 +1892,13 @@ async fn await_taker_payment_confirmation<M: MmCoin + MakerCoinSwapOpsV2, T: MmC
             sm.taker_payment_conf_timeout(),
             CONFIRMATION_POLL_SECS,
             || now_ms() / 1000,
-            || {
+            |wait_until| {
                 sm.taker_coin
                     .wait_for_confirmations(
                         taker_payment,
                         sm.conf_settings.taker_coin_confs,
                         sm.conf_settings.taker_coin_nota,
-                        sm.taker_payment_conf_timeout(),
+                        wait_until,
                         10,
                     )
                     .compat()
@@ -2274,7 +2274,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
                     Read::Gate,
                     30,
                     || now_ms() / 1000,
-                    || sm.maker_coin.can_refund_htlc(sm.maker_payment_locktime()).compat(),
+                    |_| sm.maker_coin.can_refund_htlc(sm.maker_payment_locktime()).compat(),
                 )
                 .await;
             match gate_end {

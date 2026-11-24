@@ -920,9 +920,12 @@ the previous version used. The safe way:
   of both sides. An undetermined read is read again at the step's poll interval; it is never taken as "nothing
   found", "not spent", "not confirmed" or "refundable". The wait lasts until 3700 seconds past the lock time of the
   node's own payment (for the taker's read of the maker payment's confirmations: of its funding), and at least 3700
-  seconds from the first undetermined read (a restart starts the wait anew). Then the swap ends as aborted, with a
-  reason whose text names the read, the coin and the fix: add a server on a second host to the coin's node list or
-  set `swap_evidence_node`, then run `recover_funds_of_swap`. The log has one warning per wait. A read that fails
+  seconds from the first undetermined read at or after that lock time (a restart starts the wait anew). A read that
+  follows an undetermined one asks the nodes again also after the step's own deadline; a confirmation, or a spend
+  of the taker funding, that is read only then is not acted on and the step takes its refund path. When the
+  wait ends while the read is still undetermined, the swap ends as aborted, with a reason whose text names the read,
+  the coin and the fix: add a server on a second host to the coin's node list or set `swap_evidence_node`, then run
+  `recover_funds_of_swap`. The log has one warning per wait. A read that fails
   in another way is handled as the step's own rule says.
   - Detail: PR #533; CRD ch.52 R18, R19, R21, R30, R31, R34 and their status notes of 2026-11-24, ch.51 §51.6G R100.
 

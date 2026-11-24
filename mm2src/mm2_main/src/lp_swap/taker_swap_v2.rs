@@ -2013,13 +2013,13 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                     sm.maker_payment_conf_timeout(),
                     CONFIRMATION_POLL_SECS,
                     || now_ms() / 1000,
-                    || {
+                    |wait_until| {
                         sm.maker_coin
                             .wait_for_confirmations(
                                 &maker_payment_bytes,
                                 confirmation_gate_confs(sm.conf_settings.maker_coin_confs),
                                 sm.conf_settings.maker_coin_nota,
-                                sm.maker_payment_conf_timeout(),
+                                wait_until,
                                 10,
                             )
                             .compat()
@@ -2206,23 +2206,28 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
 
 /// Searches for the maker's spend of the taker payment until the taker payment locktime (CRD ch.52 R31). An
 /// undetermined search is never read as "the maker did not spend": it is repeated every ten seconds, also past the
-/// locktime, up to the bound of the wait (CRD ch.51 R100 items 3 and 9).
+/// locktime, up to the bound of the wait (CRD ch.51 R100 items 3 and 9). A search after an undetermined answer is
+/// given a `wait_until` that has not passed, so the coin searches before it can answer "timed out"; a "timed out"
+/// answer is then a search that found no spend after the locktime.
 async fn await_taker_payment_spend<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>(
     sm: &TakerSwapStateMachine<M, T>,
     taker_payment_tx: &T::Tx,
     from_block: u64,
 ) -> ReadEnd<T::Tx, MmError<FindPaymentSpendError>> {
-    let wait_until = sm.taker_payment_locktime();
-    UndeterminedWait::new(wait_until)
+    let locktime = sm.taker_payment_locktime();
+    UndeterminedWait::new(locktime)
         .read(
             &sm.uuid,
             sm.taker_coin.ticker(),
             Read::Look,
             CONFIRMATION_POLL_SECS,
             || now_ms() / 1000,
-            || {
-                sm.taker_coin
-                    .find_taker_payment_spend_tx(taker_payment_tx, from_block, wait_until)
+            |min_wait_until| {
+                sm.taker_coin.find_taker_payment_spend_tx(
+                    taker_payment_tx,
+                    from_block,
+                    coin_wait_until(locktime, min_wait_until),
+                )
             },
         )
         .await
@@ -2659,7 +2664,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                     Read::Gate,
                     30,
                     || now_ms() / 1000,
-                    || sm.taker_coin.can_refund_htlc(sm.taker_payment_locktime()).compat(),
+                    |_| sm.taker_coin.can_refund_htlc(sm.taker_payment_locktime()).compat(),
                 )
                 .await;
             match gate_end {

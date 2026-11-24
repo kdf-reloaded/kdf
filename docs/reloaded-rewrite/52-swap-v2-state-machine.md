@@ -405,9 +405,13 @@ arrives as a message (chapter 51 R42).
 > The state takes no transition on it and searches again after thirty
 > seconds, also after the ⅔ deadline. The wait ends at the later of two
 > moments (R100 item 9 with its notes): the maker payment locktime plus
-> 3700 seconds, and 3700 seconds after the first undetermined answer of
-> the state's current run. That first moment is not stored, so a resumed
-> swap starts a new wait. The state then ends in `Aborted` with its
+> 3700 seconds, and 3700 seconds after the first undetermined answer
+> that the state's current run reads at or after that locktime; an
+> undetermined answer before the locktime is waited on and does not
+> start the count. That first moment is not stored, so a resumed
+> swap starts a new wait. A coin read whose answer can be undetermined
+> MUST answer so, and never as timed out, nothing found or not
+> confirmed. The state then ends in `Aborted` with its
 > existing funding-spend-error discriminant. The text names the read,
 > the coin and the fix (a node on a second host or `swap_evidence_node`,
 > then `recover_funds_of_swap`) and carries no error text of a node
@@ -473,9 +477,13 @@ to `MakerPaymentRefundRequired`.
 > payment locktime. At the bound the state ends in `Aborted` with the
 > existing `InternalError` discriminant, never with the
 > confirmation-timeout one; its text says that the maker payment is on
-> chain and that nothing was claimed or refunded. A confirmation that is
-> read after an undetermined read and after the ⅔ deadline counts as not
-> read in time. A determined failure keeps R19's transition.
+> chain and that nothing was claimed or refunded. A read that follows an
+> undetermined one is given a time limit that has not passed, also after
+> the ⅔ deadline, so that it asks the nodes before it can end as timed
+> out; the ⅔ deadline itself is judged by the state. A confirmation that
+> is read after an undetermined read and after the ⅔ deadline counts as
+> not read in time. A determined failure, a read that timed out after
+> asking the nodes included, keeps R19's transition.
 
 **R20.** *The propagation gate.* Before committing its own payment, the
 maker MUST establish that the taker's funding transaction is actually on
@@ -699,10 +707,12 @@ that may still be replaced.
 > `TakerFundingRefundRequired`. The funding is the output at stake, so
 > the bound is counted from the taker funding locktime. At the bound the
 > state ends in `Aborted` with the existing discriminant of a maker
-> payment not confirmed in time; R44 applies, the funding is on chain. A
-> confirmation that is read after an undetermined read and after the ⅓
-> deadline counts as not read in time. A determined failure keeps R30's
-> transition.
+> payment not confirmed in time; R44 applies, the funding is on chain.
+> The time limit of a read that follows an undetermined one is set as
+> the note of this date after R19 says, and the ⅓ deadline is judged by
+> the state. A confirmation that is read after an undetermined read and
+> after the ⅓ deadline counts as not read in time. A determined failure
+> keeps R30's transition.
 
 **R31.** *Send the taker payment.* Both `MakerPaymentConfirmed` and the
 direct branch of R29 MUST co-sign and broadcast the funding spend that
@@ -734,9 +744,12 @@ both transition to `TakerPaymentSpent`.
 > not lead to `TakerPaymentRefundRequired`. The bound is counted from
 > the taker payment locktime. At the bound the state ends in `Aborted`
 > with the existing discriminant of a maker that did not spend in time;
-> R44 applies, the taker payment is on chain. A spend that is found, and
-> a search that ends without the undetermined answer, keep R31's
-> transitions.
+> R44 applies, the taker payment is on chain. A search that follows an
+> undetermined one is given a time limit that has not passed, so that it
+> asks the nodes before it can end as timed out. A spend that is found
+> keeps R31's transition at any time. A search that asked the nodes,
+> found no spend and timed out after the locktime keeps R31's transition
+> to `TakerPaymentRefundRequired`.
 
 **R32.** *Claim the maker payment.* `TakerPaymentSpent` MUST extract the
 maker's secret from the observed spend of the taker payment
