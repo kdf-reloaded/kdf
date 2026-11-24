@@ -401,7 +401,7 @@ default, as if `swap_evidence_node` named it: its activation answer carries
 configured counts, not the hosts that answer, so a coin listed with two or more hosts stays under
 the two-host rule while one of them does not answer. The top-level `MM2.json` boolean
 `swap_evidence_allow_single_host` set to `false` turns this off: such a coin then starts no swap
-until a second host is listed or `swap_evidence_node` is set. GLEEC KDF has no such setting; the row
+until a second host is listed or `swap_evidence_node` is set. This is a Reloaded addition; the row
 in [GLEEC_COMPATIBILITY](GLEEC_COMPATIBILITY.md) describes it.
 
 ### Electrum Servers over TLS

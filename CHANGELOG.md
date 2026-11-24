@@ -38,7 +38,7 @@ or undo, and every change that needs a step from you.
     node logs one warning naming the coin. The list as configured counts, not the hosts that answer: a coin listed
     with two or more hosts stays under the two-node rule even while one of them does not answer. Set the switch to
     `false` to require two hosts or `swap_evidence_node` for every coin. Detail: PR #536; CRD ch.51 status note of
-    2026-11-24 after T43.
+    2026-11-24 before §51.7.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
     - TRON (TRX, TRC20). TRON swaps stay off in this release; when they are switched on, their chain reads already
       follow the rule. Detail: PR #509; CRD ch.21 §21.11D.
@@ -50,13 +50,13 @@ or undo, and every change that needs a step from you.
       it, add a server on a second host to the activation request, or set `swap_evidence_node` to one of the coin's
       servers to trust that server alone. A coin in native mode reads your own daemon and needs nothing. Detail: PR
       #522; CRD ch.38 status note of 2026-11-23 before §38.6.4Q.
-    - **EVM coins and ERC20 tokens.** Affected: every such coin whose nodes that passed the activation probe name
-      fewer than two hosts, for example a coin activated with a single node URL, when
-      `swap_evidence_allow_single_host` is `false` or its configured list names two or more hosts (by default a coin
-      configured with one host trusts it); a legacy ERC20 `enable` counts its own node list, and a token enabled with
-      its platform counts the platform's. It no longer starts a swap: `setprice`, `buy`, `sell` and the swap start
-      refuse it, and its running swaps wait at a refund or claim step until two nodes agree. To fix it, add a node on
-      a second host to the activation request, or set `swap_evidence_node` to one of the coin's nodes to trust that
+    - **EVM coins and ERC20 tokens.** Affected: every such coin whose configured node list names two or more hosts:
+      its swap steps wait until two of its nodes that passed the activation probe agree, and while fewer than two
+      passed it starts no swap: `setprice`, `buy`, `sell` and the swap start refuse it. A coin configured with one
+      host, for example a coin activated with a single node URL, trusts that node by default; with
+      `swap_evidence_allow_single_host` set to `false` it is refused in the same way. A legacy ERC20 `enable` counts
+      its own node list, and a token enabled with its platform counts the platform's. To fix it, add a node on a
+      second host to the activation request, or set `swap_evidence_node` to one of the coin's nodes to trust that
       node alone. Detail: PR #512; CRD ch.51 §51.6G R100.
     - **Sia (SC).** A Sia coin reads one walletd node, so there is no second node to add: by default
       (`swap_evidence_allow_single_host`) the walletd node is trusted as if `swap_evidence_node` named it. With that
