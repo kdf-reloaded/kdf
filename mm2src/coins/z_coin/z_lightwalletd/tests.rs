@@ -423,6 +423,8 @@ pub(crate) struct Script {
     pub(crate) address_error: Option<EndpointError>,
     /// The block hash `GetBlock` answers per height; a height not listed is unscripted.
     pub(crate) block_hashes: HashMap<u64, [u8; 32]>,
+    /// Added to the time of every block this endpoint serves, so two endpoints can have different clocks.
+    pub(crate) block_time_offset: u32,
 }
 
 /// Called with the bytes of every broadcast, before the scripted answer is returned.
@@ -494,7 +496,8 @@ impl LightwalletdTransport for FakeTransport {
 
     async fn block_time(&self, server: &str, height: u64) -> Result<u32, EndpointError> {
         self.record(server, "time");
-        Ok(1_000 + height as u32)
+        let offset = self.scripts.lock().get(server).map_or(0, |s| s.block_time_offset);
+        Ok(1_000 + height as u32 + offset)
     }
 
     async fn block_hash(&self, server: &str, height: u64) -> Result<[u8; 32], EndpointError> {
@@ -2428,5 +2431,315 @@ mod naming_and_suspension {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// R100 (CRD ch.51 §51.6G, T42): payment state, confirmations and the chain time of the refund gate agree
+// between two endpoints on distinct hosts
+// ---------------------------------------------------------------------------------------------
+
+mod r100 {
+    use super::*;
+    use crate::swap_evidence::SwapEvidencePolicy;
+
+    fn two_nodes() -> SwapEvidencePolicy {
+        SwapEvidencePolicy::TwoNodes {
+            hosts: vec!["a".to_owned(), "b".to_owned()],
+        }
+    }
+
+    struct Bound;
+    impl WalletBranchStore for Bound {
+        fn state(&self) -> Result<WalletBranchState, String> { Ok(scanned_wallet(IRONWOOD_BRANCH)) }
+
+        fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+    }
+
+    fn agreeing(transport: &Arc<FakeTransport>, servers: &[&str], policy: SwapEvidencePolicy) -> LightwalletdBackend {
+        let backend = backend_over(transport, servers).with_swap_evidence(policy);
+        backend.bind_wallet(Arc::new(Bound));
+        backend
+    }
+
+    /// An endpoint at `tip` whose clock runs `offset` seconds ahead.
+    fn at(tip: u64, offset: u32) -> Script {
+        Script {
+            tip_floor: Some(tip),
+            block_time_offset: offset,
+            ..healthy(&[])
+        }
+    }
+
+    // The block at height h has time 1000 + h + offset, so the median of the last 11 blocks ending at tip 100 is
+    // 1095 + offset.
+    const LOCK_BETWEEN: u64 = 1_100;
+
+    /// Two endpoints whose medians differ but are both past the lock open the gate; one before it does not.
+    #[tokio::test]
+    async fn two_chain_times_that_differ_but_are_both_past_the_lock_agree() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        transport.serve("b", at(100, 50));
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+
+        // Medians 1105 and 1145, lock 1100: both past.
+        let mtp = backend.median_time_past_agreed(11, LOCK_BETWEEN).await.unwrap();
+        assert_eq!(mtp, 1_105, "the answer of the first agreeing endpoint");
+
+        // Lock 1120: a is before it, b is past it.
+        let error = backend.median_time_past_agreed(11, 1_120).await.unwrap_err();
+        assert!(error.contains("disagree"), "{error}");
+
+        // Lock 1200: both before it, which is an agreement that the gate is closed.
+        let mtp = backend.median_time_past_agreed(11, 1_200).await.unwrap();
+        assert!(u64::from(mtp) <= 1_200);
+    }
+
+    #[tokio::test]
+    async fn the_chain_time_of_one_answering_endpoint_is_undetermined() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        transport.serve("b", healthy(&[])); // no tip scripted: its read fails
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+
+        let error = backend.median_time_past_agreed(11, LOCK_BETWEEN).await.unwrap_err();
+
+        assert!(error.contains("fewer than two"), "{error}");
+    }
+
+    /// With `swap_evidence_node` set, that endpoint's chain time alone is taken, and when it is silent no other
+    /// is asked.
+    #[tokio::test]
+    async fn a_trusted_endpoint_gives_the_chain_time_alone_and_when_silent_no_other_is_asked() {
+        let trusted = SwapEvidencePolicy::Trusted { node: "a".to_owned() };
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        transport.serve("b", at(100, 50));
+        let backend = agreeing(&transport, &["a", "b"], trusted.clone());
+        assert_eq!(backend.median_time_past_agreed(11, LOCK_BETWEEN).await.unwrap(), 1_105);
+        assert_eq!(transport.called("b", "time"), 0);
+
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", healthy(&[]));
+        transport.serve("b", at(100, 50));
+        let backend = agreeing(&transport, &["a", "b"], trusted);
+        let error = backend.median_time_past_agreed(11, LOCK_BETWEEN).await.unwrap_err();
+        assert!(error.contains("trusted node did not answer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_insufficient_coin_reads_no_chain_time_and_asks_nothing() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        let backend = agreeing(&transport, &["a"], SwapEvidencePolicy::Insufficient { hosts: 1 });
+
+        assert!(backend.median_time_past_agreed(11, LOCK_BETWEEN).await.is_err());
+        assert!(backend.payment_agreed([1; 32]).await.is_err());
+        assert!(backend
+            .confirmations_agreed(&H256Json::from([1; 32]), 0, 1)
+            .await
+            .is_err());
+        assert!(transport.calls.lock().is_empty(), "{:?}", transport.calls.lock());
+    }
+
+    fn payment(data: &[u8], height: Option<u64>) -> Script {
+        Script {
+            transaction: Some(Ok(RawTx {
+                data: data.to_vec(),
+                height,
+            })),
+            ..at(100, 0)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_payment_is_read_from_two_endpoints_that_return_the_same_bytes() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", payment(b"tx", Some(90)));
+        transport.serve("b", payment(b"tx", None));
+        transport.serve("c", payment(b"other", Some(90)));
+        let backend = agreeing(&transport, &["a", "b", "c"], two_nodes());
+
+        assert_eq!(backend.payment_agreed([1; 32]).await.unwrap().data, b"tx".to_vec());
+
+        // They differ: undetermined, and the third endpoint is not asked to outvote them.
+        transport.serve("b", payment(b"forged", Some(90)));
+        let error = backend.payment_agreed([1; 32]).await.unwrap_err();
+        assert!(error.contains("disagree"), "{error}");
+        assert_eq!(transport.called("c", "tx"), 0);
+    }
+
+    #[tokio::test]
+    async fn the_confirmations_are_decided_by_two_endpoints_each_reading_its_own_tip() {
+        let transport = Arc::new(FakeTransport::default());
+        // Mined at 95: depth 6 at tip 100.
+        transport.serve("a", payment(b"tx", Some(95)));
+        transport.serve("b", payment(b"tx", Some(95)));
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+        let tx = H256Json::from([1; 32]);
+
+        assert_eq!(
+            backend.confirmations_agreed(&tx, 0, 6).await.unwrap(),
+            ConfirmationDecision::Reached
+        );
+        assert_eq!(
+            backend.confirmations_agreed(&tx, 0, 7).await.unwrap(),
+            ConfirmationDecision::NotYet
+        );
+
+        // One endpoint is a block behind: they differ at depth 6, which is undetermined, not reached.
+        transport.serve("b", Script {
+            tip_floor: Some(99),
+            ..payment(b"tx", Some(95))
+        });
+        let error = backend.confirmations_agreed(&tx, 0, 6).await.unwrap_err();
+        assert!(error.contains("disagree"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_trusted_endpoint_decides_the_confirmations_alone() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", payment(b"tx", Some(95)));
+        transport.serve("b", healthy(&[]));
+        let backend = agreeing(&transport, &["a", "b"], SwapEvidencePolicy::Trusted {
+            node: "a".to_owned(),
+        });
+
+        assert_eq!(
+            backend
+                .confirmations_agreed(&H256Json::from([1; 32]), 0, 6)
+                .await
+                .unwrap(),
+            ConfirmationDecision::Reached
+        );
+        assert_eq!(transport.called("b", "tx"), 0);
+    }
+
+    /// The wait does not return on one endpoint's say-so: with the second endpoint behind, it keeps waiting.
+    #[tokio::test]
+    async fn the_confirmation_wait_does_not_finish_while_the_endpoints_disagree() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", payment(b"tx", Some(95)));
+        transport.serve("b", Script {
+            tip_floor: Some(99),
+            ..payment(b"tx", Some(95))
+        });
+        let client = LightwalletdClient(Arc::new(agreeing(&transport, &["a", "b"], two_nodes())));
+
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            client.wait_for_confirmations(H256Json::from([1; 32]), 0, 6, u64::MAX / 2_000, 1),
+        )
+        .await;
+
+        assert!(waited.is_err(), "the wait is still going: {waited:?}");
+    }
+
+    #[tokio::test]
+    async fn the_confirmation_wait_finishes_once_two_endpoints_agree() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", payment(b"tx", Some(95)));
+        transport.serve("b", payment(b"tx", Some(95)));
+        let client = LightwalletdClient(Arc::new(agreeing(&transport, &["a", "b"], two_nodes())));
+
+        client
+            .wait_for_confirmations(H256Json::from([1; 32]), 0, 6, u64::MAX / 2_000, 0)
+            .await
+            .unwrap();
+    }
+
+    /// Chain times and confirmations of two endpoints whose tips are within the gap decide; beyond it they are
+    /// undetermined (TipGap).
+    #[tokio::test]
+    async fn the_tip_gap_applies_to_the_chain_time_and_the_confirmations() {
+        let gap = |error: String| error.contains("tips of the nodes differ too much");
+
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        transport.serve("b", at(100 + CHAIN_TIME_MAX_TIP_GAP_BLOCKS, 10));
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+        assert!(backend.median_time_past_agreed(11, LOCK_BETWEEN).await.is_ok());
+
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", at(100, 10));
+        transport.serve("b", at(100 + CHAIN_TIME_MAX_TIP_GAP_BLOCKS + 1, 10));
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+        assert!(gap(backend
+            .median_time_past_agreed(11, LOCK_BETWEEN)
+            .await
+            .unwrap_err()));
+
+        let tx = H256Json::from([1; 32]);
+        let transport = Arc::new(FakeTransport::default());
+        transport.serve("a", payment(b"tx", Some(50)));
+        transport.serve("b", Script {
+            tip_floor: Some(100 + CONFIRMATION_MAX_TIP_GAP_BLOCKS),
+            ..payment(b"tx", Some(50))
+        });
+        let backend = agreeing(&transport, &["a", "b"], two_nodes());
+        assert_eq!(
+            backend.confirmations_agreed(&tx, 0, 6).await.unwrap(),
+            ConfirmationDecision::Reached
+        );
+
+        transport.serve("b", Script {
+            tip_floor: Some(100 + CONFIRMATION_MAX_TIP_GAP_BLOCKS + 1),
+            ..payment(b"tx", Some(50))
+        });
+        assert!(gap(backend.confirmations_agreed(&tx, 0, 6).await.unwrap_err()));
+    }
+
+    /// CRD ch.51 R80/R81: the WARN of an undetermined read names the ticker, the step, the reason class and the
+    /// policy kind, and no host, label or answer of a node. The nodes are in the error text and the DEBUG line.
+    #[test]
+    fn the_warning_of_an_undetermined_read_names_no_node() {
+        let transport = Arc::new(FakeTransport::default());
+        let backend = agreeing(&transport, &["a", "b"], SwapEvidencePolicy::Trusted {
+            node: "https://user:secret@lwd.example.org:443".to_owned(),
+        })
+        .with_ticker("ARRR");
+        let undetermined = crate::swap_evidence::Undetermined {
+            reason: UndeterminedReason::Disagree,
+            per_node: vec![
+                ("lwd1.example.org:443".to_owned(), "spent by 5ec3e7".to_owned()),
+                ("lwd2.example.org:9067".to_owned(), "not spent".to_owned()),
+            ],
+        };
+
+        let warning = backend.warning_of("the spend of the HTLC output", &undetermined);
+
+        assert!(warning.starts_with("ARRR: "), "{warning}");
+        assert!(
+            warning.contains("the spend of the HTLC output") && warning.contains("the nodes disagree"),
+            "{warning}"
+        );
+        assert!(warning.contains("trusted node"), "{warning}");
+        assert!(warning.contains("swap_evidence_node"), "the fixes are named");
+        for forbidden in [
+            "example.org",
+            "lwd1",
+            "lwd2",
+            "9067",
+            "spent by",
+            "not spent",
+            "user",
+            "secret",
+        ] {
+            assert!(!warning.contains(forbidden), "the warning names a node or an answer");
+        }
+        // The error text for the caller keeps the labels and what each node said.
+        let text = LightwalletdBackend::undetermined_text(&undetermined);
+        assert!(
+            text.contains("lwd1.example.org:443") && text.contains("spent by 5ec3e7"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn zcoin_has_adopted_r100() {
+        assert!(crate::swap_evidence::family_adopted(
+            crate::swap_evidence::SwapFamily::Zcoin
+        ));
     }
 }

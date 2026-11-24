@@ -23,11 +23,13 @@
 //!
 //! The reads sit behind [`ElectrumReads`] so the three questions can be driven without a network.
 
-use super::z_lightwalletd::{p2sh_hash_of, txid_internal_to_display, DetectionLog, LightwalletdBackend, OutputRef,
+use super::z_lightwalletd::{p2sh_hash_of, spend_proves_itself, txid_internal_to_display, DetectionLog,
+                            LightwalletdBackend, OutputRef, SentDecision, SpendDecision,
                             ADMISSION_REEVALUATION_INTERVAL};
 use super::z_tx_read::{read_tx, txid_display};
 use crate::coin_conf;
 use crate::node_url::{electrum_server_name, UNNAMED_SERVER};
+use crate::swap_evidence::{node_host, SwapEvidencePolicy};
 use crate::utxo::rpc_clients::electrum_pool::round_budget;
 use crate::utxo::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumPoolTimings, ElectrumRpcRequest};
 use crate::utxo::utxo_builder::build_electrum_client;
@@ -238,7 +240,9 @@ impl ElectrumReads for ElectrumClientReads {
 /// Why the fallback gave no answer.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum FallbackError {
-    /// The activation listed no Electrum server: there is no fallback, and nothing was asked.
+    /// There is no fallback to ask, and nothing was asked: the activation listed no Electrum server, or the
+    /// coin's swap-evidence policy does not use it (R100: a trusted `swap_evidence_node` is a lightwalletd
+    /// endpoint, and a coin short of nodes asks nothing).
     NotConfigured,
     /// Every server that could be asked failed to answer; one named condition per server, plus the
     /// conditions that stopped the question before any server could be asked.
@@ -289,6 +293,14 @@ struct ServerRecord {
     identity_passed_at: Option<Instant>,
     /// The outcome of the last vetting, to log a first use and a change of outcome (R39.11.25(e)).
     last_vetted_ok: Option<bool>,
+}
+
+/// How an Electrum question is answered (see [`ElectrumFallback::mode`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    First,
+    Pair,
+    ProofOnly,
 }
 
 /// The Electrum fallback of one shielded coin.
@@ -344,6 +356,8 @@ struct Walk<'a> {
     deadline: TokioInstant,
     /// What stopped each server so far.
     conditions: Vec<String>,
+    /// Hosts that have answered already: their other entries are not asked (R100 item 7).
+    answered_hosts: Vec<String>,
 }
 
 impl Walk<'_> {
@@ -369,6 +383,9 @@ impl Walk<'_> {
             }
             let server = self.servers[self.next].clone();
             self.next += 1;
+            if self.answered_hosts.contains(&self.fallback.host_of(&server)) {
+                continue;
+            }
             let timings = &self.fallback.timings;
             let turn = round_budget(remaining, left, timings.establishment + timings.request, timings).min(remaining);
             let turn_deadline = now + turn;
@@ -415,6 +432,24 @@ impl ElectrumFallback {
     /// when the outcome changes; an unchanged outcome is only a `debug` line (R39.11.25(e)).
     /// How a text names `server` (see [`ElectrumReads::server_name`]).
     fn name(&self, server: &str) -> String { self.reads.server_name(server) }
+
+    /// The host of `server`, the identity two answers must differ in (R100 item 7).
+    fn host_of(&self, server: &str) -> String {
+        let name = self.name(server);
+        node_host(&name).unwrap_or(name)
+    }
+
+    /// How a question is answered under the coin's policy: the first answer when the family has not adopted R100,
+    /// two agreeing answers from distinct hosts under `TwoNodes`. Under a trusted node (a lightwalletd endpoint) or
+    /// a coin short of nodes the fallback decides nothing: only a claim whose secret proves itself is taken from it
+    /// (R100 item 3), and already-sent is not asked at all.
+    fn mode(lightwalletd: &LightwalletdBackend) -> Mode {
+        match lightwalletd.swap_evidence() {
+            SwapEvidencePolicy::NotAdopted | SwapEvidencePolicy::OwnDaemon => Mode::First,
+            SwapEvidencePolicy::TwoNodes { .. } => Mode::Pair,
+            SwapEvidencePolicy::Trusted { .. } | SwapEvidencePolicy::Insufficient { .. } => Mode::ProofOnly,
+        }
+    }
 
     fn announce(&self, server: &str, result: &Result<(), String>, identity: &str) {
         let ok = result.is_ok();
@@ -597,6 +632,7 @@ impl ElectrumFallback {
             fresh_tip,
             deadline,
             conditions: Vec::new(),
+            answered_hosts: Vec::new(),
         })
     }
 
@@ -684,6 +720,11 @@ impl ElectrumFallback {
         progress: &Progress<'_>,
         log: &DetectionLog<'_>,
     ) -> Result<SentAnswer, FallbackError> {
+        let needed = match Self::mode(lightwalletd) {
+            Mode::First => 1,
+            Mode::Pair => 2,
+            Mode::ProofOnly => return Err(FallbackError::NotConfigured),
+        };
         let mut walk = self.walk(lightwalletd).await?;
         log.line(format!(
             "HTLC already-sent detection for {}: no lightwalletd endpoint answered; asking the Electrum servers \
@@ -693,6 +734,7 @@ impl ElectrumFallback {
             walk.fresh_tip
         ));
         let script_hash = hex::encode(electrum_script_hash(script_pubkey));
+        let mut answers: Vec<(String, SentAnswer, SentDecision)> = Vec::new();
         while let Some((server, deadline)) = walk.next_usable().await {
             match self
                 .sent_on(&server, script_pubkey, &script_hash, deadline, progress)
@@ -708,10 +750,44 @@ impl ElectrumFallback {
                             SentAnswer::NotSent => "not sent (its script history is complete and empty)".to_owned(),
                         }
                     ));
-                    return Ok(answer);
+                    if needed == 1 {
+                        return Ok(answer);
+                    }
+                    let decision = match &answer {
+                        SentAnswer::Sent(tx) => SentDecision::Sent {
+                            txid: *tx.txid().as_ref(),
+                        },
+                        SentAnswer::NotSent => SentDecision::NotSent,
+                    };
+                    walk.answered_hosts.push(self.host_of(&server));
+                    answers.push((self.name(&server), answer, decision));
+                    if answers.len() == needed {
+                        break;
+                    }
                 },
                 Err(condition) => walk.conditions.push(format!("{}: {}", self.name(&server), condition)),
             }
+        }
+        if needed > 1 {
+            let settled = settle_pair(answers, walk.conditions);
+            log.line(format!(
+                "HTLC already-sent detection for {}: the Electrum servers {}",
+                log.coin,
+                match &settled {
+                    Ok(_) => "agree",
+                    Err(FallbackError::Undetermined(_)) => "did not settle it (undetermined)",
+                    Err(FallbackError::NotConfigured) => "were not asked",
+                }
+            ));
+            if let Err(FallbackError::Undetermined(conditions)) = &settled {
+                // The conditions name servers: debug only.
+                common::log::debug!(
+                    "HTLC already-sent detection for {}: {}",
+                    log.coin,
+                    conditions.join("; ")
+                );
+            }
+            return settled;
         }
         log.line(format!(
             "HTLC already-sent detection for {}: no Electrum server answered: {}",
@@ -811,6 +887,8 @@ impl ElectrumFallback {
         progress: &Progress<'_>,
         log: &DetectionLog<'_>,
     ) -> Result<SpendAnswer, FallbackError> {
+        let mode = Self::mode(lightwalletd);
+        let needed = if mode == Mode::Pair { 2 } else { 1 };
         let mut walk = self.walk(lightwalletd).await?;
         log.line(format!(
             "HTLC spend detection for {}: no lightwalletd endpoint answered; asking the Electrum servers ({} \
@@ -820,6 +898,8 @@ impl ElectrumFallback {
             walk.fresh_tip
         ));
         let script_hash = hex::encode(electrum_script_hash(&output.script_pubkey));
+        let htlc_hash = p2sh_hash_of(&output.script_pubkey);
+        let mut answers: Vec<(String, SpendAnswer, SpendDecision)> = Vec::new();
         while let Some((server, deadline)) = walk.next_usable().await {
             match self.spend_on(&server, output, &script_hash, deadline, progress).await {
                 Ok(answer) => {
@@ -834,10 +914,54 @@ impl ElectrumFallback {
                             SpendAnswer::NotSpent => "not spent (the unspent listing has the output)".to_owned(),
                         }
                     ));
-                    return Ok(answer);
+                    if mode == Mode::First {
+                        return Ok(answer);
+                    }
+                    // A claim whose secret hashes to the swap's secret hash is taken on one answer (R100).
+                    if let (SpendAnswer::Spent { tx, input_index }, Some(htlc_hash)) = (&answer, &htlc_hash) {
+                        if spend_proves_itself(tx, *input_index, htlc_hash) {
+                            return Ok(answer);
+                        }
+                    }
+                    if mode == Mode::ProofOnly {
+                        // No decision rests on this answer: only a claim that proves itself is taken.
+                        walk.answered_hosts.push(self.host_of(&server));
+                        continue;
+                    }
+                    let decision = match &answer {
+                        SpendAnswer::Spent { tx, .. } => SpendDecision::Spent {
+                            txid: *tx.txid().as_ref(),
+                        },
+                        SpendAnswer::NotSpent => SpendDecision::NotSpent { funded: true },
+                    };
+                    walk.answered_hosts.push(self.host_of(&server));
+                    answers.push((self.name(&server), answer, decision));
+                    if answers.len() == needed {
+                        break;
+                    }
                 },
                 Err(condition) => walk.conditions.push(format!("{}: {}", self.name(&server), condition)),
             }
+        }
+        if mode == Mode::ProofOnly {
+            return Err(FallbackError::NotConfigured);
+        }
+        if needed > 1 {
+            let settled = settle_pair(answers, walk.conditions);
+            log.line(format!(
+                "HTLC spend detection for {}: the Electrum servers {}",
+                log.coin,
+                match &settled {
+                    Ok(_) => "agree",
+                    Err(FallbackError::Undetermined(_)) => "did not settle it (undetermined)",
+                    Err(FallbackError::NotConfigured) => "were not asked",
+                }
+            ));
+            if let Err(FallbackError::Undetermined(conditions)) = &settled {
+                // The conditions name servers: debug only.
+                common::log::debug!("HTLC spend detection for {}: {}", log.coin, conditions.join("; "));
+            }
+            return settled;
         }
         log.line(format!(
             "HTLC spend detection for {}: no Electrum server answered: {}",
@@ -906,6 +1030,35 @@ impl ElectrumFallback {
             history.len()
         ))
     }
+}
+
+/// The decision of a pair of Electrum answers (CRD ch.51 R100): the first answer when both servers, on distinct
+/// hosts, reached the same decision; otherwise the question is undetermined, with the conditions so far and what
+/// each server said. `conditions` carries what stopped each server that did not answer.
+fn settle_pair<A, K: PartialEq + fmt::Debug>(
+    mut answers: Vec<(String, A, K)>,
+    mut conditions: Vec<String>,
+) -> Result<A, FallbackError> {
+    if answers.len() < 2 {
+        conditions.push(crate::swap_evidence::undetermined(
+            "fewer than two Electrum servers on distinct hosts answered",
+            &[],
+        ));
+        return Err(FallbackError::Undetermined(conditions));
+    }
+    let (first_name, first, first_decision) = answers.remove(0);
+    let (second_name, _, second_decision) = answers.remove(0);
+    if first_decision == second_decision {
+        return Ok(first);
+    }
+    conditions.push(crate::swap_evidence::undetermined(
+        &format!(
+            "the two Electrum servers disagree: {} says {:?}, {} says {:?}",
+            first_name, first_decision, second_name, second_decision
+        ),
+        &[],
+    ));
+    Err(FallbackError::Undetermined(conditions))
 }
 
 /// Whether `tx` has a transparent output of exactly `script_pubkey`.

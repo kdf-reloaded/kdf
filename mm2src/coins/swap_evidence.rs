@@ -80,7 +80,7 @@ pub const R100_ADOPTED: &[(SwapFamily, R100Adoption)] = &[
     (SwapFamily::Qtum, R100Adoption::Adopted),
     (SwapFamily::Qrc20, R100Adoption::NotAdopted),
     (SwapFamily::Evm, R100Adoption::Adopted),
-    (SwapFamily::Zcoin, R100Adoption::NotAdopted),
+    (SwapFamily::Zcoin, R100Adoption::Adopted),
     (SwapFamily::Sia, R100Adoption::Adopted),
     (SwapFamily::Tendermint, R100Adoption::SwapsOff),
     (SwapFamily::Tron, R100Adoption::Adopted),
@@ -105,6 +105,20 @@ pub fn effective_policy(family: SwapFamily, stored: &SwapEvidencePolicy) -> Swap
         stored.clone()
     } else {
         SwapEvidencePolicy::NotAdopted
+    }
+}
+
+impl SwapEvidencePolicy {
+    /// The kind of the policy as a fixed text, which is what a log line names. A node address may carry a
+    /// credential and must never be formatted into a log or an error text, so this never reads the trusted node.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SwapEvidencePolicy::TwoNodes { .. } => "two nodes",
+            SwapEvidencePolicy::Trusted { .. } => "trusted node",
+            SwapEvidencePolicy::OwnDaemon => "own daemon",
+            SwapEvidencePolicy::Insufficient { .. } => "too few nodes",
+            SwapEvidencePolicy::NotAdopted => "not adopted",
+        }
     }
 }
 
@@ -635,6 +649,33 @@ mod tests {
     use std::cell::RefCell;
 
     fn list(entries: &[&str]) -> Vec<String> { entries.iter().map(|entry| (*entry).to_owned()).collect() }
+
+    /// The policy is logged by its kind only: a trusted node is the operator's field and can carry a credential.
+    #[test]
+    fn the_policy_kind_names_no_node() {
+        let trusted = SwapEvidencePolicy::Trusted {
+            node: "https://user:secret@h:443".to_owned(),
+        };
+        let kind = trusted.kind();
+        assert_eq!(kind, "trusted node");
+        assert!(
+            !kind.contains("secret") && !kind.contains("user"),
+            "the kind names a credential"
+        );
+        for (policy, expected) in [
+            (
+                SwapEvidencePolicy::TwoNodes {
+                    hosts: vec!["a".to_owned(), "b".to_owned()],
+                },
+                "two nodes",
+            ),
+            (SwapEvidencePolicy::OwnDaemon, "own daemon"),
+            (SwapEvidencePolicy::Insufficient { hosts: 1 }, "too few nodes"),
+            (SwapEvidencePolicy::NotAdopted, "not adopted"),
+        ] {
+            assert_eq!(policy.kind(), expected);
+        }
+    }
 
     #[test]
     fn undetermined_marker_survives_wrapping() {
