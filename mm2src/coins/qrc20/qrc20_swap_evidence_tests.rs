@@ -4,7 +4,7 @@
 //! only when their names differ, so the servers are listed under the names `a.test`, `b.test` and `c.test`, which a
 //! test resolver maps to the loopback address. The resolver guard is process-wide, so these tests run one at a time.
 
-use super::qrc20_swap_evidence::undetermined_text;
+use super::qrc20_swap_evidence::{undetermined_text, undetermined_texts};
 use super::swap::ClaimCheck;
 use super::*;
 use crate::swap_evidence::{is_undetermined, Undetermined, UndeterminedReason};
@@ -1211,6 +1211,48 @@ fn the_undetermined_text_is_built_from_the_undetermined_value() {
     assert!(
         text.contains("a.test:50001") && text.contains("b.test:50001"),
         "the text names both hosts"
+    );
+}
+
+/// CRD ch.51 R80, R81: the warning of an undetermined read names the kind and the fixes, and no server; the error
+/// text keeps what each server said.
+#[test]
+fn the_warning_of_an_undetermined_read_holds_no_host_label() {
+    let undetermined = Undetermined {
+        reason: UndeterminedReason::Disagree,
+        per_node: vec![
+            ("a.test:50001".to_owned(), "NotSpent at block 800".to_owned()),
+            ("b.test:50002".to_owned(), "no answer: timeout".to_owned()),
+        ],
+    };
+    let (warning, text) = undetermined_texts("QRC20", "spend state", "payment transaction 11", &undetermined);
+    assert!(
+        is_undetermined(&warning),
+        "the warning carries the marker of an undetermined read"
+    );
+    for expected in ["the nodes disagree", "QRC20", "spend state", "swap_evidence_node"] {
+        assert!(
+            warning.contains(expected),
+            "the warning names the reason, the coin, the read and the fix"
+        );
+    }
+    for node_text in [
+        "a.test",
+        "b.test",
+        "50001",
+        "50002",
+        "NotSpent",
+        "no answer",
+        "block 800",
+    ] {
+        assert!(
+            !warning.contains(node_text),
+            "the warning names no server and no answer of a server"
+        );
+    }
+    assert!(
+        text.contains("a.test:50001: NotSpent at block 800") && text.contains("b.test:50002: no answer: timeout"),
+        "the error text keeps what each server said"
     );
 }
 

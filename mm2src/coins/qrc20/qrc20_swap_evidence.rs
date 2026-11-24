@@ -73,6 +73,30 @@ fn first_report(key: String) -> bool {
 /// `"swap evidence undetermined: "`, the marker the swap engine matches on, and names servers by `host:port` only.
 pub(super) fn undetermined_text(undetermined: &Undetermined) -> String { undetermined.to_err_string() }
 
+/// The two texts of an undetermined read of `subject`: the warning line and the error text. Both start with the
+/// marker and the reason and end with which read waits and the two ways to fix it. The error text also says what
+/// each server answered; the warning line names no server and no answer.
+pub(super) fn undetermined_texts(
+    ticker: &str,
+    read: &str,
+    subject: &str,
+    undetermined: &Undetermined,
+) -> (String, String) {
+    let kind = Undetermined {
+        reason: undetermined.reason,
+        per_node: Vec::new(),
+    };
+    let tail = format!(
+        "[{}: the {} of {} waits; to fix it, add an Electrum server on another host that serves the contract reads to \
+         the server list, or set swap_evidence_node]",
+        ticker, read, subject
+    );
+    (
+        format!("{} {}", undetermined_text(&kind), tail),
+        format!("{} {}", undetermined_text(undetermined), tail),
+    )
+}
+
 /// A read that no server was asked for, because nothing could decide it.
 fn too_few_answers<A, K>() -> Agreement<A, K> {
     Agreement::Undetermined(Undetermined {
@@ -442,23 +466,18 @@ impl Qrc20Coin {
     }
 
     /// The error text of an undetermined read of `subject`: the marker and what each server said
-    /// ([`undetermined_text`]), then which read waits and the two ways to fix it (CRD ch.51 R100 item 9). The first
-    /// time a read of `subject` is undetermined the text is logged at WARN, afterwards at DEBUG.
+    /// ([`undetermined_text`]), then which read waits and the two ways to fix it (CRD ch.51 R100 item 9).
+    ///
+    /// The text is logged at DEBUG every time. The first time a read of `subject` is undetermined, one WARN line is
+    /// written as well ([`undetermined_texts`]): it names the kind only and no server, since a refund wait's warning
+    /// carries no node identity (CRD ch.51 R80, R81).
     fn report_undetermined(&self, read: &str, subject: &str, undetermined: &Undetermined) -> String {
         let ticker = &self.utxo.conf.ticker;
-        let text = format!(
-            "{} [{}: the {} of {} waits; to fix it, add an Electrum server on another host that serves the contract \
-             reads to the server list, or set swap_evidence_node]",
-            undetermined_text(undetermined),
-            ticker,
-            read,
-            subject
-        );
+        let (warning, text) = undetermined_texts(ticker, read, subject, undetermined);
         if first_report(format!("{}:{}:{}", ticker, read, subject)) {
-            warn!("{}", text);
-        } else {
-            debug!("{}", text);
+            warn!("{}", warning);
         }
+        debug!("{}", text);
         text
     }
 
