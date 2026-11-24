@@ -33,6 +33,7 @@ use coins::{CanRefundHtlc, FeeApproxStage, GenTakerFundingSpendArgs, GenTakerPay
 use common::executor::Timer;
 use common::log::{error, info, warn};
 use common::mm_number::MmNumber;
+use common::now_ms;
 use crypto::secret_hash_algo::SecretHashAlgo;
 use futures::compat::Future01CompatExt;
 use keys::KeyPair;
@@ -608,9 +609,7 @@ pub struct MakerPaymentSpent<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCo
     pub maker_payment_spend: BytesJson,
     pub negotiation_data: StoredTakerNegotiationData,
     /// The taker's own payment transaction, carried forward from `TakerPaymentSpent`
-    /// (CRD ch.52 D8) so `on_changed`'s confirmation-timeout abort path can build a
-    /// working `TakerPaymentRefundRequired` instead of falling back to empty bytes that
-    /// `refund_combined_taker_payment` cannot use.
+    /// and kept in the persisted event (CRD ch.52 D8).
     pub taker_payment: BytesJson,
     _p: PhantomData<(M, T)>,
 }
@@ -834,8 +833,9 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionF
     for Completed<M, T>
 {
 }
+// The claim of the maker payment is broadcast in this state, so it has no transition to a refund state.
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<MakerPaymentSpent<M, T>>
-    for TakerPaymentRefundRequired<M, T>
+    for Aborted<M, T>
 {
 }
 
@@ -2458,25 +2458,39 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
     type StateMachine = TakerSwapStateMachine<M, T>;
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> StateResult<Self::StateMachine> {
         if sm.require_maker_payment_spend_confirm {
-            let confirm_result = sm
-                .maker_coin
-                .wait_for_confirmations(
-                    &self.maker_payment_spend,
-                    confirmation_gate_confs(sm.conf_settings.maker_coin_confs),
-                    sm.conf_settings.maker_coin_nota,
-                    sm.taker_payment_locktime(),
-                    10,
-                )
-                .compat()
-                .await;
-            if let Err(e) = confirm_result {
-                warn!("Swap {}: maker payment spend not confirmed in time: {}", sm.uuid, e);
-                let reason = AbortReason::MakerPaymentSpendNotConfirmedInTime(e.to_string());
-                return Self::change_state(
-                    TakerPaymentRefundRequired::new(self.taker_payment.clone(), self.negotiation_data.clone(), reason),
-                    sm,
-                )
-                .await;
+            // The claim of the maker payment is broadcast. Its confirmation is read until 3700 seconds past
+            // the taker payment locktime, and for at least 3700 seconds (CRD ch.52 R33; ch.51 R100 item 9). This
+            // state never leads to a refund.
+            let maker_coin = &sm.maker_coin;
+            let confs = confirmation_gate_confs(sm.conf_settings.maker_coin_confs);
+            let nota = sm.conf_settings.maker_coin_nota;
+            let claim_tx_hash = match sm.maker_coin.parse_tx(&self.maker_payment_spend) {
+                Ok(tx) => Ok(hex::encode(tx.tx_hash().0)),
+                Err(_) => Err(hex::encode(&self.maker_payment_spend.0)),
+            };
+            let claim = own_claim_name(sm.maker_coin.ticker(), claim_tx_hash);
+            let confirmed = await_own_claim_confirmation(
+                &claim,
+                own_claim_confirmation_deadline(sm.taker_payment_locktime(), now_ms() / 1000),
+                CONFIRMATION_POLL_SECS,
+                || now_ms() / 1000,
+                log_own_claim_line,
+                |wait_until| {
+                    maker_coin
+                        .wait_for_confirmations(
+                            &self.maker_payment_spend,
+                            confs,
+                            nota,
+                            wait_until,
+                            CONFIRMATION_POLL_SECS,
+                        )
+                        .compat()
+                },
+            )
+            .await;
+            if !confirmed {
+                let reason = taker_own_claim_not_confirmed_reason(&claim);
+                return Self::change_state(Aborted::new(reason), sm).await;
             }
         }
         info!("Taker swap {} completed successfully", sm.uuid);
@@ -2755,37 +2769,32 @@ mod tests {
         }
     }
 
-    /// CRD ch.52 D8, call-site half: `MakerPaymentSpent::on_changed`'s confirmation-timeout
-    /// abort path must forward the real `self.taker_payment` to `TakerPaymentRefundRequired`,
-    /// not the removed `BytesJson::default()` fallback. `on_changed` itself needs a live,
-    /// confirmation-failing coin to actually reach that branch, which this codebase has no
-    /// mocking infrastructure for on the V2 swap-ops traits (`MakerCoinSwapOpsV2` /
-    /// `TakerCoinSwapOpsV2` have no test double anywhere in the tree); this checks the fixed
-    /// call site directly instead, the same way `dex_fee.rs`'s `t16_4a`/`t16_4b` verify other
-    /// call-site shapes via `include_str!`. Before the fix, `BytesJson::default()` appeared
-    /// in this file exactly once, at this call site, so the first assertion alone would have
-    /// failed against the pre-fix code.
+    /// CRD ch.52 D8: no state of the taker machine is built from empty payment bytes.
     #[test]
-    fn maker_payment_spent_confirmation_timeout_no_longer_falls_back_to_empty_bytes() {
+    fn taker_states_are_never_built_from_empty_payment_bytes() {
         let whole_file = include_str!("taker_swap_v2.rs");
-        // Only inspect the production code above this very test module -- otherwise this
-        // assertion (and its own doc comment, which names the removed fallback call) would
-        // trivially fail against itself once inlined by `include_str!`.
+        // Only the production code above this test module is inspected.
         let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
         let source = &whole_file[..mod_tests_pos];
-        assert!(
-            !source.contains("BytesJson::default()"),
-            "MakerPaymentSpent::on_changed's confirmation-timeout abort must not fall back \
-             to empty taker_payment bytes (CRD ch.52 D8)"
-        );
+        assert!(!source.contains("BytesJson::default()"));
+    }
 
-        let marker = "MakerPaymentSpendNotConfirmedInTime";
-        let marker_pos = source.find(marker).expect("reason variant should still be used here");
-        let window = &source[marker_pos..(marker_pos + 300).min(source.len())];
-        assert!(
-            window.contains("self.taker_payment"),
-            "TakerPaymentRefundRequired::new(...) after a maker-payment-spend confirmation \
-             timeout must be constructed from self.taker_payment"
-        );
+    /// CRD ch.52 R33: after the claim of the maker payment is broadcast, `MakerPaymentSpent` ends in `Completed`
+    /// or `Aborted` only. The transition markers are what `change_state` accepts, so a transition to a refund
+    /// state from this state does not compile.
+    #[test]
+    fn maker_payment_spent_has_no_transition_to_a_refund_state() {
+        fn accepts<Next: TransitionFrom<Prev>, Prev>() {}
+        accepts::<Completed<EthCoin, EthCoin>, MakerPaymentSpent<EthCoin, EthCoin>>();
+        accepts::<Aborted<EthCoin, EthCoin>, MakerPaymentSpent<EthCoin, EthCoin>>();
+
+        let whole_file = include_str!("taker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source: String = whole_file[..mod_tests_pos]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!source.contains("TransitionFrom<MakerPaymentSpent<M, T>> for TakerPaymentRefundRequired<M, T>"));
+        assert!(!source.contains("TransitionFrom<MakerPaymentSpent<M, T>> for TakerFundingRefundRequired<M, T>"));
     }
 }

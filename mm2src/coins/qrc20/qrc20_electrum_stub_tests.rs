@@ -3755,12 +3755,23 @@ fn t38_6_4q_1_a_subscription_placed_again_after_a_reconnect_is_not_sent_by_the_n
 
         subscribe().await.unwrap();
         client.subscribe_scripthash(owner, "b9b2".to_owned()).await.unwrap();
+        // The totals are exact: a pass of the pool sends nothing for a subscription that is placed over the current
+        // session (status note of 2026-11-23, item 1), however late the pass over the first session comes.
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 1);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
         reconnect_all(&server).await;
-        wait_until("both placed again", 10., || {
-            server.requests(EVENT_SUBSCRIBE) == 2 && server.requests(SCRIPTHASH_SUBSCRIBE) == 2
+        // The placement over the new session is waited for as the client records it: the client can record the
+        // answer well after the stub received the request, and until then a request of the owner would be sent.
+        wait_until("both placed over the new session", 60., || {
+            client.script_hash_placed_in_this_session("b9b2") && client.contract_events_placed_in_this_session() == 1
         })
         .await;
-        Timer::sleep(1.).await;
+        assert_eq!(server.requests(EVENT_SUBSCRIBE), 2, "placed once over the new session");
+        assert_eq!(
+            server.requests(SCRIPTHASH_SUBSCRIBE),
+            2,
+            "placed once over the new session"
+        );
         subscribe().await.unwrap();
         client.subscribe_scripthash(owner, "b9b2".to_owned()).await.unwrap();
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
@@ -3890,18 +3901,36 @@ fn t38_6_4q_1_two_concurrent_requests_of_one_owner_for_one_key_send_one_request(
 /// only until the first one ends at the end of its call's time budget; then it has settled as a failed placement, the
 /// owner is not remembered, and the next request is sent. The first request is given a short call budget so that the
 /// test does not wait for the pool's 20 s request timeout (the pool's timings are not configurable from here).
+///
+/// A request that ends at its budget closes its session (R38.6.4f item 1), and the pool opens a new one at once.
+/// Until the ended request has settled, its owner is still remembered (D38.6.4Q.1 status note of 2026-11-22, item 1),
+/// and a pass over the new session places what is remembered and not yet placed over it. On a loaded machine the new
+/// session can be there before the request has settled, and the pass then sends the subscription once; when it is
+/// answered, the owner stays remembered (status note of 2026-11-23, item 2, which has a test of its own below). This
+/// test is about the other outcome, a request that fails and leaves nothing placed, and it counts every request. So
+/// the stub serves no new connection while a request of the test runs out its budget, and the test lets the client
+/// have its new session only when that request has ended.
 #[test]
 fn t38_6_4q_1_a_request_without_an_answer_blocks_the_same_owner_only_until_its_budget_ends() {
     block_on(async {
         let env = family_env();
         let server = family_stub().await;
         let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_maintained(&token, 1).await;
         let client = electrum_client_of(&token);
         let owner = token.utxo.electrum_owner;
         let (address, contract) = event_arguments(&token);
         let budget = Duration::from_secs(2);
         server.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::from_secs(3_600));
         server.set_reply_delay(EVENT_SUBSCRIBE, Duration::from_secs(3_600));
+        server.hold_new_connections(true);
+        // The request that ran out its budget has ended and settled: the client gets its new session, and the next
+        // step starts over it.
+        let new_session = || async {
+            server.hold_new_connections(false);
+            wait_maintained(&token, 1).await;
+            server.hold_new_connections(true);
+        };
 
         // The script hash.
         let first = with_call_budget(budget, client.subscribe_scripthash(owner, "f7f6".to_owned()));
@@ -3920,10 +3949,12 @@ fn t38_6_4q_1_a_request_without_an_answer_blocks_the_same_owner_only_until_its_b
             "the first request ends without an answer when its budget is used up"
         );
         assert_eq!(client.script_hash_owners("f7f6"), None);
+        new_session().await;
         // The first request has ended: the next one is sent.
         let third = with_call_budget(budget, client.subscribe_scripthash(owner, "f7f6".to_owned())).await;
         assert!(third.is_err());
         assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        new_session().await;
 
         // The contract event.
         let event = || {
@@ -3943,9 +3974,103 @@ fn t38_6_4q_1_a_request_without_an_answer_blocks_the_same_owner_only_until_its_b
         let (first, ()) = futures::join!(first, second);
         assert!(first.is_err());
         assert_eq!(client.contract_event_subscriptions(), 0);
+        new_session().await;
         let third = with_call_budget(budget, event()).await;
         assert!(third.is_err());
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
+        server.hold_new_connections(false);
+        drop(token);
+    });
+}
+
+/// Status note of 2026-11-23, item 1: a pass sends nothing for a subscription that is placed over the current
+/// session, script-hash and contract-event alike. After a reconnect it places each once, and a further pass over that
+/// session sends nothing again.
+#[test]
+fn t38_6_4q_1_a_pass_sends_nothing_for_a_subscription_placed_over_the_current_session() {
+    block_on(async {
+        let env = family_env();
+        let server = family_stub().await;
+        let token = init_token_named(&env, TICKER, &[&server], false).await;
+        wait_maintained(&token, 1).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+        let (address, contract) = event_arguments(&token);
+        client
+            .blockchain_contract_event_subscribe(owner, &address, &contract, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await
+            .unwrap();
+        client.subscribe_scripthash(owner, "c8c1".to_owned()).await.unwrap();
+        let totals = || (server.requests(SCRIPTHASH_SUBSCRIBE), server.requests(EVENT_SUBSCRIBE));
+        assert_eq!(totals(), (1, 1));
+
+        // A pass over the session in which both were placed.
+        assert!(client.resubscribe_watched_scripthashes().await);
+        client.resubscribe_watched_contract_events().await;
+        assert_eq!(totals(), (1, 1), "a second subscription over the same session");
+
+        // The session changes: the pool's pass places each once.
+        reconnect_all(&server).await;
+        wait_until("both placed over the new session", 60., || {
+            client.script_hash_placed_in_this_session("c8c1") && client.contract_events_placed_in_this_session() == 1
+        })
+        .await;
+        assert_eq!(totals(), (2, 2));
+        assert!(client.resubscribe_watched_scripthashes().await);
+        client.resubscribe_watched_contract_events().await;
+        assert_eq!(totals(), (2, 2), "a second subscription over the same session");
+        drop(token);
+    });
+}
+
+/// Status note of 2026-11-23, item 2: the first request of an owner for a key is waiting for its answer when the
+/// session changes (the second server's connection drops), and a pass places the key over the new session. The request
+/// then fails. The owner stays remembered, because the server holds the subscription: a later request of the owner
+/// sends nothing, and the key goes on being placed again after reconnects.
+///
+/// The request's answer, an error, is decided when the stub receives the request and is delivered 5 s later; the
+/// pass has that long to place the key, and it needs a few milliseconds.
+#[test]
+fn t38_6_4q_1_a_failed_first_request_keeps_its_owner_when_a_pass_placed_the_key_over_the_current_session() {
+    block_on(async {
+        let env = family_env();
+        let (a, b) = (family_stub().await, family_stub().await);
+        let token = init_token_named(&env, TICKER, &[&a, &b], false).await;
+        wait_maintained(&token, 2).await;
+        let client = electrum_client_of(&token);
+        let owner = token.utxo.electrum_owner;
+
+        a.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
+        a.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::from_secs(5));
+        let request = client.subscribe_scripthash(owner, "d8d2".to_owned());
+        let session_change = async {
+            wait_until("the request to be sent", 10., || a.requests(SCRIPTHASH_SUBSCRIBE) == 1).await;
+            // What the first server answers from now on: a result, at once.
+            a.clear_error(SCRIPTHASH_SUBSCRIBE);
+            a.set_reply_delay(SCRIPTHASH_SUBSCRIBE, Duration::ZERO);
+            // The second server's connection drops: a new session epoch, and a pass, while the request waits.
+            b.kill_connections();
+            wait_until("the pass to place the key", 60., || {
+                client.script_hash_placed_in_this_session("d8d2")
+            })
+            .await;
+            assert_eq!(a.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        };
+        let (outcome, ()) = futures::join!(request, session_change);
+        let error = outcome.unwrap_err();
+        assert!(error.contains("stub subscribe error"), "{error}");
+
+        assert_eq!(
+            client.script_hash_owners("d8d2"),
+            Some(std::collections::HashSet::from([owner])),
+            "the owner of a subscription the server holds was forgotten"
+        );
+        assert!(client.script_hash_placed_in_this_session("d8d2"));
+        // Placed over the current session: a request of the owner sends nothing.
+        client.subscribe_scripthash(owner, "d8d2".to_owned()).await.unwrap();
+        assert_eq!(a.requests(SCRIPTHASH_SUBSCRIBE), 2);
+        assert_eq!(b.requests(SCRIPTHASH_SUBSCRIBE), 0);
         drop(token);
     });
 }
@@ -4091,8 +4216,11 @@ fn t38_6_4q_1_the_pass_a_failed_request_asked_for_is_not_repeated_when_the_contr
 }
 
 /// P8 F1, narrowed: a refused request of the remembered owner asks for no pass when no pass skipped the key. The
-/// subscription is unplaced after a manual failed re-placement (which the pool does not repeat), and the owner's
-/// request is refused too: the stub sees no placement beyond the two requests.
+/// subscription is remembered and not placed, and the owner's request is refused: the stub sees no placement beyond
+/// the requests counted here. For the script hash the state is set through the client's test hook, because the pool
+/// repeats a failed script-hash pass every second, and a pass over the session in which the key is placed sends
+/// nothing (status note of 2026-11-23, item 1). For the contract event it comes from a reconnect whose one placement
+/// is refused.
 #[test]
 fn t38_6_4q_1_a_refused_script_hash_request_asks_for_no_pass_when_no_pass_skipped_it() {
     block_on(async {
@@ -4105,14 +4233,14 @@ fn t38_6_4q_1_a_refused_script_hash_request_asks_for_no_pass_when_no_pass_skippe
         wait_until("the session", 10., || server.open_connections() == 1).await;
         Timer::sleep(2.).await;
         client.subscribe_scripthash(owner, "b5b2".to_owned()).await.unwrap();
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 1);
+        client.mark_script_hash_unplaced("b5b2");
         server.set_error(SCRIPTHASH_SUBSCRIBE, "stub subscribe error");
-        assert!(!client.resubscribe_watched_scripthashes().await);
-        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
-        // The owner is refused too.
+        // The owner is refused.
         assert!(client.subscribe_scripthash(owner, "b5b2".to_owned()).await.is_err());
-        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3);
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2);
         Timer::sleep(3.).await;
-        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 3, "no pass was asked for");
+        assert_eq!(server.requests(SCRIPTHASH_SUBSCRIBE), 2, "no pass was asked for");
         assert!(client.script_hash_owners("b5b2").is_some());
     });
 }
@@ -4136,7 +4264,10 @@ fn t38_6_4q_1_a_refused_contract_event_request_asks_for_no_pass_when_no_pass_ski
         Timer::sleep(2.).await;
         subscribe().await.unwrap();
         server.set_error(EVENT_SUBSCRIBE, "stub subscribe error");
-        client.resubscribe_watched_contract_events().await;
+        // The reconnect: the one placement over the new session is refused, and the pool does not repeat it.
+        reconnect_all(&server).await;
+        wait_until("the refused placement", 60., || server.requests(EVENT_SUBSCRIBE) == 2).await;
+        Timer::sleep(2.).await;
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 2);
         assert!(subscribe().await.is_err());
         assert_eq!(server.requests(EVENT_SUBSCRIBE), 3);
