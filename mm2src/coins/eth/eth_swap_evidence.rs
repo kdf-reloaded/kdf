@@ -474,8 +474,10 @@ impl EthCoin {
         .await
     }
 
-    /// The text of an undetermined read: what each node said and the two ways to fix it (CRD ch.51 R100 item 9).
-    /// The first time a read of `subject` is undetermined the text is logged at WARN, afterwards at DEBUG.
+    /// The error text of an undetermined read: the core's text of it ([`Undetermined::to_err_string`], which the
+    /// swap engine recognizes by `swap_evidence::is_undetermined`), with the coin, the read, its subject and the
+    /// two ways to fix it (CRD ch.51 R100 item 9). The first time a read of `subject` is undetermined the text is
+    /// logged at WARN, afterwards at DEBUG.
     fn report_undetermined(&self, read: &str, subject: &str, undetermined: &Undetermined) -> String {
         let text = format!(
             "[{}] the {} of {} is undetermined and the step waits: {}. To fix it, add a node on another host to \
@@ -483,7 +485,7 @@ impl EthCoin {
             self.ticker(),
             read,
             subject,
-            undetermined
+            undetermined.to_err_string()
         );
         if first_report(format!("{}:{}:{}", self.ticker(), read, subject)) {
             warn!("{}", text);
@@ -679,6 +681,8 @@ impl EthCoin {
         loop {
             let attempt =
                 assert_send_future(self.spend_read_once(policy, payment_tx, id, swap_contract_address, from_block));
+            // The text of this attempt when it was undetermined.
+            let mut undetermined_text = None;
             match attempt.await {
                 Ok(Agreement::Agreed {
                     answer:
@@ -691,17 +695,26 @@ impl EthCoin {
                 Ok(Agreement::Agreed { .. }) => (),
                 Ok(Agreement::Undetermined(undetermined)) => {
                     let subject = format!("payment {}", hex::encode(id));
-                    self.report_undetermined("spend state", &subject, &undetermined);
+                    undetermined_text = Some(self.report_undetermined("spend state", &subject, &undetermined));
                 },
                 Err(e) => return TX_PLAIN_ERR!("{}", e),
             }
 
             if now_ms() / 1000 > wait_until {
-                return TX_PLAIN_ERR!(
-                    "Waited too long until {} for transaction {:?} to be spent",
-                    wait_until,
-                    payment_tx,
-                );
+                // A wait whose last read was undetermined says so, in the form the swap engine recognizes.
+                return match undetermined_text {
+                    Some(text) => TX_PLAIN_ERR!(
+                        "Waited too long until {} for transaction {:?} to be spent; {}",
+                        wait_until,
+                        payment_tx,
+                        text
+                    ),
+                    None => TX_PLAIN_ERR!(
+                        "Waited too long until {} for transaction {:?} to be spent",
+                        wait_until,
+                        payment_tx,
+                    ),
+                };
             }
             Timer::sleep(poll_every).await;
         }
@@ -709,14 +722,19 @@ impl EthCoin {
 
     /// The refund gate under `policy` once the local clock `now` is past `locktime` (CRD ch.51 R100, §51.6E R88):
     /// each node's latest block timestamp is read, and the gate opens when two nodes (or the trusted node) show a
-    /// time past the lock, whatever the two times are. Nodes that agree on a time not past the lock, and an
-    /// undetermined read, leave the gate closed with a wait of at most `EVM_TIP_RECHECK_MAX_SECS`.
+    /// time past the lock, whatever the two times are. Nodes that agree on a time not past the lock leave the gate
+    /// closed with a wait of at most `EVM_TIP_RECHECK_MAX_SECS`.
+    ///
+    /// # Errors
+    ///
+    /// The read is undetermined. The swap engine recognizes the text, reads the gate again and holds the refund
+    /// until the read is determined or the engine's own cap ends the step; the gate is never open on it.
     pub(crate) async fn agreed_refund_gate(
         &self,
         policy: &SwapEvidencePolicy,
         now: u64,
         locktime: u64,
-    ) -> CanRefundHtlc {
+    ) -> Result<CanRefundHtlc, String> {
         let outcome = if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
             // Nothing can decide this read without two nodes or a trusted one, so no node is asked.
             Agreement::Undetermined(Undetermined {
@@ -746,11 +764,10 @@ impl EthCoin {
             assert_send_future(reading).await
         };
         match outcome {
-            Agreement::Agreed { answer, .. } => evm_refund_eligibility(now, locktime, Some(answer)),
+            Agreement::Agreed { answer, .. } => Ok(evm_refund_eligibility(now, locktime, Some(answer))),
             Agreement::Undetermined(undetermined) => {
                 let subject = format!("lock time {locktime}");
-                self.report_undetermined("chain time of the refund gate", &subject, &undetermined);
-                evm_refund_eligibility(now, locktime, None)
+                Err(self.report_undetermined("chain time of the refund gate", &subject, &undetermined))
             },
         }
     }
@@ -773,7 +790,7 @@ mod agreed_reads_policy_tests {
             SwapEvidencePolicy::Insufficient { hosts: 1 },
         ];
         for policy in policies {
-            assert_eq!(agreed_reads_policy(true, policy.clone()), None, "{policy:?}");
+            assert_eq!(agreed_reads_policy(true, policy.clone()), None);
             assert_eq!(agreed_reads_policy(false, policy.clone()), Some(policy));
         }
         assert_eq!(agreed_reads_policy(false, SwapEvidencePolicy::NotAdopted), None);

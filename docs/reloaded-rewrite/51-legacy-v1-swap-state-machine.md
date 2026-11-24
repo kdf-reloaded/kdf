@@ -395,6 +395,14 @@ and emits `TakerPaymentSpent` plus `TakerPaymentSpendConfirmStarted`.
 `STAGE-CONFIRM-SPEND` waits for the spend's confirmations with the
 refund deadline as its cut-off and emits `TakerPaymentSpendConfirmed`.
 
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100, when the validation of the
+> taker payment in `STAGE-VALIDATE-TAKER-PAYMENT` answers that its read is
+> undetermined, the maker repeats the validation every 15 seconds until the
+> deadline of that stage (the swap start time plus four fifths of the lock
+> duration). At the deadline, or on any other error, it emits
+> `TakerPaymentValidateFailed` and goes into the refund chain as stated above.
+
 ## 51.5 Bound Taker Stage Graph
 
 **R20.** *Stage set.* The taker machine MUST have exactly thirteen
@@ -495,6 +503,13 @@ confirmations with the maker-payment wait deadline of R22 as its cut-off
 payment, emitting `MakerPaymentValidateFailed` on rejection. Both
 transition to `STAGE-FINISH`: up to and including this point the taker
 has committed only the dex fee, and there is nothing to refund.
+
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100, when the validation of the
+> maker payment answers that its read is undetermined, the taker repeats the
+> validation every 15 seconds until the maker-payment wait deadline of R22. At
+> the deadline, or on any other error, it emits `MakerPaymentValidateFailed` as
+> this rule states.
 
 **R29.** *Send taker payment.* `STAGE-SEND-TAKER-PAYMENT` MUST first
 search the chain for a taker payment it may already have broadcast. Only
@@ -654,6 +669,32 @@ locktime.
 > **Pointer (2026-11-22, clean side).** The reference record of the same
 > classification, and its difference from the baseline anchor, is §51.6E R90
 > items 2 and 5.
+
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100 a look lets the chain
+> continue only when it is a determined "not spent". A search that fails, or
+> does not finish within its bound, leaves the look undetermined. A spend that
+> the search on every server (status note of 2026-11-21) finds on one server is
+> handled on that one answer when its secret matches the swap's secret hash
+> (R100 item 3); a refund, or a spend whose secret does not match, found there
+> on one server is not acted on, and the look is undetermined. A spend found by
+> the coin's own search whose secret cannot be extracted continues as R31
+> states, unless the read behind it was undetermined. While the look is
+> undetermined the chain waits: it builds no refund, it does not emit
+> `TakerPaymentRefundFailed` after a rejection, and it looks again after the
+> chain's retry wait (30 seconds in the node), writing one warning, which names
+> the fix when the read is undetermined under R100. The look also runs at a
+> fourth point: each time the refundability check answers that the refund can be
+> sent, before the refund is built, which happens only after a determined "not
+> spent". An undetermined answer of the refundability check is retried the same
+> way. A look or a refundability check that is still undetermined at the
+> deadline of R100 item 9 ends the chain as chapter 51 R100 item 9 and its
+> status notes of 2026-11-23 state: the later of the taker payment's lock time
+> plus 3700 seconds and 3700 seconds after the refund step, in its current run,
+> first could act (the refundability check first answered that the refund can be
+> sent, or the check or a look first gave an undetermined answer at or after the
+> lock time). The event set, the resume map of R32 and the persisted log shape
+> are unchanged.
 
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
@@ -1072,6 +1113,24 @@ dropped and the taker refunded) is not part of this rule.
 > reached the chain. A second send that is accepted records the claim, and the
 > wait for its confirmation decides as before. T35 pins this path. No code is
 > changed.
+
+> **Status note (2026-11-23, Reloaded-original, clean side; maintainer decisions
+> of 2026-11-22 and 2026-11-23).** Under §51.6G R100, a look of item 3 that
+> fails or cannot decide, and an undetermined answer of the refundability check,
+> are held as item 3 states, with one warning that names the fix when the read
+> is undetermined under R100. Its bound is the one of R100 item 9 and its status
+> notes of 2026-11-23: the later of the maker payment's lock time plus 3700
+> seconds and 3700 seconds after the refund step, in its current run, first
+> could act (the refundability check first answered that the refund can be sent,
+> or the check or a look first gave an undetermined answer at or after the lock
+> time). At that bound `MakerPaymentRefundFailed` names the kind of failure and,
+> for a read undetermined under R100, the cause and the fix, and asks for
+> `recover_funds_of_swap`; as R80 requires, neither the warning nor this text
+> carries a server address, URL, host or response text, and the full reason goes
+> to the debug log. A look held for another reason (a spend found but not
+> confirmed) keeps the text and the deadline of item 3. The manual recovery of
+> R83 and R84, and the taker's, answer as before; an error whose read is
+> undetermined under R100 also names the fix.
 
 ## 51.6D Bound Manual Refund After a Lost Claim
 
@@ -1837,6 +1896,34 @@ answer.
    and the node logs how to fix it, by adding a second node to the coin's node
    list or by setting `swap_evidence_node`.
 
+> *Status note (2026-11-23, Reloaded-original; maintainer decision of
+> 2026-11-23).* Item 9 has a bound. A running swap whose refund reads stay
+> undetermined waits at most until its refund deadline, the lock time of its
+> own payment plus 3700 seconds, for the maker (R18) and for the taker (the
+> deadline table of §51.5). Then it ends with its refund-failed event
+> (`MakerPaymentRefundFailed` or `TakerPaymentRefundFailed`), whose text names
+> the fix: add a node on a second host to the coin's node list, or set
+> `swap_evidence_node`, and then run `recover_funds_of_swap`. No sentence of
+> R100 is changed.
+
+> *Status note (2026-11-23, a second one, Reloaded-original; maintainer
+> decision of 2026-11-23).* The bound of the note above is refined; that note
+> stays as written. A refund step of the maker or the taker whose reads stay
+> undetermined waits until the later of two moments: the lock time of its own
+> payment plus 3700 seconds, and 3700 seconds after the moment at which the
+> refund step, in its current run, first could act. The refund step first could
+> act when its refundability check first answered that the refund can be sent,
+> or when a look or a refundability check of the step first gave an
+> undetermined answer at or after the lock time; while that moment has not
+> come, the step does not end. That moment is not stored, so a restart starts a
+> new wait of 3700 seconds. A chain whose refundability check follows the
+> median time past can open the refund up to about an hour after the lock time,
+> and the later of the two moments keeps a full wait for it. Then the step ends
+> with its refund-failed event, whose text names the kind of failure; only when
+> the read is undetermined under R100 does it name the fix of the note above (a
+> node on a second host, or `swap_evidence_node`, then
+> `recover_funds_of_swap`). No sentence of R100 is changed.
+
 **T42.** *Agreement of the reads (R100).* Over two scripted nodes: answers that
 agree by item 1 let the refund step and the step that uses the secret go on
 (including two chain times that differ but are both past the lock); answers
@@ -1855,6 +1942,47 @@ refused by item 4; two hosts of one operator count as two nodes, with no
 warning; after a disagreement, one further agreeing answer does not decide, and
 a new agreeing pair does; a running swap whose coin loses its second node waits
 and logs the two ways to fix it.
+
+*Status note (2026-11-23, clean side; the maintainer's decisions of 2026-11-22
+and 2026-11-23 and decisions within the lane). How the code applies R100.* It
+changes no sentence above.
+
+1. *Nodes.* Nodes are counted as item 7 defines them; two schemes of one host
+   (for example `https` and `wss`) also name one node.
+2. *The field.* `swap_evidence_node` matches a list entry with the same host;
+   ports are compared only when both have one, and the default port of a scheme
+   counts as written. The activation error `SwapEvidenceNodeNotInList` names the
+   ticker and the node as host and port only, never a scheme, path, query or
+   credential.
+3. *Per family.* UTXO, BCH and QTUM over Electrum count the configured servers.
+   In native mode the daemon is trusted as item 6 says; a field equal to the
+   daemon's address is accepted, any other value refused. A QRC20 token takes
+   its platform's policy, and the field is part of the shared QTUM client's key.
+   An SLP token takes its platform's policy, but has too few nodes while its
+   `bchd_urls` hold fewer than two hosts. EVM counts the nodes that passed the
+   activation probe; the field may name a configured node that failed it, which
+   is then a trusted node that does not answer. ZHTLC counts
+   `light_wallet_d_servers`, and the field must be one of them. Sia has one node
+   and starts swaps only with the field naming it. Tendermint counts its RPC
+   nodes. A token of a platform takes the platform's policy.
+4. *Adoption.* Each family switches to R100 through one table in the code once
+   its reads ask two nodes; until then its coins keep today's reads and are not
+   refused at admission. The table marks a family whose swaps are switched off
+   in a release; R100 binds the families that swap. A release-gate test fails
+   while a family that swaps has not switched, and a test in every build fails
+   when a family's swaps are switched on while the table still marks them off. A
+   release is not tagged before the gate passes.
+5. *Asking two nodes.* Reads are asked as item 8 says: an attempt asks nodes of
+   distinct hosts, in the order of preference the family's node list gives,
+   until two have answered. Each node is read at its own tip, never at a height
+   both share. Two different answers are a disagreement, also when the tips lie
+   far apart. Two equal answers whose tips lie further apart than the read
+   allows (a height or a time) leave the read undetermined. An answer that
+   proves itself, as R100's head says of a secret, is taken alone from any node,
+   also when too few nodes answered or the tips lie too far apart.
+6. *Reporting.* An undetermined read is reported with its reason and what each
+   node answered, each node named by host and port only. The swap step
+   recognizes it by one marker in that text, wherever the text is wrapped.
 
 ## 51.7 Bound Message Contract
 
@@ -3446,6 +3574,17 @@ reference rows alike.
   the maintainer's decision of 2026-11-22, the cleared §51.6E and this
   workspace's own QRC20 search code; no other reference input was consulted,
   the note makes no parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-23: the status note after the 2026-11-22 pointer
+  under R31a is a Reloaded addition written in a clean session from the
+  maintainer's decisions of 2026-11-22 and 2026-11-23, §51.6G and this
+  workspace's own refund chain code; no reference input was consulted, the
+  note makes no parity claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-11-23, a second one: the status notes after the
+  description of `STAGE-VALIDATE-TAKER-PAYMENT`, after R28 and at the end
+  of §51.6C are a Reloaded addition written in a clean session from the
+  maintainer's decisions of 2026-11-22 and 2026-11-23, §51.6G and this
+  workspace's own swap engine code; no reference input was consulted, the
+  notes make no parity claim, and no Dirty Gate pass is needed.)
   (Addition of 2026-11-21, a second one: the status notes under R82 and
   R83 and T35 are a Reloaded addition written in a clean session from the
   maintainer's decision of 2026-11-21, an issue report, and this workspace's
@@ -3656,3 +3795,20 @@ reference rows alike.
   two hosts, no outvoting, swaps already running). Reloaded-original; no
   reference input and no forbidden-class input; no sentence of the chapter is
   changed.
+- *Clean-side addition of 2026-11-23:* the status note after R100 item 9 on
+  the bound of a waiting running swap (its refund deadline, then the
+  refund-failed event naming the fix). Reloaded-original; it records the
+  maintainer's decision of 2026-11-23, takes no reference input and no
+  forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-23 (PR #521):* the status note after T43,
+  how the code of PRs #508 and #519 applies R100: nodes, the field, the policy
+  per family, adoption and the release gate, asking two nodes, and reporting.
+  It records the maintainer's decisions of 2026-11-22 and 2026-11-23 and
+  decisions within the lane, takes no reference input, and changes no sentence
+  of the chapter.
+- *Clean-side addition of 2026-11-23, a second one:* the second status note
+  after R100 item 9, which refines the bound of the first (the later of the
+  payment's lock time plus 3700 seconds and 3700 seconds after the refund step
+  first could act in its current run). Reloaded-original; it records the
+  maintainer's decision of 2026-11-23, takes no reference input and no
+  forbidden-class input, and changes no sentence of the chapter.

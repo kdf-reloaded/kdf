@@ -2860,7 +2860,7 @@ impl EthCoin {
             },
             // V1 Ethereum HTLC swaps; TRON path is gated. P10.2.5.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
-                ERRL!("TRON HTLC spend not yet wired (pending P10.2.5)"),
+                ERRL!("a TRON spend is sent by tron::swap::watch before this point"),
             ))),
         }
     }
@@ -2948,7 +2948,7 @@ impl EthCoin {
             // V1 Ethereum HTLC refund; TRON refund is a separate flow. TRON coins are wallet-only while
             // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Box::new(futures01::future::err(TransactionErr::Plain(
-                ERRL!("TRON HTLC refund not yet wired (pending P10.2.5)"),
+                ERRL!("a TRON refund is sent by tron::swap::watch before this point"),
             ))),
         }
     }
@@ -3440,7 +3440,7 @@ impl EthCoin {
                 // separate validator. TRON coins are wallet-only while
                 // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
                 EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                    return ERR!("TRON HTLC payment validation not yet wired (pending P10.2.5)");
+                    return ERR!("a TRON payment is validated by tron::swap::watch before this point");
                 },
             }
 
@@ -3487,7 +3487,7 @@ impl EthCoin {
             // TRON coins are wallet-only while
             // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                return ERR!("TRON spend search not yet wired (pending P10.2.5)");
+                return ERR!("a TRON spend is searched by tron::swap::watch before this point");
             },
         };
 

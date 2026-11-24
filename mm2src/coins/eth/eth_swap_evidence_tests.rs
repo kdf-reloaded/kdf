@@ -6,10 +6,9 @@
 
 use super::alloy_compat::transport::test_support::{captured_log_lines, error_body, install_log_capture, result_body,
                                                    stub_provider, Call, Reply, StubSender};
-use super::eth_swap_ops::EVM_TIP_RECHECK_MAX_SECS;
 use super::eth_tests::eth_coin_for_test_with_providers;
 use super::*;
-use crate::swap_evidence::swap_evidence_policy_from;
+use crate::swap_evidence::{is_undetermined, swap_evidence_policy_from};
 use crate::{CanRefundHtlc, SwapEvidencePolicy};
 use common::block_on;
 use crypto::secret_hash_algo::SecretHashAlgo;
@@ -552,7 +551,10 @@ fn two_entries_of_one_host_are_one_node_and_no_read_is_made() {
     let err = fx.validate(0).unwrap_err();
     assert_undetermined(&err, "fewer than two nodes answered");
     let gate = fx.refund_gate(now_ms() / 1000 - 7200);
-    assert!(matches!(gate, Ok(CanRefundHtlc::HaveToWait(wait)) if wait == EVM_TIP_RECHECK_MAX_SECS));
+    assert!(
+        matches!(gate, Err(e) if is_undetermined(&e)),
+        "an undetermined gate is not open and not a plain wait"
+    );
     assert!(
         fx.world.seen.lock().unwrap().is_empty(),
         "a node was asked for a read nothing can decide"
@@ -867,7 +869,10 @@ fn refund_gate_stays_closed_when_one_time_is_not_past_the_lock() {
     fx.set(B, |node| node.timestamp = locktime - 100);
     fx.set(C, |node| node.timestamp = locktime + 100);
     let gate = fx.refund_gate(locktime);
-    assert!(matches!(gate, Ok(CanRefundHtlc::HaveToWait(wait)) if wait == EVM_TIP_RECHECK_MAX_SECS));
+    assert!(
+        matches!(gate, Err(e) if is_undetermined(&e)),
+        "an undetermined gate is not open and not a plain wait"
+    );
     assert!(fx.asked(C).is_empty(), "a third node was asked: {:?}", fx.asked(C));
 
     // Both nodes at the lock time exactly: they agree, and the gate is closed.
@@ -890,7 +895,10 @@ fn refund_gate_stays_closed_on_one_answering_node() {
     fx.set(A, |node| node.timestamp = locktime + 100);
     fx.set(B, |node| node.down = true);
     let gate = fx.refund_gate(locktime);
-    assert!(matches!(gate, Ok(CanRefundHtlc::HaveToWait(wait)) if wait == EVM_TIP_RECHECK_MAX_SECS));
+    assert!(
+        matches!(gate, Err(e) if is_undetermined(&e)),
+        "an undetermined gate is not open and not a plain wait"
+    );
 }
 
 #[test]
@@ -908,7 +916,10 @@ fn refund_gate_follows_the_trusted_node_alone() {
     fx.set(A, |node| node.timestamp = locktime + 100);
     fx.set(B, |node| node.down = true);
     let gate = fx.refund_gate(locktime);
-    assert!(matches!(gate, Ok(CanRefundHtlc::HaveToWait(wait)) if wait == EVM_TIP_RECHECK_MAX_SECS));
+    assert!(
+        matches!(gate, Err(e) if is_undetermined(&e)),
+        "an undetermined gate is not open and not a plain wait"
+    );
     assert!(fx.asked(A).is_empty(), "{:?}", fx.asked(A));
 }
 
@@ -919,6 +930,60 @@ fn refund_gate_before_the_lock_time_asks_no_node() {
     let gate = block_on(fx.coin.can_refund_htlc(locktime).compat());
     assert!(matches!(gate, Ok(CanRefundHtlc::HaveToWait(wait)) if (1000..=1002).contains(&wait)));
     assert!(fx.world.seen.lock().unwrap().is_empty());
+}
+
+// ---- The error form the swap engine recognizes ----
+
+#[test]
+fn every_undetermined_read_is_recognized_by_the_core_and_a_decided_error_is_not() {
+    // Two nodes that disagree: node A shows the payment as refunded, node B as sent.
+    let fx = Fixture::eth(&[A, B], listed(&[A, B]));
+    let refund = fx.refund(95);
+    fx.spent_on(A, REFUNDED, &refund);
+    let locktime = now_ms() / 1000 - 7200;
+    fx.set(A, |node| node.timestamp = locktime + 30);
+    fx.set(B, |node| node.timestamp = locktime - 30);
+    assert!(is_undetermined(&fx.validate(0).unwrap_err()), "the payment check");
+    assert!(is_undetermined(&fx.search().unwrap_err()), "the spend search");
+    assert!(
+        is_undetermined(&fx.wait_for_spend().unwrap_err().get_plain_text_format()),
+        "the spend wait that ends on an undetermined read"
+    );
+    assert!(
+        matches!(fx.refund_gate(locktime), Err(e) if is_undetermined(&e)),
+        "the refund gate"
+    );
+
+    // A tip gap.
+    let fx = Fixture::eth(&[A, B], listed(&[A, B]));
+    fx.set(B, |node| node.timestamp = TIP_TIME - 61);
+    assert!(
+        is_undetermined(&fx.validate(0).unwrap_err()),
+        "the payment check across a tip gap"
+    );
+    assert!(
+        is_undetermined(&fx.search().unwrap_err()),
+        "the spend search across a tip gap"
+    );
+
+    // Too few nodes, and a silent trusted node.
+    let fx = Fixture::eth(&[A, A2], listed(&[A, A2]));
+    assert!(is_undetermined(&fx.validate(0).unwrap_err()), "one host");
+    let fx = Fixture::eth(&[A, B], trusting("b.example:8545", &[A, B]));
+    fx.set(B, |node| node.down = true);
+    assert!(is_undetermined(&fx.search().unwrap_err()), "a silent trusted node");
+
+    // Decided answers that are errors: a payment both nodes show as refunded, and a spend wait that ends with
+    // both nodes agreeing on "not spent".
+    let fx = Fixture::eth(&[A, B], listed(&[A, B]));
+    let err = fx.wait_for_spend().unwrap_err().get_plain_text_format();
+    assert!(err.contains("Waited too long") && !is_undetermined(&err), "{err}");
+    let refund = fx.refund(95);
+    fx.spent_on(A, REFUNDED, &refund);
+    fx.spent_on(B, REFUNDED, &refund);
+    let err = fx.validate(0).unwrap_err();
+    assert!(err.contains("Payment state is not PAYMENT_STATE_SENT, got 3"), "{err}");
+    assert!(!is_undetermined(&err), "{err}");
 }
 
 // ---- Admission and logs ----

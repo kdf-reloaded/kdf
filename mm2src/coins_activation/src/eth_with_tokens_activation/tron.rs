@@ -233,6 +233,7 @@ pub(super) async fn enable_tron_platform_coin_with_switch(
         tx_history: request.tx_history(),
         gasfree,
         swap_contracts,
+        swap_evidence_node: request.swap_evidence_node.clone(),
     };
     let protocol = CoinProtocol::TRX {
         network: network.clone(),

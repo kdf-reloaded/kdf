@@ -874,15 +874,12 @@ pub(crate) async fn maker_swap_start(ctx: MmArc, maker_match: MakerMatch, maker_
         log::warn!("Swap {} not started: {}", maker_match.request.uuid, mismatch);
         return;
     }
-    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
-    // moved yet.
-    if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
-        log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
-        return;
-    }
-    // CRD ch.51 R100 item 4: no new swap with a coin that has fewer than two nodes for swap evidence and no
-    // `swap_evidence_node`. Nothing has moved yet.
-    if let Some(error) = swap_evidence_admission(&maker_coin, &taker_coin) {
+    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain; and CRD ch.51
+    // R100 item 4: none with a coin that has fewer than two nodes for swap evidence and no `swap_evidence_node`.
+    // Nothing has moved yet.
+    if let Some(error) =
+        chain_disagreement(&maker_coin, &taker_coin).or_else(|| swap_evidence_admission(&maker_coin, &taker_coin))
+    {
         log::error!("Swap {} not started: {}", maker_match.request.uuid, error);
         return;
     }
@@ -989,14 +986,12 @@ pub(crate) async fn taker_swap_start(ctx: MmArc, taker_order: TakerOrder, taker_
         );
         return;
     }
-    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain. Nothing has
-    // moved yet.
-    if let Some(error) = chain_disagreement(&maker_coin, &taker_coin) {
-        log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
-        return;
-    }
-    // CRD ch.51 R100 item 4, as for the maker.
-    if let Some(error) = swap_evidence_admission(&maker_coin, &taker_coin) {
+    // CRD ch.38 R38.6.4o item 12: no new swap while a coin's Electrum servers disagree about the chain; and CRD ch.51
+    // R100 item 4: none with a coin that has fewer than two nodes for swap evidence and no `swap_evidence_node`.
+    // Nothing has moved yet.
+    if let Some(error) =
+        chain_disagreement(&maker_coin, &taker_coin).or_else(|| swap_evidence_admission(&maker_coin, &taker_coin))
+    {
         log::error!("Swap {} not started: {}", taker_match.reserved.taker_order_uuid, error);
         return;
     }
@@ -2363,10 +2358,6 @@ async fn taker_order_impl(
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
         return MmError::err(TakerOrderError::ChainDisagreement(error));
     }
-    // CRD ch.51 R100 item 4: no new order with a coin that has too few nodes for swap evidence.
-    if let Some(error) = swap_evidence_admission(&base_coin, &rel_coin) {
-        return MmError::err(TakerOrderError::SwapEvidenceInsufficient(error));
-    }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.
     if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
@@ -2377,6 +2368,11 @@ async fn taker_order_impl(
     }
     if rel_coin.wallet_only(ctx) {
         return MmError::err(TakerOrderError::RelCoinIsWalletOnly { coin: req.rel });
+    }
+    // CRD ch.51 R100 item 4: no new order with a coin that has too few nodes for swap evidence. A coin that cannot
+    // trade at all is refused above, so it is never told to add a node.
+    if let Some(error) = swap_evidence_admission(&base_coin, &rel_coin) {
+        return MmError::err(TakerOrderError::SwapEvidenceInsufficient(error));
     }
     // The coin that pays is the rel coin for `buy` (the amount is the volume times the price) and the base coin for
     // `sell` (the amount is the volume).
@@ -2886,10 +2882,6 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     if let Some(error) = chain_disagreement(&base_coin, &rel_coin) {
         return MmError::err(SetPriceError::ChainDisagreement(error));
     }
-    // CRD ch.51 R100 item 4: no new order with a coin that has too few nodes for swap evidence.
-    if let Some(error) = swap_evidence_admission(&base_coin, &rel_coin) {
-        return MmError::err(SetPriceError::SwapEvidenceInsufficient(error));
-    }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.
     if let Some(error) = crate::mm2::lp_clock_check::clock_refusal(ctx) {
@@ -2900,6 +2892,11 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     }
     if rel_coin.wallet_only(ctx) {
         return MmError::err(SetPriceError::RelCoinIsWalletOnly { coin: req.rel });
+    }
+    // CRD ch.51 R100 item 4: no new order with a coin that has too few nodes for swap evidence. A coin that cannot
+    // trade at all is refused above, so it is never told to add a node.
+    if let Some(error) = swap_evidence_admission(&base_coin, &rel_coin) {
+        return MmError::err(SetPriceError::SwapEvidenceInsufficient(error));
     }
     // CRD ch.60 R60.6.8: an order with no operator-set minimum volume gets the raised default. The pre-trade check
     // below then sees that default, capped at the maximum volume where it is already known (`max` false), and a
