@@ -46,7 +46,6 @@ use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use uuid::Uuid;
 
-use super::evidence_wait::Read;
 use super::swap_lock::SwapLock;
 use super::swap_v2_common::*;
 use super::swap_v2_pb::*;
@@ -1789,7 +1788,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                 .read(
                     &sm.uuid,
                     sm.taker_coin.ticker(),
-                    Read::Look,
+                    CappedRead::FundingSpendSearch,
                     30,
                     || now_ms() / 1000,
                     |_| {
@@ -1889,6 +1888,7 @@ async fn await_taker_payment_confirmation<M: MmCoin + MakerCoinSwapOpsV2, T: MmC
         .read_confirmation(
             &sm.uuid,
             sm.taker_coin.ticker(),
+            CappedRead::TakerPaymentConfirmation,
             sm.taker_payment_conf_timeout(),
             CONFIRMATION_POLL_SECS,
             || now_ms() / 1000,
@@ -2271,7 +2271,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
                 .read(
                     &sm.uuid,
                     sm.maker_coin.ticker(),
-                    Read::Gate,
+                    CappedRead::MakerRefundGate,
                     30,
                     || now_ms() / 1000,
                     |_| sm.maker_coin.can_refund_htlc(sm.maker_payment_locktime()).compat(),

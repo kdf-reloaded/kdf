@@ -318,7 +318,7 @@ impl UndeterminedWait {
         &mut self,
         swap_uuid: &Uuid,
         ticker: &str,
-        kind: Read,
+        kind: CappedRead,
         poll_secs: u64,
         now: impl Fn() -> u64,
         mut read: F,
@@ -339,7 +339,7 @@ impl UndeterminedWait {
                 AfterRead::Determined => return ReadEnd::Failed(error),
                 AfterRead::BoundPassed => return ReadEnd::BoundPassed(text),
                 AfterRead::ReadAgain => {
-                    self.log.note(swap_uuid, ticker, kind, &text);
+                    self.log.note(swap_uuid, ticker, kind.logged_as(), &text);
                     Timer::sleep(poll_secs as f64).await;
                     min_wait_until = now() + poll_secs;
                 },
@@ -351,10 +351,12 @@ impl UndeterminedWait {
     /// deadline for the confirmation; `read` is handed the `wait_until` of its coin call, which is `deadline` for
     /// the first read and may be later for a read after an undetermined answer. Whether a confirmation came in
     /// time is judged against `deadline` alone.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_confirmation<F, Fut>(
         &mut self,
         swap_uuid: &Uuid,
         ticker: &str,
+        kind: CappedRead,
         deadline: u64,
         poll_secs: u64,
         now: impl Fn() -> u64,
@@ -365,7 +367,7 @@ impl UndeterminedWait {
         Fut: std::future::Future<Output = Result<(), String>>,
     {
         let end = self
-            .read(swap_uuid, ticker, Read::Look, poll_secs, &now, |min_wait_until| {
+            .read(swap_uuid, ticker, kind, poll_secs, &now, |min_wait_until| {
                 read(coin_wait_until(deadline, min_wait_until))
             })
             .await;
@@ -404,7 +406,8 @@ fn confirmation_end(end: ReadEnd<(), String>, waited: bool, now: u64, deadline: 
     }
 }
 
-/// The read of a step whose wait ended at its bound.
+/// The read a step waits on while it is undetermined. It names the read in the log line of the wait and in the
+/// abort of a wait that ended at its bound.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum CappedRead {
     /// The maker's search for the spend of the taker funding.
@@ -419,6 +422,19 @@ pub(super) enum CappedRead {
     MakerRefundGate,
     /// The refund gate of the taker payment.
     TakerRefundGate,
+}
+
+impl CappedRead {
+    /// How the read is named in the log line of its wait.
+    fn logged_as(self) -> Read {
+        match self {
+            CappedRead::FundingSpendSearch => Read::TakerFundingSearch,
+            CappedRead::TakerPaymentConfirmation => Read::TakerPaymentConfirmation,
+            CappedRead::MakerPaymentConfirmation => Read::MakerPaymentConfirmation,
+            CappedRead::TakerPaymentSpendSearch => Read::Look,
+            CappedRead::MakerRefundGate | CappedRead::TakerRefundGate => Read::Gate,
+        }
+    }
 }
 
 /// The text of the abort of a step whose read stayed undetermined until the bound of its wait: the kind of the
@@ -1880,7 +1896,7 @@ mod tests {
         let end = common::block_on(wait.read(
             &Uuid::nil(),
             "RIN",
-            Read::Look,
+            CappedRead::TakerPaymentSpendSearch,
             0,
             || clock.get(),
             |_| {
@@ -2110,7 +2126,7 @@ mod tests {
             common::block_on(UndeterminedWait::new(lock_time).read(
                 &Uuid::nil(),
                 "RIN",
-                Read::Look,
+                CappedRead::TakerPaymentSpendSearch,
                 0,
                 || self.clock.get(),
                 |min_wait_until| {
@@ -2125,6 +2141,7 @@ mod tests {
             common::block_on(UndeterminedWait::new(lock_time).read_confirmation(
                 &Uuid::nil(),
                 "RIN",
+                CappedRead::TakerPaymentConfirmation,
                 deadline,
                 0,
                 || self.clock.get(),
@@ -2360,6 +2377,51 @@ mod tests {
                 assert!(!text.contains("http"), "{read:?}");
                 assert!(!text.contains(OWN_CLAIM_NOT_CONFIRMED_PHRASE.trim_end()), "{read:?}");
             }
+        }
+    }
+
+    /// The warning of each wait names its own read and coin, the cause and the fix, and no part of the error
+    /// text of the read.
+    #[test]
+    fn the_warning_of_each_wait_names_its_read_and_no_error_text() {
+        use super::super::evidence_wait::wait_text;
+
+        let reason = format!("{} at {NODE_ERROR}", undetermined_error());
+        let expected = [
+            (
+                CappedRead::FundingSpendSearch,
+                "the search for the spend of the taker funding on RIN could not be determined",
+            ),
+            (
+                CappedRead::TakerPaymentConfirmation,
+                "the confirmation of the taker payment on RIN could not be determined",
+            ),
+            (
+                CappedRead::MakerPaymentConfirmation,
+                "the confirmation of the maker payment on RIN could not be determined",
+            ),
+            (
+                CappedRead::TakerPaymentSpendSearch,
+                "the state of the taker payment on RIN could not be determined",
+            ),
+            (
+                CappedRead::MakerRefundGate,
+                "the chain time of the refund gate on RIN could not be determined",
+            ),
+            (
+                CappedRead::TakerRefundGate,
+                "the chain time of the refund gate on RIN could not be determined",
+            ),
+        ];
+        for (read, opening) in expected {
+            let warning = wait_text("RIN", read.logged_as(), &reason);
+            assert!(warning.starts_with(opening), "{read:?}");
+            assert!(warning.contains("no two nodes agreed"), "{read:?}");
+            assert!(warning.contains("`swap_evidence_node`"), "{read:?}");
+            assert!(!warning.contains(PRIVATE_MARKER), "{read:?}");
+            assert!(!warning.contains("node.example"), "{read:?}");
+            assert!(!warning.contains("node-b"), "{read:?}");
+            assert!(!warning.contains("http"), "{read:?}");
         }
     }
 
