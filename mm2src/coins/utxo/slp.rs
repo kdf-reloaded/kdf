@@ -4,7 +4,7 @@
 //! More info about the protocol and implementation guides can be found at https://slp.dev/
 
 use crate::utxo::bch::BchCoin;
-use crate::utxo::bchd_grpc::{check_slp_transaction, validate_slp_utxos, ValidateSlpUtxosErr};
+use crate::utxo::bchd_grpc::{check_slp_transaction, validate_slp_utxos, validate_slp_utxos_under, ValidateSlpUtxosErr};
 use crate::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum, UtxoRpcError, UtxoRpcResult};
 use crate::utxo::utxo_common::{self, big_decimal_from_sat_unsigned, payment_script, UtxoTxBuilder};
 use crate::utxo::{generate_and_send_tx, sat_from_big_decimal, ActualTxFee, AdditionalTxData, BroadcastTxErr,
@@ -61,6 +61,9 @@ const SLP_GENESIS: &str = "GENESIS";
 #[path = "slp/slp_swap_ops.rs"] mod slp_swap_ops;
 
 #[path = "slp/slp_coin_ops.rs"] mod slp_coin_ops;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "slp/slp_swap_evidence_tests.rs"]
+mod slp_swap_evidence_tests;
 
 #[derive(Debug)]
 pub struct SlpTokenConf {
@@ -766,28 +769,6 @@ mod slp_tests {
     use crate::{utxo::bch::tbch_coin_for_test, CanRefundHtlc, TransactionErr};
     use common::{block_on, HttpStatusCode};
     use std::mem::discriminant;
-
-    fn slp_refund_gate_answer(mtp: u32, locktime: u64) -> CanRefundHtlc {
-        use mocktopus::mocking::{MockResult, Mockable};
-
-        BchCoin::get_current_mtp.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(mtp))));
-        let token = SlpToken::new(4, "FUSD".into(), H256::default(), tbch_coin_for_test(), 0);
-        block_on(token.can_refund_htlc(locktime).compat()).unwrap()
-    }
-
-    #[test]
-    fn slp_refund_gate_waits_while_the_platform_mtp_is_below_the_lock_time() {
-        let locktime = common::now_ms() / 1000 - 7200;
-        let answer = slp_refund_gate_answer((locktime - 10) as u32, locktime);
-        assert!(matches!(answer, CanRefundHtlc::HaveToWait(11)));
-    }
-
-    #[test]
-    fn slp_refund_gate_opens_when_the_platform_mtp_is_past_the_lock_time() {
-        let locktime = common::now_ms() / 1000 - 7200;
-        let answer = slp_refund_gate_answer((locktime + 10) as u32, locktime);
-        assert!(matches!(answer, CanRefundHtlc::CanRefundNow));
-    }
 
     // https://slp.dev/specs/slp-token-type-1/#examples
     #[test]

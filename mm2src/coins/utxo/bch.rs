@@ -1081,6 +1081,15 @@ pub(crate) fn bch_coin_over_fields_for_test(fields: UtxoCoinFields) -> BchCoin {
     }
 }
 
+/// A BCH coin over `fields` that validates SLP tokens over `bchd_urls`, for tests of the SLP swap reads.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn bch_coin_over_fields_and_bchd_for_test(fields: UtxoCoinFields, bchd_urls: &[&str]) -> BchCoin {
+    BchCoin {
+        bchd_urls: bchd_urls.iter().map(|url| (*url).to_owned()).collect(),
+        ..bch_coin_over_fields_for_test(fields)
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod bch_tests {
     use super::*;
