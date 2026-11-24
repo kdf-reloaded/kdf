@@ -6,6 +6,7 @@
 //   qrc20_swap_ops   – SwapOps and WatcherOps trait implementations
 //   qrc20_market_ops – MarketCoinOps trait implementation
 //   qrc20_mm_coin    – MmCoin trait implementation and withdraw logic
+//   qrc20_swap_evidence – swap reads agreed on two Electrum servers (CRD ch.51 R100)
 //
 
 // ─── Imports (pub(crate) so child modules inherit via `use super::*`) ───────
@@ -81,6 +82,9 @@ mod swap;
 mod qrc20_helpers;
 mod qrc20_market_ops;
 mod qrc20_mm_coin;
+mod qrc20_swap_evidence;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod qrc20_swap_evidence_tests;
 mod qrc20_swap_ops;
 mod qrc20_types;
 
