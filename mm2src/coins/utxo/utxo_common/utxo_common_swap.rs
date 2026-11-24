@@ -3406,6 +3406,13 @@ mod refund_wait_tests {
         assert!(text.contains("the nodes disagree"), "the kind is expected in the line");
         assert!(!text.contains("a.example:50002"), "no node label may be in the line");
         assert!(!text.contains("b.example:50002"), "no node label may be in the line");
+        let free = crate::swap_evidence::undetermined("srv.example:50002 refused", &["srv.example:50002"]);
+        let text = spend_look_failed_text("BTC", &free);
+        assert!(
+            text.contains("BTC") && text.contains("undetermined"),
+            "ticker and kind are expected"
+        );
+        assert!(!text.contains("srv.example"), "no server name may be in the line");
     }
 
     const NOW: u64 = 1_700_000_000;
