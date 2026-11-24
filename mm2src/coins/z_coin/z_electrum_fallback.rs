@@ -774,11 +774,19 @@ impl ElectrumFallback {
                 "HTLC already-sent detection for {}: the Electrum servers {}",
                 log.coin,
                 match &settled {
-                    Ok(_) => "agree".to_owned(),
-                    Err(FallbackError::Undetermined(conditions)) => conditions.join("; "),
-                    Err(FallbackError::NotConfigured) => "were not asked".to_owned(),
+                    Ok(_) => "agree",
+                    Err(FallbackError::Undetermined(_)) => "did not settle it (undetermined)",
+                    Err(FallbackError::NotConfigured) => "were not asked",
                 }
             ));
+            if let Err(FallbackError::Undetermined(conditions)) = &settled {
+                // The conditions name servers: debug only.
+                common::log::debug!(
+                    "HTLC already-sent detection for {}: {}",
+                    log.coin,
+                    conditions.join("; ")
+                );
+            }
             return settled;
         }
         log.line(format!(
@@ -944,11 +952,15 @@ impl ElectrumFallback {
                 "HTLC spend detection for {}: the Electrum servers {}",
                 log.coin,
                 match &settled {
-                    Ok(_) => "agree".to_owned(),
-                    Err(FallbackError::Undetermined(conditions)) => conditions.join("; "),
-                    Err(FallbackError::NotConfigured) => "were not asked".to_owned(),
+                    Ok(_) => "agree",
+                    Err(FallbackError::Undetermined(_)) => "did not settle it (undetermined)",
+                    Err(FallbackError::NotConfigured) => "were not asked",
                 }
             ));
+            if let Err(FallbackError::Undetermined(conditions)) = &settled {
+                // The conditions name servers: debug only.
+                common::log::debug!("HTLC spend detection for {}: {}", log.coin, conditions.join("; "));
+            }
             return settled;
         }
         log.line(format!(

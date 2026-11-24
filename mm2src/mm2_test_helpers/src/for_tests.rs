@@ -757,9 +757,30 @@ pub async fn enable_electrum(mm: &MarketMakerIt, coin: &str, tx_history: bool, u
     enable_electrum_json(mm, coin, tx_history, servers).await
 }
 
+/// The `swap_evidence_node` value of an Electrum activation over `urls` (CRD ch.51 R100): the one server when the
+/// list holds fewer than two distinct hosts, so that the coin may trade; `Null` otherwise.
+pub fn swap_evidence_node_for(urls: &[String]) -> Json {
+    let host_of = |url: &String| {
+        url.rsplit_once(':')
+            .map_or(url.as_str(), |(host, _)| host)
+            .to_ascii_lowercase()
+    };
+    let mut hosts: Vec<String> = urls.iter().map(host_of).collect();
+    hosts.sort();
+    hosts.dedup();
+    match urls.first() {
+        Some(first) if hosts.len() < 2 => json!(first),
+        _ => Json::Null,
+    }
+}
+
 /// Asks MM to enable the given currency in electrum mode
 /// fresh list of servers at https://github.com/jl777/coins/blob/master/electrums/.
 pub async fn enable_electrum_json(mm: &MarketMakerIt, coin: &str, tx_history: bool, servers: Vec<Json>) -> Json {
+    let urls: Vec<String> = servers
+        .iter()
+        .filter_map(|server| server["url"].as_str().map(str::to_owned))
+        .collect();
     let electrum = mm
         .rpc(&json! ({
             "userpass": mm.userpass,
@@ -768,6 +789,8 @@ pub async fn enable_electrum_json(mm: &MarketMakerIt, coin: &str, tx_history: bo
             "servers": servers,
             "mm2": 1,
             "tx_history": tx_history,
+            // A one-server list names its server as the evidence node.
+            "swap_evidence_node": swap_evidence_node_for(&urls),
         }))
         .await
         .unwrap();
@@ -858,19 +881,22 @@ pub fn get_passphrase(path: &dyn AsRef<Path>, env: &str) -> Result<String, Strin
 /// Asks MM to enable the given currency in native mode.
 /// Returns the RPC reply containing the corresponding wallet address.
 pub async fn enable_native(mm: &MarketMakerIt, coin: &str, urls: &[&str]) -> Json {
-    let native = mm
-        .rpc(&json! ({
-            "userpass": mm.userpass,
-            "method": "enable",
-            "coin": coin,
-            "urls": urls,
-            // Dev chain swap contract address (EIP-55 checksummed; the ETH enable path
-            // validates the checksum via `valid_addr_from_str`, so a lowercase form is rejected).
-            "swap_contract_address": "0xa09aD3cD7e96586eBd05A2607EE56b56Fb2dB8FD",
-            "mm2": 1,
-        }))
-        .await
-        .unwrap();
+    let mut request = json! ({
+        "userpass": mm.userpass,
+        "method": "enable",
+        "coin": coin,
+        "urls": urls,
+        // Dev chain swap contract address (EIP-55 checksummed; the ETH enable path
+        // validates the checksum via `valid_addr_from_str`, so a lowercase form is rejected).
+        "swap_contract_address": "0xa09aD3cD7e96586eBd05A2607EE56b56Fb2dB8FD",
+        "mm2": 1,
+    });
+    // An EVM coin enabled over a single node trusts that node for its swap reads (CRD ch.51 R100 item 2);
+    // without the field the coin would be refused at order placement and at the swap start.
+    if let [node] = urls {
+        request["swap_evidence_node"] = json!(node);
+    }
+    let native = mm.rpc(&request).await.unwrap();
     assert_eq!(native.0, StatusCode::OK, "'enable' failed: {}", native.1);
     json::from_str(&native.1).unwrap()
 }
@@ -938,6 +964,13 @@ pub async fn enable_bch_with_tokens(
     tx_history: bool,
 ) -> Json {
     let slp_requests: Vec<_> = tokens.iter().map(|ticker| json!({ "ticker": ticker })).collect();
+    let evidence_node = match &mode {
+        UtxoRpcMode::Electrum { servers } => {
+            let urls: Vec<String> = servers.iter().map(|server| server.url.clone()).collect();
+            swap_evidence_node_for(&urls)
+        },
+        UtxoRpcMode::Native => Json::Null,
+    };
 
     let enable = mm
         .rpc(&json! ({
@@ -949,6 +982,7 @@ pub async fn enable_bch_with_tokens(
                 "allow_slp_unsafe_conf": true,
                 "bchd_urls": [],
                 "mode": mode,
+                "swap_evidence_node": evidence_node,
                 "tx_history": tx_history,
                 "slp_tokens_requests": slp_requests,
             }

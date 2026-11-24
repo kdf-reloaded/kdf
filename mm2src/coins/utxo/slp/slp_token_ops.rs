@@ -195,6 +195,7 @@ impl SlpToken {
             input.time_lock,
             now_ms() / 1000 + 60,
             input.confirmations,
+            self.swap_evidence_policy(),
         );
 
         validate_fut

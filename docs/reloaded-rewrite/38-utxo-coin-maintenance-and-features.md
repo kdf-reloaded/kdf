@@ -3949,6 +3949,40 @@ evaluated.
 > `CoinIsNotElectrum` and an inactive ticker for `NoSuchCoin`; its routing in the
 > dispatcher has no test of its own.
 
+*Status note (2026-11-23, clean side; Reloaded-original). The swap evidence of
+CRD ch.51 R100 for UTXO coins, BCH and QTUM over Electrum.* It changes no
+sentence above.
+
+1. *Directed reads.* Each read a swap step rests on under R100 goes to one named
+   server and reads that server at its own tip: the counterparty's payment by
+   its txid (compared byte for byte), the first history entry of the payment
+   address (whether the own payment was sent), the spend of the payment's output
+   (the searches and the wait for a spend), the confirmations of a payment, and
+   the median time past of the refund gate, whose tip and headers come from the
+   same server.
+2. *Which servers.* The pool's usable servers, in the pool's own order of
+   preference, one per host. Each is named by host and port only.
+3. *Tip gap.* Two servers whose tips lie further apart than the pool's own
+   tolerance in blocks, the one that judges a server up to date, leave the
+   refund gate's read undetermined when they agree.
+4. *A claim proves itself from the payment.* A spend of the payment's output
+   proves itself when it takes the claim path, its redeem script hashes to the
+   payment output's script hash, and its secret satisfies the hash that redeem
+   script commits to. Where the swap's secret hash is known, the secret is
+   checked against it. Such a claim is taken from one server.
+5. *Confirmations.* The wait for confirmations stays on one server as before;
+   its final decision that a payment has enough confirmations must then be
+   agreed by two servers, or given by the trusted node.
+6. *Native mode.* A coin served by its own daemon reads that daemon as before
+   (ch.51 R100 item 6).
+7. *Every server.* The look on every server that follows a failed spend search
+   is, under R100, the agreed search of a pair, and in addition every other
+   server is asked for a claim that proves itself; such a claim is taken from
+   any server, and every other answer of those servers is ignored. When the
+   pair's search is undetermined and no server shows such a claim, the look
+   finds no spend, and the step stays undetermined and waits: the answer is
+   never "not spent" (ch.51 R100 item 3).
+
 ### 38.6.4Q QTUM and QRC20 over Electrum: clients, methods and shared wallet state
 
 > **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
@@ -6746,3 +6780,8 @@ R38.8.6 **Tests (two-direction, observable).**
   never read the forbidden corpus, from this repository's code and its tests.
   It takes no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required.
+- *Clean-side addition of 2026-11-23 (PR #522):* the status note before
+  §38.6.4Q on the swap evidence of ch.51 R100 for UTXO coins, BCH and QTUM over
+  Electrum. Reloaded-original; written from this repository's code and tests;
+  no reference input and no forbidden-class input; no sentence of the chapter
+  is changed.

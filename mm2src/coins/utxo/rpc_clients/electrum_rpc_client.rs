@@ -685,6 +685,10 @@ impl ElectrumClientImpl {
     /// from it excluded. These are the names a directed request (R38.6.4g) is addressed to.
     pub fn server_addrs(&self) -> Vec<String> { self.pool.usable_addrs() }
 
+    /// The coin's tolerance in blocks, the gap within which the pool judges a server up to date (CRD ch.38
+    /// R38.6.4o item 1). A swap read compares two servers' tips within the same gap (CRD ch.51 R100).
+    pub(crate) fn tolerance_blocks(&self) -> u64 { self.pool.tolerance_blocks() }
+
     /// Get available protocol versions.
     pub fn protocol_version(&self) -> &OrdRange<f32> { &self.protocol_version }
 
@@ -827,6 +831,13 @@ impl ElectrumClient {
     }
 }
 
+/// The tip height and the median time past one server reports (CRD ch.51 R100).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirectedMtp {
+    pub(crate) tip: u64,
+    pub(crate) mtp: u32,
+}
+
 /// The error answers of one server to the transaction request, in a row, that a confirmation wait counts as a failure
 /// of that server (CRD ch.38 R38.6.4o item 6, status note of 2026-11-21).
 const WAIT_ERROR_ANSWERS_LIMIT: u32 = 3;
@@ -839,6 +850,16 @@ impl ElectrumClient {
     /// `blockchain.block.header` of `server`.
     pub fn blockchain_block_header_from(&self, server: &str, height: u64) -> RpcRes<BytesJson> {
         rpc_func_from!(self, server, "blockchain.block.header", height)
+    }
+
+    /// `blockchain.block.headers` of `server` (CRD ch.51 R100: a directed read of a header window).
+    pub fn blockchain_block_headers_from(
+        &self,
+        server: &str,
+        start_height: u64,
+        count: NonZeroU64,
+    ) -> RpcRes<ElectrumBlockHeadersRes> {
+        rpc_func_from!(self, server, "blockchain.block.headers", start_height, count)
     }
 
     /// `blockchain.headers.subscribe` of `server`: its tip.
@@ -871,7 +892,7 @@ impl ElectrumClient {
     /// The spend of output `vout` of the transaction `tx_hash`, searched on one named server with directed
     /// requests (R38.6.4g): the history of the output's script hash, then each transaction of it, as
     /// [`UtxoRpcOps::find_output_spend`] does through the spread reads.
-    async fn find_output_spend_from(
+    pub(crate) async fn find_output_spend_from(
         &self,
         server: &str,
         tx_hash: H256,
@@ -898,6 +919,60 @@ impl ElectrumClient {
             }
         }
         Ok(None)
+    }
+
+    /// CRD ch.51 R100: the tip height and the median time past of ONE named server. The tip and the headers both
+    /// come from `server`, and the window ends at that server's own tip (never at a lower common height).
+    pub(crate) async fn median_time_past_from(
+        &self,
+        server: &str,
+        count: NonZeroU64,
+        policy: &HeaderReadPolicy,
+    ) -> Result<DirectedMtp, String> {
+        let tip = try_s!(self.blockchain_headers_subscribe_from(server).compat().await).block_height();
+        let from = if tip <= count.get() { 0 } else { tip - count.get() + 1 };
+        let res = try_s!(self.blockchain_block_headers_from(server, from, count).compat().await);
+        if res.count == 0 {
+            return ERR!("the server returned zero headers");
+        }
+        let header_count = try_s!(usize::try_from(res.count));
+        let mut timestamps = read_window_times(
+            policy,
+            &self.coin_ticker,
+            &res.hex.0,
+            header_count,
+            from,
+            now_ms() / 1000,
+            |height| async move {
+                self.blockchain_block_header_from(server, height)
+                    .compat()
+                    .await
+                    .map(|bytes| bytes.0)
+                    .map_to_mm(UtxoRpcError::from)
+            },
+        )
+        .await
+        .map_err(|e| ERRL!("{:?}", e))?;
+        // The window is not empty, so the median exists.
+        let mtp = median(timestamps.as_mut_slice()).ok_or_else(|| ERRL!("no header times"))?;
+        Ok(DirectedMtp { tip, mtp })
+    }
+
+    /// CRD ch.51 R100: the first transaction of the history of `script_hash` (hex) on ONE named server, with its
+    /// id, or `None` when the history is empty.
+    pub(crate) async fn first_history_tx_from(
+        &self,
+        server: &str,
+        script_hash: &str,
+    ) -> Result<Option<(H256Json, BytesJson)>, String> {
+        let history = try_s!(self.scripthash_get_history_from(server, script_hash).compat().await);
+        match history.first() {
+            Some(item) => {
+                let bytes = try_s!(self.transaction_get_from(server, &item.tx_hash).compat().await);
+                Ok(Some((item.tx_hash, bytes)))
+            },
+            None => Ok(None),
+        }
     }
 
     /// CRD ch.51 R31a, status note of 2026-11-21: the search of [`Self::find_output_spend_from`] on every usable

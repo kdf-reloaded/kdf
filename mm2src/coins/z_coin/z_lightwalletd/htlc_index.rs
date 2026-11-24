@@ -206,6 +206,8 @@ pub(crate) struct EvidenceUndetermined {
     /// The two endpoints answered with different decisions. A second pair (the Electrum fallback) is not asked
     /// in the same attempt (item 8).
     pub(crate) disagree: bool,
+    /// The reason class as a fixed text, which names no node: what a log line may say.
+    pub(crate) class: &'static str,
     pub(crate) text: String,
 }
 
@@ -1184,12 +1186,10 @@ impl LightwalletdBackend {
             .settle(&step, agreement)
             .map(|(answer, _)| answer.outcome)
             .map_err(HtlcIndexError::SwapEvidence);
-        log.line(format!(
-            "HTLC spend detection for {}: {}{}",
-            log.coin,
-            if result.is_ok() { "decision " } else { "" },
-            describe_spend_decision(&result)
-        ));
+        log.line(format!("HTLC spend detection for {}: {}", log.coin, match &result {
+            Err(HtlcIndexError::SwapEvidence(undetermined)) => format!("undetermined ({})", undetermined.class),
+            other => format!("decision {}", describe_spend_decision(other)),
+        }));
         result
     }
 
@@ -1258,10 +1258,12 @@ impl LightwalletdBackend {
             .map(|(answer, _)| answer.outcome)
             .map_err(HtlcIndexError::SwapEvidence);
         log.line(format!(
-            "HTLC already-sent detection for {}: {}{}",
+            "HTLC already-sent detection for {}: {}",
             log.coin,
-            if result.is_ok() { "decision " } else { "" },
-            describe_sent_decision(&result)
+            match &result {
+                Err(HtlcIndexError::SwapEvidence(undetermined)) => format!("undetermined ({})", undetermined.class),
+                other => format!("decision {}", describe_sent_decision(other)),
+            }
         ));
         result
     }

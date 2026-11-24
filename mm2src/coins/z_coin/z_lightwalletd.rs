@@ -1535,6 +1535,8 @@ pub(crate) struct LightwalletdBackend {
     /// How the swap-evidence reads are judged (CRD ch.51 R100): the coin's stored policy once its family has
     /// adopted R100, else [`SwapEvidencePolicy::NotAdopted`], which keeps today's reads.
     swap_evidence: SwapEvidencePolicy,
+    /// The coin's ticker, the only name a log line gives the coin's node source on an undetermined swap read.
+    ticker: String,
     /// For each swap step whose read was last undetermined, the text that was logged, so a step that stays
     /// undetermined is logged once (R100 item 9).
     undetermined_logged: Mutex<Vec<(String, String)>>,
@@ -1592,6 +1594,7 @@ impl LightwalletdBackend {
             suspensions: Mutex::new(HashMap::new()),
             clock: Arc::new(common::now_float),
             swap_evidence: SwapEvidencePolicy::NotAdopted,
+            ticker: String::new(),
             undetermined_logged: Mutex::new(Vec::new()),
         }
     }
@@ -1600,6 +1603,12 @@ impl LightwalletdBackend {
     /// `swap_evidence::effective_policy` answers it.
     pub(crate) fn with_swap_evidence(mut self, policy: SwapEvidencePolicy) -> Self {
         self.swap_evidence = policy;
+        self
+    }
+
+    /// Names the coin in the log lines of an undetermined swap read.
+    pub(crate) fn with_ticker(mut self, ticker: &str) -> Self {
+        self.ticker = ticker.to_owned();
         self
     }
 
@@ -1699,8 +1708,41 @@ impl LightwalletdBackend {
         }
     }
 
-    /// Turns an agreement into the decided answer, or into the undetermined read, logged once per `step` for as
-    /// long as its text does not change.
+    /// The WARN line of an undetermined read: the coin's ticker, the step (a fixed description of the read), the
+    /// reason class, the policy kind and the two fixes. It names no host, label, URL or answer of a node (CRD ch.51
+    /// R80/R81); what each node said is a separate DEBUG line.
+    fn undetermined_warning(ticker: &str, step: &str, class: &str, kind: &str) -> String {
+        format!(
+            "{}: the read of {} is undetermined ({}; policy: {}) and the step waits; add a lightwalletd server on \
+             another host to light_wallet_d_servers, or set swap_evidence_node to one of the listed servers",
+            ticker, step, class, kind
+        )
+    }
+
+    /// The WARN line of `undetermined` at `step` for this coin: built from the reason class and the policy kind
+    /// only, never from the nodes the read names.
+    pub(crate) fn warning_of(&self, step: &str, undetermined: &Undetermined) -> String {
+        Self::undetermined_warning(
+            &self.ticker,
+            step,
+            Self::reason_class(undetermined.reason),
+            self.swap_evidence.kind(),
+        )
+    }
+
+    /// The reason class of an undetermined read, as a fixed text.
+    fn reason_class(reason: UndeterminedReason) -> &'static str {
+        match reason {
+            UndeterminedReason::Disagree => "the nodes disagree",
+            UndeterminedReason::TooFewAnswers => "too few answers",
+            UndeterminedReason::TipGap => "tip gap",
+            UndeterminedReason::TrustedNodeSilent => "trusted node silent",
+        }
+    }
+
+    /// Turns an agreement into the decided answer, or into the undetermined read. The read is warned once per
+    /// `step` for as long as its class does not change (the WARN names no node); what each node said goes to a
+    /// DEBUG line. The error text returned to the caller carries the node labels.
     pub(crate) fn settle<A, K>(&self, step: &str, agreement: Agreement<A, K>) -> Result<(A, K), EvidenceUndetermined> {
         match agreement {
             Agreement::Agreed { answer, decision } => {
@@ -1708,16 +1750,21 @@ impl LightwalletdBackend {
                 Ok((answer, decision))
             },
             Agreement::Undetermined(undetermined) => {
-                let text = Self::undetermined_text(&undetermined);
-                let first = self.note_undetermined(step, &text);
-                if first {
-                    common::log::warn!("the read of {} is undetermined and the step waits: {}", step, text);
-                } else {
-                    common::log::debug!("the read of {} is still undetermined: {}", step, text);
+                let class = Self::reason_class(undetermined.reason);
+                let warning = self.warning_of(step, &undetermined);
+                if self.note_undetermined(step, &warning) {
+                    common::log::warn!("{}", warning);
                 }
+                common::log::debug!(
+                    "{}: the read of {} is undetermined, what each node said: {}",
+                    self.ticker,
+                    step,
+                    undetermined.to_err_string()
+                );
                 Err(EvidenceUndetermined {
                     disagree: undetermined.reason == UndeterminedReason::Disagree,
-                    text,
+                    class,
+                    text: Self::undetermined_text(&undetermined),
                 })
             },
         }
@@ -2414,6 +2461,7 @@ impl LightwalletdClient {
         ironwood_activation_time: Option<u32>,
         addressing: HtlcAddressing,
         swap_evidence: SwapEvidencePolicy,
+        ticker: &str,
     ) -> Self {
         LightwalletdClient(Arc::new(
             LightwalletdBackend::new(
@@ -2422,7 +2470,8 @@ impl LightwalletdClient {
                 AdmissionPolicy::from_params(params).with_ironwood_activation_time(ironwood_activation_time),
                 addressing,
             )
-            .with_swap_evidence(swap_evidence),
+            .with_swap_evidence(swap_evidence)
+            .with_ticker(ticker),
         ))
     }
 
@@ -2479,7 +2528,11 @@ impl LightwalletdClient {
                         confirmations,
                         decision
                     ),
-                    Err(e) => common::log::error!("could not decide the confirmations of {:?}: {}", tx_hash, e),
+                    Err(e) => {
+                        // `e` names the endpoints; the WARN of the read (`settle`) says why, without a host.
+                        common::log::debug!("could not decide the confirmations of {:?}: {}", tx_hash, e);
+                        common::log::info!("the confirmations of {:?} are undetermined; waiting", tx_hash);
+                    },
                 }
                 common::executor::Timer::sleep(check_every as f64).await;
                 continue;

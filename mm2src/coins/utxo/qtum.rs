@@ -614,11 +614,11 @@ impl SwapOps for QtumCoin {
     }
 
     fn validate_maker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        utxo_common::validate_maker_payment(self, input)
+        utxo_common::validate_maker_payment(self, input, &self.swap_evidence_policy())
     }
 
     fn validate_taker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        utxo_common::validate_taker_payment(self, input)
+        utxo_common::validate_taker_payment(self, input, &self.swap_evidence_policy())
     }
 
     fn check_if_my_payment_sent(
@@ -630,7 +630,14 @@ impl SwapOps for QtumCoin {
         _search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        utxo_common::check_if_my_payment_sent(self.clone(), time_lock, my_pub, other_pub, secret_hash)
+        utxo_common::check_if_my_payment_sent(
+            self.clone(),
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            &self.swap_evidence_policy(),
+        )
     }
 
     async fn search_for_swap_tx_spend_my(
@@ -645,6 +652,7 @@ impl SwapOps for QtumCoin {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_my(
             &self.utxo_arc,
+            &self.swap_evidence_policy(),
             time_lock,
             my_pub,
             other_pub,
@@ -666,6 +674,7 @@ impl SwapOps for QtumCoin {
     ) -> Option<FoundSwapTxSpend> {
         utxo_common::search_for_swap_tx_spend_my_on_every_server(
             &self.utxo_arc,
+            &self.swap_evidence_policy(),
             time_lock,
             my_pub,
             other_pub,
@@ -688,6 +697,7 @@ impl SwapOps for QtumCoin {
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         utxo_common::search_for_swap_tx_spend_other(
             &self.utxo_arc,
+            &self.swap_evidence_policy(),
             time_lock,
             my_pub,
             other_pub,
@@ -704,8 +714,9 @@ impl SwapOps for QtumCoin {
     }
 
     fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        let policy = self.swap_evidence_policy();
         Box::new(
-            utxo_common::can_refund_htlc(self, locktime)
+            async move { utxo_common::can_refund_htlc(self, locktime, &policy).await }
                 .boxed()
                 .map_err(|e| ERRL!("{}", e))
                 .compat(),
@@ -785,6 +796,7 @@ impl MarketCoinOps for QtumCoin {
             requires_nota,
             wait_until,
             check_every,
+            &self.swap_evidence_policy(),
         )
     }
 
@@ -801,6 +813,7 @@ impl MarketCoinOps for QtumCoin {
             utxo_common::DEFAULT_SWAP_VOUT,
             from_block,
             wait_until,
+            &self.swap_evidence_policy(),
         )
     }
 

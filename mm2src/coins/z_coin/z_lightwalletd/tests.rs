@@ -2690,6 +2690,52 @@ mod r100 {
         assert!(gap(backend.confirmations_agreed(&tx, 0, 6).await.unwrap_err()));
     }
 
+    /// CRD ch.51 R80/R81: the WARN of an undetermined read names the ticker, the step, the reason class and the
+    /// policy kind, and no host, label or answer of a node. The nodes are in the error text and the DEBUG line.
+    #[test]
+    fn the_warning_of_an_undetermined_read_names_no_node() {
+        let transport = Arc::new(FakeTransport::default());
+        let backend = agreeing(&transport, &["a", "b"], SwapEvidencePolicy::Trusted {
+            node: "https://user:secret@lwd.example.org:443".to_owned(),
+        })
+        .with_ticker("ARRR");
+        let undetermined = crate::swap_evidence::Undetermined {
+            reason: UndeterminedReason::Disagree,
+            per_node: vec![
+                ("lwd1.example.org:443".to_owned(), "spent by 5ec3e7".to_owned()),
+                ("lwd2.example.org:9067".to_owned(), "not spent".to_owned()),
+            ],
+        };
+
+        let warning = backend.warning_of("the spend of the HTLC output", &undetermined);
+
+        assert!(warning.starts_with("ARRR: "), "{warning}");
+        assert!(
+            warning.contains("the spend of the HTLC output") && warning.contains("the nodes disagree"),
+            "{warning}"
+        );
+        assert!(warning.contains("trusted node"), "{warning}");
+        assert!(warning.contains("swap_evidence_node"), "the fixes are named");
+        for forbidden in [
+            "example.org",
+            "lwd1",
+            "lwd2",
+            "9067",
+            "spent by",
+            "not spent",
+            "user",
+            "secret",
+        ] {
+            assert!(!warning.contains(forbidden), "the warning names a node or an answer");
+        }
+        // The error text for the caller keeps the labels and what each node said.
+        let text = LightwalletdBackend::undetermined_text(&undetermined);
+        assert!(
+            text.contains("lwd1.example.org:443") && text.contains("spent by 5ec3e7"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn zcoin_has_adopted_r100() {
         assert!(crate::swap_evidence::family_adopted(

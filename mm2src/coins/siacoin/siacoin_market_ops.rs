@@ -140,7 +140,7 @@ impl MarketCoinOps for SiaCoin {
         let tx: SiaTransaction = try_fus!(serde_json::from_slice(tx)
             .map_err(|e| format!("siacoin wait_for_confirmations payment_tx deser failed: {}", e)));
         let txid = tx.txid();
-        let client = self.client.clone();
+        let coin = self.clone();
         let tx_request = GetEventRequest { txid: txid.clone() };
 
         let fut = async move {
@@ -153,13 +153,25 @@ impl MarketCoinOps for SiaCoin {
                     );
                 }
 
-                match client.dispatcher(tx_request.clone()).await {
-                    Ok(event) => {
-                        if event.confirmations >= confirmations {
-                            return Ok(());
-                        }
-                    },
-                    Err(e) => info!("Waiting for confirmation of Sia txid {}: {}", txid, sia_text(&e)),
+                // CRD ch.51 R100 (P): the confirmation decision goes through the coin's swap-evidence policy;
+                // an undetermined read is logged and the wait goes on.
+                let read = coin
+                    .swap_evidence_read(
+                        || async {
+                            coin.client
+                                .dispatcher(tx_request.clone())
+                                .await
+                                .map(|event| event.confirmations)
+                                .map_err(|e| sia_text(&e))
+                        },
+                        |seen: &u64| *seen >= confirmations,
+                        |_| false,
+                    )
+                    .await;
+                match read {
+                    Ok((_, true)) => return Ok(()),
+                    Ok((_, false)) => (),
+                    Err(e) => info!("Waiting for confirmation of Sia txid {}: {}", txid, e),
                 }
 
                 Timer::sleep(check_every as f64).await;
@@ -177,12 +189,16 @@ impl MarketCoinOps for SiaCoin {
         _swap_contract_address: &Option<BytesJson>,
     ) -> super::TransactionFut {
         let tx_bytes = transaction.to_vec();
-        let client = self.client.clone();
+        let coin = self.clone();
 
         let fut = async move {
             let tx = SiaTransaction::try_from(tx_bytes).map_err(|e| TransactionErr::Plain(e.to_string()))?;
             let htlc_lock_txid = tx.txid();
             let output_id = SiacoinOutputId::new(htlc_lock_txid.clone(), HTLC_VOUT_INDEX);
+            let htlc_address =
+                tx.0.siacoin_outputs
+                    .get(HTLC_VOUT_INDEX as usize)
+                    .map(|output| output.address.clone());
             let check_every = 10f64;
 
             loop {
@@ -192,33 +208,51 @@ impl MarketCoinOps for SiaCoin {
                 // it is logged rather than discarded: a node that is persistently
                 // unreachable otherwise presents exactly like an unspent HTLC, and
                 // the swap runs silently to its timeout with nothing to explain
-                // why. The chain-side lookup below already reports its errors this
-                // way; this one used to swallow them.
-                let mempool_transactions = match client.dispatcher(TxpoolTransactionsRequest).await {
-                    Ok(response) => response.v2transactions,
-                    Err(e) => {
-                        debug!("SiaCoin::wait_for_tx_spend: mempool query failed: {}", sia_text(&e));
-                        Vec::new()
-                    },
-                };
-
-                let found_in_mempool = mempool_transactions
-                    .into_iter()
-                    .find(|tx| tx.siacoin_inputs.iter().any(|input| input.parent.id == output_id));
-
-                if let Some(tx) = found_in_mempool {
-                    return Ok(TransactionEnum::SiaTransaction(SiaTransaction(tx)));
-                }
-
-                let found_in_block = client.find_where_utxo_spent(&output_id).await;
-
-                match found_in_block {
-                    Ok(Some(tx)) => return Ok(TransactionEnum::SiaTransaction(SiaTransaction(tx))),
-                    Err(e) => debug!(
-                        "SiaCoin::wait_for_tx_spend: find_where_utxo_spent failed: {}",
-                        sia_text(&e)
-                    ),
-                    _ => (),
+                // why. CRD ch.51 R100 (S): the lookup goes through the coin's
+                // swap-evidence policy, and "not spent" is only taken from a node
+                // that answered both reads.
+                let read = coin
+                    .swap_evidence_read(
+                        || async {
+                            let mempool_transactions = coin
+                                .client
+                                .dispatcher(TxpoolTransactionsRequest)
+                                .await
+                                .map(|response| response.v2transactions)
+                                .map_err(|e| format!("mempool query failed: {}", sia_text(&e)));
+                            if let Some(tx) = mempool_transactions.as_ref().ok().and_then(|txs| {
+                                txs.iter()
+                                    .find(|tx| tx.siacoin_inputs.iter().any(|input| input.parent.id == output_id))
+                            }) {
+                                return Ok(Some(tx.clone()));
+                            }
+                            let found_in_block = coin
+                                .client
+                                .find_where_utxo_spent(&output_id)
+                                .await
+                                .map_err(|e| format!("find_where_utxo_spent failed: {}", sia_text(&e)))?;
+                            // The mempool read failed and the chain showed nothing: not spent is not proven.
+                            if found_in_block.is_none() {
+                                mempool_transactions?;
+                            }
+                            Ok(found_in_block)
+                        },
+                        |spend: &Option<V2Transaction>| spend.as_ref().map(|tx| tx.txid().to_string()),
+                        // CRD ch.51 R100: a claim that reveals a preimage of the hash its own HTLC address commits
+                        // to proves itself. This is how the taker learns the secret under any policy; a refund, or a
+                        // spend that reveals no such preimage, stays under the policy.
+                        |spend: &Option<V2Transaction>| match (spend, &htlc_address) {
+                            (Some(spend), Some(address)) => {
+                                super::siacoin_swap_ops::claim_proves_itself(spend, &output_id, address)
+                            },
+                            _ => false,
+                        },
+                    )
+                    .await;
+                match read {
+                    Ok((Some(tx), _)) => return Ok(TransactionEnum::SiaTransaction(SiaTransaction(tx))),
+                    Ok((None, _)) => (),
+                    Err(e) => debug!("SiaCoin::wait_for_tx_spend: {}", e),
                 }
 
                 if now_ms() / 1000 >= wait_until {

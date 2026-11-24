@@ -688,6 +688,7 @@ impl MarketCoinOps for SlpToken {
             SLP_SWAP_VOUT,
             from_block,
             wait_until,
+            &self.swap_evidence_policy(),
         )
     }
 
@@ -1097,6 +1098,7 @@ mod slp_tests {
             lock_time,
             now_ms() / 1000 + 60,
             1,
+            crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
         )
         .wait()
         .unwrap();

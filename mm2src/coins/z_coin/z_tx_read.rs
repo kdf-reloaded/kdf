@@ -277,7 +277,9 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
                     // Undetermined is not a spend and not an answer: keep waiting, say why.
                     Err(e) => {
                         if last_undetermined.as_deref() != Some(e.as_str()) {
-                            log::error!("HTLC spend detection of tx {} could not tell: {}", tx_debug, e);
+                            // `e` names the endpoints; the log of the read itself says why, without a host.
+                            log::debug!("HTLC spend detection of tx {} could not tell: {}", tx_debug, e);
+                            log::warn!("HTLC spend detection of tx {} could not tell; waiting", tx_debug);
                             last_undetermined = Some(e);
                         }
                     },
@@ -304,6 +306,7 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
         DEFAULT_SWAP_VOUT,
         from_block,
         wait_until,
+        &crate::MmCoin::swap_evidence_policy(coin),
     )
 }
 
@@ -364,11 +367,17 @@ pub(crate) fn check_payment_pays_htlc(
     let tx = read_tx(payment_tx)?;
     let payment = PaymentOutputs {
         tx_hash: txid_internal(&tx),
-        output0_script_pubkey: script_pubkey_at(&tx, 0)?.into(),
         spent_script_pubkey: script_pubkey_at(&tx, DEFAULT_SWAP_VOUT)?.into(),
     };
     Ok(
-        match ensure_payment_pays_htlc(time_lock, first_pub, second_pub, secret_hash, &payment) {
+        match ensure_payment_pays_htlc(
+            time_lock,
+            first_pub,
+            second_pub,
+            secret_hash,
+            &payment,
+            DEFAULT_SWAP_VOUT,
+        ) {
             Ok(()) => HtlcPaymentCheck::Pays,
             Err(_) => HtlcPaymentCheck::PaysAnotherScript {
                 payment_id: format!("{:?}", payment.tx_hash.reversed()),
@@ -398,15 +407,20 @@ pub(crate) async fn search_for_swap_tx_spend(
     search_from_block: u64,
 ) -> Result<Option<FoundSwapTxSpend>, String> {
     let tx = read_tx(tx)?;
-    let output0_script_pubkey = script_pubkey_at(&tx, 0)?;
     let spent_script_pubkey = script_pubkey_at(&tx, DEFAULT_SWAP_VOUT)?;
     let payment = PaymentOutputs {
         tx_hash: txid_internal(&tx),
-        output0_script_pubkey: output0_script_pubkey.into(),
         spent_script_pubkey: spent_script_pubkey.into(),
     };
     if let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client {
-        ensure_payment_pays_htlc(time_lock, first_pub, second_pub, secret_hash, &payment)?;
+        ensure_payment_pays_htlc(
+            time_lock,
+            first_pub,
+            second_pub,
+            secret_hash,
+            &payment,
+            DEFAULT_SWAP_VOUT,
+        )?;
         let output = watched_output(&tx, DEFAULT_SWAP_VOUT)?;
         return match find_spend_over_lightwalletd(coin, client, &output, search_from_block, false).await? {
             None => Ok(None),
@@ -415,6 +429,7 @@ pub(crate) async fn search_for_swap_tx_spend(
     }
     utxo_common::search_for_swap_output_spend_of(
         coin.as_ref(),
+        &crate::MmCoin::swap_evidence_policy(coin),
         time_lock,
         first_pub,
         second_pub,
@@ -527,11 +542,16 @@ async fn counting_unmined(
                 && match client.0.tip_past_agreed(expiry).await {
                     Ok(past) => past,
                     Err(e) => {
-                        log::warn!(
-                            "ZCoin {}: the expiry of the recorded send {} could not be decided ({}); the record still counts",
+                        // `e` names the endpoints; it is for the debug log only.
+                        log::debug!(
+                            "ZCoin {}: the expiry of the recorded send could not be decided: {}",
                             ticker,
-                            hex::encode(txid_display(&tx).0),
                             e
+                        );
+                        log::warn!(
+                            "ZCoin {}: the expiry of the recorded send {} could not be decided; the record still counts",
+                            ticker,
+                            hex::encode(txid_display(&tx).0)
                         );
                         false
                     },
@@ -967,7 +987,6 @@ mod tests {
         let tx = read_tx(&bytes_of(LIVE_PAYMENT_HEX.trim())).expect("the live payment is readable");
         PaymentOutputs {
             tx_hash: txid_internal(&tx),
-            output0_script_pubkey: script_pubkey_at(&tx, 0).expect("output 0").into(),
             spent_script_pubkey: script_pubkey_at(&tx, DEFAULT_SWAP_VOUT).expect("output 0").into(),
         }
     }
@@ -984,6 +1003,7 @@ mod tests {
             &live_key(LIVE_MAKER_KEY),
             &bytes_of(LIVE_SECRET_HASH),
             &payment,
+            DEFAULT_SWAP_VOUT,
         );
         assert_eq!(verdict, Ok(()));
     }
@@ -1000,6 +1020,7 @@ mod tests {
             &live_key(LIVE_MAKER_KEY),
             &bytes_of(LIVE_SECRET_HASH),
             &payment,
+            DEFAULT_SWAP_VOUT,
         )
         .unwrap_err();
         assert!(
