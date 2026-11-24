@@ -985,14 +985,14 @@ mod funding_spend_search_and_secret_tests {
     #[test]
     fn secret_of_the_spend_is_returned_when_its_hash_matches() {
         let secret_hash = SecretHashAlgo::SHA256.hash_secret(&SECRET);
-        assert_eq!(
-            secret_of_taker_payment_spend(&spend_call_input(&SECRET), &secret_hash),
-            Ok(SECRET)
+        assert!(
+            secret_of_taker_payment_spend(&spend_call_input(&SECRET), &secret_hash) == Ok(SECRET),
+            "the secret of a 32-byte hash is returned"
         );
         let short_hash = SecretHashAlgo::DHASH160.hash_secret(&SECRET);
-        assert_eq!(
-            secret_of_taker_payment_spend(&spend_call_input(&SECRET), &short_hash),
-            Ok(SECRET)
+        assert!(
+            secret_of_taker_payment_spend(&spend_call_input(&SECRET), &short_hash) == Ok(SECRET),
+            "the secret of a 20-byte hash is returned"
         );
     }
 
@@ -1001,9 +1001,10 @@ mod funding_spend_search_and_secret_tests {
     fn secret_of_the_spend_is_refused_when_its_hash_does_not_match() {
         let secret_hash = SecretHashAlgo::SHA256.hash_secret(&SECRET);
         let other = [0x55u8; 32];
-        assert_eq!(
-            secret_of_taker_payment_spend(&spend_call_input(&other), &secret_hash),
-            Err(ExtractSecretV2Err::SecretHashMismatch(hex::encode(&secret_hash)))
+        let refused = secret_of_taker_payment_spend(&spend_call_input(&other), &secret_hash);
+        assert!(
+            refused == Err(ExtractSecretV2Err::SecretHashMismatch(hex::encode(&secret_hash))),
+            "a non-matching secret is refused"
         );
     }
 
@@ -1013,7 +1014,7 @@ mod funding_spend_search_and_secret_tests {
         let refused = secret_of_taker_payment_spend(&spend_call_input(&SECRET), &[0u8; 21]);
         assert!(
             matches!(refused, Err(ExtractSecretV2Err::InvalidSecretHash(_))),
-            "{refused:?}"
+            "a secret hash of an unsupported width is refused"
         );
 
         let secret_hash = SecretHashAlgo::SHA256.hash_secret(&SECRET);
@@ -1021,7 +1022,7 @@ mod funding_spend_search_and_secret_tests {
             let refused = secret_of_taker_payment_spend(input, &secret_hash);
             assert!(
                 matches!(refused, Err(ExtractSecretV2Err::InvalidSpendTx(_))),
-                "{refused:?}"
+                "an input that is not the spend call is refused"
             );
         }
     }
