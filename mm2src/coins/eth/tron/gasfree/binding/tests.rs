@@ -157,6 +157,7 @@ async fn platform(ctx: &MmArc, node: &StubNode, gasfree: Option<GasFreeBinding>)
         tx_history: false,
         gasfree,
         swap_contracts: None,
+        swap_evidence_node: None,
     };
     tron_coin_from_params(
         ctx,
@@ -577,6 +578,7 @@ fn a_token_built_on_its_own_takes_no_provider_binding() {
         tx_history: false,
         gasfree: Some(binding(&Network::Nile, "https://open.gasfree.io")),
         swap_contracts: None,
+        swap_evidence_node: None,
     };
     let built = block_on(tron_coin_from_params(
         &ctx,

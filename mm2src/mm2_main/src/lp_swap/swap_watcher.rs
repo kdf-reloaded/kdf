@@ -12,8 +12,10 @@
 ///
 /// The watcher carries **precomputed** spend/refund transactions so it never
 /// needs the taker's private key.
+use crate::mm2::lp_swap::evidence_wait::{Read, WaitLog};
 use crate::mm2::lp_swap::taker_swap::spend_secret;
 use crate::mm2::lp_swap::SwapsContext;
+use coins::swap_evidence::is_undetermined;
 use coins::{lp_coinfind, MmCoinEnum};
 use common::executor::Timer;
 use common::log::{debug, error, info, warn};
@@ -164,6 +166,13 @@ pub struct ValidateTakerFee;
 /// State 2: Wait for and validate the taker payment on-chain.
 pub struct ValidateTakerPayment;
 
+/// Whether the watcher moves on to the refund: the refund start time has come and the latest search of the taker
+/// payment was a determined "not spent" (CRD ch.51 §51.6G R100 item 3). A search that failed or was undetermined
+/// keeps the watcher searching.
+fn refund_may_start(now_secs: u64, refund_start_secs: u64, latest_search_found_not_spent: bool) -> bool {
+    now_secs >= refund_start_secs && latest_search_found_not_spent
+}
+
 /// State 3: Wait for the taker payment to be spent or timeout.
 pub struct WaitForTakerPaymentSpend;
 
@@ -245,6 +254,9 @@ impl State for ValidateTakerPayment {
     async fn on_changed(self: Box<Self>, ctx: &mut Self::Ctx) -> StateResult<Self::Ctx, Self::Result> {
         // Wait for taker payment to appear on-chain
         let deadline = now_ms() / 1000 + ctx.conf.wait_taker_payment as u64;
+        // Every error is read again until the deadline; an undetermined read (CRD ch.51 §51.6G R100 items 3
+        // and 9) is logged once at WARN.
+        let mut validate_log = WaitLog::new();
         loop {
             let now = now_ms() / 1000;
             if now > deadline {
@@ -275,7 +287,11 @@ impl State for ValidateTakerPayment {
                     return Self::change_state(WaitForTakerPaymentSpend);
                 },
                 Err(e) => {
-                    debug!("Watcher {}: taker payment not yet valid: {}", ctx.data.uuid, e);
+                    if is_undetermined(&e) {
+                        validate_log.note(&ctx.data.uuid, ctx.taker_coin.ticker(), Read::TakerPaymentCheck, &e);
+                    } else {
+                        debug!("Watcher {}: taker payment not yet valid: {}", ctx.data.uuid, e);
+                    }
                     Timer::sleep(10.0).await;
                 },
             }
@@ -291,17 +307,10 @@ impl State for WaitForTakerPaymentSpend {
     async fn on_changed(self: Box<Self>, ctx: &mut Self::Ctx) -> StateResult<Self::Ctx, Self::Result> {
         let refund_deadline = ctx.refund_start_time();
         let search_interval = ctx.conf.search_interval;
+        // CRD ch.51 §51.6G R100 items 3 and 9: one WARN for a search that could not be determined.
+        let mut search_log = WaitLog::new();
 
         loop {
-            let now = now_ms() / 1000;
-            if now >= refund_deadline {
-                info!(
-                    "Watcher {}: refund deadline reached, refunding taker payment",
-                    ctx.data.uuid
-                );
-                return Self::change_state(RefundTakerPayment);
-            }
-
             // Search for taker payment spend
             match ctx
                 .taker_coin
@@ -337,16 +346,28 @@ impl State for WaitForTakerPaymentSpend {
                     });
                 },
                 Ok(None) => {
+                    // The refund starts only on a determined "not spent" (CRD ch.51 §51.6G R100 item 3).
+                    if refund_may_start(now_ms() / 1000, refund_deadline, true) {
+                        info!(
+                            "Watcher {}: refund deadline reached, refunding taker payment",
+                            ctx.data.uuid
+                        );
+                        return Self::change_state(RefundTakerPayment);
+                    }
                     debug!(
                         "Watcher {}: taker payment not yet spent, checking again in {}s",
                         ctx.data.uuid, search_interval
                     );
                 },
                 Err(e) => {
-                    warn!(
-                        "Watcher {}: error searching for taker payment spend: {}",
-                        ctx.data.uuid, e
-                    );
+                    if is_undetermined(&e) {
+                        search_log.note(&ctx.data.uuid, ctx.taker_coin.ticker(), Read::Look, &e);
+                    } else {
+                        warn!(
+                            "Watcher {}: error searching for taker payment spend: {}",
+                            ctx.data.uuid, e
+                        );
+                    }
                 },
             }
 
@@ -399,6 +420,9 @@ impl State for RefundTakerPayment {
     async fn on_changed(self: Box<Self>, ctx: &mut Self::Ctx) -> StateResult<Self::Ctx, Self::Result> {
         // Wait until the timelock has actually expired (MTP for UTXO chains).
         let locktime = ctx.taker_locktime();
+        // The watcher's refund has no deadline of its own: an undetermined chain time is read again until it is
+        // determined, with one WARN (CRD ch.51 §51.6G R100 item 3).
+        let mut gate_log = WaitLog::new();
         loop {
             match ctx.taker_coin.can_refund_htlc(locktime).compat().await {
                 Ok(coins::CanRefundHtlc::CanRefundNow) => break,
@@ -407,7 +431,11 @@ impl State for RefundTakerPayment {
                     Timer::sleep(secs as f64).await;
                 },
                 Err(e) => {
-                    error!("Watcher {}: can_refund_htlc error: {}", ctx.data.uuid, e);
+                    if is_undetermined(&e) {
+                        gate_log.note(&ctx.data.uuid, ctx.taker_coin.ticker(), Read::Gate, &e);
+                    } else {
+                        error!("Watcher {}: can_refund_htlc error: {}", ctx.data.uuid, e);
+                    }
                     Timer::sleep(30.0).await;
                 },
             }
@@ -605,6 +633,17 @@ async fn spawn_taker_swap_watcher(ctx: MmArc, data: TakerSwapWatcherData, verifi
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_refund_starts_only_on_a_determined_not_spent_at_the_start_time() {
+        assert!(refund_may_start(100, 100, true));
+        assert!(refund_may_start(101, 100, true));
+        assert!(!refund_may_start(99, 100, true), "before the start time");
+        assert!(
+            !refund_may_start(100, 100, false),
+            "the latest search failed or was undetermined"
+        );
+    }
 
     #[test]
     fn test_watcher_topic_format() {

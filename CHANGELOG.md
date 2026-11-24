@@ -23,11 +23,16 @@ or undo, and every change that needs a step from you.
     `swap_evidence_node`, starts no new swap: `setprice`, `buy`, `sell` and the swap start refuse it with a
     reason that names `swap_evidence_node`. A swap that is already running when you upgrade keeps running, but a
     step whose reads do not agree, or that has too few answers, waits and logs how to fix it; it never refunds or
-    claims on such a read.
+    claims on such a read. A refund step waits like this until an hour after the refund first became possible in
+    the current run, and at least until its payment's lock time plus 3700 seconds; a swap still waiting then ends
+    as refund failed, with a text that names the kind of failure and, for reads that did not agree, the fix; after
+    fixing the node list, or once the coin answers again, you run `recover_funds_of_swap`.
   - *What to do:* list a server on a second host in the activation request, or set the new activation field
     `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
     not answer, the step waits; no other node is asked in its place.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
+    - TRON (TRX, TRC20). TRON swaps stay off in this release; when they are switched on, their chain reads already
+      follow the rule. Detail: PR #509; CRD ch.21 §21.11D.
     - Sia (SC). A Sia coin reads one walletd node, so there is no second node to add: set `swap_evidence_node` to
       the walletd `server_url` to trust it. Without the field, SC orders are refused and a running SC swap waits at
       its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
@@ -577,6 +582,12 @@ the previous version used. The safe way:
   "swap_contract_address is ignored, the coin is wallet-only". Nothing else changes for a user: the groundwork for
   TRON swaps added here (the contract interface, the transaction form and the contract binding at activation) is not
   used by any order or swap while TRON swaps are off. Detail: PR #506; CRD ch.21 §21.11C, R21.B2.
+- **A TRON platform accepts `swap_evidence_node` at activation.** The field names one node of the request's own
+  node list to trust for swap evidence instead of the two-node agreement (see "Breaking changes and upgrade
+  notes"); a value that is not in the list refuses the activation with `SwapEvidenceNodeNotInList`. TRON swaps stay
+  off: the part of a TRON swap that reads the chain (checking the other side's payment and the DEX fee, this node's
+  claim and refund, the refund time, the search for a claim and its secret) is built and waits for the switch-on.
+  Detail: PR #509; CRD ch.21 §21.11D.
 
 #### Tendermint (Cosmos) coins
 
@@ -898,6 +909,18 @@ the previous version used. The safe way:
   status note of 2026-11-22;
   `vendor-patches/libp2p-noise-0.43.0/PATCH-NOTES.md`.
 
+#### Swap protocol v2
+
+- **A v2 swap never refunds after its own claim, repeats a chain search after a node error, and takes an EVM secret
+  only when it matches the secret hash.** After the node's own claim of the other side's payment is broadcast, the
+  swap reads its confirmation again every 10 seconds and ends as completed when it is read. It waits until 3700
+  seconds past the lock time of its own payment, and at least 3700 seconds from the start of that wait (a restart
+  starts the wait anew); then it ends as aborted with a reason whose text names the claim transaction. The maker's
+  search for the spend of the taker funding treats an unreachable node, or a node answer that cannot be decoded, as
+  a passing error on every coin family and searches again after 30 seconds. On EVM coins the value read from the
+  spend of the taker payment is used as the secret only when its hash equals the swap's secret hash.
+  - Detail: PR #532; CRD ch.52 R18, R19, R32, R33 and their status notes of 2026-11-23, ch.51 §51.6G R100.
+
 ### Fixed
 
 #### Orders
@@ -910,6 +933,11 @@ the previous version used. The safe way:
   such an order with `cancel_order`, which still sends its cancel message. A kept taker order still times out as
   before: fill-or-kill is removed, good-till-cancelled becomes a maker order that is kept and not announced.
   Detail: PR #485; CRD ch.60 R60.6.5.
+- **A wallet-only coin is refused as wallet-only before the two-node check.** `setprice`, `buy` and `sell` with a
+  coin that cannot trade (a wallet-only coin, every TRON coin while TRON swaps are off) now answer the wallet-only
+  error first. Before, a coin that also had fewer than two nodes was told to add a node or set `swap_evidence_node`
+  (see the R100 item under "Breaking changes and upgrade notes"), which would not have made it tradable.
+  Detail: PR #509.
 
 #### EVM, BCH, Sia and Lightning coins
 
@@ -1310,6 +1338,23 @@ the previous version used. The safe way:
   swap event to the contract call it belongs to, requires that call to the swap contract to have succeeded, and
   looks for a refund in the history of the payment's sender, so a refund of the other side's payment is found too.
   Detail: PR #496; CRD ch.51, status note of 2026-11-22 after §51.6E R92.
+- **The taker's refund waits while the chain's answer about its payment is undetermined.** Before it refunds, the
+  taker looks for a claim or a refund of its payment. On every coin, while a look fails or does not finish, and on
+  a coin whose reads need two agreeing nodes also while they do not agree, the refund waits and the look repeats,
+  with one warning. The look also runs each time the refund becomes possible, just before the refund is built. A
+  claim found on one server whose secret matches the swap's hash is used at once; a refund, or another spend, found
+  on one server only is not acted on. A swap still waiting an hour after its refund first became possible in the
+  current run, and at least until its payment's lock time plus 3700 seconds, ends as refund failed, with a text
+  that names the kind of failure and, when the nodes did not agree, the fix; the servers' own answers go to the
+  debug log only. Detail: PR #523; CRD ch.51, status note of 2026-11-23 under R31a.
+- **The maker's refund, the watcher and the payment checks wait on an undetermined answer.** The maker's refund
+  waits while its look at the taker payment, or the check whether the refund is possible, does not give a
+  determined answer, with the same bound and the same kind of text as the taker's. A watcher refunds the taker
+  payment only after a search that answered that the payment is not spent. When the check of the other side's
+  payment cannot be determined, the maker and the taker repeat it until the step's existing deadline instead of
+  giving up at once. The manual recovery names the fix when its read is undetermined. Detail: PR #527; CRD ch.51,
+  status notes of 2026-11-23 after the description of the maker's validation stage, after R28 and at the end of
+  §51.6C; ch.09, status note of 2026-11-23 after §9.6.
 
 ### Tests
 
@@ -1423,6 +1468,12 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`swap-v2-chain-read-agreement`](docs/plans/swap-v2-chain-read-agreement.md) — new, planning: swap protocol v2
+  follows the agreement of chain reads (R100) in 0.5.0, with the recovery and the funding-refund rules decided on
+  2026-11-23, PR #528.
+- [`swap-v2-state-and-abort-reason-naming`](docs/plans/swap-v2-state-and-abort-reason-naming.md) — new, planning
+  (after 0.5.0): a decision, with wallet maintainers, on renaming or adding swap protocol v2 states and abort
+  reasons, then compatibility, migration of stored rows and docs; PR #531.
 - [`swap-recovery-retry-switch`](docs/plans/swap-recovery-retry-switch.md) — new, planning (v0.6): a decision,
   after a discussion with experienced users, on whether an operator or frontend switch retries the recovery of
   swaps that end needing manual recovery; added with the R100 item 9 note, PR #518.

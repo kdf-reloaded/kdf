@@ -1,5 +1,7 @@
 use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, CheckBalanceResult,
                            TakerFeeAdditionalInfo};
+use super::evidence_wait::{clock_secs, refund_cap_text, refund_gate_cap_text, retry_while_undetermined,
+                           undetermined_refund_deadline, with_fix_hint, Read, WaitLog};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
                              ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
@@ -22,6 +24,7 @@ use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, swap_key_mismatch,
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, retried_refund_rejection, tx_helper_topic, NON_FINAL_REFUND_RETRY_SECS};
 use crate::mm2::MM_VERSION;
 use coins::request_fee_scope::with_request_fee_scope;
+use coins::swap_evidence::is_undetermined;
 use coins::{lp_coinfind, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions,
             TradeFee, TradePreimageValue, ValidatePaymentInput};
 use common::custom_futures::FutureTimerExt;
@@ -61,6 +64,18 @@ struct RefundPacing {
     chain_look_interval_secs: f64,
     /// Longest one look at the chain may take; a look that takes longer counts as failed.
     chain_look_timeout_secs: f64,
+    /// The clock the cap of an undetermined look or gate is counted on, in seconds since the epoch.
+    now_secs: fn() -> u64,
+}
+
+/// What the look at the chain found while the taker is in its refund chain (CRD ch.51 R31a, §51.6G R100).
+enum RefundChainLook {
+    /// A determined answer: nothing spent, nothing refunded.
+    NotSpent,
+    /// A spend or a refund was found; the swap goes on as the events say.
+    Outcome(Option<TakerSwapCommand>, Vec<TakerSwapEvent>),
+    /// The look could not be determined (the reason is the error of the read).
+    Undetermined(String),
 }
 
 const REFUND_PACING: RefundPacing = RefundPacing {
@@ -69,6 +84,7 @@ const REFUND_PACING: RefundPacing = RefundPacing {
     min_wait_step_secs: 5.,
     chain_look_interval_secs: 60.,
     chain_look_timeout_secs: 120.,
+    now_secs: clock_secs,
 };
 
 construct_detailed!(DetailedAmount, amount);
@@ -1529,6 +1545,15 @@ impl TakerSwap {
     }
 
     async fn validate_maker_payment(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
+        self.validate_maker_payment_paced(WAIT_CONFIRM_INTERVAL as f64).await
+    }
+
+    /// [`TakerSwap::validate_maker_payment`] with the wait between two repeated payment checks given, so a test
+    /// can shorten it (CRD ch.51 §51.6G R100 item 3).
+    async fn validate_maker_payment_paced(
+        &self,
+        recheck_secs: f64,
+    ) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
         log!({ "Before wait confirm" });
         let confirmations = self.r().data.maker_payment_confirmations;
         let f = self.maker_coin.wait_for_confirmations(
@@ -1558,7 +1583,18 @@ impl TakerSwap {
             try_spv_proof_until: self.r().data.maker_payment_wait,
             confirmations,
         };
-        let validated = self.maker_coin.validate_maker_payment(validate_input).compat().await;
+        // CRD ch.51 §51.6G R100 item 3: a payment check that rests on an undetermined read is repeated until the
+        // step's own deadline.
+        let maker_payment_wait = self.r().data.maker_payment_wait;
+        let validated = retry_while_undetermined(
+            &self.uuid,
+            self.maker_coin.ticker(),
+            Read::MakerPaymentCheck,
+            recheck_secs,
+            maker_payment_wait,
+            || self.maker_coin.validate_maker_payment(validate_input.clone()).compat(),
+        )
+        .await;
 
         if let Err(e) = validated {
             return Ok((Some(TakerSwapCommand::Finish), vec![
@@ -1958,9 +1994,17 @@ impl TakerSwap {
         pacing: RefundPacing,
     ) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
         let non_final_retry_secs = pacing.non_final_retry_secs;
+        // CRD ch.51 §51.6G R100 item 9: one WARN per refund step for what could not be determined.
+        let mut wait_log = WaitLog::new();
+        let mut gate_log = WaitLog::new();
+        // In memory for this run of the step: a restart counts a fresh hour.
+        let mut first_could_act: Option<u64> = None;
         // CRD ch.51 R31a item 1: a payment the maker has already spent, or that is already refunded, ends the
         // refund chain before it starts.
-        if let Some(outcome) = self.refund_outcome_from_chain(pacing.chain_look_timeout_secs).await {
+        if let Some(outcome) = self
+            .settled_refund_look(pacing, &mut wait_log, &mut first_could_act)
+            .await
+        {
             return Ok(outcome);
         }
         let mut last_chain_look_ms = now_ms();
@@ -1971,7 +2015,10 @@ impl TakerSwap {
         let transaction = loop {
             loop {
                 match self.taker_coin.can_refund_htlc(locktime).compat().await {
-                    Ok(CanRefundHtlc::CanRefundNow) => break,
+                    Ok(CanRefundHtlc::CanRefundNow) => {
+                        first_could_act.get_or_insert((pacing.now_secs)());
+                        break;
+                    },
                     Ok(CanRefundHtlc::HaveToWait(to_sleep)) => {
                         // R31a item 2: the wait for the lock time is cut into steps; after a step the chain is
                         // looked at when the previous look is old enough, so a gate that answers "wait a few
@@ -1983,15 +2030,47 @@ impl TakerSwap {
                             continue;
                         }
                         last_chain_look_ms = now_ms();
-                        if let Some(outcome) = self.refund_outcome_from_chain(pacing.chain_look_timeout_secs).await {
+                        if let Some(outcome) = self
+                            .settled_refund_look(pacing, &mut wait_log, &mut first_could_act)
+                            .await
+                        {
                             return Ok(outcome);
                         }
                     },
                     Err(e) => {
-                        error!("Error {} on can_refund_htlc, retrying in 30 seconds", e);
-                        Timer::sleep(30.).await;
+                        // CRD ch.51 §51.6G R100 items 3 and 9: an undetermined chain time is read again.
+                        if is_undetermined(&e) {
+                            // The cap of every read a refund step rests on, counted from the first moment the
+                            // refund could act.
+                            let now = (pacing.now_secs)();
+                            if now >= locktime {
+                                first_could_act.get_or_insert(now);
+                            }
+                            if undetermined_refund_deadline(self.wait_refund_until(), first_could_act)
+                                .is_some_and(|deadline| now >= deadline)
+                            {
+                                return Ok((Some(TakerSwapCommand::Finish), vec![
+                                    TakerSwapEvent::TakerPaymentRefundFailed(
+                                        ERRL!("{}", refund_gate_cap_text(self.taker_coin.ticker(), &e)).into(),
+                                    ),
+                                ]));
+                            }
+                            gate_log.note(&self.uuid, self.taker_coin.ticker(), Read::Gate, &e);
+                        } else {
+                            error!("Error {} on can_refund_htlc, retrying in 30 seconds", e);
+                        }
+                        Timer::sleep(non_final_retry_secs).await;
                     },
                 }
+            }
+
+            // CRD ch.51 §51.6G R100 item 3: the refund is sent only after a look that found the payment not
+            // spent.
+            if let Some(outcome) = self
+                .settled_refund_look(pacing, &mut wait_log, &mut first_could_act)
+                .await
+            {
+                return Ok(outcome);
             }
 
             let refund_fut = self.taker_coin.send_taker_refunds_payment(
@@ -2028,7 +2107,10 @@ impl TakerSwap {
 
                     // R31a item 3: before the rejection ends the swap, the chain is asked once more; a maker
                     // that spent the payment is the usual cause.
-                    if let Some(outcome) = self.refund_outcome_from_chain(pacing.chain_look_timeout_secs).await {
+                    if let Some(outcome) = self
+                        .settled_refund_look(pacing, &mut wait_log, &mut first_could_act)
+                        .await
+                    {
                         return Ok(outcome);
                     }
 
@@ -2069,23 +2151,84 @@ impl TakerSwap {
         ]))
     }
 
+    /// [`TakerSwap::refund_outcome_from_chain`] repeated until it is determined (CRD ch.51 §51.6G R100 item 3).
+    ///
+    /// `None` is a determined "not spent": the refund may go on. `Some` is the outcome of a spend or a refund that
+    /// was found. While the look is undetermined the step waits (`pacing.non_final_retry_secs` between looks) and
+    /// neither refunds nor ends; at `undetermined_refund_deadline` it ends with `TakerPaymentRefundFailed` naming
+    /// the cause and the fix. An undetermined look at or after the lock time starts the hour if none has started.
+    async fn settled_refund_look(
+        &self,
+        pacing: RefundPacing,
+        wait_log: &mut WaitLog,
+        first_could_act: &mut Option<u64>,
+    ) -> Option<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)> {
+        loop {
+            match self.refund_outcome_from_chain(pacing.chain_look_timeout_secs).await {
+                RefundChainLook::NotSpent => return None,
+                RefundChainLook::Outcome(command, events) => return Some((command, events)),
+                RefundChainLook::Undetermined(reason) => {
+                    // An undetermined look at or after the lock time is a moment the refund could have acted.
+                    let now = (pacing.now_secs)();
+                    if now >= self.r().data.taker_payment_lock {
+                        first_could_act.get_or_insert(now);
+                    }
+                    if undetermined_refund_deadline(self.wait_refund_until(), *first_could_act)
+                        .is_some_and(|deadline| now >= deadline)
+                    {
+                        return Some((Some(TakerSwapCommand::Finish), vec![
+                            TakerSwapEvent::TakerPaymentRefundFailed(
+                                ERRL!("{}", refund_cap_text(self.taker_coin.ticker(), &reason)).into(),
+                            ),
+                        ]));
+                    }
+                    wait_log.note(&self.uuid, self.taker_coin.ticker(), Read::Look, &reason);
+                    Timer::sleep(pacing.non_final_retry_secs).await;
+                },
+            }
+        }
+    }
+
+    /// The outcome of a spend of the taker payment whose secret is proven by the swap's hash: the swap goes on to
+    /// spend the maker payment (CRD ch.51 R31a).
+    fn claim_outcome(&self, tx: coins::TransactionEnum, secret: H256Json) -> RefundChainLook {
+        let tx_hash = tx.tx_hash();
+        log!({"Swap {}: the maker spent the taker payment in {:02x}, spending the maker payment", self.uuid, tx_hash});
+        RefundChainLook::Outcome(Some(TakerSwapCommand::SpendMakerPayment), vec![
+            TakerSwapEvent::TakerPaymentSpent(TakerPaymentSpentData {
+                transaction: TransactionIdentifier {
+                    tx_hex: tx.tx_hex().into(),
+                    tx_hash,
+                },
+                secret,
+            }),
+        ])
+    }
+
     /// CRD ch.51 R31a: what the chain says about the taker payment while the swap is in its refund chain.
     ///
     /// A spend by the maker reveals the secret, so the swap goes on to spend the maker payment, exactly as
-    /// after R30's wait; a refund already on chain ends the swap as refunded. `None` when neither is found,
-    /// when the search or the secret extraction fails or the search takes longer than `timeout_secs` (the
-    /// refund chain then goes on as before), and when the swap has already recorded a spend of the taker
-    /// payment (a resumed swap whose spend of the maker payment failed must not go round again). When the
-    /// look ends without a spend or a refund, an Electrum-backed taker coin is searched once more on every
-    /// usable server at the same time, within one bound of `timeout_secs` (status note of 2026-11-21).
-    async fn refund_outcome_from_chain(
-        &self,
-        timeout_secs: f64,
-    ) -> Option<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)> {
+    /// after R30's wait; a refund already on chain ends the swap as refunded. `NotSpent` is a determined "not
+    /// spent", and also what a swap that has already recorded a spend of the taker payment (a resumed swap whose
+    /// spend of the maker payment failed must not go round again) gets without a look.
+    ///
+    /// The coin's own search is an agreed read (CRD ch.51 §51.6G R100): what it finds, a spend or a refund, is
+    /// acted on. A spend whose secret cannot be read from it goes on with the refund, unless the error is
+    /// undetermined. A search that fails, or takes longer than `timeout_secs`, is `Undetermined`: the step waits.
+    /// When the look ends without a spend or a refund, an Electrum-backed taker coin is searched once more on
+    /// every usable server at the same time, within one bound of `timeout_secs` (status note of 2026-11-21).
+    /// That is one server's answer, so only a spend whose secret matches the swap's hash is acted on (R100 item
+    /// 3: such a secret proves itself). Any other finding there, a refund or a spend whose secret does not
+    /// extract or does not match, goes beyond or disagrees with the agreed read: the result is `Undetermined`
+    /// whatever the coin's own search gave, and a later look whose own search agrees acts on it (R100 items 3
+    /// and 8).
+    async fn refund_outcome_from_chain(&self, timeout_secs: f64) -> RefundChainLook {
         if self.r().taker_payment_spend.is_some() {
-            return None;
+            return RefundChainLook::NotSpent;
         }
-        let taker_payment = self.r().taker_payment.as_ref()?.tx_hex.0.clone();
+        let Some(taker_payment) = self.r().taker_payment.as_ref().map(|tx| tx.tx_hex.0.clone()) else {
+            return RefundChainLook::NotSpent;
+        };
         let my_taker_coin_htlc_pub = self.r().my_taker_coin_htlc_pub;
         let other_taker_coin_htlc_pub = self.r().other_taker_coin_htlc_pub;
         let secret_hash = self.r().secret_hash.0.clone();
@@ -2093,7 +2236,7 @@ impl TakerSwap {
         let taker_coin_start_block = self.r().data.taker_coin_start_block;
         let taker_coin_swap_contract_address = self.r().data.taker_coin_swap_contract_address.clone();
 
-        let found = self
+        let single = self
             .taker_coin
             .search_for_swap_tx_spend_my(
                 taker_payment_lock as u32,
@@ -2106,71 +2249,88 @@ impl TakerSwap {
             )
             .timeout_secs(timeout_secs)
             .await;
-        let found = match found {
-            Ok(Ok(Some(found))) => found,
-            other => {
-                match other {
-                    Ok(Err(e)) => warn!(
-                        "Swap {}: could not look for a spend of the taker payment: {}",
-                        self.uuid, e
-                    ),
-                    Err(timeout) => warn!(
-                        "Swap {}: the look for a spend of the taker payment did not finish: {}",
-                        self.uuid, timeout
-                    ),
-                    Ok(_) => (),
-                }
-                // CRD ch.51 R31a, status note of 2026-11-21: the look ended without a spend or a refund, so
-                // every server of an Electrum-backed taker coin is asked once, within one shared bound.
-                self.taker_coin
-                    .search_for_swap_tx_spend_my_on_every_server(
-                        taker_payment_lock as u32,
-                        my_taker_coin_htlc_pub.as_slice(),
-                        other_taker_coin_htlc_pub.as_slice(),
-                        &secret_hash,
-                        &taker_payment,
-                    )
-                    .timeout_secs(timeout_secs)
-                    .await
-                    .ok()??
-            },
-        };
-
-        match found {
-            FoundSwapTxSpend::Spent(tx) => {
+        let without_a_spend = match single {
+            Ok(Ok(Some(FoundSwapTxSpend::Spent(tx)))) => {
                 let tx_hex = tx.tx_hex();
-                let secret = match spend_secret(&self.taker_coin, &secret_hash, &tx_hex).await {
-                    Ok(bytes) => H256Json::from(bytes.as_slice()),
+                return match spend_secret(&self.taker_coin, &secret_hash, &tx_hex).await {
+                    Ok(bytes) => self.claim_outcome(tx, H256Json::from(bytes.as_slice())),
+                    Err(e) if is_undetermined(&e) => RefundChainLook::Undetermined(e),
                     Err(e) => {
                         warn!(
                             "Swap {}: the taker payment was spent, but the secret could not be read from the spend, going on with the refund: {}",
                             self.uuid, e
                         );
-                        return None;
+                        RefundChainLook::NotSpent
                     },
                 };
-                let tx_hash = tx.tx_hash();
-                log!({"Swap {}: the maker spent the taker payment in {:02x}, spending the maker payment", self.uuid, tx_hash});
-                Some((Some(TakerSwapCommand::SpendMakerPayment), vec![
-                    TakerSwapEvent::TakerPaymentSpent(TakerPaymentSpentData {
-                        transaction: TransactionIdentifier {
-                            tx_hex: tx_hex.into(),
-                            tx_hash,
-                        },
-                        secret,
-                    }),
-                ]))
             },
-            FoundSwapTxSpend::Refunded(tx) => {
+            Ok(Ok(Some(FoundSwapTxSpend::Refunded(tx)))) => {
                 let tx_hash = tx.tx_hash();
                 log!({"Swap {}: the taker payment is already refunded in {:02x}", self.uuid, tx_hash});
-                Some((Some(TakerSwapCommand::Finish), vec![
+                return RefundChainLook::Outcome(Some(TakerSwapCommand::Finish), vec![
                     TakerSwapEvent::TakerPaymentRefunded(TransactionIdentifier {
                         tx_hex: tx.tx_hex().into(),
                         tx_hash,
                     }),
-                ]))
+                ]);
             },
+            Ok(Err(e)) => {
+                debug!(
+                    "Swap {}: could not look for a spend of the taker payment: {}",
+                    self.uuid, e
+                );
+                RefundChainLook::Undetermined(e)
+            },
+            Err(timeout) => {
+                debug!(
+                    "Swap {}: the look for a spend of the taker payment did not finish: {}",
+                    self.uuid, timeout
+                );
+                RefundChainLook::Undetermined(format!("the look did not finish: {timeout}"))
+            },
+            Ok(Ok(None)) => RefundChainLook::NotSpent,
+        };
+
+        // CRD ch.51 R31a, status note of 2026-11-21: the look ended without a spend or a refund, so every server
+        // of an Electrum-backed taker coin is asked once, within one shared bound.
+        let on_every_server = self
+            .taker_coin
+            .search_for_swap_tx_spend_my_on_every_server(
+                taker_payment_lock as u32,
+                my_taker_coin_htlc_pub.as_slice(),
+                other_taker_coin_htlc_pub.as_slice(),
+                &secret_hash,
+                &taker_payment,
+            )
+            .timeout_secs(timeout_secs)
+            .await;
+        match on_every_server {
+            Ok(Some(FoundSwapTxSpend::Spent(tx))) => {
+                match spend_secret(&self.taker_coin, &secret_hash, &tx.tx_hex()).await {
+                    Ok(bytes) => self.claim_outcome(tx, H256Json::from(bytes.as_slice())),
+                    Err(e) => {
+                        debug!(
+                            "Swap {}: one server shows a spend of the taker payment whose secret does not prove itself, waiting: {}",
+                            self.uuid, e
+                        );
+                        RefundChainLook::Undetermined(coins::swap_evidence::undetermined(
+                            "a spend of the taker payment without a matching secret was found by one server only",
+                            &[],
+                        ))
+                    },
+                }
+            },
+            Ok(Some(FoundSwapTxSpend::Refunded(_))) => {
+                debug!(
+                    "Swap {}: one server shows a refund of the taker payment; it is acted on only when the coin's own search agrees",
+                    self.uuid
+                );
+                RefundChainLook::Undetermined(coins::swap_evidence::undetermined(
+                    "a refund of the taker payment was found by one server only",
+                    &[],
+                ))
+            },
+            _ => without_a_spend,
         }
     }
 
@@ -2367,7 +2527,10 @@ impl TakerSwap {
 
     /// [`TakerSwap::recover_funds`] with the total bound given, so a test can shorten it.
     pub(crate) async fn recover_funds_within(&self, bound: std::time::Duration) -> Result<RecoveredSwap, String> {
-        recover_within(bound, |stages| async move { self.recover_funds_tracked(&stages).await }).await
+        // CRD ch.51 §51.6G R100 item 9: a recovery that ends on an undetermined read says how to fix it.
+        recover_within(bound, |stages| async move { self.recover_funds_tracked(&stages).await })
+            .await
+            .map_err(with_fix_hint)
     }
 
     async fn recover_funds_tracked(&self, stages: &RecoveryStages) -> Result<RecoveredSwap, String> {
@@ -4994,6 +5157,46 @@ mod taker_swap_tests {
             min_wait_step_secs: 0.,
             chain_look_interval_secs: 0.,
             chain_look_timeout_secs: 5.,
+            now_secs: clock_secs,
+        }
+    }
+
+    #[test]
+    fn the_undetermined_deadline_is_the_later_of_the_refund_deadline_and_an_hour_after_the_first_chance() {
+        // No chance to act yet: no cap.
+        assert_eq!(undetermined_refund_deadline(10_000, None), None);
+        // The first chance came after the lock: its hour is the later one.
+        assert_eq!(undetermined_refund_deadline(10_000, Some(9_000)), Some(12_700));
+        // The first chance came early: the refund deadline is the later one.
+        assert_eq!(undetermined_refund_deadline(10_000, Some(5_000)), Some(10_000));
+        assert_eq!(undetermined_refund_deadline(10_000, Some(6_300)), Some(10_000));
+        assert_eq!(undetermined_refund_deadline(10_000, Some(6_301)), Some(10_001));
+    }
+
+    thread_local! {
+        /// The clock of the tests that count the cap of an undetermined look or gate (seconds since the epoch).
+        static TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    fn test_clock() -> u64 { TEST_NOW.with(std::cell::Cell::get) }
+
+    /// Starts the test clock at the real time and returns that time.
+    fn start_test_clock() -> u64 {
+        let now = now_ms() / 1000;
+        TEST_NOW.with(|c| c.set(now));
+        now
+    }
+
+    /// Every undetermined answer of a mocked read takes this long on the test clock.
+    const UNDETERMINED_ANSWER_SECS: u64 = 1_000;
+
+    fn advance_test_clock(secs: u64) { TEST_NOW.with(|c| c.set(c.get() + secs)); }
+
+    /// [`fast_pacing`] with the cap counted on the test clock.
+    fn cap_pacing() -> RefundPacing {
+        RefundPacing {
+            now_secs: test_clock,
+            ..fast_pacing()
         }
     }
 
@@ -5161,7 +5364,8 @@ mod taker_swap_tests {
     }
 
     /// T51.31a.7: a gate that answers "wait 0 s" again and again does not make the chain be searched on each
-    /// step; within the look interval only the look on entry is made, and the refund goes through as before.
+    /// step; within the look interval only the look on entry and the look before the refund are made, and the refund goes
+    /// through.
     #[test]
     fn r31a_short_wait_steps_do_not_search_the_chain_each_time() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5193,29 +5397,40 @@ mod taker_swap_tests {
             "{events:?}"
         );
         assert_eq!(GATES.load(Ordering::SeqCst), 6);
-        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1, "only the look on entry");
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            2,
+            "the look on entry and the look before the refund, none during the wait steps"
+        );
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
     }
 
-    /// T51.31a.8: a search that fails, a spend whose secret cannot be read and a search that does not finish
-    /// all leave the refund chain as it was: the terminal rejection still ends in the refund failure.
+    /// CRD ch.51 §51.6G R100 item 3 and the cap: a search that fails leaves the look undetermined; no refund is
+    /// sent, and at the cap the step ends with the refund failure that names the kind of failure.
     #[test]
-    fn r31a_a_failed_search_leaves_the_refund_chain_as_it_was() {
+    fn a_failed_search_holds_the_refund_until_the_cap_and_then_names_the_kind_of_failure() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
         static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 2] = [
+            Ok(None),
+            Err("error sending request for url (http://node.example:443/)"),
+        ];
         let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
-        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
-            MockResult::Return(Box::pin(futures::future::ready(Err(
-                "all electrums are down".to_owned()
-            ))))
-        });
-        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+        start_test_clock();
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(cap_pacing())).unwrap();
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(is_refund_failed(&events), "{events:?}");
-        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        // The coin gave a plain error: the event names the kind of failure, not the error text, and claims no cause.
+        let text = format!("{events:?}");
+        assert!(text.contains("(the search failed or did not finish)"), "{text}");
+        assert!(!text.contains("node.example") && !text.contains("http"), "{text}");
+        assert!(!text.contains("swap_evidence_node"), "{text}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
         assert_eq!(published_count(&mut published), 0);
     }
 
@@ -5232,33 +5447,43 @@ mod taker_swap_tests {
         let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(is_refund_failed(&events), "{events:?}");
-        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            3,
+            "on entry, before the refund and after the rejection"
+        );
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn r31a_a_search_that_does_not_finish_leaves_the_refund_chain_as_it_was() {
+    fn r31a_a_search_that_does_not_finish_is_undetermined_and_holds_the_refund_until_the_cap() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
         static SENDS: AtomicUsize = AtomicUsize::new(0);
         let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        start_test_clock();
+        // The look on entry is answered; every later search does not finish within its bound.
         TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
-            MockResult::Return(Box::pin(futures::future::pending::<
-                Result<Option<FoundSwapTxSpend>, String>,
-            >()))
+            let answer: std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Option<FoundSwapTxSpend>, String>> + Send>,
+            > = if SEARCHES.fetch_add(1, Ordering::SeqCst) == 0 {
+                Box::pin(futures::future::ready(Ok(None)))
+            } else {
+                advance_test_clock(UNDETERMINED_ANSWER_SECS);
+                Box::pin(futures::future::pending())
+            };
+            MockResult::Return(answer)
         });
         mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
         let pacing = RefundPacing {
             chain_look_timeout_secs: 0.05,
-            ..fast_pacing()
+            ..cap_pacing()
         };
 
         let (_, events) = block_on(taker_swap.refund_taker_payment_paced(pacing)).unwrap();
 
-        assert!(
-            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
-            "{events:?}"
-        );
-        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
     }
 
     /// T51.31a.3: a terminal refund rejection asks the chain once more; the maker's spend found then replaces
@@ -5269,19 +5494,24 @@ mod taker_swap_tests {
         static SEARCHES: AtomicUsize = AtomicUsize::new(0);
         static SENDS: AtomicUsize = AtomicUsize::new(0);
         let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
-        mock_chain(1, spent_by_the_maker, &SEARCHES);
+        // Nothing on entry and before the refund; the look after the rejection finds the spend.
+        mock_chain(2, spent_by_the_maker, &SEARCHES);
         mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
 
         let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
-        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2, "on entry and after the rejection");
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            3,
+            "on entry, before the refund and after the rejection"
+        );
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
         assert_eq!(published_count(&mut published), 0);
     }
 
-    /// T51.31a.4: with nothing on chain the refund chain ends as before, after asking on entry and after the
-    /// rejection.
+    /// T51.31a.4: with nothing on chain the refund chain ends as before, after asking on entry, before the refund
+    /// and after the rejection.
     #[test]
     fn r31a_nothing_on_chain_keeps_the_refund_failure() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5295,7 +5525,11 @@ mod taker_swap_tests {
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(is_refund_failed(&events), "{events:?}");
-        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            3,
+            "on entry, before the refund and after the rejection"
+        );
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
         assert_eq!(published_count(&mut published), 0);
     }
@@ -5356,6 +5590,25 @@ mod taker_swap_tests {
         TestCoin::search_for_swap_tx_spend_my_on_every_server.mock_safe(move |_, _, _, _, _, _| {
             let ask = asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let answer = if ask < quiet { None } else { Some(found()) };
+            MockResult::Return(Box::pin(futures::future::ready(answer)))
+        });
+    }
+
+    /// [`mock_other_servers`] whose findings take [`UNDETERMINED_ANSWER_SECS`] on the test clock, so the cap of
+    /// the undetermined looks they cause is reached.
+    fn mock_other_servers_advancing_the_clock(
+        quiet: usize,
+        found: fn() -> FoundSwapTxSpend,
+        asks: &'static std::sync::atomic::AtomicUsize,
+    ) {
+        TestCoin::search_for_swap_tx_spend_my_on_every_server.mock_safe(move |_, _, _, _, _, _| {
+            let ask = asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = if ask < quiet {
+                None
+            } else {
+                advance_test_clock(UNDETERMINED_ANSWER_SECS);
+                Some(found())
+            };
             MockResult::Return(Box::pin(futures::future::ready(answer)))
         });
     }
@@ -5444,29 +5697,35 @@ mod taker_swap_tests {
         static ASKS: AtomicUsize = AtomicUsize::new(0);
         static SENDS: AtomicUsize = AtomicUsize::new(0);
         let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
-        mock_single_search_without_an_answer(true, &SEARCHES);
-        // Nothing on entry; the spend is found by the look after the rejection.
-        mock_other_servers(1, spent_by_the_maker, &ASKS);
+        mock_single_search_without_an_answer(false, &SEARCHES);
+        // Nothing on entry and before the refund; the spend is found by the look after the rejection.
+        mock_other_servers(2, spent_by_the_maker, &ASKS);
         mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
 
         let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
-        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2, "on entry and after the rejection");
-        assert_eq!(ASKS.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            3,
+            "on entry, before the refund and after the rejection"
+        );
+        assert_eq!(ASKS.load(Ordering::SeqCst), 3);
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
         assert_eq!(published_count(&mut published), 0);
     }
 
-    /// T34.3: a refund of the taker payment found on another server ends the chain as refunded.
+    /// T34.3 with CRD ch.51 §51.6G R100 item 3: a refund that only one server shows is not acted on; the step
+    /// waits, and the look whose own search agrees on the refund ends the chain as refunded.
     #[test]
-    fn r31a_a_refund_found_on_another_server_ends_the_swap_as_refunded() {
+    fn r100_a_refund_found_by_one_server_waits_until_the_coins_own_search_agrees() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SEARCHES: AtomicUsize = AtomicUsize::new(0);
         static ASKS: AtomicUsize = AtomicUsize::new(0);
         static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 2] = [Err("undetermined"), Ok(Some(already_refunded))];
         let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
-        mock_single_search_without_an_answer(false, &SEARCHES);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
         mock_other_servers(0, already_refunded, &ASKS);
         mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
 
@@ -5477,8 +5736,79 @@ mod taker_swap_tests {
             matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
             "{events:?}"
         );
-        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2, "the first look waited");
+        assert_eq!(ASKS.load(Ordering::SeqCst), 1, "only the first look asked every server");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0, "no refund is built");
         assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// What the refund step does when every look is `Undetermined` until the cap: no refund is built, nothing
+    /// is recorded as refunded, and the step ends with the refund failure that names the fix.
+    fn assert_waits_until_the_cap_without_a_refund(
+        taker_swap: &TakerSwap,
+        sends: &'static std::sync::atomic::AtomicUsize,
+        published: &mut futures::channel::mpsc::Receiver<mm2_p2p::atomicdex_behaviour::AdexBehaviourCmd>,
+    ) {
+        start_test_clock();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(cap_pacing())).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert!(format!("{events:?}").contains("swap_evidence_node"), "{events:?}");
+        assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0, "no refund is built");
+        assert_eq!(published_count(published), 0);
+    }
+
+    /// A refund that one server shows, while the coin's own search found nothing, is not acted on.
+    #[test]
+    fn r100_a_refund_found_by_one_server_after_a_determined_none_waits() {
+        use std::sync::atomic::AtomicUsize;
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_single_search_without_an_answer(false, &SEARCHES);
+        // No server shows the refund on entry; the look before the refund does.
+        mock_other_servers_advancing_the_clock(1, already_refunded, &ASKS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        assert_waits_until_the_cap_without_a_refund(&taker_swap, &SENDS, &mut published);
+    }
+
+    /// A spend whose secret does not match the swap's hash, shown by one server while the coin's own search is
+    /// undetermined, is not used: the step waits and builds no refund.
+    #[test]
+    fn r100_a_spend_with_a_non_matching_secret_found_by_one_server_waits_after_an_undetermined_search() {
+        use std::sync::atomic::AtomicUsize;
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 2] = [Ok(None), Err("undetermined")];
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_other_servers_advancing_the_clock(1, spent_by_the_maker, &ASKS);
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Ok(vec![9u8; 32])));
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        assert_waits_until_the_cap_without_a_refund(&taker_swap, &SENDS, &mut published);
+    }
+
+    /// T34.4 (a spend whose secret cannot be read) with R100 item 3: a spend that one server shows and whose
+    /// secret cannot be read, while the coin's own search found nothing, is not used and does not let the refund
+    /// go: the step waits.
+    #[test]
+    fn r100_a_spend_without_a_readable_secret_found_by_one_server_waits_after_a_determined_none() {
+        use std::sync::atomic::AtomicUsize;
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_single_search_without_an_answer(false, &SEARCHES);
+        mock_other_servers_advancing_the_clock(1, spent_by_the_maker, &ASKS);
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Err("no secret in the spend".to_owned())));
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        assert_waits_until_the_cap_without_a_refund(&taker_swap, &SENDS, &mut published);
     }
 
     /// T34.4: when every server fails, does not answer within the shared bound or finds nothing, the chain
@@ -5492,7 +5822,7 @@ mod taker_swap_tests {
         static SENDS: AtomicUsize = AtomicUsize::new(0);
         // Nothing found anywhere.
         let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
-        mock_single_search_without_an_answer(true, &SEARCHES);
+        mock_single_search_without_an_answer(false, &SEARCHES);
         mock_other_servers(usize::MAX, spent_by_the_maker, &ASKS);
         mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
 
@@ -5500,7 +5830,11 @@ mod taker_swap_tests {
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(is_refund_failed(&events), "{events:?}");
-        assert_eq!(ASKS.load(Ordering::SeqCst), 2, "on entry and after the rejection");
+        assert_eq!(
+            ASKS.load(Ordering::SeqCst),
+            3,
+            "on entry, before the refund and after the rejection"
+        );
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
         assert_eq!(published_count(&mut published), 0);
 
@@ -5525,26 +5859,6 @@ mod taker_swap_tests {
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
     }
 
-    /// T34.4 (a spend whose secret cannot be read): a spend found on another server whose secret cannot be read
-    /// leaves the chain as it was.
-    #[test]
-    fn r31a_a_spend_on_another_server_without_a_readable_secret_leaves_the_chain_as_it_was() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
-        static ASKS: AtomicUsize = AtomicUsize::new(0);
-        static SENDS: AtomicUsize = AtomicUsize::new(0);
-        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
-        mock_single_search_without_an_answer(false, &SEARCHES);
-        mock_other_servers(0, spent_by_the_maker, &ASKS);
-        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Err("no secret in the spend".to_owned())));
-        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
-
-        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
-
-        assert!(is_refund_failed(&events), "{events:?}");
-        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
-    }
-
     /// T34.5: a coin that is not Electrum-backed (the test coin keeps the default of the trait: no other
     /// source) makes its single search only.
     #[test]
@@ -5553,7 +5867,7 @@ mod taker_swap_tests {
         static SEARCHES: AtomicUsize = AtomicUsize::new(0);
         static SENDS: AtomicUsize = AtomicUsize::new(0);
         let (taker_swap, _published) = taker_swap_ready_to_refund(100);
-        mock_single_search_without_an_answer(true, &SEARCHES);
+        mock_single_search_without_an_answer(false, &SEARCHES);
         mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
 
         let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
@@ -5561,10 +5875,415 @@ mod taker_swap_tests {
         assert!(is_refund_failed(&events), "{events:?}");
         assert_eq!(
             SEARCHES.load(Ordering::SeqCst),
-            2,
-            "on entry and after the rejection, one search each"
+            3,
+            "on entry, before the refund and after the rejection, one search each"
         );
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CRD ch.51 §51.6G R100 items 3 and 9, T42: the refund chain waits on an undetermined look.
+    // ---------------------------------------------------------------------------------------------
+
+    /// One answer of the scripted single search: a spend (or none) or an error text ("undetermined" stands for
+    /// an undetermined read).
+    type ScriptedSearch = Result<Option<fn() -> FoundSwapTxSpend>, &'static str>;
+
+    fn undetermined_read() -> String {
+        coins::swap_evidence::undetermined("the nodes differ", &["node-a.test", "node-b.test"])
+    }
+
+    /// The single search answers `answers[i]` on its i-th call (the last one afterwards); an answer of `Err` is
+    /// returned as the text. While it answers an error, `sends` must still be zero.
+    fn mock_scripted_single_search(
+        answers: &'static [ScriptedSearch],
+        searches: &'static std::sync::atomic::AtomicUsize,
+        sends: &'static std::sync::atomic::AtomicUsize,
+    ) {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(move |_, _, _, _, _, _, _, _| {
+            let call = searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = match &answers[call.min(answers.len() - 1)] {
+                Ok(found) => Ok(found.map(|f| f())),
+                Err(text) if *text == "undetermined" => Err(undetermined_read()),
+                Err(text) => Err((*text).to_owned()),
+            };
+            if answer.is_err() {
+                assert_eq!(
+                    sends.load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "no refund while the look is undetermined"
+                );
+                advance_test_clock(UNDETERMINED_ANSWER_SECS);
+            }
+            MockResult::Return(Box::pin(futures::future::ready(answer)))
+        });
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Ok(MAKER_SECRET.to_vec())));
+    }
+
+    /// T42 "differ -> wait", "agree -> go on": an undetermined look on entry sends no refund; once the look is a
+    /// determined "not spent" the refund is sent.
+    #[test]
+    fn r100_an_undetermined_look_on_entry_waits_and_the_refund_follows_a_determined_not_spent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 4] = [Err("undetermined"), Err("undetermined"), Err("undetermined"), Ok(None)];
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(
+            SEARCHES.load(Ordering::SeqCst),
+            5,
+            "three undetermined looks, the determined one on entry, the look before the refund"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 1);
+    }
+
+    /// A secret proven by its hash is used on one answer: the search on every server finds a spend while the
+    /// single search stays undetermined, and the swap claims the maker payment.
+    #[test]
+    fn r100_a_spend_found_on_one_answer_is_used_while_the_single_search_is_undetermined() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static ASKS: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 1] = [Err("undetermined")];
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_other_servers(0, spent_by_the_maker, &ASKS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// A single search that finds a spend is used on that one answer as well.
+    #[test]
+    fn r100_a_spend_found_by_the_single_search_is_used() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 1] = [Ok(Some(spent_by_the_maker))];
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+    }
+
+    /// The gate opens (`CanRefundNow`) while the look is undetermined: no refund until the look is a determined
+    /// "not spent".
+    #[test]
+    fn r100_an_open_gate_with_an_undetermined_look_sends_no_refund() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static GATES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        // The look on entry is determined; the look before the refund is undetermined twice.
+        static ANSWERS: [ScriptedSearch; 4] = [Ok(None), Err("undetermined"), Err("undetermined"), Ok(None)];
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_gate_open_counting(&GATES);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 4);
+        assert_eq!(GATES.load(Ordering::SeqCst), 1);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    /// A search error that is not an undetermined read holds the refund as well.
+    #[test]
+    fn r100_a_plain_search_error_holds_the_refund_too() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 3] = [
+            Err("the server answered an error"),
+            Err("the server answered an error"),
+            Ok(None),
+        ];
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    /// A refund rejected for a reason that ends the chain is followed by a look; while the look is undetermined
+    /// the refund failure is not emitted, and the spend it finds later is acted on.
+    #[test]
+    fn r100_a_rejected_refund_with_an_undetermined_look_does_not_end_the_swap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        // Entry and before the refund: nothing; after the rejection: undetermined twice, then the spend.
+        static ANSWERS: [ScriptedSearch; 5] = [
+            Ok(None),
+            Ok(None),
+            Err("undetermined"),
+            Err("undetermined"),
+            Ok(Some(spent_by_the_maker)),
+        ];
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        // The one rejected attempt is counted by `SENDS`, so the search mock's check of "no refund while
+        // undetermined" reads a counter that stays at zero.
+        static NO_SENDS: AtomicUsize = AtomicUsize::new(0);
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &NO_SENDS);
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 5);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1, "the one rejected attempt");
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// An undetermined look after a rejected refund ends, at the cap, with the refund failure that names the
+    /// cause and the fix.
+    #[test]
+    fn r100_an_undetermined_look_after_a_rejection_ends_at_the_cap_with_the_fix_text() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static NO_SENDS: AtomicUsize = AtomicUsize::new(0);
+        // Entry and before the refund: nothing; after the rejection: undetermined for good.
+        static ANSWERS: [ScriptedSearch; 3] = [Ok(None), Ok(None), Err("undetermined")];
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        start_test_clock();
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &NO_SENDS);
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(cap_pacing())).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        let text = match events.as_slice() {
+            [TakerSwapEvent::TakerPaymentRefundFailed(text)] => format!("{text:?}"),
+            other => panic!("expected the refund failure, got {other:?}"),
+        };
+        assert!(text.contains("swap_evidence_node"), "{text}");
+        assert!(text.contains("recover_funds_of_swap"), "{text}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1, "the one rejected attempt");
+    }
+
+    /// The refund gate stays undetermined after the lock time: no refund, and one hour after the first
+    /// undetermined answer the step ends with the refund failure that names the cause and the fix.
+    #[test]
+    fn r100_an_undetermined_gate_after_the_lock_starts_the_hour_and_ends_at_its_cap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static GATES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        let start = start_test_clock();
+        TestCoin::can_refund_htlc.mock_safe(|_, _| {
+            GATES.fetch_add(1, Ordering::SeqCst);
+            advance_test_clock(UNDETERMINED_ANSWER_SECS);
+            MockResult::Return(Box::new(futures01::future::err(undetermined_read())))
+        });
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(cap_pacing())).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        let text = match events.as_slice() {
+            [TakerSwapEvent::TakerPaymentRefundFailed(err)] => format!("{err:?}"),
+            other => panic!("expected the refund failure, got {other:?}"),
+        };
+        assert!(text.contains("refundability check"), "{text}");
+        assert!(text.contains("swap_evidence_node"), "{text}");
+        assert!(text.contains("recover_funds_of_swap"), "{text}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+        // The first answer (at 1000 s) starts the hour; the fifth is the first at or past 1000 + 3700 s.
+        assert_eq!(GATES.load(Ordering::SeqCst), 5);
+        assert_eq!(test_clock(), start + 5 * UNDETERMINED_ANSWER_SECS);
+    }
+
+    /// A gate that opens after `wait_refund_until()` with a look that stays undetermined does not end the step
+    /// at once: it ends one hour after the gate opened.
+    #[test]
+    fn r100_a_gate_that_opens_after_the_refund_deadline_keeps_waiting_for_an_hour() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static NO_SENDS: AtomicUsize = AtomicUsize::new(0);
+        // The look on entry is determined; the look before the refund stays undetermined.
+        static ANSWERS: [ScriptedSearch; 2] = [Ok(None), Err("undetermined")];
+        // The lock time passed 3701 s ago: `wait_refund_until()` has passed.
+        let (taker_swap, _published) = taker_swap_ready_to_refund(3_701);
+        let start = start_test_clock();
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &NO_SENDS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(cap_pacing())).unwrap();
+
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+        // The gate opened at `start`; the undetermined looks end at the first answer at or past start + 3700 s.
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1 + 4);
+        assert_eq!(test_clock(), start + 4 * UNDETERMINED_ANSWER_SECS);
+    }
+
+    /// A gate that opens before `wait_refund_until()` counts its hour from the opening, which is the later
+    /// deadline.
+    /// A chain that starts after `wait_refund_until()` with an undetermined look on entry does not end at once:
+    /// the look starts the hour.
+    #[test]
+    fn r100_an_undetermined_entry_look_after_the_refund_deadline_ends_an_hour_after_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 1] = [Err("undetermined")];
+        let (taker_swap, _published) = taker_swap_ready_to_refund(3_701);
+        let start = start_test_clock();
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &SENDS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(cap_pacing())).unwrap();
+
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+        // The first look answers at `start + 1000` and starts the hour; the fifth is the first at or past
+        // `start + 1000 + 3700`.
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 5);
+        assert_eq!(test_clock(), start + 5 * UNDETERMINED_ANSWER_SECS);
+    }
+
+    #[test]
+    fn r100_a_gate_that_opens_before_the_refund_deadline_ends_the_wait_an_hour_after_it_opened() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        static NO_SENDS: AtomicUsize = AtomicUsize::new(0);
+        static ANSWERS: [ScriptedSearch; 2] = [Ok(None), Err("undetermined")];
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        let start = start_test_clock();
+        mock_scripted_single_search(&ANSWERS, &SEARCHES, &NO_SENDS);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(cap_pacing())).unwrap();
+
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1 + 4);
+        assert_eq!(test_clock(), start + 4 * UNDETERMINED_ANSWER_SECS);
+    }
+
+    /// The refund gate answering an undetermined chain time is read again; no refund is sent meanwhile.
+    #[test]
+    fn r100_an_undetermined_gate_is_retried_without_a_refund() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static GATES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        TestCoin::can_refund_htlc.mock_safe(|_, _| {
+            let call = GATES.fetch_add(1, Ordering::SeqCst);
+            let answer: Box<dyn futures01::Future<Item = CanRefundHtlc, Error = String> + Send> = if call < 2 {
+                assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+                Box::new(futures01::future::err(undetermined_read()))
+            } else {
+                Box::new(futures01::future::ok(CanRefundHtlc::CanRefundNow))
+            };
+            MockResult::Return(answer)
+        });
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(GATES.load(Ordering::SeqCst), 3);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    /// The maker payment's check is repeated while it is undetermined, then the swap goes on.
+    #[test]
+    fn r100_an_undetermined_maker_payment_check_is_repeated_and_the_swap_goes_on() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        {
+            let mut w = taker_swap.w();
+            w.maker_payment = Some(TransactionIdentifier {
+                tx_hex: vec![1u8].into(),
+                tx_hash: vec![2u8].into(),
+            });
+            w.data.maker_payment_wait = now_ms() / 1000 + 100;
+        }
+        TestCoin::wait_for_confirmations
+            .mock_safe(|_, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+        TestCoin::validate_maker_payment.mock_safe(|_, _| {
+            let answer: Box<dyn futures01::Future<Item = (), Error = String> + Send> =
+                if CHECKS.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Box::new(futures01::future::err(undetermined_read()))
+                } else {
+                    Box::new(futures01::future::ok(()))
+                };
+            MockResult::Return(answer)
+        });
+
+        let (next, events) = block_on(taker_swap.validate_maker_payment_paced(0.01)).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::SendTakerPayment)), "{next:?}");
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::MakerPaymentValidatedAndConfirmed]),
+            "{events:?}"
+        );
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 3);
+    }
+
+    /// A check that stays undetermined until the step's deadline fails as any failed check does.
+    #[test]
+    fn r100_an_undetermined_maker_payment_check_fails_at_the_deadline() {
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        {
+            let mut w = taker_swap.w();
+            w.maker_payment = Some(TransactionIdentifier {
+                tx_hex: vec![1u8].into(),
+                tx_hash: vec![2u8].into(),
+            });
+            w.data.maker_payment_wait = now_ms() / 1000;
+        }
+        TestCoin::wait_for_confirmations
+            .mock_safe(|_, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+        TestCoin::validate_maker_payment
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::err(undetermined_read()))));
+
+        let (next, events) = block_on(taker_swap.validate_maker_payment_paced(0.01)).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)), "{next:?}");
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::MakerPaymentValidateFailed(_)]),
+            "{events:?}"
+        );
     }
 
     /// T39.5.f: `recover_funds_of_swap` before the gate opens reports "too early", names the chain time it
