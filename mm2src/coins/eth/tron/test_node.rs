@@ -48,7 +48,13 @@ impl StubNode {
     /// Starts a node on a free loopback port. `handler` gets the request path (for example
     /// `/wallet/getaccount`) and the request body, and returns the answer.
     pub(super) fn start(handler: impl Fn(&str, &str) -> Reply + Send + Sync + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        Self::start_on("127.0.0.1", handler)
+    }
+
+    /// Like [`Self::start`] on the loopback address `ip` (any `127.x.y.z` is a loopback address on Linux), so that
+    /// two stub nodes can be two different hosts.
+    pub(super) fn start_on(ip: &str, handler: impl Fn(&str, &str) -> Reply + Send + Sync + 'static) -> Self {
+        let listener = TcpListener::bind(format!("{ip}:0")).expect("bind a loopback port");
         let addr = listener.local_addr().expect("local address");
         let stop = Arc::new(AtomicBool::new(false));
         let requests: Arc<Mutex<Vec<(String, String)>>> = Arc::default();

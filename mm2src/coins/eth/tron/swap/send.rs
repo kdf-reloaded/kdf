@@ -673,7 +673,7 @@ fn call_bandwidth(coin: &EthCoin, contract: &TronAddress, data: Vec<u8>, call_va
 /// transport error (CRD ch.51 R95 item 5).
 fn preimage_error(e: TronSwapError) -> TradePreimageError {
     match e {
-        TronSwapError::Node(_) | TronSwapError::NodesDisagree | TronSwapError::Reverted { .. } => {
+        TronSwapError::Node(_) | TronSwapError::Undetermined(_) | TronSwapError::Reverted { .. } => {
             TradePreimageError::Transport(e.to_string())
         },
         other => TradePreimageError::InternalError(other.to_string()),

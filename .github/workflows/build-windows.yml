@@ -61,9 +61,51 @@ jobs:
           "profile=$profile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "features=$features" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # protoc is a pinned release, checked by its SHA-256 and found through
+      # PROTOC; no package manager is involved.
       - name: Install protoc
         shell: powershell
-        run: choco install protoc -y
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $version = '27.3'
+          $sha256 = 'bdccd341a0c25ff4f65d8530f170c78ce5681e42920aa5d892f27ac06cc3bba0'
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$version/protoc-$version-win64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "protoc-$version-win64.zip"
+          $dir = Join-Path $env:RUNNER_TEMP 'protoc'
+
+          $downloaded = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+              $downloaded = $true
+              break
+            } catch {
+              Write-Host "protoc download attempt $attempt failed: $($_.Exception.Message)"
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $downloaded) { throw "protoc $version download failed after 3 attempts" }
+
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "protoc $version SHA-256 mismatch: expected $sha256, got $actual"
+          }
+
+          if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          Remove-Item -Force $zip
+
+          $exe = Join-Path $dir 'bin\protoc.exe'
+          "PROTOC=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PROTOC_INCLUDE=$(Join-Path $dir 'include')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $dir 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          $out = (& $exe --version) | Out-String
+          Write-Host $out
+          if ($out.Trim() -ne "libprotoc $version") {
+            throw "unexpected protoc version output: $out"
+          }
 
       # Rust toolchain (stable + x86_64-pc-windows-msvc) is preinstalled on
       # the GitHub-hosted windows-latest image.
