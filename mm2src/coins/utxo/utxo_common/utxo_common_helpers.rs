@@ -360,7 +360,6 @@ pub(crate) fn wait_for_output_spend_of(
     let policy = policy.clone();
     let payment = PaymentOutputs {
         tx_hash,
-        output0_script_pubkey: script_pubkey.clone(),
         spent_script_pubkey: script_pubkey.clone(),
     };
     let fut = async move {
