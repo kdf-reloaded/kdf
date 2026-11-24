@@ -1321,7 +1321,7 @@ the previous version used. The safe way:
   an SLP token's swap payment, before a refund or in `recover_funds_of_swap`, it compared the wrong output of the
   payment with the swap's script, so every such search stopped with an error (since 0.3.0-beta.1). It now compares
   the output that holds the swap's script: output 1 for SLP tokens, and output 0 for other UTXO coins, as before.
-  Detail: PR #NNN; CRD ch.51 R90.
+  Detail: PR #534; CRD ch.51 R90.
 - **A spend of a UTXO swap payment is read from the input that spends it.** When the node looks for the claim or
   refund of a swap payment (UTXO coins, BCH, QTUM, SLP tokens), it now reads the input of the spending transaction
   that spends the payment. The same applies to the search of a version-2 swap's funding transaction. Detail: PR #481;
