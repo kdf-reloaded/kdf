@@ -37,7 +37,7 @@ or undo, and every change that needs a step from you.
     `swap_evidence_node` named it, the coin's activation answer carries `"swap_evidence_single_host": true`, and the
     node logs one warning naming the coin. The list as configured counts, not the hosts that answer: a coin listed
     with two or more hosts stays under the two-node rule even while one of them does not answer. Set the switch to
-    `false` to require two hosts or `swap_evidence_node` for every coin. Detail: PR #NNN; CRD ch.51 status note of
+    `false` to require two hosts or `swap_evidence_node` for every coin. Detail: PR #536; CRD ch.51 status note of
     2026-11-24 after T43.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
     - TRON (TRX, TRC20). TRON swaps stay off in this release; when they are switched on, their chain reads already
