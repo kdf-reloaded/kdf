@@ -61,6 +61,11 @@ or undo, and every change that needs a step from you.
       both QTUM servers of the published coins file answered that request with an error, so with them alone a QRC20
       token starts no swap: list servers on two distinct hosts that serve it, or set `swap_evidence_node` to a listed
       server that serves it. Detail: PR #524; CRD ch.51 §51.6G, ch.38.
+    - **SLP tokens.** Affected: every SLP token whose BCH activation request lists fewer than two bchd servers on
+      different hosts. It no longer starts a swap, and its running swaps wait at a refund or claim step. The check of
+      the other side's token payment asks two bchd hosts, and the swap's other chain reads follow BCH. To fix it, add
+      a bchd server on a second host; `swap_evidence_node` does not replace the second bchd host. Detail: PR #526;
+      CRD ch.51 §51.6G R100.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,
