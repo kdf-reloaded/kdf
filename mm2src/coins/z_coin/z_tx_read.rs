@@ -268,6 +268,7 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
         DEFAULT_SWAP_VOUT,
         from_block,
         wait_until,
+        &crate::MmCoin::swap_evidence_policy(coin),
     )
 }
 
@@ -379,6 +380,7 @@ pub(crate) async fn search_for_swap_tx_spend(
     }
     utxo_common::search_for_swap_output_spend_of(
         coin.as_ref(),
+        &crate::MmCoin::swap_evidence_policy(coin),
         time_lock,
         first_pub,
         second_pub,

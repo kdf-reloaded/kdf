@@ -74,10 +74,10 @@ pub enum R100Adoption {
 /// (`r100_release_gate_every_swap_family_adopted`, ignored in ordinary CI) passes when every entry is `Adopted` or
 /// `SwapsOff`, so it binds only the families that swap in the release.
 pub const R100_ADOPTED: &[(SwapFamily, R100Adoption)] = &[
-    (SwapFamily::Utxo, R100Adoption::NotAdopted),
-    (SwapFamily::Bch, R100Adoption::NotAdopted),
+    (SwapFamily::Utxo, R100Adoption::Adopted),
+    (SwapFamily::Bch, R100Adoption::Adopted),
     (SwapFamily::Slp, R100Adoption::NotAdopted),
-    (SwapFamily::Qtum, R100Adoption::NotAdopted),
+    (SwapFamily::Qtum, R100Adoption::Adopted),
     (SwapFamily::Qrc20, R100Adoption::NotAdopted),
     (SwapFamily::Evm, R100Adoption::NotAdopted),
     (SwapFamily::Zcoin, R100Adoption::NotAdopted),

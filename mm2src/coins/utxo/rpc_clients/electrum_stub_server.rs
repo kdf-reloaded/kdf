@@ -98,6 +98,8 @@ struct StubState {
 }
 
 pub struct StubServer {
+    /// The loopback address the stub listens on (`127.0.0.1` unless started with [`StubServer::start_on`]).
+    host: String,
     port: u16,
     state: Arc<StubState>,
     /// While the behavior is [`StubBehavior::Down`]: a socket bound to `port` that does not listen.
@@ -108,21 +110,26 @@ pub struct StubServer {
 
 /// Binds `127.0.0.1:port` (`0`: any free port) without listening, and returns the socket and the port.
 /// `SO_REUSEADDR` is left off on purpose: with it another bind of the port could succeed.
-fn reserve_port(port: u16) -> std::io::Result<(TcpSocket, u16)> {
+fn reserve_port(host: &str, port: u16) -> std::io::Result<(TcpSocket, u16)> {
     let socket = TcpSocket::new_v4()?;
-    socket.bind(([127, 0, 0, 1], port).into())?;
+    let ip: std::net::Ipv4Addr = host.parse().expect("an IPv4 host");
+    socket.bind((ip, port).into())?;
     let port = socket.local_addr()?.port();
     Ok((socket, port))
 }
 
 impl StubServer {
     /// Starts a stub with the given behavior on a free port of `127.0.0.1`.
-    pub async fn start(behavior: StubBehavior) -> StubServer {
+    pub async fn start(behavior: StubBehavior) -> StubServer { StubServer::start_on("127.0.0.1", behavior).await }
+
+    /// Starts a stub on `host`, a loopback address (`127.0.0.2` and so on): two stubs on two addresses are two
+    /// distinct hosts for a policy that counts hosts (CRD ch.51 R100).
+    pub async fn start_on(host: &str, behavior: StubBehavior) -> StubServer {
         let (port, listener, reserved) = if behavior == StubBehavior::Down {
-            let (socket, port) = reserve_port(0).expect("reserve the port of a down stub");
+            let (socket, port) = reserve_port(host, 0).expect("reserve the port of a down stub");
             (port, None, Some(socket))
         } else {
-            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind a stub server");
+            let listener = TcpListener::bind((host, 0)).await.expect("bind a stub server");
             let port = listener.local_addr().expect("local address").port();
             (port, Some(listener), None)
         };
@@ -151,6 +158,7 @@ impl StubServer {
             listener_stop: Mutex::new(None),
         });
         let server = StubServer {
+            host: host.to_owned(),
             port,
             state,
             reserved: Mutex::new(reserved),
@@ -161,8 +169,8 @@ impl StubServer {
         server
     }
 
-    /// The address a client lists: `127.0.0.1:port`.
-    pub fn addr(&self) -> String { format!("127.0.0.1:{}", self.port) }
+    /// The address a client lists: `host:port`, the host `127.0.0.1` unless started with [`StubServer::start_on`].
+    pub fn addr(&self) -> String { format!("{}:{}", self.host, self.port) }
 
     /// The entry of the `servers` list of an activation request.
     pub fn request(&self) -> super::ElectrumRpcRequest {
@@ -211,7 +219,7 @@ impl StubServer {
             tokio::time::sleep(Duration::from_millis(20)).await;
             // The listener is gone; take the port over with a socket that never listens.
             for _ in 0..50 {
-                if let Ok((socket, _)) = reserve_port(self.port) {
+                if let Ok((socket, _)) = reserve_port(&self.host, self.port) {
                     *self.reserved.lock().unwrap() = Some(socket);
                     break;
                 }
@@ -221,7 +229,7 @@ impl StubServer {
             let reserved = self.reserved.lock().unwrap().take();
             let listener = match reserved {
                 Some(socket) => socket.listen(1024).expect("listen on the reserved stub port"),
-                None => TcpListener::bind(("127.0.0.1", self.port))
+                None => TcpListener::bind((self.host.as_str(), self.port))
                     .await
                     .expect("bind the stub port again"),
             };

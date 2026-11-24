@@ -109,7 +109,7 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
 }
 
 /// Returned client won't work by default, requires some mocks to be usable
-fn native_client_for_test() -> NativeClient { NativeClient(Arc::new(NativeClientImpl::default())) }
+pub(crate) fn native_client_for_test() -> NativeClient { NativeClient(Arc::new(NativeClientImpl::default())) }
 
 #[test]
 fn test_utxo_activation_params_min_addresses_number() {
@@ -16135,6 +16135,7 @@ mod swap_spend_by_consumed_input_tests {
         let coin = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
         block_on(utxo_common::search_for_swap_output_spend_of(
             &coin,
+            &crate::swap_evidence::SwapEvidencePolicy::NotAdopted,
             TIME_LOCK,
             &first_pub(),
             &second_pub(),

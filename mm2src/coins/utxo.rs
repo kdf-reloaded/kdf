@@ -130,6 +130,8 @@ pub mod utxo_indexedb_block_header_storage;
 pub mod utxo_sql_block_header_storage;
 
 #[cfg(test)] pub mod utxo_common_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod utxo_swap_evidence_tests;
 #[cfg(test)] pub mod utxo_tests;
 #[cfg(all(test, target_arch = "wasm32"))]
 pub mod utxo_wasm_tests;
