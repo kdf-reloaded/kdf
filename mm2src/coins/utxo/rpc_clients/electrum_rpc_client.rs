@@ -686,8 +686,10 @@ impl ElectrumClientImpl {
     pub fn server_addrs(&self) -> Vec<String> { self.pool.usable_addrs() }
 
     /// The labels (`host:port`) of the usable servers that have served `blockchain.contract.event.get_history` since
-    /// this client was built, and of those that have not.
-    pub(crate) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>) { self.pool.contract_history_servers() }
+    /// this client was built, of those whose last probe of it failed, and of those not asked yet.
+    pub(crate) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+        self.pool.contract_history_servers()
+    }
 
     /// The servers a probe of `blockchain.contract.event.get_history` may ask now, each marked as being probed until
     /// [`Self::end_contract_history_probe`]: a server is given at most once per `min_gap_secs` and never while a probe
@@ -697,9 +699,10 @@ impl ElectrumClientImpl {
             .claim_contract_history_probes(common::now_float(), min_gap_secs, only)
     }
 
-    /// Ends the probe of `server`.
-    pub(crate) fn end_contract_history_probe(&self, server: &str) {
-        self.pool.end_contract_history_probe(server, common::now_float())
+    /// Ends the probe of `server`; `failed` when it got an error or an answer that could not be read.
+    pub(crate) fn end_contract_history_probe(&self, server: &str, failed: bool) {
+        self.pool
+            .end_contract_history_probe(server, common::now_float(), failed)
     }
 
     /// The coin's tolerance in blocks, the gap within which the pool judges a server up to date (CRD ch.38
