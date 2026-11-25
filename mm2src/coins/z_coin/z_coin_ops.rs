@@ -1157,7 +1157,7 @@ pub(crate) fn build_from_wallet_db(
             })
             .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
             .or_mm_err(|| GenTxError::FailedToGetMerklePath)?;
-        selected_notes_with_paths.push((selected.note().clone(), merkle_path));
+        selected_notes_with_paths.push((selected.spending_key_scope(), selected.note().clone(), merkle_path));
     }
 
     // `height` above only selects notes and picks the anchor from the wallet database. The builder
@@ -1169,9 +1169,27 @@ pub(crate) fn build_from_wallet_db(
     // wallets build a payment into Ironwood; no tree state is read for it (R39.6.5d, R39.6.5e). The bundle
     // is padded to the default two actions. Every other transaction carries no Ironwood bundle.
     let mut assembler = TxAssembler::new(inputs.params.clone(), builder_height.into(), sapling_anchor.into());
-    let fvk = FullViewingKey::from_expanded_spending_key(inputs.spending_key.expsk());
-    for (note, merkle_path) in selected_notes_with_paths {
-        assembler.add_sapling_spend(fvk.clone(), note, merkle_path);
+    // The wallet database selects notes of both ZIP 32 scopes of the account: the external one (the
+    // wallet's address) and the internal one (its change address). Each note is spent with the full
+    // viewing key of its own scope, because the internal key has its own nullifier key; spent with the
+    // external key, an internal note gets a wrong nullifier and a spend proof that does not verify.
+    // Both spending keys go to the assembler, whose Sapling builder takes the proof generation key of
+    // each spend from the key whose full viewing key matches it; the two keys share the spend
+    // authorizing key.
+    let internal_spending_key = inputs.spending_key.derive_internal().or_mm_err(|| {
+        GenTxError::TxBuilderError(super::z_tx_assembler::AssemblerError::Sapling(
+            "the internal (change) spending key of the account cannot be derived".to_owned(),
+        ))
+    })?;
+    let spending_keys = [inputs.spending_key.clone(), internal_spending_key];
+    let external_fvk = FullViewingKey::from_expanded_spending_key(spending_keys[0].expsk());
+    let internal_fvk = FullViewingKey::from_expanded_spending_key(spending_keys[1].expsk());
+    for (scope, note, merkle_path) in selected_notes_with_paths {
+        let fvk = match scope {
+            zip32::Scope::External => external_fvk.clone(),
+            zip32::Scope::Internal => internal_fvk.clone(),
+        };
+        assembler.add_sapling_spend(fvk, note, merkle_path);
     }
     let carries_ironwood = ironwood.is_some();
     if let Some(payment) = ironwood {
@@ -1225,13 +1243,7 @@ pub(crate) fn build_from_wallet_db(
     let first_ironwood_build = carries_ironwood && !FIRST_IRONWOOD_BUILD_STARTED.swap(true, AtomicOrdering::SeqCst);
     let started = std::time::Instant::now();
     let tx = tokio::task::block_in_place(|| {
-        assembler.build(
-            os_rng(),
-            std::slice::from_ref(inputs.spending_key),
-            inputs.prover,
-            inputs.prover,
-            &fee_rule,
-        )
+        assembler.build(os_rng(), &spending_keys, inputs.prover, inputs.prover, &fee_rule)
     })?;
     if first_ironwood_build {
         log::info!(

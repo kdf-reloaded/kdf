@@ -3949,22 +3949,35 @@ pub(crate) mod tests {
         extfvk: &ExtendedFullViewingKey,
         notes: &[(u64, u8, u8)],
     ) -> zcash_compact::CompactBlock {
+        let address = extfvk.default_address().1;
+        let paid = notes
+            .iter()
+            .map(|(value, txid_byte, rseed_byte)| (address, *value, *txid_byte, *rseed_byte))
+            .collect::<Vec<_>>();
+        compact_block_paying(height, hash_byte, prev_hash_byte, extfvk.fvk().ovk, &paid)
+    }
+
+    /// A block holding one transaction per `(address, value, txid byte, rseed byte)` entry, each paying
+    /// one note to `address`, encrypted with `ovk`. The note in entry `i` is at tree position `i`.
+    pub(crate) fn compact_block_paying(
+        height: u64,
+        hash_byte: u8,
+        prev_hash_byte: u8,
+        ovk: sapling::keys::OutgoingViewingKey,
+        notes: &[(sapling::PaymentAddress, u64, u8, u8)],
+    ) -> zcash_compact::CompactBlock {
         let mut rng = FixtureRng(7);
         let vtx = notes
             .iter()
             .enumerate()
-            .map(|(index, (value, txid_byte, rseed_byte))| {
+            .map(|(index, (address, value, txid_byte, rseed_byte))| {
                 let note = Note::from_parts(
-                    extfvk.default_address().1,
+                    *address,
                     NoteValue::from_raw(*value),
                     Rseed::AfterZip212([*rseed_byte; 32]),
                 );
-                let encryptor = sapling_note_encryption(
-                    Some(extfvk.fvk().ovk),
-                    note.clone(),
-                    MemoBytes::empty().into_bytes(),
-                    &mut rng,
-                );
+                let encryptor =
+                    sapling_note_encryption(Some(ovk), note.clone(), MemoBytes::empty().into_bytes(), &mut rng);
                 let ciphertext = encryptor.encrypt_note_plaintext();
                 let output = zcash_compact::CompactSaplingOutput {
                     cmu: note.cmu().to_bytes().to_vec(),
