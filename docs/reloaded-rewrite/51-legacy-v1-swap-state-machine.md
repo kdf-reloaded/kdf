@@ -2003,6 +2003,13 @@ changes no sentence above.
 4. *Visibility.* The activation answer of a relaxed coin carries
    `swap_evidence_single_host` with the value `true`, and the node logs one
    warning that names the coin and no node. Reads log nothing more for it.
+5. *SLP tokens.* The setting covers the bchd servers of an SLP token's platform
+   too: with it `true`, a platform whose `bchd_urls` name exactly one host
+   trusts that host for the token's reads, and the token takes its platform's
+   policy instead of having too few nodes; two or more bchd hosts stay under
+   items 1 to 4. The platform's activation answer carries
+   `swap_evidence_single_bchd_host` with the value `true`, and the node logs one
+   warning that names the platform and no host.
 
 ## 51.7 Bound Message Contract
 

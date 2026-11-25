@@ -401,8 +401,11 @@ default, as if `swap_evidence_node` named it: its activation answer carries
 configured counts, not the hosts that answer, so a coin listed with two or more hosts stays under
 the two-host rule while one of them does not answer. The top-level `MM2.json` boolean
 `swap_evidence_allow_single_host` set to `false` turns this off: such a coin then starts no swap
-until a second host is listed or `swap_evidence_node` is set. This is a Reloaded addition; the row
-in [GLEEC_COMPATIBILITY](GLEEC_COMPATIBILITY.md) describes it.
+until a second host is listed or `swap_evidence_node` is set. The setting covers the bchd servers of
+an SLP token's platform as well: a BCH platform whose `bchd_urls` name exactly one host trusts it
+for the token's reads, its activation answer carries `"swap_evidence_single_bchd_host": true`, and
+one warning names the platform. This is a Reloaded addition; the row in
+[GLEEC_COMPATIBILITY](GLEEC_COMPATIBILITY.md) describes it.
 
 ### Electrum Servers over TLS
 
