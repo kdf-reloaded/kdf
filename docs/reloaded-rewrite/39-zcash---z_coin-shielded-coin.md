@@ -1560,7 +1560,7 @@ kilobyte then asks for about 1,060. Withdrawals to a Sapling address keep the co
 fee.
 
 > **Reloaded status note (2026-11-26, Reloaded-original; informative; PR
-> #NNN).** A shielded coin whose entry declares no `txfee` now pays a fixed
+> #544).** A shielded coin whose entry declares no `txfee` now pays a fixed
 > 10,000 base units (0.0001 ARRR) for every transaction, not the shared default
 > of 1,000 of R39.5.2, which other UTXO coins keep; a configured `txfee` still
 > wins. The fee of the HTLC spend and refund follows the same coin fee in place

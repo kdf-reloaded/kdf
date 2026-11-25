@@ -793,7 +793,7 @@ the previous version used. The safe way:
   10,000 for a withdrawal, a swap payment, the DEX fee, and the spend and refund of a swap payment, in place of
   1,000; `trade_preimage` and the swap figures report the same 10,000 (the receiver fee was 496 before), so what a
   trade is quoted equals what it pays. A `txfee` in the coin entry still sets the fee. Other UTXO coins keep their
-  default. Detail: PR #NNN; CRD ch.39 R39.6.5f (status note of 2026-11-26).
+  default. Detail: PR #544; CRD ch.39 R39.6.5f (status note of 2026-11-26).
 
 #### Tendermint (Cosmos) coins
 
