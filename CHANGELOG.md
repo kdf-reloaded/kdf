@@ -23,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   wallet database already holds these notes. Detail: PR #541; CRD ch.39 R39.8.0ag1 (status note of
   2026-11-25).
 
+#### Transport, TLS and dependencies
+
+- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** KDF Reloaded's own code does
+  not call the affected function. Detail: PR #NNN.
+
 ### Known limitations
 
 - **KDF Reloaded neither shows nor spends ARRR funds held in the Ironwood pool.** The Ironwood pool
