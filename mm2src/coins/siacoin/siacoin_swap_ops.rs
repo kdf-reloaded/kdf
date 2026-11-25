@@ -697,26 +697,6 @@ fn policy_hash_leaves<'a>(policy: &'a SpendPolicy, leaves: &mut Vec<&'a Hash256>
     }
 }
 
-/// The address a spend policy commits to, when the policy is as a spend reveals it: a branch that was not taken is
-/// an `Opaque` leaf already, and stays as it is. (`SpendPolicy::address` opacifies every child again, which turns an
-/// `Opaque` leaf into the opaque form of its own address and so never reproduces the address of a revealed policy.)
-fn committed_address(policy: &SpendPolicy) -> Address {
-    let SpendPolicy::Threshold { n, of } = policy else {
-        return policy.address();
-    };
-    let of = of
-        .iter()
-        .map(|child| match child {
-            SpendPolicy::Opaque(_) => child.clone(),
-            other => SpendPolicy::Opaque(committed_address(other)),
-        })
-        .collect();
-    let mut encoder = sia_rust::encoding::Encoder::default();
-    encoder.write_distinguisher("address");
-    sia_rust::encoding::Encodable::encode(&SpendPolicy::Threshold { n: *n, of }, &mut encoder);
-    Address(encoder.hash())
-}
-
 /// Whether `spend` is a claim of the HTLC output `htlc_output_id` that proves itself (CRD ch.51 R100): it spends
 /// that output, the spend policy it satisfies is the one `htlc_address` commits to, and it reveals a preimage whose
 /// SHA-256 equals a hash in that policy. No node can fake such a spend, so one node's answer is enough; it needs no
@@ -732,7 +712,7 @@ pub(super) fn claim_proves_itself(
         .filter(|input| &input.parent.id == htlc_output_id)
         .any(|input| {
             let satisfied = &input.satisfied_policy;
-            if &committed_address(&satisfied.policy) != htlc_address {
+            if &satisfied.policy.address() != htlc_address {
                 return false;
             }
             let mut hashes = Vec::new();
@@ -1778,10 +1758,10 @@ mod swap_evidence_read_tests {
         assert!(err.contains("Timed out waiting for spend"), "{err}");
     }
 
-    /// `committed_address` against the library's `address()` on the side where the library is right: the full HTLC
-    /// policy, and the same policy with one branch replaced by its opaque form (as a spend reveals it).
+    /// The library behavior `claim_proves_itself` relies on: `address()` of an HTLC policy with either branch
+    /// replaced by its opaque form (as a spend reveals it) equals `address()` of the full policy.
     #[test]
-    fn t42_sia_committed_address_matches_the_library_address_of_an_htlc_policy() {
+    fn t42_sia_htlc_address_is_unchanged_with_either_branch_opaque() {
         let success = SiaKeypair::from_private_bytes(&[1u8; 32]).unwrap().public();
         let refund = SiaKeypair::from_private_bytes(&[2u8; 32]).unwrap().public();
         let secret_hash = Hash256(sha256(&[7u8; 32]).take());
@@ -1792,17 +1772,15 @@ mod swap_evidence_read_tests {
         // (a) the refund branch opaque
         let refund_opaque = SpendPolicy::Threshold {
             n,
-            of: vec![of[0].clone(), SpendPolicy::Opaque(of[1].address())],
+            of: vec![of[0].clone(), SpendPolicy::opaque(&of[1])],
         };
-        assert_eq!(full.address(), committed_address(&refund_opaque));
+        assert_eq!(refund_opaque.address(), full.address());
         // (b) the claim branch opaque
         let claim_opaque = SpendPolicy::Threshold {
             n,
-            of: vec![SpendPolicy::Opaque(of[0].address()), of[1].clone()],
+            of: vec![SpendPolicy::opaque(&of[0]), of[1].clone()],
         };
-        assert_eq!(full.address(), committed_address(&claim_opaque));
-        // (c) the full policy
-        assert_eq!(committed_address(&full), full.address());
+        assert_eq!(claim_opaque.address(), full.address());
     }
 
     /// The `swap_evidence_node` field against the one `server_url` under the port rule (a port is compared only when

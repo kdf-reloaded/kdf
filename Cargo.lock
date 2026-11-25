@@ -9017,7 +9017,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 [[package]]
 name = "sia-rust"
 version = "0.1.0"
-source = "git+https://github.com/kdf-reloaded/sia-rust?rev=b07bfd418c0f5e65128742b411acfcd81bc4ae4d#b07bfd418c0f5e65128742b411acfcd81bc4ae4d"
+source = "git+https://github.com/kdf-reloaded/sia-rust?rev=175e5b8d5a902fc015de437e159197021597eb02#175e5b8d5a902fc015de437e159197021597eb02"
 dependencies = [
  "async-trait",
  "base64 0.21.7",
