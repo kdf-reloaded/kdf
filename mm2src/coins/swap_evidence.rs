@@ -416,7 +416,8 @@ pub fn undetermined(reason: &str, nodes: &[&str]) -> String {
 pub fn is_undetermined(err: &str) -> bool { err.contains(UNDETERMINED_PREFIX) }
 
 impl UndeterminedReason {
-    /// Every reason; a new variant must be listed here (the match below does not compile without it).
+    /// Every reason. A new variant fails to compile in [`Self::phrase`] and in the match of the test
+    /// `every_reason_is_listed_in_all` until it is handled there; that test then fails until it is listed here.
     pub const ALL: [UndeterminedReason; 4] = [
         UndeterminedReason::Disagree,
         UndeterminedReason::TooFewAnswers,
@@ -833,6 +834,23 @@ mod tests {
         let free = undetermined("srv.example:50002 refused", &["srv.example:50002"]);
         assert_eq!(undetermined_reason_kind(&free), Some("undetermined"));
         assert_eq!(undetermined_reason_kind("plain text"), None);
+    }
+
+    #[test]
+    fn every_reason_is_listed_in_all() {
+        // Exhaustive on purpose (no wildcard): a new variant does not compile here until it is handled.
+        fn listed(r: UndeterminedReason) -> bool {
+            match r {
+                UndeterminedReason::Disagree
+                | UndeterminedReason::TooFewAnswers
+                | UndeterminedReason::TrustedNodeSilent
+                | UndeterminedReason::TipGap => UndeterminedReason::ALL.contains(&r),
+            }
+        }
+        assert!(listed(UndeterminedReason::Disagree));
+        assert!(listed(UndeterminedReason::TooFewAnswers));
+        assert!(listed(UndeterminedReason::TrustedNodeSilent));
+        assert!(listed(UndeterminedReason::TipGap));
     }
 
     #[test]
