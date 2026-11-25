@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.4.2-beta.1] — 2026-11-26
 
+### Changed
+
+#### Transport, TLS and dependencies
+
+- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** The `url` crate moved from
+  2.5.8 to 2.5.9, and `form_urlencoded`, which the new version requires, from 1.2.2 to 1.2.3. KDF
+  Reloaded's own code does not call the affected function. The dependency policy needs no exception
+  for this advisory. Detail: PR #545, the release-line port of PR #492.
+
 ### Fixed
 
 #### Shielded coins (ARRR)
@@ -22,11 +31,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   address and was not affected. Nothing needs to be done: no rescan and no new activation, since the
   wallet database already holds these notes. Detail: PR #541; CRD ch.39 R39.8.0ag1 (status note of
   2026-11-25).
-
-#### Transport, TLS and dependencies
-
-- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** KDF Reloaded's own code does
-  not call the affected function. Detail: PR #545.
 
 ### Known limitations
 
