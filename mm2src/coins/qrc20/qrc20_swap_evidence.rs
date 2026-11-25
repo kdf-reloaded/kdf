@@ -231,10 +231,18 @@ enum CapabilityScope {
 struct ProbeGuard {
     client: ElectrumClient,
     server: String,
+    /// The probe got an error or an answer that could not be read.
+    failed: bool,
+}
+
+impl ProbeGuard {
+    /// Records that the probe got an error or an answer that could not be read; the probe ends so when the guard
+    /// drops.
+    fn mark_failed(&mut self) { self.failed = true; }
 }
 
 impl Drop for ProbeGuard {
-    fn drop(&mut self) { self.client.end_contract_history_probe(&self.server); }
+    fn drop(&mut self) { self.client.end_contract_history_probe(&self.server, self.failed); }
 }
 
 impl Qrc20Coin {
@@ -283,8 +291,8 @@ impl Qrc20Coin {
     }
 
     /// The refusal text of an order or a swap start with this token, `None` when it may trade (CRD ch.51 R100 item
-    /// 4). A token that is refused for the capability rule is told which hosts have served the contract-event history
-    /// and which have not, or that its trusted server has not.
+    /// 4). A token that is refused for the capability rule is told which hosts have served the contract-event history,
+    /// which failed it and which have not been asked yet, or which of these holds for its trusted server.
     pub(super) fn evidence_refusal(&self) -> Option<String> {
         let SwapEvidencePolicy::Insufficient { .. } = self.evidence_policy() else {
             return None;
@@ -292,15 +300,23 @@ impl Qrc20Coin {
         let Some((client, scope)) = self.capability_scope() else {
             return Some(insufficient_refusal(&self.utxo.conf.ticker));
         };
+        let (served, failed, not_asked) = client.contract_history_servers();
         if let CapabilityScope::Trusted(trusted) = scope {
+            let holds = |labels: &[String]| labels.iter().any(|label| node_name(label) == trusted);
+            let state = if holds(&failed) {
+                "did not serve blockchain.contract.event.get_history at the last check"
+            } else if holds(&not_asked) {
+                "has not been asked yet; the check repeats within a minute"
+            } else {
+                "has not served blockchain.contract.event.get_history in this session"
+            };
             return Some(format!(
-                "{}: the trusted Electrum server {} of {} has not served blockchain.contract.event.get_history in \
-                 this session; QRC20 swaps need the server named by swap_evidence_node to serve it: add a server \
-                 that serves it to the server list, or name one of the list that does",
-                self.utxo.conf.ticker, trusted, self.platform
+                "{}: the trusted Electrum server {} of {} {}; QRC20 swaps need the server named by \
+                 swap_evidence_node to serve blockchain.contract.event.get_history: add a server that serves it to \
+                 the server list, or name one of the list that does",
+                self.utxo.conf.ticker, trusted, self.platform, state
             ));
         }
-        let (served, not_served) = client.contract_history_servers();
         let list = |labels: Vec<String>| match labels.is_empty() {
             true => "none".to_owned(),
             false => labels
@@ -311,12 +327,13 @@ impl Qrc20Coin {
         };
         Some(format!(
             "{}: fewer than two Electrum hosts of {} have served blockchain.contract.event.get_history in this \
-             session (served: {}; not served: {}); QRC20 swaps need two such hosts: add one to the server list or \
-             set swap_evidence_node",
+             session (served: {}; failed: {}; not yet asked: {}); the check repeats within a minute; QRC20 swaps \
+             need two such hosts: add one to the server list or set swap_evidence_node",
             self.utxo.conf.ticker,
             self.platform,
             list(served),
-            list(not_served)
+            list(failed),
+            list(not_asked)
         ))
     }
 
@@ -325,7 +342,8 @@ impl Qrc20Coin {
     /// while a probe of it runs (the client keeps that, so it holds for every token that shares the client). The
     /// probe runs for a token over two or more hosts, and for a token with a trusted server on that server only. It
     /// ends when the token is disabled or dropped, and holds the client no longer than the token does. An answer is recorded by the client itself; one INFO line names the
-    /// hosts by `host:port`.
+    /// hosts by `host:port`: served, failed (the last probe got an error or an answer that could not be read) and not
+    /// yet asked.
     pub(crate) fn start_capability_probe(&self) {
         let Some((client, scope)) = self.capability_scope() else {
             return;
@@ -349,6 +367,7 @@ impl Qrc20Coin {
             .map(|server| ProbeGuard {
                 client: client.clone(),
                 server,
+                failed: false,
             })
             .collect();
         if guards.is_empty() {
@@ -359,20 +378,28 @@ impl Qrc20Coin {
         let address = contract_addr_into_rpc_format(&my_address);
         let token = contract_addr_into_rpc_format(&self.contract_address);
         let probe = async move {
-            let requests = guards.iter().map(|guard| {
-                client
+            // Each server's probe ends with its own answer. A served read is recorded by the client where every
+            // answer of the method is; a failed one here.
+            let probes = guards.into_iter().map(|mut guard| {
+                let request = client
                     .blockchain_contract_event_get_history_from(&guard.server, &address, &token, QRC20_TRANSFER_TOPIC)
-                    .compat()
+                    .compat();
+                async move {
+                    if request.await.is_err() {
+                        guard.mark_failed();
+                    }
+                }
             });
-            // The answers are recorded by the client where every answer of the method is.
-            let _answers = futures::future::join_all(requests).await;
-            let (served, not_served) = client.contract_history_servers();
+            futures::future::join_all(probes).await;
+            let (served, failed, not_asked) = client.contract_history_servers();
             let names = |labels: &[String]| labels.iter().map(|label| node_name(label)).collect::<Vec<_>>();
             info!(
-                "{}: Electrum hosts that have served blockchain.contract.event.get_history: {:?}; not served: {:?}",
+                "{}: Electrum hosts that have served blockchain.contract.event.get_history: {:?}; failed: {:?}; not \
+                 yet asked: {:?}",
                 platform,
                 names(&served),
-                names(&not_served)
+                names(&failed),
+                names(&not_asked)
             );
         };
         let (probe, handle) = futures::future::abortable(probe);

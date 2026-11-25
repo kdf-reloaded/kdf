@@ -925,29 +925,24 @@ fn one_capable_host_refuses_with_the_text_naming_the_hosts() {
             hosts.a().requests(GET_HISTORY) == 1 && hosts.b().requests(GET_HISTORY) == 1
         })
         .await;
-        wait_for("the answer of the first host", || {
-            client_of(&coin).contract_history_servers().0.len() == 1
+        wait_for("the end of the probe of both hosts", || {
+            let (served, failed, _) = client_of(&coin).contract_history_servers();
+            served.len() == 1 && failed.len() == 1
         })
         .await;
         assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {
             hosts: 1
         });
         let refusal = coin.swap_evidence_refusal().unwrap();
-        assert!(
-            refusal.contains("blockchain.contract.event.get_history"),
-            "the refusal names the method"
-        );
-        assert!(
-            refusal.contains(&format!("served: {}", hosts.name(0))),
-            "the refusal lists the host that served the request"
-        );
-        assert!(
-            refusal.contains(&format!("not served: {}", hosts.name(1))),
-            "the refusal lists the host that did not serve the request"
-        );
-        assert!(
-            refusal.contains("swap_evidence_node"),
-            "the text names swap_evidence_node"
+        assert_eq!(
+            refusal,
+            format!(
+                "QRC20: fewer than two Electrum hosts of QTUM have served blockchain.contract.event.get_history in \
+                 this session (served: {}; failed: {}; not yet asked: none); the check repeats within a minute; \
+                 QRC20 swaps need two such hosts: add one to the server list or set swap_evidence_node",
+                hosts.name(0),
+                hosts.name(1)
+            )
         );
         assert!(!refusal.contains("://"), "the refusal holds no URL");
 
@@ -979,6 +974,37 @@ fn one_capable_host_refuses_with_the_text_naming_the_hosts() {
     });
 }
 
+/// The refusal names each host by its state: served, failed (its probe got an error) and not yet asked (its probe
+/// still runs).
+#[test]
+fn the_refusal_names_served_failed_and_not_yet_asked_hosts() {
+    block_on(async {
+        let hosts = Hosts::start(3).await;
+        hosts.b().set_error(GET_HISTORY, "unknown method");
+        hosts.servers[2].set_reply_delay(GET_HISTORY, std::time::Duration::from_millis(1500));
+        let ctx = new_ctx();
+        let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
+        wait_for("the answers of the first two hosts", || {
+            let (served, failed, _) = client_of(&coin).contract_history_servers();
+            served.len() == 1 && failed.len() == 1
+        })
+        .await;
+        let refusal = coin.swap_evidence_refusal().unwrap();
+        assert_eq!(
+            refusal,
+            format!(
+                "QRC20: fewer than two Electrum hosts of QTUM have served blockchain.contract.event.get_history in \
+                 this session (served: {}; failed: {}; not yet asked: {}); the check repeats within a minute; QRC20 \
+                 swaps need two such hosts: add one to the server list or set swap_evidence_node",
+                hosts.name(0),
+                hosts.name(1),
+                hosts.name(2)
+            )
+        );
+        assert!(!refusal.contains("://"), "the refusal holds no URL");
+    });
+}
+
 #[test]
 fn a_host_is_not_probed_while_a_probe_of_it_runs() {
     block_on(async {
@@ -996,9 +1022,9 @@ fn a_host_is_not_probed_while_a_probe_of_it_runs() {
         // ends; the host that served it is never given.
         assert_eq!(client.claim_contract_history_probes(0., None), vec![hosts.name(1)]);
         assert!(client.claim_contract_history_probes(0., None).is_empty());
-        client.end_contract_history_probe(&hosts.name(1));
+        client.end_contract_history_probe(&hosts.name(1), false);
         assert_eq!(client.claim_contract_history_probes(0., None), vec![hosts.name(1)]);
-        client.end_contract_history_probe(&hosts.name(1));
+        client.end_contract_history_probe(&hosts.name(1), false);
     });
 }
 
@@ -1017,7 +1043,7 @@ fn a_disabled_token_starts_no_probe() {
         .await;
         // The minute of the bound is taken out of the way: the host may be probed again at once.
         assert_eq!(client.claim_contract_history_probes(0., None), vec![hosts.name(1)]);
-        client.end_contract_history_probe(&hosts.name(1));
+        client.end_contract_history_probe(&hosts.name(1), false);
 
         coin.end_capability_probes();
         coin.start_capability_probe();
@@ -1058,22 +1084,21 @@ fn a_trusted_host_needs_the_capability_too() {
         let ctx = new_ctx();
         let coin = token_on(&ctx, "QRC20", &hosts.urls(), Some(&hosts.name(0))).await;
 
-        // Refused before the trusted host has served the read, with a text that names it.
+        // Refused before the trusted host has served the read, with a text that names it as not asked yet: its probe
+        // runs.
         assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {
             hosts: 0
         });
         let refusal = coin.swap_evidence_refusal().unwrap();
-        assert!(
-            refusal.contains(&format!("trusted Electrum server {}", hosts.name(0))),
-            "the refusal names the trusted host"
-        );
-        assert!(
-            refusal.contains("blockchain.contract.event.get_history"),
-            "the refusal names the method"
-        );
-        assert!(
-            refusal.contains("swap_evidence_node"),
-            "the text names swap_evidence_node"
+        assert_eq!(
+            refusal,
+            format!(
+                "QRC20: the trusted Electrum server {} of QTUM has not been asked yet; the check repeats within a \
+                 minute; QRC20 swaps need the server named by swap_evidence_node to serve \
+                 blockchain.contract.event.get_history: add a server that serves it to the server list, or name one \
+                 of the list that does",
+                hosts.name(0)
+            )
         );
         assert!(!refusal.contains("://"), "the refusal holds no URL");
         // A running swap's reads wait meanwhile.
@@ -1112,15 +1137,22 @@ fn a_trusted_host_that_answers_the_event_history_with_an_error_is_refused() {
             client.claim_contract_history_probes(0., Some(&hosts.name(0))).len() == 1
         })
         .await;
-        client.end_contract_history_probe(&hosts.name(0));
+        client.end_contract_history_probe(&hosts.name(0), false);
         assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {
             hosts: 0
         });
         let refusal = coin.swap_evidence_refusal().unwrap();
-        assert!(
-            refusal.contains(&format!("trusted Electrum server {}", hosts.name(0))),
-            "the refusal names the trusted host"
+        assert_eq!(
+            refusal,
+            format!(
+                "QRC20: the trusted Electrum server {} of QTUM did not serve blockchain.contract.event.get_history at \
+                 the last check; QRC20 swaps need the server named by swap_evidence_node to serve \
+                 blockchain.contract.event.get_history: add a server that serves it to the server list, or name one \
+                 of the list that does",
+                hosts.name(0)
+            )
         );
+        assert!(!refusal.contains("://"), "the refusal holds no URL");
         // The refusals asked for a new probe, which is bounded to once a minute for the host, and the other host is
         // never probed.
         Timer::sleep(0.3).await;
@@ -1159,7 +1191,7 @@ fn one_configured_host_is_trusted_and_needs_the_capability() {
             client.claim_contract_history_probes(0., Some(&hosts.name(0))).len() == 1
         })
         .await;
-        client.end_contract_history_probe(&hosts.name(0));
+        client.end_contract_history_probe(&hosts.name(0), false);
 
         // Refused while the host has not served the read, with the text of a trusted server.
         assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {

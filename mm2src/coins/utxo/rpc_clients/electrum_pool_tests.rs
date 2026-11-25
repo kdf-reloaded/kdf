@@ -1734,6 +1734,75 @@ fn t38_6_4q_2_history_too_large_is_final_and_an_unreadable_answer_is_final() {
     });
 }
 
+/// The contract-event history states of the usable servers: one never probed and one whose first probe runs are not
+/// asked yet, one whose probe got an error failed, one that answered the read served it. A cancelled probe leaves the
+/// record as it was, a failed server stays failed while a new probe of it runs, and a later answer moves it to served.
+#[test]
+fn the_contract_history_servers_are_served_failed_or_not_yet_asked() {
+    block_on(async {
+        let mut servers = Vec::new();
+        for _ in 0..5 {
+            let server = StubServer::start(StubBehavior::Answer).await;
+            server.set_result(CONTRACT_HISTORY, json!([]));
+            servers.push(server);
+        }
+        let refs: Vec<&StubServer> = servers.iter().collect();
+        let client = pool_client(&refs, 1, None, test_timings());
+        let pool = &client.pool;
+        let addr = |i: usize| servers[i].addr();
+        let none: Vec<String> = Vec::new();
+
+        // Server 4 serves the read.
+        pool.route_directed(rpc(CONTRACT_HISTORY, vec![]), &addr(4))
+            .await
+            .unwrap();
+        // Server 1 is being probed; server 2's probe got an error; server 3's probe was cancelled; server 0 was never
+        // probed.
+        for i in 1..=3 {
+            assert_eq!(
+                pool.claim_contract_history_probes(now_float(), 0., Some(&addr(i))),
+                vec![addr(i)]
+            );
+        }
+        pool.end_contract_history_probe(&addr(2), now_float(), true);
+        pool.end_contract_history_probe(&addr(3), now_float(), false);
+        assert_eq!(
+            pool.contract_history_servers(),
+            (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
+        );
+
+        // The failed server stays failed while a new probe of it runs, and its error leaves it failed.
+        assert_eq!(
+            pool.claim_contract_history_probes(now_float(), 0., Some(&addr(2))),
+            vec![addr(2)]
+        );
+        assert_eq!(
+            pool.contract_history_servers(),
+            (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
+        );
+        pool.end_contract_history_probe(&addr(2), now_float(), true);
+        assert_eq!(
+            pool.contract_history_servers(),
+            (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
+        );
+
+        // A new probe of the failed server that gets the history moves it to served.
+        assert_eq!(
+            pool.claim_contract_history_probes(now_float(), 0., Some(&addr(2))),
+            vec![addr(2)]
+        );
+        assert_eq!(pool.contract_history_servers().1, vec![addr(2)]);
+        pool.route_directed(rpc(CONTRACT_HISTORY, vec![]), &addr(2))
+            .await
+            .unwrap();
+        pool.end_contract_history_probe(&addr(2), now_float(), false);
+        assert_eq!(
+            pool.contract_history_servers(),
+            (vec![addr(2), addr(4)], none, vec![addr(0), addr(1), addr(3)])
+        );
+    });
+}
+
 /// Every server answers an error: the request fails as R38.6.4i binds, naming each server and its error, every session
 /// stays open, and each server is asked exactly once: a server that answered with an error is not asked again in the
 /// retry (D38.6.4Q.2 status note, item 1). The failure text says that every server answered with an error answer.
