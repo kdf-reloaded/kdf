@@ -31,7 +31,7 @@ use coins::{CanRefundHtlc, FeeApproxStage, FindPaymentSpendError, GenTakerFundin
             SpendMakerPaymentArgs, SwapTxTypeWithSecretHash, TakerCoinSwapOpsV2, ToBytes, TradePreimageValue,
             Transaction, TxPreimageWithSig, ValidateMakerPaymentArgs};
 use common::executor::Timer;
-use common::log::{error, info, warn};
+use common::log::{debug, error, info, warn};
 use common::mm_number::MmNumber;
 use common::now_ms;
 use crypto::secret_hash_algo::SecretHashAlgo;
@@ -2029,7 +2029,9 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             match confirmation_end {
                 ConfirmationEnd::Confirmed => (),
                 ConfirmationEnd::NotConfirmed(e) => {
-                    warn!("Swap {}: maker payment not confirmed in time: {}", sm.uuid, e);
+                    // The coin's error text may name a node; it goes to the debug log only (CRD ch.51 R80).
+                    warn!("Swap {}: maker payment not confirmed in time", sm.uuid);
+                    debug!("Swap {}: maker payment not confirmed in time: {}", sm.uuid, e);
                     let reason = AbortReason::MakerPaymentNotConfirmedInTime(e);
                     return self.abort_to_funding_refund_required(reason, sm).await;
                 },
