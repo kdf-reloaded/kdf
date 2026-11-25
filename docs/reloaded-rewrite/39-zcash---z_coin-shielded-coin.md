@@ -2711,6 +2711,17 @@ poll, and survives a restart.
 > seed is not covered, because it is not in this node's wallet database. That
 > case is deferred with the two-daemon item of the in-flight note-locking plan.
 
+> **Reloaded status note (2026-11-25, Reloaded-original; informative; PR
+> #NNN).** A note the wallet database holds for the internal (change) address of
+> the wallet's key (ZIP 32 internal scope), such as the change a Pirate wallet
+> on the same seed makes, is spent with the internal key: each note selected for
+> a light-mode build keeps its scope, an internal note is spent with the full
+> viewing key of the internal spending key, and the build holds both spending
+> keys, which share the spend authorizing key. Every note the balance counts is
+> therefore spendable by withdraw and by a swap payment. Native mode selects
+> only notes of the external address, so it does not meet such notes; notes of
+> the Ironwood pool are neither shown nor spent.
+
 R39.8.0ah A pending shielded receipt shall be invalidated — removed from the
 pending set and no longer added to the non-spendable balance — as soon as any of
 the following holds:
@@ -7416,3 +7427,7 @@ entries in its list cannot be told apart. Passing the position to the fallback c
 - *Reloaded-original addition (2026-11-20) -- the status note of that date under
   R39.6.4f.* A pointer to chapter 59 §59.4C. No forbidden-class input; it needs no Dirty
   Gate pass.
+- *Reloaded-original addition (2026-11-25) -- the status note of that date under
+  R39.8.0ag1.* The spending of internal-scope (change-address) notes, as built.
+  It describes this repository's code and ZIP 32's internal key; no
+  forbidden-class input, so it needs no Dirty Gate pass.
