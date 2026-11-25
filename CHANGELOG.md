@@ -1433,7 +1433,7 @@ the previous version used. The safe way:
   counts these notes as before, and the amount it shows can now be spent: a withdrawal of the
   maximum spends exactly that balance. KDF Reloaded's own change goes to the wallet's external `zs1`
   address and was not affected. Nothing needs to be done: no rescan and no new activation, since the
-  wallet database already holds these notes. Detail: PR #NNN; CRD ch.39 R39.8.0ag1 (status note of
+  wallet database already holds these notes. Detail: PR #542; CRD ch.39 R39.8.0ag1 (status note of
   2026-11-25).
 
 ### Tests
