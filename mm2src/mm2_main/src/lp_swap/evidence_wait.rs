@@ -42,6 +42,12 @@ pub(crate) enum Read {
     TakerPaymentCheck,
     /// The check of the maker's payment (the taker's payment check).
     MakerPaymentCheck,
+    /// The search for the spend of the taker funding (the maker of a version-two swap).
+    TakerFundingSearch,
+    /// The read of the taker payment's confirmations (the maker of a version-two swap).
+    TakerPaymentConfirmation,
+    /// The read of the maker payment's confirmations (the taker of a version-two swap).
+    MakerPaymentConfirmation,
 }
 
 impl Read {
@@ -52,6 +58,9 @@ impl Read {
             Read::Gate => "the chain time of the refund gate",
             Read::TakerPaymentCheck => "the check of the taker payment",
             Read::MakerPaymentCheck => "the check of the maker payment",
+            Read::TakerFundingSearch => "the search for the spend of the taker funding",
+            Read::TakerPaymentConfirmation => "the confirmation of the taker payment",
+            Read::MakerPaymentConfirmation => "the confirmation of the maker payment",
         }
     }
 
@@ -62,13 +71,17 @@ impl Read {
             Read::Gate => "the refundability check",
             Read::TakerPaymentCheck => "the check of the taker payment",
             Read::MakerPaymentCheck => "the check of the maker payment",
+            Read::TakerFundingSearch => "the search for the spend of the taker funding",
+            Read::TakerPaymentConfirmation => "the read of the confirmation of the taker payment",
+            Read::MakerPaymentConfirmation => "the read of the confirmation of the maker payment",
         }
     }
 
     fn plain_kind(self) -> &'static str {
         match self {
-            Read::Look => "the search failed or did not finish",
+            Read::Look | Read::TakerFundingSearch => "the search failed or did not finish",
             Read::Gate | Read::TakerPaymentCheck | Read::MakerPaymentCheck => "the check failed",
+            Read::TakerPaymentConfirmation | Read::MakerPaymentConfirmation => "the read failed or did not finish",
         }
     }
 }
@@ -85,7 +98,7 @@ fn kind(read: Read, reason: &str) -> String {
 }
 
 /// The text of the log line that tells an operator a step waits on a read that was not determined.
-fn wait_text(ticker: &str, read: Read, reason: &str) -> String {
+pub(crate) fn wait_text(ticker: &str, read: Read, reason: &str) -> String {
     let fix = if is_undetermined(reason) {
         format!("; {FIX_HINT}")
     } else {

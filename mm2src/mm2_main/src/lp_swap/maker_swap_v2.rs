@@ -695,6 +695,11 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>
     TransitionFrom<MakerPaymentSentFundingSpendGenerated<M, T>> for MakerPaymentRefundRequired<M, T>
 {
 }
+// A search for the funding spend that stays undetermined until the bound of its wait ends the swap.
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>
+    TransitionFrom<MakerPaymentSentFundingSpendGenerated<M, T>> for Aborted<M, T>
+{
+}
 
 // TakerPaymentReceived →
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<TakerPaymentReceived<M, T>>
@@ -705,6 +710,11 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionF
     for MakerPaymentRefundRequired<M, T>
 {
 }
+// A confirmation read that stays undetermined until the bound of its wait ends the swap.
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<TakerPaymentReceived<M, T>>
+    for Aborted<M, T>
+{
+}
 
 // TakerPaymentReceivedPreimageSkipped →
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>
@@ -713,6 +723,10 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>
 }
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>
     TransitionFrom<TakerPaymentReceivedPreimageSkipped<M, T>> for MakerPaymentRefundRequired<M, T>
+{
+}
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>
+    TransitionFrom<TakerPaymentReceivedPreimageSkipped<M, T>> for Aborted<M, T>
 {
 }
 
@@ -1759,6 +1773,9 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
         };
 
         let wait_until = sm.started_at + sm.lock_duration * 2 / 3;
+        // An undetermined search is never read as "nothing found": it is repeated inside `read`, also past
+        // `wait_until`, up to the bound of the wait (CRD ch.51 R100 items 3 and 9).
+        let mut undetermined_wait = UndeterminedWait::new(sm.maker_payment_locktime());
 
         loop {
             let now = now_ms() / 1000;
@@ -1767,16 +1784,40 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                 break self.abort_to_maker_payment_refund_required(reason, sm).await;
             }
 
-            let search_result = sm
-                .taker_coin
-                .search_for_taker_funding_spend(
-                    &taker_funding,
-                    self.taker_coin_start_block,
-                    &self.negotiation_data.taker_secret_hash,
+            let search_end = undetermined_wait
+                .read(
+                    &sm.uuid,
+                    sm.taker_coin.ticker(),
+                    CappedRead::FundingSpendSearch,
+                    30,
+                    || now_ms() / 1000,
+                    |_| {
+                        sm.taker_coin.search_for_taker_funding_spend(
+                            &taker_funding,
+                            self.taker_coin_start_block,
+                            &self.negotiation_data.taker_secret_hash,
+                        )
+                    },
                 )
                 .await;
+            let search_result = match search_end {
+                ReadEnd::Answer(found) => Ok(found),
+                ReadEnd::Failed(e) => Err(e),
+                ReadEnd::BoundPassed(e) => {
+                    let reason = undetermined_cap_reason(CappedRead::FundingSpendSearch, sm.taker_coin.ticker(), &e);
+                    break Self::change_state(Aborted::new(reason), sm).await;
+                },
+            };
 
             match search_result {
+                // A taker payment that is found only after an undetermined wait and after the deadline is not
+                // claimed: the maker's secret stays unused and the maker payment is refunded.
+                Ok(Some(FundingTxSpend::TransferredToTakerPayment(_)))
+                    if answered_too_late(undetermined_wait.waited(), now_ms() / 1000, wait_until) =>
+                {
+                    let reason = AbortReason::FundingSpendError("Taker funding not spent in time".into());
+                    break self.abort_to_maker_payment_refund_required(reason, sm).await;
+                },
                 Ok(Some(FundingTxSpend::TransferredToTakerPayment(taker_payment))) => {
                     let taker_payment_bytes: BytesJson = taker_payment.tx_hex().into();
                     if sm.taker_coin.skip_taker_payment_spend_preimage() {
@@ -1836,6 +1877,36 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
 
 // TakerPaymentReceived → TakerPaymentSpent ------------------------------
 
+/// Waits for the confirmations of the taker payment before the maker claims it (CRD ch.52 R19). An undetermined
+/// read is repeated and never leads to the refund state; a confirmation that is read only after such a wait and
+/// after the deadline is not acted on (CRD ch.51 R100 items 3 and 9).
+async fn await_taker_payment_confirmation<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>(
+    sm: &MakerSwapStateMachine<M, T>,
+    taker_payment: &[u8],
+) -> ConfirmationEnd {
+    UndeterminedWait::new(sm.maker_payment_locktime())
+        .read_confirmation(
+            &sm.uuid,
+            sm.taker_coin.ticker(),
+            CappedRead::TakerPaymentConfirmation,
+            sm.taker_payment_conf_timeout(),
+            CONFIRMATION_POLL_SECS,
+            || now_ms() / 1000,
+            |wait_until| {
+                sm.taker_coin
+                    .wait_for_confirmations(
+                        taker_payment,
+                        sm.conf_settings.taker_coin_confs,
+                        sm.conf_settings.taker_coin_nota,
+                        wait_until,
+                        10,
+                    )
+                    .compat()
+            },
+        )
+        .await
+}
+
 // Wait for confirmation, receive + validate preimage, spend taker payment.
 
 #[async_trait::async_trait]
@@ -1846,20 +1917,16 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
         let unique_data = sm.unique_data();
 
         // Step 1: Wait for taker payment confirmations.
-        if let Err(e) = sm
-            .taker_coin
-            .wait_for_confirmations(
-                &self.taker_payment,
-                sm.conf_settings.taker_coin_confs,
-                sm.conf_settings.taker_coin_nota,
-                sm.taker_payment_conf_timeout(),
-                10,
-            )
-            .compat()
-            .await
-        {
-            let reason = AbortReason::ConfirmationTimeout(format!("Taker payment not confirmed in time: {}", e));
-            return self.abort_to_maker_payment_refund_required(reason, sm).await;
+        match await_taker_payment_confirmation(sm, &self.taker_payment).await {
+            ConfirmationEnd::Confirmed => (),
+            ConfirmationEnd::NotConfirmed(e) => {
+                let reason = AbortReason::ConfirmationTimeout(format!("Taker payment not confirmed in time: {}", e));
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
+            },
+            ConfirmationEnd::BoundPassed(e) => {
+                let reason = undetermined_cap_reason(CappedRead::TakerPaymentConfirmation, sm.taker_coin.ticker(), &e);
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
         }
 
         // Step 2: Receive taker payment spend preimage.
@@ -2027,20 +2094,16 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
         );
 
         // Wait for taker payment confirmations.
-        if let Err(e) = sm
-            .taker_coin
-            .wait_for_confirmations(
-                &self.taker_payment,
-                sm.conf_settings.taker_coin_confs,
-                sm.conf_settings.taker_coin_nota,
-                sm.taker_payment_conf_timeout(),
-                10,
-            )
-            .compat()
-            .await
-        {
-            let reason = AbortReason::ConfirmationTimeout(format!("Taker payment not confirmed in time: {}", e));
-            return self.abort_to_maker_payment_refund_required(reason, sm).await;
+        match await_taker_payment_confirmation(sm, &self.taker_payment).await {
+            ConfirmationEnd::Confirmed => (),
+            ConfirmationEnd::NotConfirmed(e) => {
+                let reason = AbortReason::ConfirmationTimeout(format!("Taker payment not confirmed in time: {}", e));
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
+            },
+            ConfirmationEnd::BoundPassed(e) => {
+                let reason = undetermined_cap_reason(CappedRead::TakerPaymentConfirmation, sm.taker_coin.ticker(), &e);
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
         }
 
         // Parse taker payment and build spend args.
@@ -2200,22 +2263,33 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
             sm.uuid, self.reason
         );
 
-        // Wait until the refund timelock has expired.
+        // Wait until the refund timelock has expired. An undetermined answer of the gate is never read as
+        // "refundable": it is repeated inside `read` up to the bound of the wait (CRD ch.51 R100 items 3 and 9).
+        let mut undetermined_wait = UndeterminedWait::new(sm.maker_payment_locktime());
         loop {
-            match sm
-                .maker_coin
-                .can_refund_htlc(sm.maker_payment_locktime())
-                .compat()
-                .await
-            {
-                Ok(CanRefundHtlc::CanRefundNow) => break,
-                Ok(CanRefundHtlc::HaveToWait(secs)) => {
+            let gate_end = undetermined_wait
+                .read(
+                    &sm.uuid,
+                    sm.maker_coin.ticker(),
+                    CappedRead::MakerRefundGate,
+                    30,
+                    || now_ms() / 1000,
+                    |_| sm.maker_coin.can_refund_htlc(sm.maker_payment_locktime()).compat(),
+                )
+                .await;
+            match gate_end {
+                ReadEnd::Answer(CanRefundHtlc::CanRefundNow) => break,
+                ReadEnd::Answer(CanRefundHtlc::HaveToWait(secs)) => {
                     info!("Swap {} waiting {} seconds until refund is possible", sm.uuid, secs);
                     Timer::sleep(secs as f64).await;
                 },
-                Err(e) => {
+                ReadEnd::Failed(e) => {
                     error!("Swap {} can_refund_htlc error: {}, retrying in 30s", sm.uuid, e);
                     Timer::sleep(30.).await;
+                },
+                ReadEnd::BoundPassed(e) => {
+                    let reason = undetermined_cap_reason(CappedRead::MakerRefundGate, sm.maker_coin.ticker(), &e);
+                    return Self::change_state(Aborted::new(reason), sm).await;
                 },
             }
         }
@@ -2333,5 +2407,48 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(!source.contains("TransitionFrom<TakerPaymentSpent<M, T>> for MakerPaymentRefundRequired<M, T>"));
+    }
+
+    /// CRD ch.51 R100 item 9: a state whose read stays undetermined until the bound of its wait ends in `Aborted`,
+    /// and it keeps the transitions of its own rule for a determined read.
+    #[test]
+    fn states_that_wait_on_an_undetermined_read_can_end_in_aborted() {
+        fn accepts<Next: TransitionFrom<Prev>, Prev>() {}
+        type Abort = Aborted<EthCoin, EthCoin>;
+        accepts::<Abort, MakerPaymentSentFundingSpendGenerated<EthCoin, EthCoin>>();
+        accepts::<Abort, TakerPaymentReceived<EthCoin, EthCoin>>();
+        accepts::<Abort, TakerPaymentReceivedPreimageSkipped<EthCoin, EthCoin>>();
+        accepts::<Abort, MakerPaymentRefundRequired<EthCoin, EthCoin>>();
+
+        type Refund = MakerPaymentRefundRequired<EthCoin, EthCoin>;
+        accepts::<Refund, MakerPaymentSentFundingSpendGenerated<EthCoin, EthCoin>>();
+        accepts::<Refund, TakerPaymentReceived<EthCoin, EthCoin>>();
+        accepts::<Refund, TakerPaymentReceivedPreimageSkipped<EthCoin, EthCoin>>();
+    }
+
+    /// The search for the funding spend and the refund gate are each read at one place, the one inside the wait
+    /// on undetermined reads; both states that wait for the taker payment's confirmation use the same wait.
+    #[test]
+    fn the_reads_before_a_refund_are_made_at_one_place_each() {
+        let whole_file = include_str!("maker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source = &whole_file[..mod_tests_pos];
+        assert_eq!(source.matches(".search_for_taker_funding_spend(").count(), 1);
+        assert_eq!(source.matches(".can_refund_htlc(").count(), 1);
+        assert_eq!(source.matches("await_taker_payment_confirmation(sm,").count(), 2);
+    }
+
+    /// CRD ch.52 R18: the search for the funding spend judges a found taker payment by its own wait and the ⅔
+    /// deadline before it is acted on, and the late case comes first.
+    #[test]
+    fn the_funding_spend_search_checks_a_found_taker_payment_for_being_too_late() {
+        let whole_file = include_str!("maker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source = &whole_file[..mod_tests_pos];
+        let guard = "if answered_too_late(undetermined_wait.waited(), now_ms() / 1000, wait_until) =>";
+        let guard_pos = source.find(guard).expect("the search has the late guard");
+        let acted_on = "Ok(Some(FundingTxSpend::TransferredToTakerPayment(taker_payment))) =>";
+        let acted_on_pos = source.find(acted_on).expect("the search acts on a found taker payment");
+        assert!(guard_pos < acted_on_pos);
     }
 }

@@ -399,6 +399,32 @@ arrives as a message (chapter 51 R42).
 > transaction that is not valid, or a missing contract setting) is a
 > non-transient search error. No sentence of R18 is changed.
 
+> *Status note (2026-11-24, Reloaded-original; maintainer decisions of
+> 2026-11-23).* A search that chapter 51 §51.6G R100 item 3 calls
+> undetermined is neither "nothing found" nor a transient node error.
+> The state takes no transition on it and searches again after thirty
+> seconds, also after the ⅔ deadline. The wait ends at the later of two
+> moments (R100 item 9 with its notes): the maker payment locktime plus
+> 3700 seconds, and 3700 seconds after the first undetermined answer
+> that the state's current run reads at or after that locktime; an
+> undetermined answer before the locktime is waited on and does not
+> start the count. That first moment is not stored, so a resumed
+> swap starts a new wait. A coin read whose answer can be undetermined
+> MUST answer so, and never as timed out, nothing found or not
+> confirmed. The state then ends in `Aborted` with its
+> existing funding-spend-error discriminant. The text names the read,
+> the coin and the fix (a node on a second host or `swap_evidence_node`,
+> then `recover_funds_of_swap`) and carries no error text of a node
+> read; the log has one warning per wait, also without error text. R44
+> applies: the maker payment is on chain. A determined answer keeps the
+> transitions of the table, with one exception: a cooperative spend that
+> is found after an undetermined search and after the ⅔ deadline counts
+> as not found in time, and the state goes to
+> `MakerPaymentRefundRequired` as for a reached deadline, the maker's
+> secret unused. The notes of this date after R19, R21, R30,
+> R31 and R34 use the same wait, text and log rules. No sentence of R18
+> is changed.
+
 **R19.** *Spend the taker payment.* `TakerPaymentReceived` MUST wait for
 the taker payment to reach the order's configured taker-coin
 confirmation and notarisation settings, with the ⅔ deadline of R11 as
@@ -443,6 +469,22 @@ to `MakerPaymentRefundRequired`.
 > abort text carries the phrase; in particular the maker's aborts on a
 > confirmation timeout, which commit nothing, do not.
 
+> *Status note (2026-11-24, Reloaded-original; maintainer decisions of
+> 2026-11-23).* In both states of R19 the wait for the taker payment's
+> confirmations follows the note of this date after R18. An undetermined
+> read is repeated at the ten-second poll interval and does not lead to
+> `MakerPaymentRefundRequired`. The bound is counted from the maker
+> payment locktime. At the bound the state ends in `Aborted` with the
+> existing `InternalError` discriminant, never with the
+> confirmation-timeout one; its text says that the maker payment is on
+> chain and that nothing was claimed or refunded. A read that follows an
+> undetermined one is given a time limit that has not passed, also after
+> the ⅔ deadline, so that it asks the nodes before it can end as timed
+> out; the ⅔ deadline itself is judged by the state. A confirmation that
+> is read after an undetermined read and after the ⅔ deadline counts as
+> not read in time. A determined failure, a read that timed out after
+> asking the nodes included, keeps R19's transition.
+
 **R20.** *The propagation gate.* Before committing its own payment, the
 maker MUST establish that the taker's funding transaction is actually on
 the network. The gate MUST be: poll the taker coin for the transaction
@@ -482,6 +524,14 @@ and which is terminal. On failure of the refund broadcast it MUST
 transition to `Aborted`. Implementations and consumers MUST NOT read the
 maker's terminal `Aborted` event as "no maker funds were committed":
 this path reaches it with the maker payment on chain and unrefunded.
+
+> *Status note (2026-11-24, Reloaded-original; maintainer decisions of
+> 2026-11-23).* The refundability poll follows the note of this date
+> after R18. An undetermined answer is not "refundable": the poll is
+> repeated after thirty seconds. The bound is counted from the maker
+> payment locktime. At the bound the state ends in `Aborted` with the
+> existing `InternalError` discriminant. A transient error that is not
+> undetermined keeps its retry.
 
 **R22.** *Maker event set, resume map, and reason vocabularies.* The
 maker machine MUST use exactly the eleven event types below with exactly
@@ -650,6 +700,20 @@ risks only a delayed refund by proceeding on visibility, whereas the
 taker would be irreversibly converting its funding against a payment
 that may still be replaced.
 
+> *Status note (2026-11-24, Reloaded-original; maintainer decisions of
+> 2026-11-23).* The taker's wait for the maker payment's confirmations
+> follows the note of this date after R18. An undetermined read is
+> repeated at the ten-second poll interval and does not lead to
+> `TakerFundingRefundRequired`. The funding is the output at stake, so
+> the bound is counted from the taker funding locktime. At the bound the
+> state ends in `Aborted` with the existing discriminant of a maker
+> payment not confirmed in time; R44 applies, the funding is on chain.
+> The time limit of a read that follows an undetermined one is set as
+> the note of this date after R19 says, and the ⅓ deadline is judged by
+> the state. A confirmation that is read after an undetermined read and
+> after the ⅓ deadline counts as not read in time. A determined failure
+> keeps R30's transition.
+
 **R31.** *Send the taker payment.* Both `MakerPaymentConfirmed` and the
 direct branch of R29 MUST co-sign and broadcast the funding spend that
 converts the funding output into the taker payment (chapter 15 R23).
@@ -671,6 +735,21 @@ observed before the locktime MUST each transition to
 `TakerPaymentSentAndPreimageSendingSkipped` MUST behave identically
 except that it neither generates nor broadcasts a preimage. On success
 both transition to `TakerPaymentSpent`.
+
+> *Status note (2026-11-24, Reloaded-original; maintainer decisions of
+> 2026-11-23).* In both states the search for the spend of the taker
+> payment follows the note of this date after R18. An undetermined
+> search is not "a spend that is not observed": it is repeated at the
+> ten-second interval, also after the taker payment locktime, and does
+> not lead to `TakerPaymentRefundRequired`. The bound is counted from
+> the taker payment locktime. At the bound the state ends in `Aborted`
+> with the existing discriminant of a maker that did not spend in time;
+> R44 applies, the taker payment is on chain. A search that follows an
+> undetermined one is given a time limit that has not passed, so that it
+> asks the nodes before it can end as timed out. A spend that is found
+> keeps R31's transition at any time. A search that asked the nodes,
+> found no spend and timed out after the locktime keeps R31's transition
+> to `TakerPaymentRefundRequired`.
 
 **R32.** *Claim the maker payment.* `TakerPaymentSpent` MUST extract the
 maker's secret from the observed spend of the taker payment
@@ -733,6 +812,13 @@ refund different outputs by different script branches, one immediately
 and one only after a timelock. The immediate path is what makes the
 taker's exposure bounded when the maker walks away after funding, which
 is the whole purpose of the two-stage taker flow.
+
+> *Status note (2026-11-24, Reloaded-original; maintainer decisions of
+> 2026-11-23).* In `TakerPaymentRefundRequired` the refundability poll
+> follows the notes of this date after R18 and R21, with the bound
+> counted from the taker payment locktime. At the bound the state ends
+> in `Aborted` with the existing discriminant of a taker-payment refund
+> failure.
 
 **R35.** *No refund state is reachable from a state whose funds are not
 yet committed.* `TakerFundingRefundRequired` MUST be reachable only from
@@ -1830,3 +1916,8 @@ divergence rather than resolving it.
   claim with the bound of R100 item 9 on the confirmation read, and the
   secret of a spend checked against its hash for every coin family.
   Reloaded-original; no forbidden-class input.
+- *Clean-side addition of 2026-11-24:* the status notes of that date
+  after R18, R19, R21, R30, R31 and R34, the maintainer's decisions of
+  2026-11-23 on how the version-two states wait on an undetermined read
+  and on the bound of that wait. Reloaded-original; no forbidden-class
+  input.

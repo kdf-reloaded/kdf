@@ -32,6 +32,7 @@
 //!   [`SWAP_TX_VISIBILITY_GRACE_SECS`].
 
 use coins::lp_coinfind;
+use coins::swap_evidence::is_undetermined;
 use coins::{MakerCoinSwapOpsV2, MmCoin, MmCoinEnum, ParseCoinAssocTypes, TakerCoinSwapOpsV2};
 use common::executor::{spawn, Timer};
 use common::log::log_crate::Level;
@@ -44,6 +45,7 @@ use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::evidence_wait::{refund_cap_text, refund_gate_cap_text, Read, WaitLog};
 use super::nft_maker_swap_v2::{select_nft_swap_v2_post_maker_payment_restart_from_tx,
                                select_nft_swap_v2_pre_maker_payment_restart, NftSwapV2PostMakerPaymentRestart,
                                NftSwapV2RestartDecision, NftSwapV2TakerAsset};
@@ -217,6 +219,264 @@ pub(super) fn maker_own_claim_not_confirmed_reason(claim: &str) -> AbortReason {
 /// (CRD ch.52 R33).
 pub(super) fn taker_own_claim_not_confirmed_reason(claim: &str) -> AbortReason {
     AbortReason::MakerPaymentSpendNotConfirmedInTime(own_claim_not_confirmed_text(claim))
+}
+
+// Waits on undetermined reads ------------------------------------------------
+
+/// What a swap step does after one chain read it rests on (CRD ch.51 §51.6G R100 items 3 and 9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AfterRead {
+    /// The read gave a determined answer or failed in another way; the step handles it as its own rule says.
+    Determined,
+    /// The read is undetermined and the wait has not reached its bound: the step reads again.
+    ReadAgain,
+    /// The read is undetermined and the wait has reached its bound: the swap ends.
+    BoundPassed,
+}
+
+/// How [`UndeterminedWait::read`] ended.
+pub(super) enum ReadEnd<T, E> {
+    /// A determined answer.
+    Answer(T),
+    /// A failure that is not an undetermined read.
+    Failed(E),
+    /// The read stayed undetermined until the bound of the wait. Carries the text of the last error, which may
+    /// hold what an operator keeps private and is never put into an event.
+    BoundPassed(String),
+}
+
+/// The wait of one swap step on chain reads that could not be determined (CRD ch.51 §51.6G R100 items 3 and 9).
+///
+/// A step neither refunds nor claims on an undetermined read; it reads again. The wait ends 3700 seconds after
+/// the first undetermined answer that was read at or after `lock_time`, the moment the step first could act; an
+/// undetermined answer before the lock time is waited on and does not start that count. So the wait never ends
+/// before `lock_time` plus 3700 seconds. The moment is kept in memory only, so a resumed swap starts a new wait.
+///
+/// # What the coin must guarantee
+///
+/// A coin read with its own `wait_until` (a confirmation wait, a search for a spend) checks the clock before it
+/// asks a node and answers "timed out" without a read once `wait_until` has passed. The step's own deadline and
+/// the coin's `wait_until` are therefore two values: [`coin_wait_until`] gives every read after an undetermined
+/// answer a `wait_until` that has not passed, and the step's deadline is judged here, by [`answered_too_late`].
+/// The engine takes "timed out" from such a read as a determined "not in time". That rests on one rule for a coin
+/// whose reads can be undetermined: a call whose `wait_until` has not passed asks its nodes at least once, and it
+/// answers "timed out" only when its last read in that call was determined; an undetermined read is answered
+/// with the marker and is never turned into "timed out", "nothing found" or "not confirmed".
+pub(super) struct UndeterminedWait {
+    lock_time: u64,
+    waited: bool,
+    first_at: Option<u64>,
+    log: WaitLog,
+}
+
+/// The `wait_until` a coin read is given: the step's own `deadline` for the first read of a wait, and for a read
+/// that follows an undetermined answer at least `min_wait_until`, so that the coin reads instead of answering
+/// "timed out" from its clock alone. `min_wait_until` is what [`UndeterminedWait::read`] hands its `read`.
+pub(super) fn coin_wait_until(deadline: u64, min_wait_until: u64) -> u64 { deadline.max(min_wait_until) }
+
+impl UndeterminedWait {
+    pub(super) fn new(lock_time: u64) -> Self {
+        UndeterminedWait {
+            lock_time,
+            waited: false,
+            first_at: None,
+            log: WaitLog::new(),
+        }
+    }
+
+    /// Whether a read of this wait was undetermined.
+    pub(super) fn waited(&self) -> bool { self.waited }
+
+    /// Judges one read at the time `now`: `error` is the text of its error, `None` for an answer. An error is an
+    /// undetermined read when it carries the marker anywhere in its text.
+    pub(super) fn after_read(&mut self, error: Option<&str>, now: u64) -> AfterRead {
+        match error {
+            Some(error) if is_undetermined(error) => {
+                self.waited = true;
+                if now >= self.lock_time && self.first_at.is_none() {
+                    self.first_at = Some(now);
+                }
+                match self.first_at {
+                    Some(first_at) if now >= own_claim_confirmation_deadline(self.lock_time, first_at) => {
+                        AfterRead::BoundPassed
+                    },
+                    _ => AfterRead::ReadAgain,
+                }
+            },
+            _ => AfterRead::Determined,
+        }
+    }
+
+    /// Repeats `read` every `poll_secs` while it is undetermined, until it gives an answer, fails in another way,
+    /// or the bound of the wait has passed. `now` is the clock in seconds. The first undetermined read gives one
+    /// warning that names `ticker` and no error text; the repeats and every error text go to debug level.
+    ///
+    /// `read` is handed the earliest `wait_until` its coin call may use: zero for the first read, and one poll
+    /// interval from now for a read that follows an undetermined answer (see [`coin_wait_until`]). The window is
+    /// one poll interval and not the bound of the wait, because a coin read keeps polling until its `wait_until`.
+    pub(super) async fn read<T, E, F, Fut>(
+        &mut self,
+        swap_uuid: &Uuid,
+        ticker: &str,
+        kind: CappedRead,
+        poll_secs: u64,
+        now: impl Fn() -> u64,
+        mut read: F,
+    ) -> ReadEnd<T, E>
+    where
+        E: std::fmt::Display,
+        F: FnMut(u64) -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        let mut min_wait_until = 0;
+        loop {
+            let error = match read(min_wait_until).await {
+                Ok(answer) => return ReadEnd::Answer(answer),
+                Err(error) => error,
+            };
+            let text = error.to_string();
+            match self.after_read(Some(&text), now()) {
+                AfterRead::Determined => return ReadEnd::Failed(error),
+                AfterRead::BoundPassed => return ReadEnd::BoundPassed(text),
+                AfterRead::ReadAgain => {
+                    self.log.note(swap_uuid, ticker, kind.logged_as(), &text);
+                    Timer::sleep(poll_secs as f64).await;
+                    min_wait_until = now() + poll_secs;
+                },
+            }
+        }
+    }
+
+    /// Reads a confirmation a step rests on, as [`UndeterminedWait::read`] does. `deadline` is the step's own
+    /// deadline for the confirmation; `read` is handed the `wait_until` of its coin call, which is `deadline` for
+    /// the first read and may be later for a read after an undetermined answer. Whether a confirmation came in
+    /// time is judged against `deadline` alone.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn read_confirmation<F, Fut>(
+        &mut self,
+        swap_uuid: &Uuid,
+        ticker: &str,
+        kind: CappedRead,
+        deadline: u64,
+        poll_secs: u64,
+        now: impl Fn() -> u64,
+        mut read: F,
+    ) -> ConfirmationEnd
+    where
+        F: FnMut(u64) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let end = self
+            .read(swap_uuid, ticker, kind, poll_secs, &now, |min_wait_until| {
+                read(coin_wait_until(deadline, min_wait_until))
+            })
+            .await;
+        confirmation_end(end, self.waited(), now(), deadline)
+    }
+}
+
+/// How a confirmation read a step rests on ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ConfirmationEnd {
+    Confirmed,
+    /// Not confirmed, with the reason; the step handles it as its own rule says for a failed confirmation.
+    NotConfirmed(String),
+    /// Undetermined until the bound of the wait, with the text of the last error.
+    BoundPassed(String),
+}
+
+/// Whether an answer that was read only after undetermined reads came too late to act on: the step's own
+/// deadline for it has passed. This holds for a confirmation and for a funding spend that became the taker
+/// payment. An answer read without such a wait is taken as the coin gave it.
+pub(super) fn answered_too_late(waited: bool, now: u64, deadline: u64) -> bool { waited && now > deadline }
+
+/// The reason text of a confirmation that [`answered_too_late`] refuses.
+const CONFIRMED_AFTER_DEADLINE: &str = "the confirmation was read only after its deadline";
+
+/// Turns the end of a confirmation read into what the step does. `waited` is whether a read of the wait was
+/// undetermined, `now` the time the read ended, and `deadline` the step's own deadline for the confirmation.
+fn confirmation_end(end: ReadEnd<(), String>, waited: bool, now: u64, deadline: u64) -> ConfirmationEnd {
+    match end {
+        ReadEnd::Answer(()) if answered_too_late(waited, now, deadline) => {
+            ConfirmationEnd::NotConfirmed(CONFIRMED_AFTER_DEADLINE.to_string())
+        },
+        ReadEnd::Answer(()) => ConfirmationEnd::Confirmed,
+        ReadEnd::Failed(error) => ConfirmationEnd::NotConfirmed(error),
+        ReadEnd::BoundPassed(error) => ConfirmationEnd::BoundPassed(error),
+    }
+}
+
+/// The read a step waits on while it is undetermined. It names the read in the log line of the wait and in the
+/// abort of a wait that ended at its bound.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum CappedRead {
+    /// The maker's search for the spend of the taker funding.
+    FundingSpendSearch,
+    /// The maker's read of the taker payment's confirmation, before it claims.
+    TakerPaymentConfirmation,
+    /// The taker's read of the maker payment's confirmation, before it spends its funding.
+    MakerPaymentConfirmation,
+    /// The taker's search for the spend of the taker payment.
+    TakerPaymentSpendSearch,
+    /// The refund gate of the maker payment.
+    MakerRefundGate,
+    /// The refund gate of the taker payment.
+    TakerRefundGate,
+}
+
+impl CappedRead {
+    /// How the read is named in the log line of its wait.
+    fn logged_as(self) -> Read {
+        match self {
+            CappedRead::FundingSpendSearch => Read::TakerFundingSearch,
+            CappedRead::TakerPaymentConfirmation => Read::TakerPaymentConfirmation,
+            CappedRead::MakerPaymentConfirmation => Read::MakerPaymentConfirmation,
+            CappedRead::TakerPaymentSpendSearch => Read::Look,
+            CappedRead::MakerRefundGate | CappedRead::TakerRefundGate => Read::Gate,
+        }
+    }
+}
+
+/// The text of the abort of a step whose read stayed undetermined until the bound of its wait: the kind of the
+/// read, the coin, what was not done, and the fix (CRD ch.51 §51.6G R100 item 9). It carries no error text.
+fn undetermined_cap_text(read: &str, ticker: &str, left_undone: &str) -> String {
+    format!(
+        "{read} on {ticker} did not give a determined answer before its deadline (no two nodes agreed, or the \
+         trusted node did not answer); {left_undone}; add a server on a second host to the coin's node list or set \
+         `swap_evidence_node`, then run `recover_funds_of_swap`"
+    )
+}
+
+/// The abort reason of a step whose `read` on the coin `ticker` stayed undetermined until the bound of its wait.
+/// Each read ends with the reason variant its state already uses. `last_error` only decides the kind named in the
+/// texts shared with the legacy swap; no part of it is in the reason.
+pub(super) fn undetermined_cap_reason(read: CappedRead, ticker: &str, last_error: &str) -> AbortReason {
+    match read {
+        CappedRead::FundingSpendSearch => AbortReason::FundingSpendError(undetermined_cap_text(
+            "the search for the spend of the taker funding",
+            ticker,
+            "the maker payment is not refunded",
+        )),
+        // Not `ConfirmationTimeout`: the maker's aborts with that reason commit nothing (CRD ch.52 R19, R44),
+        // and this one is reached with the maker payment on chain.
+        CappedRead::TakerPaymentConfirmation => AbortReason::InternalError(undetermined_cap_text(
+            "the read of the confirmation of the taker payment",
+            ticker,
+            "the maker payment is on chain, the taker payment is not claimed and the maker payment is not refunded",
+        )),
+        CappedRead::MakerPaymentConfirmation => AbortReason::MakerPaymentNotConfirmedInTime(undetermined_cap_text(
+            "the read of the confirmation of the maker payment",
+            ticker,
+            "the taker funding is not spent and not refunded",
+        )),
+        CappedRead::TakerPaymentSpendSearch => AbortReason::MakerDidNotSpendInTime(refund_cap_text(ticker, last_error)),
+        CappedRead::MakerRefundGate => AbortReason::InternalError(undetermined_cap_text(
+            "the refundability check",
+            ticker,
+            "the maker payment is not refunded",
+        )),
+        CappedRead::TakerRefundGate => AbortReason::TakerPaymentRefundFailed(refund_gate_cap_text(ticker, last_error)),
+    }
 }
 
 /// Errors produced by the V2 state machine infrastructure itself.
@@ -1611,6 +1871,591 @@ mod tests {
         }
         let nothing_committed = AbortReason::ConfirmationTimeout("Taker funding not confirmed in time: late".into());
         assert!(!nothing_committed.to_string().contains(phrase));
+    }
+
+    /// An undetermined read as a coin reports it, with node names that must not reach an event.
+    fn undetermined_error() -> String {
+        coins::swap_evidence::undetermined("the nodes disagree", &["node.example:443", "node-b.example"])
+    }
+
+    /// A scripted read under [`UndeterminedWait::read`]: each attempt takes the next answer and moves the clock on
+    /// by `step`. The answer is how the read ended, the number of attempts, and whether the wait saw an
+    /// undetermined read.
+    fn run_read<T, E: std::fmt::Display>(
+        lock_time: u64,
+        start: u64,
+        step: u64,
+        answers: Vec<Result<T, E>>,
+    ) -> (ReadEnd<T, E>, usize, bool) {
+        use std::cell::Cell;
+
+        let clock = Cell::new(start);
+        let attempts = Cell::new(0usize);
+        let mut answers = answers.into_iter();
+        let mut wait = UndeterminedWait::new(lock_time);
+        let end = common::block_on(wait.read(
+            &Uuid::nil(),
+            "RIN",
+            CappedRead::TakerPaymentSpendSearch,
+            0,
+            || clock.get(),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                clock.set(clock.get() + step);
+                let answer = answers.next().expect("no further attempt is expected");
+                async move { answer }
+            },
+        ));
+        (end, attempts.get(), wait.waited())
+    }
+
+    /// CRD ch.51 R100, the note on how the code applies it, item 6: the marker is recognized wherever the error
+    /// text carries it, also inside the text of another error.
+    #[test]
+    fn an_undetermined_read_is_recognized_when_its_text_is_wrapped() {
+        let wrapped = format!("lp_coins:1234] RPC error: \"{}\"", undetermined_error());
+        let mut wait = UndeterminedWait::new(10_000);
+        assert_eq!(wait.after_read(Some(&wrapped), 100), AfterRead::ReadAgain);
+        assert!(wait.waited());
+
+        let in_a_search_error = coins::SearchForFundingSpendErr::Rpc(undetermined_error()).to_string();
+        assert_eq!(wait.after_read(Some(&in_a_search_error), 100), AfterRead::ReadAgain);
+
+        let in_a_find_error = MmError::new(coins::FindPaymentSpendError::Transport(undetermined_error())).to_string();
+        assert_eq!(wait.after_read(Some(&in_a_find_error), 100), AfterRead::ReadAgain);
+    }
+
+    /// An answer, and an error without the marker, are determined: the step keeps its own handling of them.
+    #[test]
+    fn an_answer_and_a_plain_error_are_determined() {
+        let mut wait = UndeterminedWait::new(10_000);
+        assert_eq!(wait.after_read(None, 100), AfterRead::Determined);
+        assert_eq!(wait.after_read(Some(NODE_ERROR), 100), AfterRead::Determined);
+        assert_eq!(wait.after_read(Some(NODE_ERROR), 99_999), AfterRead::Determined);
+        assert!(!wait.waited());
+    }
+
+    /// CRD ch.51 R100 item 9, its second note: only an undetermined answer at or after the lock time is the
+    /// moment the step first could act. One before the lock time is waited on and does not start the 3700
+    /// seconds.
+    #[test]
+    fn an_undetermined_answer_before_the_lock_time_does_not_start_the_bound() {
+        let undetermined = undetermined_error();
+        let lock_time = 10_000;
+        let mut wait = UndeterminedWait::new(lock_time);
+        assert_eq!(wait.after_read(Some(&undetermined), 2_000), AfterRead::ReadAgain);
+        assert!(wait.waited());
+        assert_eq!(wait.after_read(None, 9_000), AfterRead::Determined);
+        assert_eq!(wait.after_read(None, lock_time + 2_999), AfterRead::Determined);
+        assert_eq!(
+            wait.after_read(Some(&undetermined), lock_time + 3_000),
+            AfterRead::ReadAgain
+        );
+        assert_eq!(
+            wait.after_read(Some(&undetermined), lock_time + 3_700),
+            AfterRead::ReadAgain
+        );
+        assert_eq!(
+            wait.after_read(Some(&undetermined), lock_time + 6_699),
+            AfterRead::ReadAgain
+        );
+        assert_eq!(
+            wait.after_read(Some(&undetermined), lock_time + 6_700),
+            AfterRead::BoundPassed
+        );
+
+        // Undetermined answers that all come before the lock time never end the wait.
+        let mut before = UndeterminedWait::new(lock_time);
+        assert_eq!(before.after_read(Some(&undetermined), 100), AfterRead::ReadAgain);
+        assert_eq!(
+            before.after_read(Some(&undetermined), lock_time - 1),
+            AfterRead::ReadAgain
+        );
+    }
+
+    /// CRD ch.51 R100 item 9 with its notes: the wait ends at the later of the lock time plus 3700 seconds and
+    /// 3700 seconds after its first undetermined read at or after the lock time. A determined read in between
+    /// does not move that moment.
+    #[test]
+    fn an_undetermined_wait_ends_at_the_later_of_the_two_moments() {
+        let undetermined = undetermined_error();
+
+        let mut early = UndeterminedWait::new(10_000);
+        assert_eq!(early.after_read(Some(&undetermined), 2_000), AfterRead::ReadAgain);
+        assert_eq!(early.after_read(Some(&undetermined), 10_000), AfterRead::ReadAgain);
+        assert_eq!(early.after_read(None, 12_000), AfterRead::Determined);
+        assert_eq!(early.after_read(Some(&undetermined), 13_699), AfterRead::ReadAgain);
+        assert_eq!(early.after_read(Some(&undetermined), 13_700), AfterRead::BoundPassed);
+
+        let mut late = UndeterminedWait::new(10_000);
+        assert_eq!(late.after_read(Some(&undetermined), 50_000), AfterRead::ReadAgain);
+        assert_eq!(late.after_read(Some(&undetermined), 53_699), AfterRead::ReadAgain);
+        assert_eq!(late.after_read(Some(&undetermined), 53_700), AfterRead::BoundPassed);
+
+        // A wait that is started again, as after a restart, has a full 3700 seconds.
+        let mut resumed = UndeterminedWait::new(10_000);
+        assert_eq!(resumed.after_read(Some(&undetermined), 53_700), AfterRead::ReadAgain);
+    }
+
+    /// An undetermined read is read again, and the determined answer that follows is what the step gets.
+    #[test]
+    fn a_read_goes_on_after_undetermined_answers_once_it_is_determined() {
+        let answers: Vec<Result<u8, String>> = vec![Err(undetermined_error()), Err(undetermined_error()), Ok(7)];
+        let (end, attempts, waited) = run_read(10_000, 100, 10, answers);
+        assert!(matches!(end, ReadEnd::Answer(7)));
+        assert_eq!(attempts, 3);
+        assert!(waited);
+    }
+
+    /// A read that stays undetermined through the lock time gives no answer and no other failure: it ends only at
+    /// the bound, and then as `BoundPassed`.
+    #[test]
+    fn a_read_that_stays_undetermined_ends_only_at_the_bound() {
+        // The first undetermined read is at 9_000, so the bound is 10_000 + 3700; the clock moves 1000 per read.
+        let answers: Vec<Result<u8, String>> = vec![Err(undetermined_error()); 6];
+        let (end, attempts, waited) = run_read(10_000, 8_000, 1_000, answers);
+        assert!(matches!(end, ReadEnd::BoundPassed(_)));
+        assert_eq!(
+            attempts, 6,
+            "reads at 9000, 10000, 11000, 12000 and 13000 wait; the one at 14000 ends"
+        );
+        assert!(waited);
+    }
+
+    /// An error without the marker ends the read at once as a failure, at any time, with its own error.
+    #[test]
+    fn a_read_ends_at_once_on_an_error_that_is_not_undetermined() {
+        let (end, attempts, waited) = run_read::<u8, String>(10_000, 100, 10, vec![Err(NODE_ERROR.to_string())]);
+        assert!(matches!(end, ReadEnd::Failed(ref e) if e == NODE_ERROR));
+        assert_eq!(attempts, 1);
+        assert!(!waited);
+
+        let answers: Vec<Result<u8, String>> = vec![Err(undetermined_error()), Err(NODE_ERROR.to_string())];
+        let (end, attempts, _) = run_read(10_000, 100, 10, answers);
+        assert!(matches!(end, ReadEnd::Failed(_)));
+        assert_eq!(attempts, 2);
+    }
+
+    /// CRD ch.52 R18: an undetermined search for the funding spend is never taken as "nothing found" or as a
+    /// passing node error; the answer of the search that follows is taken.
+    #[test]
+    fn the_funding_spend_search_waits_on_an_undetermined_answer() {
+        use coins::SearchForFundingSpendErr;
+
+        let answers: Vec<Result<Option<u8>, SearchForFundingSpendErr>> =
+            vec![Err(SearchForFundingSpendErr::Rpc(undetermined_error())), Ok(Some(1))];
+        let (end, attempts, _) = run_read(10_000, 100, 10, answers);
+        assert!(matches!(end, ReadEnd::Answer(Some(1))));
+        assert_eq!(attempts, 2);
+
+        // Past the search deadline and the lock time the search still waits, up to the bound.
+        let answers: Vec<Result<Option<u8>, SearchForFundingSpendErr>> = vec![
+            Err(SearchForFundingSpendErr::Rpc(undetermined_error())),
+            Err(SearchForFundingSpendErr::Rpc(undetermined_error())),
+            Ok(None),
+        ];
+        let (end, attempts, _) = run_read(10_000, 11_000, 1_000, answers);
+        assert!(matches!(end, ReadEnd::Answer(None)));
+        assert_eq!(attempts, 3);
+
+        let plain: Vec<Result<Option<u8>, SearchForFundingSpendErr>> =
+            vec![Err(SearchForFundingSpendErr::Rpc(NODE_ERROR.to_string()))];
+        let (end, _, _) = run_read(10_000, 100, 10, plain);
+        assert!(matches!(end, ReadEnd::Failed(SearchForFundingSpendErr::Rpc(_))));
+    }
+
+    /// What the nodes of [`ClockFirstCoin`] answer to one read.
+    #[derive(Clone, Copy)]
+    enum NodeRead {
+        /// The spend is found, or the transaction is confirmed.
+        Yes,
+        /// A determined "not spent" or "not confirmed".
+        NotYet,
+        Undetermined,
+    }
+
+    const TIMED_OUT: &str = "Waited too long";
+
+    /// A scripted coin read that keeps the order of the real ones: it checks the clock first and answers "timed
+    /// out" without asking a node once `wait_until` has passed; otherwise it asks every ten seconds until
+    /// `wait_until`. An undetermined read is answered with the marker at once.
+    struct ClockFirstCoin {
+        clock: std::cell::Cell<u64>,
+        calls: std::cell::Cell<usize>,
+        node_reads: std::cell::Cell<usize>,
+        script: std::cell::RefCell<std::collections::VecDeque<NodeRead>>,
+        wait_untils: std::cell::RefCell<Vec<u64>>,
+    }
+
+    impl ClockFirstCoin {
+        fn new(start: u64, script: Vec<NodeRead>) -> Self {
+            ClockFirstCoin {
+                clock: std::cell::Cell::new(start),
+                calls: std::cell::Cell::new(0),
+                node_reads: std::cell::Cell::new(0),
+                script: std::cell::RefCell::new(script.into()),
+                wait_untils: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn read(&self, wait_until: u64) -> Result<(), String> {
+            self.calls.set(self.calls.get() + 1);
+            self.wait_untils.borrow_mut().push(wait_until);
+            loop {
+                if self.clock.get() > wait_until {
+                    return Err(TIMED_OUT.to_string());
+                }
+                self.node_reads.set(self.node_reads.get() + 1);
+                let answer = self
+                    .script
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("no further node read is expected");
+                self.clock.set(self.clock.get() + 10);
+                match answer {
+                    NodeRead::Yes => return Ok(()),
+                    NodeRead::Undetermined => return Err(undetermined_error()),
+                    NodeRead::NotYet => (),
+                }
+            }
+        }
+
+        /// The search for a spend under [`UndeterminedWait::read`], as the taker's states run it: the step's
+        /// deadline is the lock time.
+        fn search(&self, lock_time: u64) -> ReadEnd<(), String> {
+            common::block_on(UndeterminedWait::new(lock_time).read(
+                &Uuid::nil(),
+                "RIN",
+                CappedRead::TakerPaymentSpendSearch,
+                0,
+                || self.clock.get(),
+                |min_wait_until| {
+                    let answer = self.read(coin_wait_until(lock_time, min_wait_until));
+                    async move { answer }
+                },
+            ))
+        }
+
+        /// A confirmation wait under [`UndeterminedWait::read_confirmation`].
+        fn confirmation(&self, lock_time: u64, deadline: u64) -> ConfirmationEnd {
+            common::block_on(UndeterminedWait::new(lock_time).read_confirmation(
+                &Uuid::nil(),
+                "RIN",
+                CappedRead::TakerPaymentConfirmation,
+                deadline,
+                0,
+                || self.clock.get(),
+                |wait_until| {
+                    let answer = self.read(wait_until);
+                    async move { answer }
+                },
+            ))
+        }
+    }
+
+    /// CRD ch.52 R31: a search for the spend of the taker payment that is undetermined just before the locktime
+    /// is never ended by the coin's clock. Every search after it reaches the nodes, also past the locktime, and
+    /// the wait ends only at its bound.
+    #[test]
+    fn an_undetermined_spend_search_near_the_locktime_is_not_ended_by_the_clock() {
+        let coin = ClockFirstCoin::new(9_995, vec![NodeRead::Undetermined; 400]);
+        let end = coin.search(10_000);
+        assert!(matches!(end, ReadEnd::BoundPassed(_)));
+        // The first answer at or after the locktime comes at 10_005, so the bound is 13_705.
+        assert!(coin.clock.get() >= 13_705);
+        assert_eq!(
+            coin.calls.get(),
+            coin.node_reads.get(),
+            "every call of the coin reached the nodes"
+        );
+        assert_eq!(coin.wait_untils.borrow()[0], 10_000);
+        assert!(coin.wait_untils.borrow()[1..]
+            .iter()
+            .all(|wait_until| *wait_until > 10_000));
+    }
+
+    /// CRD ch.52 R31: after an undetermined search, "timed out" past the locktime is taken as "the maker did not
+    /// spend" only from a search that reached the nodes and found no spend; a spend that is found is taken.
+    #[test]
+    fn a_spend_search_after_an_undetermined_one_times_out_only_after_a_real_read() {
+        let coin = ClockFirstCoin::new(9_995, vec![NodeRead::Undetermined, NodeRead::NotYet]);
+        let end = coin.search(10_000);
+        assert!(matches!(end, ReadEnd::Failed(ref e) if e == TIMED_OUT));
+        assert_eq!(
+            coin.node_reads.get(),
+            2,
+            "the second search asked the nodes before it timed out"
+        );
+
+        let coin = ClockFirstCoin::new(9_995, vec![NodeRead::Undetermined, NodeRead::Yes]);
+        assert!(matches!(coin.search(10_000), ReadEnd::Answer(())));
+
+        let coin = ClockFirstCoin::new(9_000, vec![
+            NodeRead::Undetermined,
+            NodeRead::Undetermined,
+            NodeRead::Yes,
+        ]);
+        assert!(matches!(coin.search(10_000), ReadEnd::Answer(())));
+        assert_eq!(*coin.wait_untils.borrow(), vec![10_000, 10_000, 10_000]);
+    }
+
+    /// A search that starts after the locktime without an undetermined answer before it keeps its own handling:
+    /// the coin answers "timed out" and the step takes it.
+    #[test]
+    fn a_first_spend_search_after_the_locktime_keeps_its_own_handling() {
+        let coin = ClockFirstCoin::new(10_001, vec![]);
+        assert!(matches!(coin.search(10_000), ReadEnd::Failed(ref e) if e == TIMED_OUT));
+        assert_eq!(coin.node_reads.get(), 0);
+    }
+
+    /// CRD ch.52 R21, R34: an undetermined answer of the refund gate is never taken as "refundable"; the gate is
+    /// read again and its later answer is taken, and an error without the marker keeps its own retry.
+    #[test]
+    fn the_refund_gate_waits_on_an_undetermined_answer() {
+        use coins::CanRefundHtlc;
+
+        let answers: Vec<Result<CanRefundHtlc, String>> =
+            vec![Err(undetermined_error()), Ok(CanRefundHtlc::CanRefundNow)];
+        let (end, attempts, _) = run_read(10_000, 10_000, 30, answers);
+        assert!(matches!(end, ReadEnd::Answer(CanRefundHtlc::CanRefundNow)));
+        assert_eq!(attempts, 2);
+
+        let answers: Vec<Result<CanRefundHtlc, String>> = (0..3).map(|_| Err(undetermined_error())).collect();
+        let (end, attempts, _) = run_read(10_000, 10_000, 1_850, answers);
+        assert!(matches!(end, ReadEnd::BoundPassed(_)));
+        assert_eq!(attempts, 3, "reads at 11850 and 13700 wait; the one at 15550 ends");
+
+        let (end, _, _) = run_read::<CanRefundHtlc, String>(10_000, 10_000, 30, vec![Err(NODE_ERROR.to_string())]);
+        assert!(matches!(end, ReadEnd::Failed(_)));
+    }
+
+    /// CRD ch.52 R18: a funding spend that became the taker payment and is found after undetermined searches and
+    /// after the ⅔ deadline is not acted on, so the maker takes its refund path. Found without such a wait, or
+    /// before the deadline, it is acted on as the search gave it.
+    #[test]
+    fn a_taker_payment_found_after_a_wait_and_after_the_deadline_is_too_late() {
+        let deadline = 6_000;
+        assert!(answered_too_late(true, 6_001, deadline));
+        assert!(answered_too_late(true, 13_000, deadline));
+        assert!(!answered_too_late(true, 6_000, deadline));
+        assert!(!answered_too_late(true, 100, deadline));
+        assert!(!answered_too_late(false, 6_001, deadline));
+        assert!(!answered_too_late(false, 13_000, deadline));
+
+        // The same through a scripted search: the wait of the search is what makes a late find too late.
+        let found_late: Vec<Result<Option<u8>, String>> = vec![Err(undetermined_error()), Ok(Some(1))];
+        let (end, _, waited) = run_read(10_000, 6_500, 500, found_late);
+        assert!(matches!(end, ReadEnd::Answer(Some(1))));
+        assert!(answered_too_late(waited, 7_500, deadline));
+
+        let found_at_once: Vec<Result<Option<u8>, String>> = vec![Ok(Some(1))];
+        let (end, _, waited) = run_read(10_000, 6_500, 500, found_at_once);
+        assert!(matches!(end, ReadEnd::Answer(Some(1))));
+        assert!(!answered_too_late(waited, 7_000, deadline));
+    }
+
+    /// CRD ch.52 R19, R30: a confirmation read keeps its own outcome when it was determined at once; after
+    /// undetermined reads a confirmation is acted on only when it is read before the step's deadline.
+    #[test]
+    fn a_confirmation_read_after_a_wait_is_acted_on_only_before_its_deadline() {
+        let ok = || ReadEnd::<(), String>::Answer(());
+        assert_eq!(confirmation_end(ok(), false, 100, 1_000), ConfirmationEnd::Confirmed);
+        assert_eq!(confirmation_end(ok(), false, 1_001, 1_000), ConfirmationEnd::Confirmed);
+        assert_eq!(confirmation_end(ok(), true, 1_000, 1_000), ConfirmationEnd::Confirmed);
+        assert_eq!(
+            confirmation_end(ok(), true, 1_001, 1_000),
+            ConfirmationEnd::NotConfirmed(CONFIRMED_AFTER_DEADLINE.to_string())
+        );
+        assert_eq!(
+            confirmation_end(ReadEnd::Failed("timed out".to_string()), false, 1_001, 1_000),
+            ConfirmationEnd::NotConfirmed("timed out".to_string())
+        );
+        assert_eq!(
+            confirmation_end(ReadEnd::BoundPassed("x".to_string()), true, 9_999, 1_000),
+            ConfirmationEnd::BoundPassed("x".to_string())
+        );
+    }
+
+    /// CRD ch.52 R19, R30: a confirmation read that is undetermined just before the step's deadline is never
+    /// ended by the coin's clock as "not confirmed", which would lead to a refund state. Every read after it
+    /// reaches the nodes, and the wait ends only at its bound.
+    #[test]
+    fn an_undetermined_confirmation_read_near_the_deadline_is_not_ended_by_the_clock() {
+        let coin = ClockFirstCoin::new(2_995, vec![NodeRead::Undetermined; 1_200]);
+        let end = coin.confirmation(10_000, 3_000);
+        assert!(matches!(end, ConfirmationEnd::BoundPassed(_)));
+        assert!(coin.clock.get() >= 13_700);
+        assert_eq!(
+            coin.calls.get(),
+            coin.node_reads.get(),
+            "every call of the coin reached the nodes"
+        );
+    }
+
+    /// CRD ch.52 R19, R30: the step's deadline is judged apart from the `wait_until` the coin is given. A
+    /// confirmation read in time after a wait is taken; one read after the deadline is not, although the coin was
+    /// given a later `wait_until`; "timed out" is taken as "not confirmed" only after a read of the nodes.
+    #[test]
+    fn a_confirmation_after_an_undetermined_read_is_judged_by_the_steps_deadline() {
+        let coin = ClockFirstCoin::new(2_000, vec![NodeRead::Undetermined, NodeRead::Yes]);
+        assert_eq!(coin.confirmation(10_000, 3_000), ConfirmationEnd::Confirmed);
+        assert_eq!(*coin.wait_untils.borrow(), vec![3_000, 3_000]);
+
+        let coin = ClockFirstCoin::new(2_995, vec![NodeRead::Undetermined, NodeRead::Yes]);
+        assert_eq!(
+            coin.confirmation(10_000, 3_000),
+            ConfirmationEnd::NotConfirmed(CONFIRMED_AFTER_DEADLINE.to_string())
+        );
+        assert_eq!(*coin.wait_untils.borrow(), vec![3_000, 3_005]);
+
+        let coin = ClockFirstCoin::new(2_995, vec![NodeRead::Undetermined, NodeRead::NotYet]);
+        assert_eq!(
+            coin.confirmation(10_000, 3_000),
+            ConfirmationEnd::NotConfirmed(TIMED_OUT.to_string())
+        );
+        assert_eq!(
+            coin.node_reads.get(),
+            2,
+            "the second read asked the nodes before it timed out"
+        );
+
+        // Without an undetermined read the coin's own answer is taken as it is.
+        let coin = ClockFirstCoin::new(3_001, vec![]);
+        assert_eq!(
+            coin.confirmation(10_000, 3_000),
+            ConfirmationEnd::NotConfirmed(TIMED_OUT.to_string())
+        );
+    }
+
+    /// The `wait_until` of a coin read is the step's deadline until a read after an undetermined answer needs a
+    /// later one.
+    #[test]
+    fn the_coin_is_given_the_steps_deadline_or_a_later_window() {
+        assert_eq!(coin_wait_until(10_000, 0), 10_000);
+        assert_eq!(coin_wait_until(10_000, 9_000), 10_000);
+        assert_eq!(coin_wait_until(10_000, 10_015), 10_015);
+    }
+
+    /// Every abort of a wait that reached its bound uses the reason variant its state already has, names the
+    /// coin and the fix, and carries no part of the error text of the read.
+    #[test]
+    fn the_abort_of_a_wait_at_its_bound_names_the_coin_and_the_fix_and_no_error_text() {
+        let last_error = format!("{} at {NODE_ERROR}", undetermined_error());
+        let all = [
+            CappedRead::FundingSpendSearch,
+            CappedRead::TakerPaymentConfirmation,
+            CappedRead::MakerPaymentConfirmation,
+            CappedRead::TakerPaymentSpendSearch,
+            CappedRead::MakerRefundGate,
+            CappedRead::TakerRefundGate,
+        ];
+        for read in all {
+            let reason = undetermined_cap_reason(read, "RIN", &last_error);
+            let variant_is_the_states_own = match read {
+                CappedRead::FundingSpendSearch => matches!(reason, AbortReason::FundingSpendError(_)),
+                CappedRead::TakerPaymentConfirmation => matches!(reason, AbortReason::InternalError(_)),
+                CappedRead::MakerPaymentConfirmation => {
+                    matches!(reason, AbortReason::MakerPaymentNotConfirmedInTime(_))
+                },
+                CappedRead::TakerPaymentSpendSearch => matches!(reason, AbortReason::MakerDidNotSpendInTime(_)),
+                CappedRead::MakerRefundGate => matches!(reason, AbortReason::InternalError(_)),
+                CappedRead::TakerRefundGate => matches!(reason, AbortReason::TakerPaymentRefundFailed(_)),
+            };
+            assert!(variant_is_the_states_own, "{read:?}");
+
+            let shown = reason.to_string();
+            let stored = serde_json::to_string(&reason).unwrap();
+            for text in [&shown, &stored] {
+                assert!(text.contains("RIN"), "{read:?}");
+                assert!(text.contains("second host"), "{read:?}");
+                assert!(text.contains("`swap_evidence_node`"), "{read:?}");
+                assert!(text.contains("`recover_funds_of_swap`"), "{read:?}");
+                assert!(text.contains("no two nodes agreed"), "{read:?}");
+                assert!(!text.contains(PRIVATE_MARKER), "{read:?}");
+                assert!(!text.contains("node.example"), "{read:?}");
+                assert!(!text.contains("node-b"), "{read:?}");
+                assert!(!text.contains("http"), "{read:?}");
+                assert!(!text.contains(OWN_CLAIM_NOT_CONFIRMED_PHRASE.trim_end()), "{read:?}");
+            }
+        }
+    }
+
+    /// The warning of each wait names its own read and coin, the cause and the fix, and no part of the error
+    /// text of the read.
+    #[test]
+    fn the_warning_of_each_wait_names_its_read_and_no_error_text() {
+        use super::super::evidence_wait::wait_text;
+
+        let reason = format!("{} at {NODE_ERROR}", undetermined_error());
+        let expected = [
+            (
+                CappedRead::FundingSpendSearch,
+                "the search for the spend of the taker funding on RIN could not be determined",
+            ),
+            (
+                CappedRead::TakerPaymentConfirmation,
+                "the confirmation of the taker payment on RIN could not be determined",
+            ),
+            (
+                CappedRead::MakerPaymentConfirmation,
+                "the confirmation of the maker payment on RIN could not be determined",
+            ),
+            (
+                CappedRead::TakerPaymentSpendSearch,
+                "the state of the taker payment on RIN could not be determined",
+            ),
+            (
+                CappedRead::MakerRefundGate,
+                "the chain time of the refund gate on RIN could not be determined",
+            ),
+            (
+                CappedRead::TakerRefundGate,
+                "the chain time of the refund gate on RIN could not be determined",
+            ),
+        ];
+        for (read, opening) in expected {
+            let warning = wait_text("RIN", read.logged_as(), &reason);
+            assert!(warning.starts_with(opening), "{read:?}");
+            assert!(warning.contains("no two nodes agreed"), "{read:?}");
+            assert!(warning.contains("`swap_evidence_node`"), "{read:?}");
+            assert!(!warning.contains(PRIVATE_MARKER), "{read:?}");
+            assert!(!warning.contains("node.example"), "{read:?}");
+            assert!(!warning.contains("node-b"), "{read:?}");
+            assert!(!warning.contains("http"), "{read:?}");
+        }
+    }
+
+    /// The abort text says which payment was left as it is, so a reader knows what to recover.
+    #[test]
+    fn the_abort_of_a_wait_at_its_bound_says_what_was_not_done() {
+        let text = |read| undetermined_cap_reason(read, "RIN", &undetermined_error()).to_string();
+        assert!(text(CappedRead::FundingSpendSearch).contains("the maker payment is not refunded"));
+        assert!(text(CappedRead::TakerPaymentConfirmation).contains("the taker payment is not claimed"));
+        assert!(text(CappedRead::TakerPaymentConfirmation).contains("the maker payment is on chain"));
+        assert!(text(CappedRead::MakerPaymentConfirmation).contains("the taker funding is not spent"));
+        assert!(text(CappedRead::TakerPaymentSpendSearch).contains("the taker payment is not refunded"));
+        assert!(text(CappedRead::MakerRefundGate).contains("the maker payment is not refunded"));
+        assert!(text(CappedRead::TakerRefundGate).contains("the taker payment is not refunded"));
+    }
+
+    /// CRD ch.52 R19, R44: the maker's `ConfirmationTimeout` aborts commit nothing. No abort of a wait that
+    /// reached its bound carries that reason, because each of them is reached with funds on chain.
+    #[test]
+    fn no_abort_of_a_wait_at_its_bound_is_a_confirmation_timeout() {
+        for read in [
+            CappedRead::FundingSpendSearch,
+            CappedRead::TakerPaymentConfirmation,
+            CappedRead::MakerPaymentConfirmation,
+            CappedRead::TakerPaymentSpendSearch,
+            CappedRead::MakerRefundGate,
+            CappedRead::TakerRefundGate,
+        ] {
+            let reason = undetermined_cap_reason(read, "RIN", &undetermined_error());
+            assert!(
+                !matches!(reason, AbortReason::ConfirmationTimeout(_)),
+                "a wait that ends with funds on chain must not abort as a confirmation timeout"
+            );
+        }
     }
 
     #[test]
