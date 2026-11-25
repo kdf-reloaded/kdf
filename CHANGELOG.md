@@ -26,8 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **KDF Reloaded neither shows nor spends ARRR funds held in the Ironwood pool.** The Ironwood pool
   is Pirate Chain's newer shielded pool. Funds there, for example funds a Pirate wallet on the same
   seed keeps in it, stay safe and can be spent from that Pirate wallet; the balance KDF Reloaded
-  shows covers the Sapling part only. Native mode builds no shielded transactions in this release,
-  as before.
+  shows covers the Sapling part only. A coin in native mode is refused at activation in this
+  release, as before.
 
 ## [0.4.1-beta.1] — 2026-11-21
 
