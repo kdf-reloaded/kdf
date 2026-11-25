@@ -1423,6 +1423,19 @@ the previous version used. The safe way:
   status notes of 2026-11-23 after the description of the maker's validation stage, after R28 and at the end of
   §51.6C; ch.09, status note of 2026-11-23 after §9.6.
 
+#### Shielded coins
+
+- **ARRR can spend the notes on the wallet's change address, and the balance it shows can be
+  spent.** In Light mode, ARRR notes on the wallet's change address (the internal address of the
+  same seed), such as the change that a Pirate wallet on the same seed makes, are now spent like any
+  other note: a withdrawal, a withdrawal to a `pirate1` address and a swap payment can use them. A
+  shielded spend signs each note with the key of the ZIP-32 scope the note belongs to. `my_balance`
+  counts these notes as before, and the amount it shows can now be spent: a withdrawal of the
+  maximum spends exactly that balance. KDF Reloaded's own change goes to the wallet's external `zs1`
+  address and was not affected. Nothing needs to be done: no rescan and no new activation, since the
+  wallet database already holds these notes. Detail: PR #542; CRD ch.39 R39.8.0ag1 (status note of
+  2026-11-25).
+
 ### Tests
 
 - **A Tendermint history test no longer hangs when the whole `coins` test suite runs in parallel.** Once a test
@@ -1669,6 +1682,10 @@ the previous version used. The safe way:
   Siacoin is the only coin that does, so no swap hands its data to a watcher, as the 0.4.0-beta.1 item "The swap
   watcher does not work yet" says. Keep your node running until your swaps have finished. Detail: CRD ch.09 R17,
   ch.20 D7.
+- **KDF Reloaded neither shows nor spends ARRR funds held in the Ironwood pool.** The Ironwood pool
+  is Pirate Chain's newer shielded pool. Funds there, for example funds a Pirate wallet on the same
+  seed keeps in it, stay safe and can be spent from that Pirate wallet; the balance KDF Reloaded
+  shows covers the Sapling part only. A coin in native mode is still refused at activation.
 
 ## [0.4.1-beta.1] — 2026-11-21
 
