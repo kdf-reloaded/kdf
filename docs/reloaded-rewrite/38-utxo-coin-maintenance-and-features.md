@@ -3949,6 +3949,40 @@ evaluated.
 > `CoinIsNotElectrum` and an inactive ticker for `NoSuchCoin`; its routing in the
 > dispatcher has no test of its own.
 
+*Status note (2026-11-23, clean side; Reloaded-original). The swap evidence of
+CRD ch.51 R100 for UTXO coins, BCH and QTUM over Electrum.* It changes no
+sentence above.
+
+1. *Directed reads.* Each read a swap step rests on under R100 goes to one named
+   server and reads that server at its own tip: the counterparty's payment by
+   its txid (compared byte for byte), the first history entry of the payment
+   address (whether the own payment was sent), the spend of the payment's output
+   (the searches and the wait for a spend), the confirmations of a payment, and
+   the median time past of the refund gate, whose tip and headers come from the
+   same server.
+2. *Which servers.* The pool's usable servers, in the pool's own order of
+   preference, one per host. Each is named by host and port only.
+3. *Tip gap.* Two servers whose tips lie further apart than the pool's own
+   tolerance in blocks, the one that judges a server up to date, leave the
+   refund gate's read undetermined when they agree.
+4. *A claim proves itself from the payment.* A spend of the payment's output
+   proves itself when it takes the claim path, its redeem script hashes to the
+   payment output's script hash, and its secret satisfies the hash that redeem
+   script commits to. Where the swap's secret hash is known, the secret is
+   checked against it. Such a claim is taken from one server.
+5. *Confirmations.* The wait for confirmations stays on one server as before;
+   its final decision that a payment has enough confirmations must then be
+   agreed by two servers, or given by the trusted node.
+6. *Native mode.* A coin served by its own daemon reads that daemon as before
+   (ch.51 R100 item 6).
+7. *Every server.* The look on every server that follows a failed spend search
+   is, under R100, the agreed search of a pair, and in addition every other
+   server is asked for a claim that proves itself; such a claim is taken from
+   any server, and every other answer of those servers is ignored. When the
+   pair's search is undetermined and no server shows such a claim, the look
+   finds no spend, and the step stays undetermined and waits: the answer is
+   never "not spent" (ch.51 R100 item 3).
+
 ### 38.6.4Q QTUM and QRC20 over Electrum: clients, methods and shared wallet state
 
 > **Clearance (chapter 01 R40) — passed the KDF Dirty Gate on 2026-11-15,
@@ -4887,6 +4921,78 @@ token's swap paths were read only for the set of methods they send
 > answer when the contract state says the payment exists but no matching
 > transaction is found. The pointer is a Spec Reader addition and passed the
 > KDF Dirty Gate with that subsection on 2026-11-22.
+
+> **Clean-side addition of 2026-11-23 (Reloaded-original; as built; no claim
+> about the reference).** The swap reads of a QRC20 token over Electrum
+> follow [chapter 51](51-legacy-v1-swap-state-machine.md) §51.6G R100. A
+> token read through the operator's own daemon reads as before.
+>
+> 1. *Directed reads.* `blockchain.contract.call`,
+>    `blochchain.transaction.get_receipt` and
+>    `blockchain.contract.event.get_history` each have a form addressed to
+>    one named server (R38.6.4g). It is answered by that server or fails
+>    naming it, and it does not move on to another server. Every swap read
+>    first reads the server's own tip (`blockchain.headers.subscribe`), then
+>    the read itself on the same server. Two answers whose tips are further
+>    apart than the tolerance of R38.6.4o item 1 do not decide.
+> 2. *Decisions.* Two answers are compared on a decision, never on a height,
+>    a confirmation count or a time:
+>    - payment: the state of `payments(id)` and the payment call details
+>      read from the server's receipt of the payment transaction. The
+>      validation repeats the read until its deadline while it is
+>      undetermined or the servers agree that the contract does not know the
+>      payment yet;
+>    - confirmation wait: the wait polls one server as before (R38.6.4o item
+>      6); its end is then confirmed by a pair: "has the required
+>      confirmations" and "the swap contract calls completed";
+>    - already sent: "not sent" (the contract does not know the payment), or
+>      the payment transaction;
+>    - spend: the state of `payments(id)` decides. "Not spent" is the state
+>      `sent` on both servers. Only a server whose state is `spent` or
+>      `refunded` is asked for the event history, to name the transaction,
+>      which is bound to its call and receipt as chapter 51 §51.6E R89
+>      binds it. A claim so found carries a secret whose hash is the
+>      payment's secret hash and is taken from one server;
+>    - refund gate: each server's median time past at its own tip is past
+>      the lock time or is not.
+> 3. *Claims and refunds.* The claim of the side that reveals its own secret,
+>    and a refund, check the payment (state and call details) on a pair
+>    first. The claim made with a secret that a claim on the other chain
+>    already revealed is read from one routed server and is not held back by
+>    an undetermined read.
+> 4. *Undetermined.* An undetermined read is an error whose text starts with
+>    `swap evidence undetermined: ` and names servers by host and port only.
+>    It is never answered as valid, not sent, not spent or an open gate.
+> 5. *Capability.* A token whose server list has two or more hosts and no
+>    `swap_evidence_node` is admitted for swaps only once two distinct hosts
+>    of its client have answered `blockchain.contract.event.get_history`
+>    with a result since the client was built. A token with
+>    `swap_evidence_node` is admitted only once its trusted server has
+>    answered that request with a result: under a trusted server the spend
+>    read of a claimed payment still needs that server's event history to
+>    name the claim and read the secret. An error answer does not count.
+>    The client records it per server for every such request, routed or
+>    directed, so the instances that share a client (D38.6.4Q.1) share the
+>    record. Until then the token answers as a coin with too few nodes:
+>    orders and swap starts are refused, and the reads of a running swap
+>    wait. The refusal text lists the hosts that have and have not served
+>    the request, or names the trusted server that has not. Only a token in
+>    native mode needs no such proof.
+> 6. *Probe.* After the activation of such a token, each server concerned
+>    that has not served the request is asked once, in the background, for
+>    the token's own transfer history: every server of a token over two or
+>    more hosts, and the trusted server alone of a token with
+>    `swap_evidence_node`. The activation does not wait for it and does not
+>    fail on it. While the proof is missing, a refusal and an undetermined
+>    read start the probe again for the servers still missing. One server
+>    is probed at most once a minute and never while a probe of it runs. A
+>    probe ends when the token that started it is disabled or dropped, and
+>    none starts for a disabled token. One log line names the hosts that
+>    have and have not served the request.
+> 7. *Refund gate.* The refund gate of a token is the gate of the UTXO
+>    Electrum client (chapter 51 §51.6G R100), given the token's policy of
+>    item 5: the median time past is read through that client's directed
+>    header reads, and the tips are compared within its tolerance.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
@@ -6746,3 +6852,8 @@ R38.8.6 **Tests (two-direction, observable).**
   never read the forbidden corpus, from this repository's code and its tests.
   It takes no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required.
+- *Clean-side addition of 2026-11-23 (PR #522):* the status note before
+  §38.6.4Q on the swap evidence of ch.51 R100 for UTXO coins, BCH and QTUM over
+  Electrum. Reloaded-original; written from this repository's code and tests;
+  no reference input and no forbidden-class input; no sentence of the chapter
+  is changed.

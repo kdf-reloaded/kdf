@@ -1105,6 +1105,7 @@ mod tests {
             swap_contract_address: H160::from([8u8; 20]),
             fallback_swap_contract: None,
             history_abort: HistoryAbort::new(),
+            capability_probes: CapabilityProbes::new(),
         }));
 
         // The block count grows with every read; only the first one bounds the search.

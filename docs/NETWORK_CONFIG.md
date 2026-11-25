@@ -391,6 +391,22 @@ count. The remedy is the same in both cases: remove the servers that follow the 
 the coin's list, or activate the coin with servers that agree. The checks are on by default and the
 top-level `MM2.json` boolean `electrum_tip_checks` set to `false` turns them off.
 
+### Swap evidence from one host
+
+Before a swap refunds, or uses the swap's secret, the chain reads it rests on must agree between two
+hosts of the coin's node list, or come from the one node named in the activation field
+`swap_evidence_node`. A coin whose configured list names exactly one host trusts that host by
+default, as if `swap_evidence_node` named it: its activation answer carries
+`"swap_evidence_single_host": true`, and the node logs one warning naming the coin. The list as
+configured counts, not the hosts that answer, so a coin listed with two or more hosts stays under
+the two-host rule while one of them does not answer. The top-level `MM2.json` boolean
+`swap_evidence_allow_single_host` set to `false` turns this off: such a coin then starts no swap
+until a second host is listed or `swap_evidence_node` is set. The setting covers the bchd servers of
+an SLP token's platform as well: a BCH platform whose `bchd_urls` name exactly one host trusts it
+for the token's reads, its activation answer carries `"swap_evidence_single_bchd_host": true`, and
+one warning names the platform. This is a Reloaded addition; the row in
+[GLEEC_COMPATIBILITY](GLEEC_COMPATIBILITY.md) describes it.
+
 ### Electrum Servers over TLS
 
 An Electrum server entry with `"protocol": "SSL"` is reached over TLS. The entry sits in the

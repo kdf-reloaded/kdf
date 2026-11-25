@@ -901,6 +901,7 @@ mod search_for_swap_tx_spend_scripted {
                     &secret_hash,
                     amount.parse::<BigDecimal>().unwrap(),
                     swap_contract,
+                    0,
                 )
                 .compat(),
             )

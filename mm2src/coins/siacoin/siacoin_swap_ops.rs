@@ -420,20 +420,33 @@ impl SiaCoin {
         let htlc_address = spend_policy.address();
 
         // CRD ch.39 R39.11.5A.8, D39.11.5A.1 (a): a failed request is an undetermined answer, never "not sent".
-        let events = self
-            .client
-            .get_address_events(htlc_address)
+        // CRD ch.51 R100 (P): the read goes through the coin's swap-evidence policy; a node that does not answer
+        // leaves it undetermined as well.
+        let (first_event, _) = self
+            .swap_evidence_read(
+                || async {
+                    let events = self
+                        .client
+                        .get_address_events(htlc_address.clone())
+                        .await
+                        .map_err(|e| SiaCheckIfMyPaymentSentError::EventsRequest(sia_text(&e)).to_string())?;
+                    Ok(events.into_iter().next().map(|event| event.data))
+                },
+                |first: &Option<EventDataWrapper>| {
+                    first.as_ref().map(|data| match data {
+                        EventDataWrapper::V2Transaction(tx) => tx.txid().to_string(),
+                        other => format!("{other:?}"),
+                    })
+                },
+                |_| false,
+            )
             .await
-            .map_err(|e| SiaCheckIfMyPaymentSentError::EventsRequest(sia_text(&e)))?;
+            .map_err(SiaCheckIfMyPaymentSentError::Undetermined)?;
 
-        let event = match events.len() {
-            0 => return Ok(None),
-            _ => events[0].clone(),
-        };
-
-        let tx = match event.data {
-            EventDataWrapper::V2Transaction(tx) => tx,
-            wrong_variant => return Err(SiaCheckIfMyPaymentSentError::EventVariant(wrong_variant)),
+        let tx = match first_event {
+            None => return Ok(None),
+            Some(EventDataWrapper::V2Transaction(tx)) => tx,
+            Some(wrong_variant) => return Err(SiaCheckIfMyPaymentSentError::EventVariant(wrong_variant)),
         };
 
         Ok(Some(SiaTransaction(tx).into()))
@@ -474,9 +487,23 @@ impl SiaCoin {
             SpendPolicy::atomic_swap(&success_public_key, &refund_public_key, time_lock as u64, &secret_hash).address();
         let htlc_output_id = SiacoinOutputId::new(payment_tx.txid(), HTLC_VOUT_INDEX);
 
-        let events = self.fetch_all_events(&htlc_address).await?;
-
-        Ok(classify_htlc_spend(&events, &htlc_output_id, &secret_hash))
+        // CRD ch.51 R100 (S): the walk goes through the coin's swap-evidence policy. A claim whose secret hashes to
+        // the swap's secret hash proves itself; a refund or "unspent" needs the policy's answer.
+        let (found, _) = self
+            .swap_evidence_read(
+                || async {
+                    let events = self
+                        .fetch_all_events(&htlc_address)
+                        .await
+                        .map_err(|e| SiaCoinSearchSwapTxSpendError::FetchEvents(e).to_string())?;
+                    Ok(classify_htlc_spend(&events, &htlc_output_id, &secret_hash))
+                },
+                spend_decision,
+                spend_proves_itself,
+            )
+            .await
+            .map_err(SiaCoinSearchSwapTxSpendError::Undetermined)?;
+        Ok(found)
     }
 
     /// `tx` is the payment *I* sent, so I hold the refund key and the
@@ -526,7 +553,21 @@ impl SiaCoin {
     }
 
     async fn sia_can_refund_htlc(&self, locktime: u64) -> Result<CanRefundHtlc, SiaCoinSiaCanRefundHtlcError> {
-        let median_timestamp = self.client.get_median_timestamp().await?;
+        // CRD ch.51 R100 (T): the gate is "past the lock or not" on the coin's swap-evidence read of the chain
+        // time; an undetermined read is no decision either way.
+        let (median_timestamp, _) = self
+            .swap_evidence_read(
+                || async {
+                    self.client
+                        .get_median_timestamp()
+                        .await
+                        .map_err(|e| SiaCoinSiaCanRefundHtlcError::FetchTimestamp(e).to_string())
+                },
+                |median_timestamp: &u64| locktime < *median_timestamp,
+                |_| false,
+            )
+            .await
+            .map_err(SiaCoinSiaCanRefundHtlcError::Undetermined)?;
 
         if locktime < median_timestamp {
             return Ok(CanRefundHtlc::CanRefundNow);
@@ -619,6 +660,88 @@ fn extract_secret_from_tx(tx: &V2Transaction, expected_hash: &Hash256) -> Option
         .flat_map(|input| input.satisfied_policy.preimages.iter())
         .find(|extracted_secret| Hash256(sha256(&extracted_secret.0).take()) == *expected_hash)
         .map(|secret| secret.0.to_vec())
+}
+
+/// What a spend search decided, as two reads are compared on it (CRD ch.51 R100 (S)): unspent, or the id of the
+/// transaction that claimed or refunded the HTLC output.
+#[derive(Debug, PartialEq, Eq)]
+enum SpendDecision {
+    Unspent,
+    Claimed(String),
+    Refunded(String),
+}
+
+fn spend_decision(found: &Option<FoundSwapTxSpend>) -> SpendDecision {
+    let id = |tx: &TransactionEnum| match tx {
+        TransactionEnum::SiaTransaction(tx) => tx.txid().to_string(),
+        other => format!("{other:?}"),
+    };
+    match found {
+        None => SpendDecision::Unspent,
+        Some(FoundSwapTxSpend::Spent(tx)) => SpendDecision::Claimed(id(tx)),
+        Some(FoundSwapTxSpend::Refunded(tx)) => SpendDecision::Refunded(id(tx)),
+    }
+}
+
+/// A claim proves itself (CRD ch.51 R100): `classify_htlc_spend` calls a spend `Spent` only when it reveals a
+/// secret that hashes to the swap's secret hash, which no node can fake, so one node's answer is enough. A refund
+/// or "unspent" is a claim about the chain that needs the coin's policy.
+fn spend_proves_itself(found: &Option<FoundSwapTxSpend>) -> bool { matches!(found, Some(FoundSwapTxSpend::Spent(_))) }
+
+/// The secret hashes a spend policy commits to: every `Hash` leaf of it.
+fn policy_hash_leaves<'a>(policy: &'a SpendPolicy, leaves: &mut Vec<&'a Hash256>) {
+    match policy {
+        SpendPolicy::Hash(hash) => leaves.push(hash),
+        SpendPolicy::Threshold { of, .. } => of.iter().for_each(|inner| policy_hash_leaves(inner, leaves)),
+        _ => (),
+    }
+}
+
+/// The address a spend policy commits to, when the policy is as a spend reveals it: a branch that was not taken is
+/// an `Opaque` leaf already, and stays as it is. (`SpendPolicy::address` opacifies every child again, which turns an
+/// `Opaque` leaf into the opaque form of its own address and so never reproduces the address of a revealed policy.)
+fn committed_address(policy: &SpendPolicy) -> Address {
+    let SpendPolicy::Threshold { n, of } = policy else {
+        return policy.address();
+    };
+    let of = of
+        .iter()
+        .map(|child| match child {
+            SpendPolicy::Opaque(_) => child.clone(),
+            other => SpendPolicy::Opaque(committed_address(other)),
+        })
+        .collect();
+    let mut encoder = sia_rust::encoding::Encoder::default();
+    encoder.write_distinguisher("address");
+    sia_rust::encoding::Encodable::encode(&SpendPolicy::Threshold { n: *n, of }, &mut encoder);
+    Address(encoder.hash())
+}
+
+/// Whether `spend` is a claim of the HTLC output `htlc_output_id` that proves itself (CRD ch.51 R100): it spends
+/// that output, the spend policy it satisfies is the one `htlc_address` commits to, and it reveals a preimage whose
+/// SHA-256 equals a hash in that policy. No node can fake such a spend, so one node's answer is enough; it needs no
+/// secret hash from the caller, because the hash is the one the output's own address commits to.
+pub(super) fn claim_proves_itself(
+    spend: &V2Transaction,
+    htlc_output_id: &SiacoinOutputId,
+    htlc_address: &Address,
+) -> bool {
+    spend
+        .siacoin_inputs
+        .iter()
+        .filter(|input| &input.parent.id == htlc_output_id)
+        .any(|input| {
+            let satisfied = &input.satisfied_policy;
+            if &committed_address(&satisfied.policy) != htlc_address {
+                return false;
+            }
+            let mut hashes = Vec::new();
+            policy_hash_leaves(&satisfied.policy, &mut hashes);
+            satisfied
+                .preimages
+                .iter()
+                .any(|preimage| hashes.contains(&&Hash256(sha256(&preimage.0).take())))
+        })
 }
 
 /// Locate, within an already-fetched event set, the event whose consumed
@@ -1132,6 +1255,7 @@ mod already_sent_query_tests {
             fee_address: address.clone(),
             derivation_method: Arc::new(DerivationMethod::Iguana(address)),
             swap_evidence: crate::SwapEvidencePolicy::NotAdopted,
+            swap_evidence_node_name: "127.0.0.1".to_owned(),
         }
     }
 
@@ -1276,6 +1400,459 @@ mod swap_spend_search_tests {
     fn no_matching_event_is_not_found() {
         let secret_hash = Hash256(sha256(&[7u8; 32]).take());
         assert_eq!(classify_htlc_spend(&[], &htlc_output_id(), &secret_hash), None);
+    }
+}
+
+/// CRD ch.51 R100 / T42 (Sia): the swap reads of the coin's one walletd node, judged by the coin's policy.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod swap_evidence_read_tests {
+    use super::*;
+    use crate::answer_stub::{http_response, serve};
+    use crate::siacoin::siacoin_helpers::sia_swap_evidence_policy;
+    use crate::swap_evidence::node_name;
+    use crate::swap_evidence::{Agreement, SwapEvidencePolicy, UndeterminedReason};
+    use std::sync::atomic::AtomicUsize;
+
+    const TIP: &str = r#"{"height":10,"id":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    const ADDR: &str = "c34caa97740668de2bbdb7174572ed64c861342bf27e80313cbfa02e9251f52e30aad3892533";
+    const PLACEHOLDER_PUBKEY: &str = "a729be53dae7b0ed812f2a123ce93556014bbad8516ba6b1b496a112b46bbd97";
+    const PLACEHOLDER_SIG: &str = "160e79ac52e0eaab5e92bd1675604a94b56ec58fdd0be3f3a842a4ece07d794f7ee1e8cc8f29b596bf71b2dc594df53347b9a4bcbec46fe09244ce6d3f6a6708";
+    /// The median of the chain times `tipstate` answers (2026-01-01T00:00:05Z).
+    const MEDIAN: u64 = 1_767_225_605;
+    const LOCK: u64 = MEDIAN - 100;
+
+    /// The chain-time answer of a walletd whose last 11 block times have the median [`MEDIAN`].
+    fn tipstate() -> Vec<u8> {
+        let times: Vec<String> = (0..11).map(|i| format!("2026-01-01T00:00:{i:02}Z")).collect();
+        let body = json!({"index": {"height": 10, "id": "00".repeat(32)}, "prevTimestamps": times});
+        http_response("200 OK", "application/json", body.to_string().as_bytes())
+    }
+
+    /// The events a walletd answers for the HTLC address: one v2 transaction that consumes `output_id`, revealing
+    /// `preimage` when the spend is a claim.
+    fn spend_events(output_id: &str, preimage: Option<[u8; 32]>) -> Vec<u8> {
+        http_response(
+            "200 OK",
+            "application/json",
+            spend_events_json(output_id, preimage).to_string().as_bytes(),
+        )
+    }
+
+    fn spend_events_json(output_id: &str, preimage: Option<[u8; 32]>) -> serde_json::Value {
+        let mut satisfied_policy = json!({
+            "policy": { "type": "pk", "policy": format!("ed25519:{PLACEHOLDER_PUBKEY}") },
+            "signatures": [PLACEHOLDER_SIG],
+        });
+        if let Some(secret) = preimage {
+            satisfied_policy["preimages"] = json!([hex::encode(secret)]);
+        }
+        json!([{
+            "id": "0f088eddda5320f8453a55349063abe43ba5b282631d5d2b9e684548f083055a",
+            "index": { "height": 42, "id": "b37a5387883748f73c1475ca85c8f3200eef09126c44824d0f44574109dabedc" },
+            "confirmations": 7,
+            "timestamp": "2024-05-01T12:00:00Z",
+            "maturityHeight": 0,
+            "type": "v2Transaction",
+            "data": {
+                "siacoinInputs": [{
+                    "parent": {
+                        "id": output_id,
+                        "stateElement": { "leafIndex": 3, "merkleProof": [] },
+                        "siacoinOutput": { "value": "1000000000000000000000000", "address": ADDR },
+                        "maturityHeight": 0,
+                    },
+                    "satisfiedPolicy": satisfied_policy,
+                }],
+                "siacoinOutputs": [{ "value": "999990000000000000000000", "address": ADDR }],
+                "minerFee": "10000000000000000000",
+            },
+        }])
+    }
+
+    /// A coin of a walletd that answers the connection probe (the first request) with a consensus tip and every
+    /// later request with `reply(request)`; returns the coin and the number of requests the walletd saw.
+    fn coin_with(
+        policy: SwapEvidencePolicy,
+        reply: impl Fn(&str) -> Vec<u8> + Send + 'static,
+    ) -> (SiaCoin, Arc<AtomicUsize>) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let port = serve(move |request| {
+            if requests.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                http_response("200 OK", "application/json", TIP.as_bytes())
+            } else {
+                reply(request)
+            }
+        });
+        let server_url = format!("http://127.0.0.1:{port}/");
+        let client_conf: SiaClientConf = serde_json::from_value(serde_json::json!({
+            "server_url": server_url,
+            "password": "pw",
+            "timeout": 5,
+        }))
+        .unwrap();
+        let client = common::block_on(SiaClient::new(client_conf)).unwrap();
+        let key_pair = SiaKeypair::from_private_bytes(&[2u8; 32]).unwrap();
+        let address = key_pair.public().address();
+        let coin = SiaCoin {
+            conf: SiaCoinConf {
+                ticker: "SC".to_owned(),
+                required_confirmations: 1,
+            },
+            priv_key_policy: PrivKeyPolicy::KeyPair(key_pair).into(),
+            client: Arc::new(client),
+            history_sync_state: Mutex::new(HistorySyncState::NotEnabled).into(),
+            required_confirmations: AtomicU64::new(1).into(),
+            fee_address: address.clone(),
+            derivation_method: Arc::new(DerivationMethod::Iguana(address)),
+            swap_evidence: policy,
+            swap_evidence_node_name: node_name(&server_url),
+        };
+        (coin, seen)
+    }
+
+    /// The `Trusted` policy of a coin the field named: what activation computes for the coin's one `server_url`.
+    fn trusted(coin_url_port: &str) -> SwapEvidencePolicy {
+        sia_swap_evidence_policy("SC", Some(coin_url_port), &format!("http://{coin_url_port}/")).unwrap()
+    }
+
+    /// A coin whose walletd answers every request after the probe with `reply`, trusted by the field.
+    fn trusted_coin(reply: impl Fn(&str) -> Vec<u8> + Send + 'static) -> (SiaCoin, Arc<AtomicUsize>) {
+        // The port is not known before the stub is served: the policy is set once the coin is built.
+        let (mut coin, seen) = coin_with(SwapEvidencePolicy::NotAdopted, reply);
+        coin.swap_evidence = trusted(&coin.swap_evidence_node_name);
+        (coin, seen)
+    }
+
+    /// `Ok(None)`: the gate is open; `Ok(Some(seconds))`: closed for that long.
+    fn can_refund(coin: &SiaCoin, lock: u64) -> Result<Option<u64>, String> {
+        common::block_on(coin.can_refund_htlc(lock).compat()).map(|gate| match gate {
+            CanRefundHtlc::CanRefundNow => None,
+            CanRefundHtlc::HaveToWait(seconds) => Some(seconds),
+        })
+    }
+
+    fn payment_sent(coin: &SiaCoin) -> Result<Option<TransactionEnum>, String> {
+        let other_pub = ed25519_pubkey_to_swap_field(&SiaKeypair::from_private_bytes(&[1u8; 32]).unwrap().public());
+        let my_pub = [0u8; SWAP_HTLC_PUBKEY_LEN];
+        common::block_on(
+            coin.check_if_my_payment_sent(LOCK as u32, &my_pub, &other_pub, &[7u8; 32], 0, &None)
+                .compat(),
+        )
+    }
+
+    /// The HTLC payment the spend search looks at, its spend's secret and the success and refund keys.
+    fn search(
+        coin: &SiaCoin,
+        secret_hash: [u8; 32],
+        tx: &SiaTransaction,
+    ) -> Result<Option<FoundSwapTxSpend>, SiaCoinSearchSwapTxSpendError> {
+        let theirs = SiaKeypair::from_private_bytes(&[1u8; 32]).unwrap().public();
+        common::block_on(coin.sia_search_for_swap_tx_spend(
+            LOCK as u32,
+            &secret_hash,
+            &serde_json::to_vec(tx).unwrap(),
+            theirs,
+            coin.my_keypair().unwrap().public(),
+        ))
+    }
+
+    fn payment() -> (SiaTransaction, String) {
+        let tx = SiaTransaction(V2Transaction::default());
+        let output_id = SiacoinOutputId::new(tx.txid(), HTLC_VOUT_INDEX);
+        (tx, output_id.to_string())
+    }
+
+    /// The field equal to the `server_url` makes the coin `Trusted`; the node's chain time decides the refund gate.
+    #[test]
+    fn t42_sia_trusted_node_chain_time_decides_the_refund_gate() {
+        let (coin, _) = trusted_coin(|_| tipstate());
+        assert!(matches!(
+            MmCoin::swap_evidence_policy(&coin),
+            SwapEvidencePolicy::Trusted { .. }
+        ));
+        // the chain time is past the lock: the gate is open; before the lock: closed
+        assert_eq!(can_refund(&coin, MEDIAN - 100), Ok(None));
+        assert_eq!(can_refund(&coin, MEDIAN + 100), Ok(Some(100)));
+    }
+
+    /// The node failing leaves P, S and T undetermined: no refund decision, no "not sent", no "not spent".
+    #[test]
+    fn t42_sia_trusted_node_failing_leaves_every_read_undetermined() {
+        let failing = |_: &str| http_response("500 Internal Server Error", "text/plain", b"database is locked\n");
+        let (coin, _) = trusted_coin(failing);
+        let err = can_refund(&coin, LOCK).unwrap_err();
+        assert!(err.contains("the trusted node did not answer"), "{err}");
+        assert!(err.contains("127.0.0.1:"), "the node is named: {err}");
+        assert!(!err.contains("pw"), "{err}");
+        assert!(crate::swap_evidence::is_undetermined(&err), "{err}");
+        let err = payment_sent(&coin).unwrap_err();
+        assert!(err.contains("Undetermined whether the payment was sent"), "{err}");
+        assert!(crate::swap_evidence::is_undetermined(&err), "{err}");
+        assert!(err.contains("the trusted node did not answer"), "{err}");
+        let (tx, _) = payment();
+        let err = search(&coin, [7u8; 32], &tx).unwrap_err();
+        assert!(err.to_string().contains("the trusted node did not answer"), "{err}");
+        assert!(crate::swap_evidence::is_undetermined(&err.to_string()), "{err}");
+    }
+
+    /// A node that answers "no events" is "not sent" and "unspent"; those are answers, not silence.
+    #[test]
+    fn t42_sia_trusted_node_answering_empty_is_not_sent_and_unspent() {
+        let (coin, _) = trusted_coin(|_| http_response("200 OK", "application/json", b"[]"));
+        assert_eq!(payment_sent(&coin).unwrap(), None);
+        let (tx, _) = payment();
+        assert!(search(&coin, [7u8; 32], &tx).unwrap().is_none());
+    }
+
+    /// A claim whose secret hashes to the swap's secret hash is taken on the one answer; a spend that does not
+    /// reveal it is a refund.
+    #[test]
+    fn t42_sia_claim_with_the_matching_secret_is_a_claim_and_other_spends_are_refunds() {
+        let secret = [7u8; 32];
+        let secret_hash = sha256(&secret).take();
+        let (tx, output_id) = payment();
+        let claim = spend_events(&output_id, Some(secret));
+        let (coin, _) = trusted_coin(move |_| claim.clone());
+        assert!(matches!(
+            search(&coin, secret_hash, &tx).unwrap(),
+            Some(FoundSwapTxSpend::Spent(_))
+        ));
+        // a secret of another hash: the same spend is not a claim of this swap
+        let (coin, _) = trusted_coin({
+            let claim = spend_events(&output_id, Some([8u8; 32]));
+            move |_| claim.clone()
+        });
+        assert!(matches!(
+            search(&coin, secret_hash, &tx).unwrap(),
+            Some(FoundSwapTxSpend::Refunded(_))
+        ));
+    }
+
+    /// The claim proves itself and a refund does not: with two nodes of which one is silent, the claim stands on
+    /// the one answer and the refund stays undetermined. (Sia has one node; this is the helper's behavior the
+    /// read is built on, with the coin's own classification.)
+    #[test]
+    fn t42_sia_only_a_matching_claim_stands_on_one_answer() {
+        let secret = [7u8; 32];
+        let secret_hash = Hash256(sha256(&secret).take());
+        let (_, output_id) = payment();
+        let output_id = SiacoinOutputId(Hash256::from_str(&output_id).unwrap());
+        let policy = SwapEvidencePolicy::TwoNodes {
+            hosts: vec!["a.test".to_owned(), "b.test".to_owned()],
+        };
+        let nodes = ["a.test:9980".to_owned(), "b.test:9980".to_owned()];
+        let one_answer = |preimage: Option<[u8; 32]>| {
+            let events: Vec<Event> =
+                serde_json::from_value(spend_events_json(&output_id.to_string(), preimage)).unwrap();
+            common::block_on(crate::swap_evidence::agree(
+                &policy,
+                &nodes,
+                |node| node.clone(),
+                |node| {
+                    let answer = if node.starts_with("a.") {
+                        Ok(classify_htlc_spend(&events, &output_id, &secret_hash))
+                    } else {
+                        Err("no answer".to_owned())
+                    };
+                    async move { answer }
+                },
+                spend_decision,
+                spend_proves_itself,
+            ))
+        };
+        assert!(matches!(one_answer(Some(secret)), Agreement::Agreed {
+            answer: Some(FoundSwapTxSpend::Spent(_)),
+            ..
+        }));
+        assert!(matches!(
+            one_answer(Some([8u8; 32])),
+            Agreement::Undetermined(u) if u.reason == UndeterminedReason::TooFewAnswers
+        ));
+    }
+
+    /// No field with adoption on: the coin is `Insufficient`, refuses with R0's text, asks its node nothing, and
+    /// every read is undetermined with the fix named.
+    #[test]
+    fn t42_sia_without_the_field_the_coin_is_insufficient_and_waits() {
+        assert!(crate::swap_evidence::family_adopted(
+            crate::swap_evidence::SwapFamily::Sia
+        ));
+        let (coin, _) = coin_with(SwapEvidencePolicy::Insufficient { hosts: 1 }, |_| tipstate());
+        assert_eq!(
+            MmCoin::swap_evidence_refusal(&coin).as_deref(),
+            Some("SC has fewer than two nodes for swap evidence; add a second node or set swap_evidence_node")
+        );
+        let err = can_refund(&coin, LOCK).unwrap_err();
+        assert!(err.contains("swap_evidence_node"), "{err}");
+        assert!(err.contains("127.0.0.1:"), "{err}");
+        assert!(payment_sent(&coin).unwrap_err().contains("swap_evidence_node"));
+        // The node answered the chain time past the lock, and the refund gate is still undetermined above: under
+        // `Insufficient` the node is asked only for an answer that proves itself (R100), and a chain time does not.
+    }
+
+    /// The HTLC payment of a swap, and the answer of a walletd whose mempool holds a spend of it: a claim revealing
+    /// `preimage` (success branch) or a refund (no preimage).
+    fn htlc_payment_and_mempool_spend(secret: [u8; 32], preimage: Option<[u8; 32]>) -> (SiaTransaction, Vec<u8>) {
+        let success = SiaKeypair::from_private_bytes(&[1u8; 32]).unwrap().public();
+        let refund = SiaKeypair::from_private_bytes(&[2u8; 32]).unwrap().public();
+        let secret_hash = Hash256(sha256(&secret).take());
+        let htlc_address = SpendPolicy::atomic_swap(&success, &refund, LOCK, &secret_hash).address();
+        let payment = SiaTransaction(V2Transaction {
+            siacoin_outputs: vec![SiacoinOutput {
+                value: Currency(1_000),
+                address: htlc_address.clone(),
+            }],
+            ..Default::default()
+        });
+        let output_id = SiacoinOutputId::new(payment.txid(), HTLC_VOUT_INDEX);
+        let policy = match preimage {
+            Some(_) => SpendPolicy::atomic_swap_success(&success, &refund, LOCK, &secret_hash),
+            None => SpendPolicy::atomic_swap_refund(&success, &refund, LOCK, &secret_hash),
+        };
+        let mut satisfied_policy = json!({ "policy": policy, "signatures": [PLACEHOLDER_SIG] });
+        if let Some(preimage) = preimage {
+            satisfied_policy["preimages"] = json!([hex::encode(preimage)]);
+        }
+        let spend: V2Transaction = serde_json::from_value(json!({
+            "siacoinInputs": [{
+                "parent": {
+                    "id": output_id.to_string(),
+                    "stateElement": { "leafIndex": 3, "merkleProof": [] },
+                    "siacoinOutput": { "value": "1000", "address": htlc_address.to_string() },
+                    "maturityHeight": 0,
+                },
+                "satisfiedPolicy": satisfied_policy,
+            }],
+            "siacoinOutputs": [{ "value": "990", "address": ADDR }],
+            "minerFee": "10",
+        }))
+        .unwrap();
+        let body = json!({ "transactions": [], "v2transactions": [spend] });
+        (
+            payment,
+            http_response("200 OK", "application/json", body.to_string().as_bytes()),
+        )
+    }
+
+    fn wait_for_spend(coin: &SiaCoin, payment: &SiaTransaction) -> Result<TransactionEnum, String> {
+        // `wait_until` is now: the wait reads once and then times out, so a spend that is not returned is shown.
+        let wait_until = now_ms() / 1000;
+        common::block_on(
+            coin.wait_for_tx_spend(&serde_json::to_vec(payment).unwrap(), wait_until, 0, &None)
+                .compat(),
+        )
+        .map_err(|e| format!("{e:?}"))
+    }
+
+    /// R100 / T42: under `Insufficient` (no field) the wait still returns a claim that reveals a preimage of the
+    /// hash its HTLC address commits to: the taker learns the secret. A refund is not returned: it stays under the
+    /// policy and the wait times out.
+    #[test]
+    fn t42_sia_insufficient_wait_returns_a_proven_claim_and_not_a_refund() {
+        let secret = [7u8; 32];
+        let (payment, reply) = htlc_payment_and_mempool_spend(secret, Some(secret));
+        let (coin, _) = coin_with(SwapEvidencePolicy::Insufficient { hosts: 1 }, move |_| reply.clone());
+        let spend = wait_for_spend(&coin, &payment).expect("a proven claim is returned");
+        let TransactionEnum::SiaTransaction(spend) = spend else {
+            panic!("not a Sia transaction")
+        };
+        assert!(extract_secret_from_tx(&spend.0, &Hash256(sha256(&secret).take())).is_some());
+
+        let (payment, reply) = htlc_payment_and_mempool_spend(secret, None);
+        let (coin, _) = coin_with(SwapEvidencePolicy::Insufficient { hosts: 1 }, move |_| reply.clone());
+        let err = wait_for_spend(&coin, &payment).unwrap_err();
+        assert!(
+            err.contains("Timed out waiting for spend"),
+            "a refund was returned: {err}"
+        );
+    }
+
+    /// A spend that reveals a preimage of another hash does not prove itself, whatever policy it claims to satisfy.
+    #[test]
+    fn t42_sia_a_preimage_of_another_hash_does_not_prove_a_claim() {
+        let secret = [7u8; 32];
+        let (payment, reply) = htlc_payment_and_mempool_spend(secret, Some([8u8; 32]));
+        let (coin, _) = coin_with(SwapEvidencePolicy::Insufficient { hosts: 1 }, move |_| reply.clone());
+        let err = wait_for_spend(&coin, &payment).unwrap_err();
+        assert!(err.contains("Timed out waiting for spend"), "{err}");
+    }
+
+    /// `committed_address` against the library's `address()` on the side where the library is right: the full HTLC
+    /// policy, and the same policy with one branch replaced by its opaque form (as a spend reveals it).
+    #[test]
+    fn t42_sia_committed_address_matches_the_library_address_of_an_htlc_policy() {
+        let success = SiaKeypair::from_private_bytes(&[1u8; 32]).unwrap().public();
+        let refund = SiaKeypair::from_private_bytes(&[2u8; 32]).unwrap().public();
+        let secret_hash = Hash256(sha256(&[7u8; 32]).take());
+        let full = SpendPolicy::atomic_swap(&success, &refund, LOCK, &secret_hash);
+        let SpendPolicy::Threshold { n, of } = full.clone() else {
+            panic!("an HTLC policy is a threshold")
+        };
+        // (a) the refund branch opaque
+        let refund_opaque = SpendPolicy::Threshold {
+            n,
+            of: vec![of[0].clone(), SpendPolicy::Opaque(of[1].address())],
+        };
+        assert_eq!(full.address(), committed_address(&refund_opaque));
+        // (b) the claim branch opaque
+        let claim_opaque = SpendPolicy::Threshold {
+            n,
+            of: vec![SpendPolicy::Opaque(of[0].address()), of[1].clone()],
+        };
+        assert_eq!(full.address(), committed_address(&claim_opaque));
+        // (c) the full policy
+        assert_eq!(committed_address(&full), full.address());
+    }
+
+    /// The `swap_evidence_node` field against the one `server_url` under the port rule (a port is compared only when
+    /// both sides have one; an `http(s)` URL without a port has its scheme's default): explicit port, no port, and
+    /// the field written with or without the default port.
+    #[test]
+    fn t42_sia_field_match_follows_the_port_rule() {
+        let trusted = |field: &str, url: &str| {
+            matches!(
+                sia_swap_evidence_policy("SC", Some(field), url),
+                Ok(SwapEvidencePolicy::Trusted { .. })
+            )
+        };
+        // explicit port: a field without a port or with the same port matches, another port does not
+        let url = "http://walletd.example:9980/";
+        assert!(trusted("walletd.example", url));
+        assert!(trusted("WALLETD.example:9980", url));
+        assert!(!trusted("walletd.example:9981", url));
+        assert!(!trusted("walletd.example:443", url));
+        // https without a port: the default port is 443
+        let url = "https://walletd.example/api";
+        assert!(trusted("walletd.example", url));
+        assert!(trusted("walletd.example:443", url));
+        assert!(trusted("https://walletd.example", url));
+        assert!(!trusted("walletd.example:8443", url));
+        // http without a port: the default port is 80
+        let url = "http://walletd.example";
+        assert!(trusted("walletd.example:80", url));
+        assert!(!trusted("walletd.example:443", url));
+        // another host never matches
+        assert!(!trusted("other.example", url));
+    }
+
+    /// The label the reads ask the node by (the shared `node_name`) matches the `Trusted` node it came from, with or without a port.
+    #[test]
+    fn t42_sia_node_label_matches_the_trusted_node() {
+        for url in [
+            "https://walletd.example/api",
+            "http://walletd.example:9980/",
+            "https://user:pw@walletd.example:8443",
+        ] {
+            let label = node_name(url);
+            assert!(!label.contains("pw") && !label.contains('/'), "{label}");
+            let policy = sia_swap_evidence_policy("SC", Some("walletd.example"), url).unwrap();
+            let SwapEvidencePolicy::Trusted { node } = policy else {
+                panic!("not trusted")
+            };
+            assert!(crate::swap_evidence::node_matches(&node, &label), "{url}: {label}");
+        }
+        assert_eq!(node_name("https://walletd.example/"), "walletd.example:443");
     }
 }
 

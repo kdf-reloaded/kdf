@@ -829,6 +829,7 @@ fn end_removed_instance_work(removed: &MmCoinEnum, work: &CoinWork) {
         },
         MmCoinEnum::Qrc20Coin(token) => {
             token.end_history_collector();
+            token.end_capability_probes();
             token.utxo.forget_electrum_subscriptions();
         },
         _ => (),

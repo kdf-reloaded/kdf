@@ -92,6 +92,9 @@ fn token_env(decimals: Option<u8>) -> TokenEnv {
             "dbdir": root.to_str().unwrap(),
             "electrum_server_order": "listed",
             "electrum_spread_reads": false,
+            // These tests pin the requests of activation and history over one server; with the single-host switch on,
+            // that server would be trusted and probed for the contract-event history (see qrc20_swap_evidence_tests).
+            "swap_evidence_allow_single_host": false,
         }))
         .into_mm_arc();
     CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "qrc20 electrum stub tests").unwrap();
@@ -1275,6 +1278,9 @@ fn family_env_with_decimals(decimals: Option<u8>) -> TokenEnv {
             "dbdir": root.to_str().unwrap(),
             "electrum_server_order": "listed",
             "electrum_spread_reads": false,
+            // These tests pin the requests of activation and history over one server; with the single-host switch on,
+            // that server would be trusted and probed for the contract-event history (see qrc20_swap_evidence_tests).
+            "swap_evidence_allow_single_host": false,
         }))
         .into_mm_arc();
     CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "qrc20 electrum stub tests").unwrap();
@@ -4475,18 +4481,39 @@ async fn already_sent(coin: &Qrc20Coin) -> Result<Option<TransactionEnum>, Strin
         .await
 }
 
+/// The token over one server that it trusts for its swap reads (CRD ch.51 R100 item 2): without the field the
+/// already-sent check of a token over one host is undetermined. The trusted server must have served the
+/// contract-event history before the token's swap reads are taken, so the stub serves an empty one and the probe that
+/// follows the activation is waited for: one history request, made before the test's own.
+async fn init_token_trusting(env: &TokenEnv, server: &StubServer) -> Qrc20Coin {
+    server.set_result(GET_HISTORY, json!([]));
+    let mut request = electrum_request(&[server], false);
+    request["swap_evidence_node"] = json!(server.addr());
+    let coin = match lp_coininit(&env.ctx, TICKER, &request).await.unwrap() {
+        MmCoinEnum::Qrc20Coin(coin) => coin,
+        _ => panic!("a QRC20 coins-file entry must build a QRC20 coin"),
+    };
+    wait_until("the trusted server that served the event history", 20., || {
+        coin.swap_evidence_refusal().is_none()
+    })
+    .await;
+    assert_eq!(server.requests(GET_HISTORY), 1);
+    coin
+}
+
 /// R39.11.5A.7: a state of `Uninitialized` answers "not sent" at once, without a history request.
 #[test]
 fn r39_11_5a_7_qrc20_uninitialized_state_is_not_sent_without_a_history_request() {
     block_on(async {
         let env = token_env(Some(8));
         let server = token_stub(1).await;
-        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let coin = init_token_trusting(&env, &server).await;
         serve_payment_state(&server, 0);
         server.set_result(GET_HISTORY, json!([]));
 
         assert_eq!(already_sent(&coin).await.unwrap(), None);
-        assert_eq!(server.requests(GET_HISTORY), 0);
+        // Only the probe after the activation asked for the history.
+        assert_eq!(server.requests(GET_HISTORY), 1);
     });
 }
 
@@ -4498,7 +4525,7 @@ fn t39_11_5a_5_qrc20_state_without_matching_transaction_is_undetermined() {
     block_on(async {
         let env = token_env(Some(8));
         let server = token_stub(1).await;
-        let coin = init_token(&env, &[&server], false).await.unwrap();
+        let coin = init_token_trusting(&env, &server).await;
         serve_payment_state(&server, 1);
         server.set_result(GET_HISTORY, json!([]));
 
@@ -4514,7 +4541,8 @@ fn t39_11_5a_5_qrc20_state_without_matching_transaction_is_undetermined() {
             );
         };
         assert_undetermined(already_sent(&coin).await);
-        assert_eq!(server.requests(GET_HISTORY), 1);
+        // The probe after the activation, and this read.
+        assert_eq!(server.requests(GET_HISTORY), 2);
 
         // A transaction whose receipt carries the swap contract's payment-sent event, but which holds no payment
         // call with this swap's identifier: it is read, and it does not answer the question.

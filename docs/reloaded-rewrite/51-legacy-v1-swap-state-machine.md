@@ -1984,6 +1984,33 @@ changes no sentence above.
    node answered, each node named by host and port only. The swap step
    recognizes it by one marker in that text, wherever the text is wrapped.
 
+*Status note (2026-11-24, clean side; Reloaded-original; maintainer decision of
+2026-11-24). A coin listed with one host.* It changes no sentence above.
+
+1. *The switch.* The top-level setting `swap_evidence_allow_single_host`, a
+   boolean that is `true` when absent, relaxes item 4 for a coin with no
+   `swap_evidence_node` whose node list, as configured, names exactly one host
+   by item 7. That host is the node the operator trusts, exactly as if
+   `swap_evidence_node` named it (item 2), and item 4 does not refuse the coin.
+2. *The list as configured.* Whether a list names one host is judged by the list
+   the coin was activated with, never by the hosts that answer: a coin listed
+   with two or more hosts stays under items 1 to 4 while one of them does not
+   answer, and a coin whose one host does not answer has a trusted node that
+   does not answer (item 3).
+3. *Unchanged.* A coin with `swap_evidence_node`, a coin read through the
+   operator's own daemon (item 6) and a coin with an empty list are unchanged.
+   With the setting `false`, item 4 applies as written.
+4. *Visibility.* The activation answer of a relaxed coin carries
+   `swap_evidence_single_host` with the value `true`, and the node logs one
+   warning that names the coin and no node. Reads log nothing more for it.
+5. *SLP tokens.* The setting covers the bchd servers of an SLP token's platform
+   too: with it `true`, a platform whose `bchd_urls` name exactly one host
+   trusts that host for the token's reads, and the token takes its platform's
+   policy instead of having too few nodes; two or more bchd hosts stay under
+   items 1 to 4. The platform's activation answer carries
+   `swap_evidence_single_bchd_host` with the value `true`, and the node logs one
+   warning that names the platform and no host.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -3812,3 +3839,8 @@ reference rows alike.
   first could act in its current run). Reloaded-original; it records the
   maintainer's decision of 2026-11-23, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-24 (PR #536):* the status note before §51.7
+  on a coin listed with one host (`swap_evidence_allow_single_host`).
+  Reloaded-original; it records the maintainer's decision of 2026-11-24,
+  takes no reference input and no forbidden-class input, and changes no
+  sentence of the chapter.

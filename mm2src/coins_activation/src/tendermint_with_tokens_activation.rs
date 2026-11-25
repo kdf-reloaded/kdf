@@ -348,6 +348,9 @@ pub struct TendermintActivationResult {
     tokens_balances: Option<HashMap<String, CoinBalance>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens_tickers: Option<HashSet<String>>,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    swap_evidence_single_host: bool,
 }
 
 impl GetPlatformBalance for TendermintActivationResult {
@@ -529,6 +532,13 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
             .collect();
         let swap_evidence = swap_evidence_policy_from(&ticker, activation_request.swap_evidence_node.as_deref(), &urls)
             .map_err(|e| MmError::new(TendermintActivationError::SwapEvidenceNodeNotInList(e)))?;
+        let swap_evidence = coins::swap_evidence::apply_single_host(
+            &ctx,
+            &ticker,
+            swap_evidence,
+            activation_request.swap_evidence_node.as_deref(),
+            &urls,
+        );
         let coin = build_platform_coin(ctx, ticker, platform_conf, activation_request, priv_key).await?;
         coin.set_swap_evidence_policy(swap_evidence);
         Ok(coin)
@@ -560,7 +570,7 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
 
     async fn get_activation_result<XPubExtractor>(
         &self,
-        _ctx: &MmArc,
+        ctx: &MmArc,
         activation_request: &Self::ActivationRequest,
         _xpub_extractor: Option<&XPubExtractor>,
     ) -> Result<TendermintActivationResult, MmError<TendermintActivationError>>
@@ -595,6 +605,7 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         };
 
         Ok(TendermintActivationResult {
+            swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(ctx, &ticker),
             ticker,
             address,
             current_block,
@@ -774,6 +785,7 @@ mod tests {
             unspendable: BigDecimal::from(0),
         });
         let result = TendermintActivationResult {
+            swap_evidence_single_host: false,
             ticker: "IRIS".to_owned(),
             address: "cosmos1abc".to_owned(),
             current_block: 99,
@@ -801,6 +813,7 @@ mod tests {
         let mut tickers = HashSet::new();
         tickers.insert("IRIS-IBC".to_owned());
         let result = TendermintActivationResult {
+            swap_evidence_single_host: false,
             ticker: "IRIS".to_owned(),
             address: "cosmos1abc".to_owned(),
             current_block: 1,

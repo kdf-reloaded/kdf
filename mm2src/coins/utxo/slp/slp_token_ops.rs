@@ -161,9 +161,15 @@ impl SlpToken {
             },
             slp_amount: slp_satoshis,
         };
-        validate_slp_utxos(self.platform_coin.bchd_urls(), &[slp_unspent], self.token_id())
-            .await
-            .mm_err(Into::into)?;
+        validate_slp_utxos_under(
+            &self.swap_evidence_policy(),
+            self.platform_coin.bchd_urls(),
+            self.platform_coin.allow_single_host(),
+            &[slp_unspent],
+            self.token_id(),
+        )
+        .await
+        .mm_err(Into::into)?;
 
         let slp_tx: SlpTxDetails = parse_slp_script(tx.outputs[0].script_pubkey.as_slice()).mm_err(Into::into)?;
 
@@ -195,6 +201,7 @@ impl SlpToken {
             input.time_lock,
             now_ms() / 1000 + 60,
             input.confirmations,
+            self.swap_evidence_policy(),
         );
 
         validate_fut

@@ -320,6 +320,8 @@ fn success_object_has_a_ticker_and_a_ticker_keyed_iguana_balance() {
         ticker: "RIN".to_owned(),
         current_block: 123,
         wallet_balance: UtxoWalletBalance::iguana("RIN", "Raddress".to_owned(), balance("1.5", "0")),
+        swap_evidence_single_host: false,
+        swap_evidence_single_bchd_host: false,
     };
     assert_eq!(
         serde_json::to_value(&result).unwrap(),
@@ -333,6 +335,48 @@ fn success_object_has_a_ticker_and_a_ticker_keyed_iguana_balance() {
             },
         })
     );
+}
+
+/// The relaxed swap evidence is reported by `swap_evidence_single_host: true`; every other response keeps its shape.
+#[test]
+fn success_object_reports_a_single_host_relaxation_only_when_relaxed() {
+    let mut result = UtxoStandardActivationResult {
+        ticker: "RIN".to_owned(),
+        current_block: 1,
+        wallet_balance: UtxoWalletBalance::iguana("RIN", "Raddress".to_owned(), balance("1", "0")),
+        swap_evidence_single_host: false,
+        swap_evidence_single_bchd_host: false,
+    };
+    assert!(serde_json::to_value(&result)
+        .unwrap()
+        .get("swap_evidence_single_host")
+        .is_none());
+    result.swap_evidence_single_host = true;
+    assert_eq!(
+        serde_json::to_value(&result).unwrap()["swap_evidence_single_host"],
+        json!(true)
+    );
+}
+
+/// A BCH platform whose bchd list was relaxed to one host at its build reports
+/// `swap_evidence_single_bchd_host: true`, apart from the Electrum-list member; a ticker without the record (every
+/// non-BCH coin) omits it.
+#[test]
+fn success_object_reports_a_single_bchd_host_only_for_the_recorded_ticker() {
+    let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+    coins::swap_evidence::record_single_bchd_host_outcome(&ctx, "BCH", true);
+    let result_of = |ticker: &str| UtxoStandardActivationResult {
+        ticker: ticker.to_owned(),
+        current_block: 1,
+        wallet_balance: UtxoWalletBalance::iguana(ticker, "address".to_owned(), balance("1", "0")),
+        swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(&ctx, ticker),
+        swap_evidence_single_bchd_host: coins::swap_evidence::single_bchd_host_relaxed(&ctx, ticker),
+    };
+    let bch = serde_json::to_value(result_of("BCH")).unwrap();
+    assert_eq!(bch["swap_evidence_single_bchd_host"], json!(true));
+    assert!(bch.get("swap_evidence_single_host").is_none(), "{bch}");
+    let rin = serde_json::to_value(result_of("RIN")).unwrap();
+    assert!(rin.get("swap_evidence_single_bchd_host").is_none(), "{rin}");
 }
 
 #[test]
@@ -357,6 +401,8 @@ fn success_object_hd_form_keys_every_balance_by_the_ticker() {
         ticker: "RIN".to_owned(),
         current_block: 5,
         wallet_balance: UtxoWalletBalance::HD(hd),
+        swap_evidence_single_host: false,
+        swap_evidence_single_bchd_host: false,
     };
     let wire = serde_json::to_value(&result).unwrap();
     assert_eq!(wire["wallet_balance"]["wallet_type"], json!("HD"));

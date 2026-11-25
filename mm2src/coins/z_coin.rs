@@ -3229,8 +3229,22 @@ impl<'a> UtxoCoinBuilderCommonOps for ZCoinBuilder<'a> {
     /// The policy is over the lightwalletd servers of a Light-mode coin; `swap_evidence_node` must be one of them.
     /// A Native-mode coin is served by its own daemon (CRD ch.51 R100).
     fn swap_evidence_policy(&self) -> UtxoCoinBuildResult<crate::SwapEvidencePolicy> {
-        zcoin_swap_evidence_policy(self.ticker, self.params.swap_evidence_node.as_deref(), &self.backend)
-            .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))
+        let policy = zcoin_swap_evidence_policy(self.ticker, self.params.swap_evidence_node.as_deref(), &self.backend)
+            .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))?;
+        let configured: &[String] = match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinBackend::Native => &[],
+            ZcoinBackend::Light {
+                light_wallet_d_servers, ..
+            } => light_wallet_d_servers,
+        };
+        Ok(crate::swap_evidence::apply_single_host(
+            self.ctx,
+            self.ticker,
+            policy,
+            self.params.swap_evidence_node.as_deref(),
+            configured,
+        ))
     }
 
     /// The RPC client is selected by the requested backend, never by `activation_params().mode`: a
@@ -3267,6 +3281,13 @@ impl<'a> UtxoCoinBuilderCommonOps for ZCoinBuilder<'a> {
                             // Every shielded-coin family is double-SHA256.
                             checksum_type: kdf_crypto::ChecksumType::DSHA256,
                         },
+                        // The reads of a swap step judge their evidence by this policy once the family has
+                        // adopted R100 (CRD ch.51 R100); until then they are today's reads.
+                        crate::swap_evidence::effective_policy(
+                            crate::swap_evidence::SwapFamily::Zcoin,
+                            &self.swap_evidence_policy()?,
+                        ),
+                        self.ticker,
                     )))
                 }
             },
@@ -3669,6 +3690,7 @@ impl MarketCoinOps for ZCoin {
                 requires_nota,
                 wait_until,
                 check_every,
+                &MmCoin::swap_evidence_policy(self),
             )
         }
     }
@@ -3692,6 +3714,7 @@ impl MarketCoinOps for ZCoin {
                 utxo_common::DEFAULT_SWAP_VOUT,
                 from_block,
                 wait_until,
+                &MmCoin::swap_evidence_policy(self),
             )
         }
     }

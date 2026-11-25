@@ -8,9 +8,11 @@ impl MmCoin for Qrc20Coin {
 
     fn chain_disagreement(&self) -> Option<String> { crate::utxo::electrum_chain_disagreement(&self.utxo) }
 
-    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
-        crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Qrc20, &self.utxo.swap_evidence)
-    }
+    /// The policy stored at activation, with the capability rule of the contract-event history (CRD ch.51 R100 item
+    /// 4): a token over two or more Electrum hosts is `Insufficient` until two of them have served that read.
+    fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy { self.evidence_policy() }
+
+    fn swap_evidence_refusal(&self) -> Option<String> { self.evidence_refusal() }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         Box::new(qrc20_withdraw(self.clone(), req).boxed().compat())

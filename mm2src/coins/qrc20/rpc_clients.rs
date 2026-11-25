@@ -1,6 +1,6 @@
 use super::*;
 use crate::utxo::rpc_clients::{ElectrumOwner, UtxoRpcError, UtxoRpcFut};
-use common::jsonrpc_client::JsonRpcError;
+use common::jsonrpc_client::{JsonRpcError, JsonRpcMultiClient};
 use rpc::v1::types::H256;
 
 impl From<crate::eth::abi::AbiError> for UtxoRpcError {
@@ -373,6 +373,75 @@ impl ElectrumClient {
             topic
         );
         self.send_request_with_listing_tip(request).await
+    }
+}
+
+/// The text of a failed request of one server for the per-server summary of a swap read (CRD ch.51 R100): the error
+/// alone, which names the server by `host:port` only, without the request.
+pub(crate) fn directed_error_text(error: JsonRpcError) -> String { error.error.to_string() }
+
+/// The contract reads addressed to one named server (CRD ch.38 R38.6.4g), for the swap reads that two servers must
+/// agree on (CRD ch.51 R100). Each is answered by that server or fails naming it; none fails over.
+impl ElectrumClient {
+    /// `blockchain.contract.call` of `server`.
+    pub fn blockchain_contract_call_from(
+        &self,
+        server: &str,
+        contract_addr: &H160Json,
+        data: BytesJson,
+    ) -> RpcRes<ContractCallResult> {
+        let sender = "";
+        rpc_func_from!(self, server, "blockchain.contract.call", contract_addr, data, sender)
+    }
+
+    /// `blochchain.transaction.get_receipt` of `server` (the method name is spelled as the server spells it).
+    pub fn blockchain_transaction_get_receipt_from(&self, server: &str, hash: &H256Json) -> RpcRes<Vec<TxReceipt>> {
+        rpc_func_from!(self, server, "blochchain.transaction.get_receipt", hash)
+    }
+
+    /// `blockchain.contract.event.get_history` of `server`.
+    pub fn blockchain_contract_event_get_history_from(
+        &self,
+        server: &str,
+        address: &H160Json,
+        contract_addr: &H160Json,
+        topic: &str,
+    ) -> RpcRes<Vec<TxHistoryItem>> {
+        rpc_func_from!(
+            self,
+            server,
+            "blockchain.contract.event.get_history",
+            address,
+            contract_addr,
+            topic
+        )
+    }
+
+    /// The state of the payment `swap_id` in the swap contract `swap_contract`, as `server` reports it
+    /// (`payments(id)`).
+    pub(crate) async fn payment_state_from(
+        &self,
+        server: &str,
+        swap_contract: &H160,
+        swap_id: &[u8],
+    ) -> Result<U256, String> {
+        let function = eth::SWAP_CONTRACT.function("payments").map_err(|e| e.to_string())?;
+        let params = function
+            .encode_input(&[Token::FixedBytes(swap_id.to_vec())])
+            .map_err(|e| e.to_string())?;
+        let contract_addr = contract_addr_into_rpc_format(swap_contract);
+        let result = self
+            .blockchain_contract_call_from(server, &contract_addr, params.into())
+            .compat()
+            .await
+            .map_err(directed_error_text)?;
+        let decoded = function
+            .decode_output(&result.execution_result.output)
+            .map_err(|e| e.to_string())?;
+        match decoded.get(2) {
+            Some(Token::Uint(state)) => Ok(*state),
+            other => Err(format!("the payment state must be a uint, got {:?}", other)),
+        }
     }
 }
 

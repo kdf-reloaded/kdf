@@ -74,14 +74,14 @@ pub enum R100Adoption {
 /// (`r100_release_gate_every_swap_family_adopted`, ignored in ordinary CI) passes when every entry is `Adopted` or
 /// `SwapsOff`, so it binds only the families that swap in the release.
 pub const R100_ADOPTED: &[(SwapFamily, R100Adoption)] = &[
-    (SwapFamily::Utxo, R100Adoption::NotAdopted),
-    (SwapFamily::Bch, R100Adoption::NotAdopted),
-    (SwapFamily::Slp, R100Adoption::NotAdopted),
-    (SwapFamily::Qtum, R100Adoption::NotAdopted),
-    (SwapFamily::Qrc20, R100Adoption::NotAdopted),
-    (SwapFamily::Evm, R100Adoption::NotAdopted),
-    (SwapFamily::Zcoin, R100Adoption::NotAdopted),
-    (SwapFamily::Sia, R100Adoption::NotAdopted),
+    (SwapFamily::Utxo, R100Adoption::Adopted),
+    (SwapFamily::Bch, R100Adoption::Adopted),
+    (SwapFamily::Slp, R100Adoption::Adopted),
+    (SwapFamily::Qtum, R100Adoption::Adopted),
+    (SwapFamily::Qrc20, R100Adoption::Adopted),
+    (SwapFamily::Evm, R100Adoption::Adopted),
+    (SwapFamily::Zcoin, R100Adoption::Adopted),
+    (SwapFamily::Sia, R100Adoption::Adopted),
     (SwapFamily::Tendermint, R100Adoption::SwapsOff),
     (SwapFamily::Tron, R100Adoption::Adopted),
     (SwapFamily::Solana, R100Adoption::SwapsOff),
@@ -105,6 +105,20 @@ pub fn effective_policy(family: SwapFamily, stored: &SwapEvidencePolicy) -> Swap
         stored.clone()
     } else {
         SwapEvidencePolicy::NotAdopted
+    }
+}
+
+impl SwapEvidencePolicy {
+    /// The kind of the policy as a fixed text, which is what a log line names. A node address may carry a
+    /// credential and must never be formatted into a log or an error text, so this never reads the trusted node.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SwapEvidencePolicy::TwoNodes { .. } => "two nodes",
+            SwapEvidencePolicy::Trusted { .. } => "trusted node",
+            SwapEvidencePolicy::OwnDaemon => "own daemon",
+            SwapEvidencePolicy::Insufficient { .. } => "too few nodes",
+            SwapEvidencePolicy::NotAdopted => "not adopted",
+        }
     }
 }
 
@@ -257,6 +271,125 @@ pub fn swap_evidence_policy_from(
     }
 }
 
+/// The MM2.json key of the single-host switch.
+pub const ALLOW_SINGLE_HOST_KEY: &str = "swap_evidence_allow_single_host";
+
+/// Reads the MM2.json bool `swap_evidence_allow_single_host`: `true` when absent or `null`; a value that is not a
+/// bool is an error that names the key (the start-up refuses it like other MM2.json bools).
+pub fn allow_single_host_from_conf(conf: &serde_json::Value) -> Result<bool, String> {
+    match conf.get(ALLOW_SINGLE_HOST_KEY) {
+        None | Some(serde_json::Value::Null) => Ok(true),
+        Some(serde_json::Value::Bool(allow)) => Ok(*allow),
+        Some(other) => Err(format!(
+            "invalid '{ALLOW_SINGLE_HOST_KEY}' value {other}: the value must be a boolean"
+        )),
+    }
+}
+
+/// The switch of the node (the one place that reads it): `true` unless MM2.json sets it to `false`. A value that is
+/// not a bool was refused at start-up; here it reads as the default.
+pub fn allow_single_host(ctx: &mm2_core::mm_ctx::MmArc) -> bool {
+    allow_single_host_from_conf(&ctx.conf).unwrap_or(true)
+}
+
+/// Relaxes `policy` for a coin whose CONFIGURED node list names exactly one distinct host (maintainer decision of
+/// 2026-11-24, relaxing R100). Returns the possibly relaxed policy and `true` when it relaxed it.
+///
+/// The policy is relaxed only when `allow` is set, `field` (`swap_evidence_node`) is absent, `policy` is
+/// [`SwapEvidencePolicy::Insufficient`] and `configured` has exactly one distinct host ([`node_host`]; two ports or
+/// schemes of one host are one host). The result is `Trusted { node: <the first entry of that host> }`, exactly what
+/// a `swap_evidence_node` naming that entry gives. The judgement is by the configured list, never by the hosts that
+/// answer: a list of two hosts stays strict even when one of them is down. Every other policy is returned as it is.
+pub fn relax_single_host(
+    policy: SwapEvidencePolicy,
+    field: Option<&str>,
+    configured: &[String],
+    allow: bool,
+) -> (SwapEvidencePolicy, bool) {
+    if !allow || field.is_some() || !matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
+        return (policy, false);
+    }
+    let hosts = distinct_hosts(configured);
+    let [host] = hosts.as_slice() else {
+        return (policy, false);
+    };
+    match configured
+        .iter()
+        .find(|entry| node_host(entry).as_deref() == Some(host.as_str()))
+    {
+        Some(entry) => (SwapEvidencePolicy::Trusted { node: entry.clone() }, true),
+        None => (policy, false),
+    }
+}
+
+/// For `skip_serializing_if`: the response field `swap_evidence_single_host` is written only when it is `true`.
+pub fn is_false(value: &bool) -> bool { !*value }
+
+/// The one warning of a coin whose policy was relaxed at activation: the ticker and the kind, no host, no URL.
+pub fn single_host_warning(ticker: &str) -> String {
+    format!("{ticker}: swap evidence relaxed to a single host ({ALLOW_SINGLE_HOST_KEY})")
+}
+
+/// [`relax_single_host`] at an activation site: reads the switch, relaxes, and records the outcome
+/// ([`record_single_host_outcome`]). Call it after [`swap_evidence_policy_from`] with the node list as CONFIGURED.
+pub fn apply_single_host(
+    ctx: &mm2_core::mm_ctx::MmArc,
+    ticker: &str,
+    policy: SwapEvidencePolicy,
+    field: Option<&str>,
+    configured: &[String],
+) -> SwapEvidencePolicy {
+    let (policy, relaxed) = relax_single_host(policy, field, configured, allow_single_host(ctx));
+    record_single_host_outcome(ctx, ticker, relaxed);
+    policy
+}
+
+/// Writes the one warning of a relaxed coin and records the outcome of `ticker` for its activation response
+/// ([`single_host_relaxed`]); an activation that did not relax clears an earlier record of the ticker.
+pub fn record_single_host_outcome(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str, relaxed: bool) {
+    if relaxed {
+        common::log::warn!("{}", single_host_warning(ticker));
+    }
+    if let Ok(coins_ctx) = crate::CoinsContext::from_ctx(ctx) {
+        coins_ctx.set_single_host_relaxed(ticker, relaxed);
+    }
+}
+
+/// Whether the activation of `ticker` that just ran relaxed its swap evidence to a single host: the value of the
+/// response field `swap_evidence_single_host`.
+pub fn single_host_relaxed(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str) -> bool {
+    crate::CoinsContext::from_ctx(ctx)
+        .map(|coins_ctx| coins_ctx.is_single_host_relaxed(ticker))
+        .unwrap_or(false)
+}
+
+/// The one warning of a BCH platform whose SLP token reads were relaxed to its one configured bchd host: the
+/// ticker and the kind, no host, no URL.
+pub fn single_bchd_host_warning(ticker: &str) -> String {
+    format!("{ticker}: SLP token reads relaxed to a single bchd host ({ALLOW_SINGLE_HOST_KEY})")
+}
+
+/// Writes the one warning of a BCH platform whose `bchd_urls` were relaxed to one host and records the outcome of
+/// `ticker` for its activation response ([`single_bchd_host_relaxed`]). The record is kept apart from the
+/// Electrum-list record of the same ticker ([`record_single_host_outcome`]); an activation that did not relax
+/// clears an earlier bchd record of the ticker.
+pub fn record_single_bchd_host_outcome(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str, relaxed: bool) {
+    if relaxed {
+        common::log::warn!("{}", single_bchd_host_warning(ticker));
+    }
+    if let Ok(coins_ctx) = crate::CoinsContext::from_ctx(ctx) {
+        coins_ctx.set_single_bchd_host_relaxed(ticker, relaxed);
+    }
+}
+
+/// Whether the activation of the BCH platform `ticker` that just ran relaxed its SLP token reads to a single bchd
+/// host: the value of the response field `swap_evidence_single_bchd_host`.
+pub fn single_bchd_host_relaxed(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str) -> bool {
+    crate::CoinsContext::from_ctx(ctx)
+        .map(|coins_ctx| coins_ctx.is_single_bchd_host_relaxed(ticker))
+        .unwrap_or(false)
+}
+
 /// A `swap_evidence_node` set for a coin that has no node list (a coin served by its own daemon).
 pub fn swap_evidence_field_without_list(ticker: &str, field: Option<&str>) -> Result<(), SwapEvidenceNodeNotInList> {
     match field {
@@ -309,18 +442,49 @@ pub fn undetermined(reason: &str, nodes: &[&str]) -> String {
 /// that quotes it counts as undetermined; that errs toward waiting, the safe side.
 pub fn is_undetermined(err: &str) -> bool { err.contains(UNDETERMINED_PREFIX) }
 
+impl UndeterminedReason {
+    /// Every reason. A new variant fails to compile in [`Self::phrase`] and in the match of the test
+    /// `every_reason_is_listed_in_all` until it is handled there; that test then fails until it is listed here.
+    pub const ALL: [UndeterminedReason; 4] = [
+        UndeterminedReason::Disagree,
+        UndeterminedReason::TooFewAnswers,
+        UndeterminedReason::TrustedNodeSilent,
+        UndeterminedReason::TipGap,
+    ];
+
+    /// The fixed phrase of the reason, free of any node label.
+    pub fn phrase(&self) -> &'static str {
+        match self {
+            UndeterminedReason::Disagree => "the nodes disagree",
+            UndeterminedReason::TooFewAnswers => "fewer than two nodes answered",
+            UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
+            UndeterminedReason::TipGap => "the tips of the nodes differ too much",
+        }
+    }
+}
+
+/// The label-free kind of an undetermined error text, or `None` when the text carries no marker. The text may be
+/// wrapped (`file:line] `). A known reason gives its phrase; a free reason (any other text after the marker, which
+/// may carry server names) gives the generic "undetermined". A caller can print the result, never the text.
+pub fn undetermined_reason_kind(err: &str) -> Option<&'static str> {
+    let at = err.find(UNDETERMINED_PREFIX)?;
+    let rest = &err[at + UNDETERMINED_PREFIX.len()..];
+    Some(
+        UndeterminedReason::ALL
+            .iter()
+            .map(UndeterminedReason::phrase)
+            .find(|phrase| rest.starts_with(phrase))
+            .unwrap_or("undetermined"),
+    )
+}
+
 impl Undetermined {
     /// The error text of this read: [`UNDETERMINED_PREFIX`], the reason, and what each node said, as
     /// `(label: summary; label: summary)`. A summary is the decision or the fixed error text of the node's `ask`,
     /// which carries no URL or credential by the contract of [`agree`]. [`undetermined`] builds the labels-only form
     /// for callers without an `Undetermined` value; both start with the prefix.
     pub fn to_err_string(&self) -> String {
-        let reason = match self.reason {
-            UndeterminedReason::Disagree => "the nodes disagree",
-            UndeterminedReason::TooFewAnswers => "fewer than two nodes answered",
-            UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
-            UndeterminedReason::TipGap => "the tips of the nodes differ too much",
-        };
+        let reason = self.reason.phrase();
         if self.per_node.is_empty() {
             return format!("{UNDETERMINED_PREFIX}{reason}");
         }
@@ -606,6 +770,33 @@ mod tests {
 
     fn list(entries: &[&str]) -> Vec<String> { entries.iter().map(|entry| (*entry).to_owned()).collect() }
 
+    /// The policy is logged by its kind only: a trusted node is the operator's field and can carry a credential.
+    #[test]
+    fn the_policy_kind_names_no_node() {
+        let trusted = SwapEvidencePolicy::Trusted {
+            node: "https://user:secret@h:443".to_owned(),
+        };
+        let kind = trusted.kind();
+        assert_eq!(kind, "trusted node");
+        assert!(
+            !kind.contains("secret") && !kind.contains("user"),
+            "the kind names a credential"
+        );
+        for (policy, expected) in [
+            (
+                SwapEvidencePolicy::TwoNodes {
+                    hosts: vec!["a".to_owned(), "b".to_owned()],
+                },
+                "two nodes",
+            ),
+            (SwapEvidencePolicy::OwnDaemon, "own daemon"),
+            (SwapEvidencePolicy::Insufficient { hosts: 1 }, "too few nodes"),
+            (SwapEvidencePolicy::NotAdopted, "not adopted"),
+        ] {
+            assert_eq!(policy.kind(), expected);
+        }
+    }
+
     #[test]
     fn undetermined_marker_survives_wrapping() {
         let text = undetermined("disagree", &["a:1", "b:2"]);
@@ -636,6 +827,57 @@ mod tests {
         assert_eq!(disagree.to_string(), long);
         assert!(is_undetermined(&long));
         assert!(is_undetermined(&format!("x.rs:1] {long}")));
+    }
+
+    #[test]
+    fn undetermined_reason_kind_names_no_label() {
+        let long = Undetermined {
+            reason: UndeterminedReason::Disagree,
+            per_node: vec![
+                ("a.example:50002".to_owned(), "Claimed".to_owned()),
+                ("b.example:50002".to_owned(), "NotSpent".to_owned()),
+            ],
+        }
+        .to_err_string();
+        for text in [long.clone(), format!("x.rs:1] {long}")] {
+            let kind = undetermined_reason_kind(&text);
+            assert_eq!(kind, Some("the nodes disagree"), "the reason phrase is expected");
+            assert!(!kind.unwrap().contains(':'), "the phrase must carry no label");
+            assert!(!kind.unwrap().contains("example"), "the phrase must carry no host");
+        }
+        assert_eq!(undetermined_reason_kind("x.rs:1] connection refused"), None);
+    }
+
+    #[test]
+    fn every_reason_gives_its_phrase_and_a_free_reason_the_generic_kind() {
+        for reason in UndeterminedReason::ALL {
+            let text = Undetermined {
+                reason,
+                per_node: vec![("a.example:50002".to_owned(), "x".to_owned())],
+            }
+            .to_err_string();
+            assert_eq!(undetermined_reason_kind(&text), Some(reason.phrase()));
+        }
+        let free = undetermined("srv.example:50002 refused", &["srv.example:50002"]);
+        assert_eq!(undetermined_reason_kind(&free), Some("undetermined"));
+        assert_eq!(undetermined_reason_kind("plain text"), None);
+    }
+
+    #[test]
+    fn every_reason_is_listed_in_all() {
+        // Exhaustive on purpose (no wildcard): a new variant does not compile here until it is handled.
+        fn listed(r: UndeterminedReason) -> bool {
+            match r {
+                UndeterminedReason::Disagree
+                | UndeterminedReason::TooFewAnswers
+                | UndeterminedReason::TrustedNodeSilent
+                | UndeterminedReason::TipGap => UndeterminedReason::ALL.contains(&r),
+            }
+        }
+        assert!(listed(UndeterminedReason::Disagree));
+        assert!(listed(UndeterminedReason::TooFewAnswers));
+        assert!(listed(UndeterminedReason::TrustedNodeSilent));
+        assert!(listed(UndeterminedReason::TipGap));
     }
 
     #[test]
@@ -782,6 +1024,119 @@ mod tests {
         assert_eq!(none, SwapEvidencePolicy::Insufficient { hosts: 0 });
         assert!(swap_evidence_field_without_list("T", None).is_ok());
         assert!(swap_evidence_field_without_list("T", Some("x")).is_err());
+    }
+
+    #[test]
+    fn the_single_host_switch_defaults_to_true_and_must_be_a_bool() {
+        assert!(allow_single_host_from_conf(&serde_json::json!({})).unwrap());
+        assert!(allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: null })).unwrap());
+        assert!(allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: true })).unwrap());
+        assert!(!allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: false })).unwrap());
+        for bad in [serde_json::json!("false"), serde_json::json!(0), serde_json::json!([])] {
+            let error = allow_single_host_from_conf(&serde_json::json!({ ALLOW_SINGLE_HOST_KEY: bad })).unwrap_err();
+            assert!(error.contains(ALLOW_SINGLE_HOST_KEY), "{error}");
+        }
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        assert!(allow_single_host(&ctx));
+        let off = mm2_core::mm_ctx::MmCtxBuilder::new()
+            .with_conf(serde_json::json!({ ALLOW_SINGLE_HOST_KEY: false }))
+            .into_mm_arc();
+        assert!(!allow_single_host(&off));
+    }
+
+    #[test]
+    fn relax_single_host_cases() {
+        let relax = |field: Option<&str>, nodes: &[&str], allow: bool| {
+            let nodes = list(nodes);
+            let policy = swap_evidence_policy_from("T", field, &nodes).unwrap();
+            relax_single_host(policy, field, &nodes, allow)
+        };
+        // one host: relaxed to the first entry of the host
+        assert_eq!(
+            relax(None, &["a.example:50002"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "a.example:50002".to_owned()
+                },
+                true
+            )
+        );
+        // the switch off: today's behavior
+        assert_eq!(
+            relax(None, &["a.example:50002"], false),
+            (SwapEvidencePolicy::Insufficient { hosts: 1 }, false)
+        );
+        // two ports, and http plus wss of one host, are one host; the first entry is trusted
+        assert_eq!(
+            relax(None, &["a.example:50001", "A.example:50002"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "a.example:50001".to_owned()
+                },
+                true
+            )
+        );
+        assert_eq!(
+            relax(None, &["https://a.example", "wss://a.example/ws"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "https://a.example".to_owned()
+                },
+                true
+            )
+        );
+        // two distinct hosts stay strict
+        let (policy, relaxed) = relax(None, &["a.example:1", "b.example:1"], true);
+        assert!(matches!(policy, SwapEvidencePolicy::TwoNodes { .. }) && !relaxed);
+        // a field set: unchanged, not counted as relaxed
+        assert_eq!(
+            relax(Some("a.example"), &["a.example:50002"], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "a.example:50002".to_owned()
+                },
+                false
+            )
+        );
+        // an empty list stays Insufficient
+        assert_eq!(
+            relax(None, &[], true),
+            (SwapEvidencePolicy::Insufficient { hosts: 0 }, false)
+        );
+        // the other policies are returned as they are
+        for policy in [SwapEvidencePolicy::OwnDaemon, SwapEvidencePolicy::NotAdopted] {
+            assert_eq!(
+                relax_single_host(policy.clone(), None, &list(&["a.example:1"]), true),
+                (policy, false)
+            );
+        }
+    }
+
+    #[test]
+    fn the_warning_names_the_ticker_and_no_host() {
+        let text = single_host_warning("RIN");
+        assert_eq!(
+            text,
+            "RIN: swap evidence relaxed to a single host (swap_evidence_allow_single_host)"
+        );
+        assert!(!text.contains("example") && !text.contains("://"), "{text}");
+    }
+
+    #[test]
+    fn the_outcome_is_recorded_per_ticker() {
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        assert!(!single_host_relaxed(&ctx, "RIN"));
+        let nodes = list(&["a.example:50002"]);
+        let policy = swap_evidence_policy_from("RIN", None, &nodes).unwrap();
+        let policy = apply_single_host(&ctx, "RIN", policy, None, &nodes);
+        assert!(matches!(policy, SwapEvidencePolicy::Trusted { .. }));
+        assert!(single_host_relaxed(&ctx, "RIN"));
+        assert!(!single_host_relaxed(&ctx, "OTHER"));
+        // a later activation that does not relax clears the record
+        let two = list(&["a.example:1", "b.example:1"]);
+        let policy = swap_evidence_policy_from("RIN", None, &two).unwrap();
+        apply_single_host(&ctx, "RIN", policy, None, &two);
+        assert!(!single_host_relaxed(&ctx, "RIN"));
     }
 
     #[test]
