@@ -31,6 +31,10 @@ impl BchCoin {
 
     pub fn bchd_urls(&self) -> &[String] { &self.bchd_urls }
 
+    /// The node's `swap_evidence_allow_single_host` switch at activation, which the SLP validity read of a token on
+    /// this platform takes (`bchd_grpc::single_bchd_host_policy`).
+    pub(crate) fn allow_single_host(&self) -> bool { self.allow_single_host }
+
     pub(crate) async fn utxos_into_bch_unspents(&self, utxos: Vec<UnspentInfo>) -> UtxoRpcResult<BchUnspents> {
         let mut result = BchUnspents::default();
         let mut temporary_undetermined = Vec::new();

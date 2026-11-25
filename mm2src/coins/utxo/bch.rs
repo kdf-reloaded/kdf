@@ -307,10 +307,10 @@ fn slp_policy_over(
     bchd_urls: &[String],
     allow_single_host: bool,
 ) -> crate::SwapEvidencePolicy {
-    let hosts = crate::swap_evidence::distinct_hosts(bchd_urls).len();
-    if hosts == 1 && allow_single_host {
+    if crate::utxo::bchd_grpc::single_bchd_host_policy(bchd_urls, allow_single_host).is_some() {
         return platform.clone();
     }
+    let hosts = crate::swap_evidence::distinct_hosts(bchd_urls).len();
     if hosts < 2 {
         return crate::SwapEvidencePolicy::Insufficient { hosts };
     }

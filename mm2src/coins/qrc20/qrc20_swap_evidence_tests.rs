@@ -100,6 +100,19 @@ fn new_ctx() -> MmArc {
         .into_mm_arc()
 }
 
+/// [`new_ctx`] with the single-host switch (`swap_evidence_allow_single_host`) off: a coin with one host stays
+/// `Insufficient`.
+fn strict_ctx() -> MmArc {
+    MmCtxBuilder::new()
+        .with_conf(json!({
+            "electrum_tip_checks": false,
+            "electrum_server_order": "listed",
+            "electrum_spread_reads": false,
+            "swap_evidence_allow_single_host": false,
+        }))
+        .into_mm_arc()
+}
+
 async fn token_on(ctx: &MmArc, ticker: &str, urls: &[String], swap_evidence_node: Option<&str>) -> Qrc20Coin {
     let conf = json!({
         "coin": ticker,
@@ -1127,12 +1140,60 @@ fn a_trusted_host_that_answers_the_event_history_with_an_error_is_refused() {
     });
 }
 
+/// The single-host switch (`swap_evidence_allow_single_host`, on by default): a token whose platform lists ONE
+/// configured Electrum host is `Trusted` on it through the UTXO builder, and the capability rule of a trusted server
+/// then applies to that host: refused until it has served the contract-event history, admitted after.
+#[test]
+fn one_configured_host_is_trusted_and_needs_the_capability() {
+    block_on(async {
+        let hosts = Hosts::start(1).await;
+        hosts.a().set_error(GET_HISTORY, "unknown method");
+        let ctx = new_ctx();
+        let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
+        assert_eq!(coin.utxo.swap_evidence, SwapEvidencePolicy::Trusted {
+            node: hosts.name(0)
+        });
+        wait_for("the probe of the one host", || hosts.a().requests(GET_HISTORY) == 1).await;
+        let client = client_of(&coin);
+        wait_for("the end of the probe", || {
+            client.claim_contract_history_probes(0., Some(&hosts.name(0))).len() == 1
+        })
+        .await;
+        client.end_contract_history_probe(&hosts.name(0));
+
+        // Refused while the host has not served the read, with the text of a trusted server.
+        assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {
+            hosts: 0
+        });
+        let refusal = coin.swap_evidence_refusal().unwrap();
+        assert!(
+            refusal.contains(&format!("trusted Electrum server {}", hosts.name(0))),
+            "the refusal names the trusted host"
+        );
+        assert!(!refusal.contains("://"), "the refusal holds no URL");
+
+        // Admitted once the host serves the read.
+        hosts.a().clear_error(GET_HISTORY);
+        let address = contract_addr_into_rpc_format(&me(&coin));
+        let token = contract_addr_into_rpc_format(&coin.contract_address);
+        client
+            .blockchain_contract_event_get_history_from(&hosts.name(0), &address, &token, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await
+            .unwrap();
+        assert_eq!(coin.swap_evidence_refusal(), None);
+        assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Trusted {
+            node: hosts.name(0)
+        });
+    });
+}
+
 #[test]
 fn two_ports_of_one_host_count_once() {
     block_on(async {
         let hosts = Hosts::start(2).await;
         let urls = vec![format!("a.test:{}", hosts.port(0)), format!("A.test:{}", hosts.port(1))];
-        let ctx = new_ctx();
+        let ctx = strict_ctx();
         let coin = token_on(&ctx, "QRC20", &urls, None).await;
         assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {
             hosts: 1
