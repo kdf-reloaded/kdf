@@ -3632,9 +3632,9 @@ poll, and survives a restart.
 > a light-mode build keeps its scope, an internal note is spent with the full
 > viewing key of the internal spending key, and the build holds both spending
 > keys, which share the spend authorizing key. Every note the balance counts is
-> therefore spendable by withdraw and by a swap payment. Native mode selects
-> only notes of the external address, so it does not meet such notes; notes of
-> the Ironwood pool are neither shown nor spent.
+> therefore spendable by withdraw and by a swap payment. A Native-mode coin is
+> refused at activation in this release, so only Light mode spends these notes;
+> notes of the Ironwood pool are neither shown nor spent.
 
 R39.8.0ah A pending shielded receipt shall be invalidated — removed from the
 pending set and no longer added to the non-spendable balance — as soon as any of
