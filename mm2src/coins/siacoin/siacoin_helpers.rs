@@ -51,6 +51,13 @@ impl SiaCoin {
             request.client_conf.server_url.as_str(),
         )
         .map_err(SiaCoinNewError::SwapEvidenceNodeNotInList)?;
+        let swap_evidence = crate::swap_evidence::apply_single_host(
+            _ctx,
+            &conf.ticker,
+            swap_evidence,
+            request.swap_evidence_node.as_deref(),
+            &[request.client_conf.server_url.as_str().to_owned()],
+        );
 
         Ok(
             SiaCoinBuilder::new(conf, key_pair, derivation_method, request, swap_evidence)

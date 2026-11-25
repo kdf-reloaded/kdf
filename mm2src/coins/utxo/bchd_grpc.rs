@@ -1,7 +1,7 @@
 /// https://bchd.cash/
 /// https://bchd.fountainhead.cash/
 use super::bchd_pb::*;
-use crate::swap_evidence::{agree, distinct_hosts, node_name, Agreement};
+use crate::swap_evidence::{agree, distinct_hosts, node_name, relax_single_host, Agreement};
 use crate::utxo::slp::SlpUnspent;
 use crate::SwapEvidencePolicy;
 use chain::OutPoint;
@@ -201,16 +201,33 @@ pub async fn validate_slp_utxos(
     Ok(())
 }
 
+/// The policy of an SLP validity read under the single-host switch (`swap_evidence_allow_single_host`, maintainer
+/// decision of 2026-11-24): `Trusted` on the first entry of the one host when `allow_single_host` is set and the
+/// CONFIGURED `bchd_urls` name exactly one distinct host (two ports or schemes of one host are one host), else `None`.
+/// So two or more hosts stay strict, and a list with no host stays `Insufficient`. The one rule both the token's
+/// stored policy and its validity read take.
+pub(crate) fn single_bchd_host_policy(bchd_urls: &[String], allow_single_host: bool) -> Option<SwapEvidencePolicy> {
+    let insufficient = SwapEvidencePolicy::Insufficient {
+        hosts: distinct_hosts(bchd_urls).len(),
+    };
+    match relax_single_host(insufficient, None, bchd_urls, allow_single_host) {
+        (trusted, true) => Some(trusted),
+        (_, false) => None,
+    }
+}
+
 /// How the validity of the counterparty's token output is read (CRD ch.51 R100): the legacy all-nodes read while the
-/// family has not adopted R100, else two distinct bchd hosts must agree.
+/// family has not adopted R100; the one bchd host alone when the single-host switch relaxed the token
+/// ([`single_bchd_host_policy`]); else two distinct bchd hosts must agree.
 pub async fn validate_slp_utxos_under(
     policy: &SwapEvidencePolicy,
     bchd_urls: &[String],
+    allow_single_host: bool,
     utxos: &[SlpUnspent],
     token_id: &H256,
 ) -> Result<(), MmError<ValidateSlpUtxosErr>> {
     let request = validation_request(utxos);
-    validate_slp_utxos_with(policy, bchd_urls, utxos, token_id, |url: &String| {
+    validate_slp_utxos_with(policy, bchd_urls, allow_single_host, utxos, token_id, |url: &String| {
         let request = &request;
         let endpoint = url.clone() + "/pb.bchrpc/GetSlpTrustedValidation";
         async move {
@@ -227,6 +244,7 @@ pub async fn validate_slp_utxos_under(
 pub(crate) async fn validate_slp_utxos_with<F, Fut>(
     policy: &SwapEvidencePolicy,
     bchd_urls: &[String],
+    allow_single_host: bool,
     utxos: &[SlpUnspent],
     token_id: &H256,
     ask: F,
@@ -236,11 +254,15 @@ where
     Fut: std::future::Future<Output = Result<GetSlpTrustedValidationResponse, String>>,
 {
     // The bchd nodes are read by their own list: a platform node (an Electrum entry) or the platform's daemon is not
-    // a bchd node, so every adopted policy but `Insufficient` is read as two nodes.
-    let bchd_policy = match policy {
-        SwapEvidencePolicy::NotAdopted => return validate_slp_utxos_legacy(bchd_urls, utxos, token_id, &ask).await,
-        SwapEvidencePolicy::Insufficient { hosts } => SwapEvidencePolicy::Insufficient { hosts: *hosts },
-        _ => SwapEvidencePolicy::TwoNodes {
+    // a bchd node, so every adopted policy but `Insufficient` is read as two nodes, unless the single-host switch
+    // trusts the one configured bchd host (matched by its label, as `agree` matches a trusted node).
+    let bchd_policy = match (policy, single_bchd_host_policy(bchd_urls, allow_single_host)) {
+        (SwapEvidencePolicy::NotAdopted, _) => {
+            return validate_slp_utxos_legacy(bchd_urls, utxos, token_id, &ask).await
+        },
+        (_, Some(trusted)) => trusted,
+        (SwapEvidencePolicy::Insufficient { hosts }, None) => SwapEvidencePolicy::Insufficient { hosts: *hosts },
+        (_, None) => SwapEvidencePolicy::TwoNodes {
             hosts: distinct_hosts(bchd_urls),
         },
     };
@@ -640,14 +662,28 @@ mod r100_validity_tests {
 
     fn urls(entries: &[&str]) -> Vec<String> { entries.iter().map(|e| (*e).to_owned()).collect() }
 
+    /// The read with the single-host switch off, the strict rule.
     fn run(policy: &SwapEvidencePolicy, list: &[&str], script: &Script) -> Result<(), MmError<ValidateSlpUtxosErr>> {
+        run_switch(policy, false, list, script).0
+    }
+
+    /// The read with the single-host switch `allow`, and the entries that were asked, in the order asked.
+    fn run_switch(
+        policy: &SwapEvidencePolicy,
+        allow: bool,
+        list: &[&str],
+        script: &Script,
+    ) -> (Result<(), MmError<ValidateSlpUtxosErr>>, Vec<String>) {
         let list = urls(list);
-        block_on(validate_slp_utxos_with(
+        let asked = std::sync::Mutex::new(Vec::new());
+        let result = block_on(validate_slp_utxos_with(
             policy,
             &list,
+            allow,
             &[unspent()],
             &token(),
             |url: &String| {
+                asked.lock().unwrap().push(url.clone());
                 let reply = script
                     .iter()
                     .find(|(host, _)| url.contains(*host))
@@ -655,7 +691,8 @@ mod r100_validity_tests {
                     .unwrap_or_else(|| Err("no script".to_owned()));
                 async move { reply }
             },
-        ))
+        ));
+        (result, asked.into_inner().unwrap())
     }
 
     fn two(list: &[&str]) -> SwapEvidencePolicy {
@@ -713,6 +750,51 @@ mod r100_validity_tests {
         undetermined_text(run(&policy, &list, &script));
     }
 
+    /// The single-host switch (maintainer decision of 2026-11-24): off, one configured bchd host is `Insufficient`
+    /// and never reads valid; on, the token takes the platform's policy and its one bchd host is trusted alone. A
+    /// TCP+SSL pair of one host is still one host: only the first entry of it is asked.
+    #[test]
+    fn one_bchd_host_is_trusted_only_with_the_switch_on() {
+        let one = ["https://a.example:8335"];
+        let pair = ["https://a.example:8335", "http://A.example:8336"];
+        let platform = SwapEvidencePolicy::TwoNodes {
+            hosts: vec!["e1.example".to_owned(), "e2.example".to_owned()],
+        };
+        let script: Script = [("a.example", Ok(answer(1000)))].into();
+
+        // Off: the token is `Insufficient`, and so is the read.
+        assert_eq!(single_bchd_host_policy(&urls(&pair), false), None);
+        let insufficient = SwapEvidencePolicy::Insufficient { hosts: 1 };
+        undetermined_text(run_switch(&insufficient, false, &one, &script).0);
+        undetermined_text(run_switch(&insufficient, false, &pair, &script).0);
+
+        // On: `Trusted` on the first entry of the one host, which decides alone.
+        for list in [&one[..], &pair[..]] {
+            assert_eq!(
+                single_bchd_host_policy(&urls(list), true),
+                Some(SwapEvidencePolicy::Trusted {
+                    node: "https://a.example:8335".to_owned()
+                })
+            );
+            let (result, asked) = run_switch(&platform, true, list, &script);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(asked, vec!["https://a.example:8335".to_owned()]);
+        }
+
+        // On: an invalid answer of the trusted host is decided as invalid, not undetermined.
+        let invalid: Script = [("a.example", Ok(answer(5)))].into();
+        let err = run_switch(&platform, true, &one, &invalid).0.unwrap_err().to_string();
+        assert!(!crate::swap_evidence::is_undetermined(&err), "{err}");
+
+        // On: a silent trusted host is undetermined, and the read names its label only.
+        let silent: Script = [("a.example", Err("down".to_owned()))].into();
+        let text = undetermined_text(run_switch(&platform, true, &pair, &silent).0);
+        assert!(text.contains("a.example:8335"), "{text}");
+
+        // No host configured stays `Insufficient` with the switch on.
+        assert_eq!(single_bchd_host_policy(&[], true), None);
+    }
+
     #[test]
     fn two_hosts_of_one_operator_are_two_nodes() {
         let list = ["https://bchd1.op.example", "https://bchd2.op.example"];
@@ -762,6 +844,29 @@ mod r100_validity_tests {
         };
         let script: Script = [("a.example", Ok(answer(1000))), ("b.example", Ok(answer(1000)))].into();
         assert!(run(&policy, &list, &script).is_ok());
+    }
+
+    /// Two or more configured bchd hosts stay strict with the single-host switch on: two hosts must agree, one
+    /// answering host is undetermined, and a platform trusted node does not replace them.
+    #[test]
+    fn two_bchd_hosts_stay_strict_with_the_switch_on() {
+        let two_hosts = ["https://a.example", "https://b.example"];
+        let three_hosts = ["https://a.example", "https://b.example", "https://c.example"];
+        assert_eq!(single_bchd_host_policy(&urls(&two_hosts), true), None);
+        assert_eq!(single_bchd_host_policy(&urls(&three_hosts), true), None);
+        let trusted_platform = SwapEvidencePolicy::Trusted {
+            node: "electrum.example:50002".to_owned(),
+        };
+        for policy in [two(&two_hosts), trusted_platform] {
+            let agreeing: Script = [("a.example", Ok(answer(1000))), ("b.example", Ok(answer(1000)))].into();
+            let (result, asked) = run_switch(&policy, true, &two_hosts, &agreeing);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(asked.len(), 2);
+            let one_down: Script = [("a.example", Ok(answer(1000))), ("b.example", Err("down".to_owned()))].into();
+            undetermined_text(run_switch(&policy, true, &two_hosts, &one_down).0);
+            let differing: Script = [("a.example", Ok(answer(1000))), ("b.example", Ok(answer(5)))].into();
+            undetermined_text(run_switch(&policy, true, &two_hosts, &differing).0);
+        }
     }
 
     #[test]

@@ -63,6 +63,9 @@ pub struct BchCoin {
     utxo_arc: UtxoArc,
     slp_addr_prefix: CashAddrPrefix,
     bchd_urls: Vec<String>,
+    /// The node's `swap_evidence_allow_single_host` switch at activation: it lets a single `bchd_urls` host serve the
+    /// SLP tokens' platform policy.
+    allow_single_host: bool,
     slp_tokens_infos: Arc<Mutex<HashMap<String, SlpTokenInfo>>>,
 }
 
@@ -242,12 +245,15 @@ pub async fn bch_coin_from_conf_and_params_typed(
     priv_key: &[u8],
 ) -> Result<BchCoin, MmError<crate::utxo::utxo_builder::UtxoCoinBuildError>> {
     let bchd_urls = params.bchd_urls;
+    let allow_single_host = crate::swap_evidence::allow_single_host(ctx);
+    record_single_bchd_host(ctx, ticker, &bchd_urls, allow_single_host);
     let slp_tokens_infos = Arc::new(Mutex::new(HashMap::new()));
     let constructor = {
         move |utxo_arc| BchCoin {
             utxo_arc,
             slp_addr_prefix: slp_addr_prefix.clone(),
             bchd_urls: bchd_urls.clone(),
+            allow_single_host,
             slp_tokens_infos: slp_tokens_infos.clone(),
         }
     };
@@ -271,11 +277,14 @@ pub async fn bch_coin_from_conf_params_and_policy(
     priv_key_policy: PrivKeyBuildPolicy,
 ) -> Result<BchCoin, MmError<crate::utxo::utxo_builder::UtxoCoinBuildError>> {
     let bchd_urls = params.bchd_urls.clone();
+    let allow_single_host = crate::swap_evidence::allow_single_host(ctx);
+    record_single_bchd_host(ctx, ticker, &bchd_urls, allow_single_host);
     let slp_tokens_infos = Arc::new(Mutex::new(HashMap::new()));
     let constructor = move |utxo_arc| BchCoin {
         utxo_arc,
         slp_addr_prefix: slp_addr_prefix.clone(),
         bchd_urls: bchd_urls.clone(),
+        allow_single_host,
         slp_tokens_infos: slp_tokens_infos.clone(),
     };
     UtxoArcBuilder::new(ctx, ticker, conf, &params.utxo_params, priv_key_policy, constructor)
@@ -285,14 +294,35 @@ pub async fn bch_coin_from_conf_params_and_policy(
 
 impl BchCoin {
     /// The stored swap-evidence policy of an SLP token on this platform (CRD ch.51 R100): the platform's, but
-    /// `Insufficient` when the validation servers (`bchd_urls`) have fewer than two distinct hosts.
+    /// `Insufficient` when the validation servers (`bchd_urls`) have fewer than two distinct hosts, unless the
+    /// single-host switch lets exactly one configured host serve.
     pub(crate) fn slp_swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
-        slp_policy_over(&self.utxo_arc.swap_evidence, &self.bchd_urls)
+        slp_policy_over(&self.utxo_arc.swap_evidence, &self.bchd_urls, self.allow_single_host)
     }
 }
 
+/// Decides once, at the activation of the BCH platform `ticker`, whether its SLP token reads are relaxed to a single
+/// bchd host (the switch on and exactly one distinct configured `bchd_urls` host, [`single_bchd_host_policy`]), and
+/// records the outcome apart from the Electrum-list outcome of the ticker, with one warning when relaxed. Returns it.
+///
+/// [`single_bchd_host_policy`]: crate::utxo::bchd_grpc::single_bchd_host_policy
+fn record_single_bchd_host(ctx: &MmArc, ticker: &str, bchd_urls: &[String], allow_single_host: bool) -> bool {
+    let relaxed = crate::utxo::bchd_grpc::single_bchd_host_policy(bchd_urls, allow_single_host).is_some();
+    crate::swap_evidence::record_single_bchd_host_outcome(ctx, ticker, relaxed);
+    relaxed
+}
+
 /// The policy of an SLP token whose platform holds `platform` and validates over `bchd_urls`.
-fn slp_policy_over(platform: &crate::SwapEvidencePolicy, bchd_urls: &[String]) -> crate::SwapEvidencePolicy {
+///
+/// With `allow_single_host` and exactly one distinct configured `bchd_urls` host, the token takes the platform's policy.
+fn slp_policy_over(
+    platform: &crate::SwapEvidencePolicy,
+    bchd_urls: &[String],
+    allow_single_host: bool,
+) -> crate::SwapEvidencePolicy {
+    if crate::utxo::bchd_grpc::single_bchd_host_policy(bchd_urls, allow_single_host).is_some() {
+        return platform.clone();
+    }
     let hosts = crate::swap_evidence::distinct_hosts(bchd_urls).len();
     if hosts < 2 {
         return crate::SwapEvidencePolicy::Insufficient { hosts };
@@ -317,21 +347,86 @@ mod swap_evidence_tests {
         let one = slp_policy_over(
             &platform,
             &urls(&["https://bchd.example:8335", "https://bchd.example:8336"]),
+            false,
         );
         assert_eq!(one, SwapEvidencePolicy::Insufficient { hosts: 1 });
-        assert_eq!(slp_policy_over(&platform, &[]), SwapEvidencePolicy::Insufficient {
-            hosts: 0
-        });
-        let two = slp_policy_over(&platform, &urls(&["https://x.example", "https://y.example"]));
+        assert_eq!(
+            slp_policy_over(&platform, &[], true),
+            SwapEvidencePolicy::Insufficient { hosts: 0 }
+        );
+        let two = slp_policy_over(&platform, &urls(&["https://x.example", "https://y.example"]), false);
         assert_eq!(two, platform);
         // A trusted platform node does not rescue a single validation host.
         let trusted = SwapEvidencePolicy::Trusted {
             node: "a.example:50002".to_owned(),
         };
         assert_eq!(
-            slp_policy_over(&trusted, &urls(&["https://bchd.example"])),
+            slp_policy_over(&trusted, &urls(&["https://bchd.example"]), false),
             SwapEvidencePolicy::Insufficient { hosts: 1 }
         );
+    }
+
+    /// The single-host switch: one distinct configured bchd host (two ports are one host) takes the platform's
+    /// policy; off, it stays `Insufficient`; no host stays `Insufficient` either way.
+    #[test]
+    fn one_bchd_host_takes_the_platform_policy_when_the_switch_is_on() {
+        let trusted = SwapEvidencePolicy::Trusted {
+            node: "a.example:50002".to_owned(),
+        };
+        let one = urls(&["https://bchd.example:8335", "https://bchd.example:8336"]);
+        assert_eq!(slp_policy_over(&trusted, &one, true), trusted);
+        assert_eq!(
+            slp_policy_over(&trusted, &one, false),
+            SwapEvidencePolicy::Insufficient { hosts: 1 }
+        );
+        assert_eq!(slp_policy_over(&trusted, &[], true), SwapEvidencePolicy::Insufficient {
+            hosts: 0
+        });
+    }
+
+    /// The activation outcome of the bchd list: one distinct configured host with the switch on is recorded (and
+    /// warned with the ticker only); two hosts, no host or the switch off record nothing and clear an earlier record.
+    /// The record is kept apart from the Electrum-list record of the same ticker.
+    #[test]
+    fn one_bchd_host_is_recorded_apart_from_the_electrum_list() {
+        use crate::swap_evidence::{record_single_host_outcome, single_bchd_host_relaxed, single_bchd_host_warning,
+                                   single_host_relaxed};
+
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let one = urls(&["https://bchd.example:8335", "https://BCHD.example:8336"]);
+        let two = urls(&["https://bchd.example:8335", "https://other.example:8335"]);
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+
+        assert!(record_single_bchd_host(&ctx, "BCH", &one, true));
+        assert!(single_bchd_host_relaxed(&ctx, "BCH"));
+        assert!(!single_bchd_host_relaxed(&ctx, "OTHER"));
+        // the bchd record does not touch the Electrum-list record of the ticker
+        assert!(!single_host_relaxed(&ctx, "BCH"));
+
+        let text = single_bchd_host_warning("BCH");
+        assert_eq!(
+            text,
+            "BCH: SLP token reads relaxed to a single bchd host (swap_evidence_allow_single_host)"
+        );
+        assert!(!text.contains("example") && !text.contains("://"), "{text}");
+
+        // two hosts, no host or the switch off: no record, and an earlier one is cleared
+        assert!(!record_single_bchd_host(&ctx, "BCH", &two, true));
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+        assert!(record_single_bchd_host(&ctx, "BCH", &one, true));
+        assert!(!record_single_bchd_host(&ctx, "BCH", &one, false));
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+        assert!(!record_single_bchd_host(&ctx, "BCH", &[], true));
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+
+        // the Electrum-list record of the same ticker is unaffected by the bchd outcome either way
+        record_single_host_outcome(&ctx, "BCH", true);
+        assert!(!record_single_bchd_host(&ctx, "BCH", &two, true));
+        assert!(single_host_relaxed(&ctx, "BCH"));
+        assert!(record_single_bchd_host(&ctx, "BCH", &one, true));
+        assert!(single_host_relaxed(&ctx, "BCH"));
+        record_single_host_outcome(&ctx, "BCH", false);
+        assert!(single_bchd_host_relaxed(&ctx, "BCH"));
     }
 }
 
@@ -1066,6 +1161,7 @@ pub(crate) fn bch_coin_without_network_for_test() -> BchCoin {
         utxo_arc: UtxoArc::new(fields),
         slp_addr_prefix: CashAddrPrefix::SlpTest,
         bchd_urls: vec![],
+        allow_single_host: false,
         slp_tokens_infos: Arc::new(Mutex::new(HashMap::new())),
     }
 }
@@ -1077,6 +1173,7 @@ pub(crate) fn bch_coin_over_fields_for_test(fields: UtxoCoinFields) -> BchCoin {
         utxo_arc: UtxoArc::new(fields),
         slp_addr_prefix: CashAddrPrefix::SlpTest,
         bchd_urls: vec![],
+        allow_single_host: false,
         slp_tokens_infos: Arc::new(Mutex::new(HashMap::new())),
     }
 }

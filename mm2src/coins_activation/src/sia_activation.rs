@@ -32,6 +32,9 @@ pub struct SiaActivationResult {
     pub ticker: String,
     pub current_block: u64,
     pub wallet_balance: EnableCoinBalance,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    pub swap_evidence_single_host: bool,
 }
 
 impl CurrentBlock for SiaActivationResult {
@@ -262,6 +265,7 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
             .mm_err(Into::into)?;
 
         Ok(SiaActivationResult {
+            swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(&ctx, self.ticker()),
             ticker: self.ticker().to_owned(),
             current_block,
             wallet_balance,

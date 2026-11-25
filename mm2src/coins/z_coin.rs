@@ -3229,8 +3229,22 @@ impl<'a> UtxoCoinBuilderCommonOps for ZCoinBuilder<'a> {
     /// The policy is over the lightwalletd servers of a Light-mode coin; `swap_evidence_node` must be one of them.
     /// A Native-mode coin is served by its own daemon (CRD ch.51 R100).
     fn swap_evidence_policy(&self) -> UtxoCoinBuildResult<crate::SwapEvidencePolicy> {
-        zcoin_swap_evidence_policy(self.ticker, self.params.swap_evidence_node.as_deref(), &self.backend)
-            .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))
+        let policy = zcoin_swap_evidence_policy(self.ticker, self.params.swap_evidence_node.as_deref(), &self.backend)
+            .map_err(|e| MmError::new(UtxoCoinBuildError::SwapEvidenceNodeNotInList(e)))?;
+        let configured: &[String] = match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinBackend::Native => &[],
+            ZcoinBackend::Light {
+                light_wallet_d_servers, ..
+            } => light_wallet_d_servers,
+        };
+        Ok(crate::swap_evidence::apply_single_host(
+            self.ctx,
+            self.ticker,
+            policy,
+            self.params.swap_evidence_node.as_deref(),
+            configured,
+        ))
     }
 
     /// The RPC client is selected by the requested backend, never by `activation_params().mode`: a

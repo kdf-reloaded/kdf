@@ -164,6 +164,7 @@ impl SlpToken {
         validate_slp_utxos_under(
             &self.swap_evidence_policy(),
             self.platform_coin.bchd_urls(),
+            self.platform_coin.allow_single_host(),
             &[slp_unspent],
             self.token_id(),
         )

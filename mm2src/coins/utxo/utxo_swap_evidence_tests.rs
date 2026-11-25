@@ -805,7 +805,7 @@ fn a_one_server_coin_is_refused_and_accepted_with_the_evidence_node() {
         let server = StubServer::start(StubBehavior::Answer).await;
         server.set_result("blockchain.headers.subscribe", json!({"height": 777, "hex": "00"}));
         let conf = json!({"coin": "DOC", "asset": "DOC", "rpcport": 62415});
-        let activate = |extra: Json| {
+        let activate = |extra: Json, allow: bool| {
             let conf = conf.clone();
             let addr = server.addr();
             async move {
@@ -813,17 +813,23 @@ fn a_one_server_coin_is_refused_and_accepted_with_the_evidence_node() {
                 if let Some(field) = extra.as_str() {
                     req["swap_evidence_node"] = json!(field);
                 }
-                let ctx = MmCtxBuilder::new().into_mm_arc();
+                let ctx = MmCtxBuilder::new()
+                    .with_conf(json!({ "swap_evidence_allow_single_host": allow }))
+                    .into_mm_arc();
                 let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
                 utxo_standard_coin_with_priv_key(&ctx, "DOC", &conf, &params, &[1u8; 32])
                     .await
                     .unwrap()
             }
         };
-        let refused = activate(Json::Null).await;
+        // the single-host switch off: today's refusal
+        let refused = activate(Json::Null, false).await;
         let text = refused.swap_evidence_refusal().expect("one server is refused");
         assert!(text.contains("swap_evidence_node"), "{text}");
-        let accepted = activate(json!(server.addr())).await;
+        let accepted = activate(json!(server.addr()), false).await;
         assert_eq!(accepted.swap_evidence_refusal(), None);
+        // the switch on (the default): one configured host is relaxed and admitted without the field
+        let relaxed = activate(Json::Null, true).await;
+        assert_eq!(relaxed.swap_evidence_refusal(), None);
     });
 }

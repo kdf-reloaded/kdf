@@ -348,6 +348,13 @@ struct CoinInitResponse<'a> {
     requires_notarization: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mature_confirmations: Option<u32>,
+    /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    swap_evidence_single_host: bool,
+    /// Present and `true` only for a BCH platform whose SLP token reads were relaxed to a single bchd host
+    /// (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    swap_evidence_single_bchd_host: bool,
 }
 
 /// How long `electrum` waits for the balance of a freshly registered coin (CRD ch.55 R55.4.6).
@@ -439,6 +446,8 @@ async fn legacy_activation_response(
         required_confirmations: coin.required_confirmations(),
         requires_notarization: coin.requires_notarization(),
         mature_confirmations: coin.mature_confirmations(),
+        swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(ctx, &ticker),
+        swap_evidence_single_bchd_host: coins::swap_evidence::single_bchd_host_relaxed(ctx, &ticker),
     };
     let res = try_s!(json::to_vec(&res));
     Ok(try_s!(Response::builder().body(res)))

@@ -96,7 +96,7 @@ impl InitStandaloneCoinActivationOps for BchCoin {
 
     async fn get_activation_result(
         &self,
-        _ctx: MmArc,
+        ctx: MmArc,
         task_handle: &BchRpcTaskHandle,
         _activation_request: &Self::ActivationRequest,
     ) -> MmResult<Self::ActivationResult, InitUtxoStandardError> {
@@ -127,6 +127,8 @@ impl InitStandaloneCoinActivationOps for BchCoin {
 
         Ok(UtxoStandardActivationResult {
             wallet_balance: UtxoWalletBalance::iguana(&ticker, address, balance),
+            swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(&ctx, &ticker),
+            swap_evidence_single_bchd_host: coins::swap_evidence::single_bchd_host_relaxed(&ctx, &ticker),
             ticker,
             current_block,
         })

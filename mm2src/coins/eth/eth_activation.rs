@@ -833,7 +833,17 @@ pub(crate) async fn build_eth_coin(
             &configured_urls,
             &probed_urls,
         )
-        .map_err(|e| MmError::new(EthCoinBuildError::SwapEvidenceNodeNotInList(e)))?
+        .map_err(|e| MmError::new(EthCoinBuildError::SwapEvidenceNodeNotInList(e)))
+        .map(|policy| {
+            // The relaxation judges the CONFIGURED list, never the probed one.
+            crate::swap_evidence::apply_single_host(
+                ctx,
+                ticker,
+                policy,
+                params.swap_evidence_node.as_deref(),
+                &configured_urls,
+            )
+        })?
     };
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
     let web3 = super::alloy_compat::build_provider(nodes, event_handlers).map_to_mm(EthCoinBuildError::Internal)?;
@@ -1019,6 +1029,35 @@ mod tests {
                 node: "https://c.example".to_owned()
             }
         );
+        // the single-host switch judges the CONFIGURED list: one configured host whose probe failed is a trusted node
+        // that does not answer; two configured hosts with one failed stay strict
+        let relax = |configured: &[String], probed: &[String], allow: bool| {
+            let policy = evm_swap_evidence_policy("ETH", None, configured, probed).unwrap();
+            crate::swap_evidence::relax_single_host(policy, None, configured, allow)
+        };
+        let one_host = vec!["https://a.example:8545".to_owned(), "https://a.example:8546".to_owned()];
+        assert_eq!(
+            relax(&one_host, &one_host[1..], true),
+            (
+                SwapEvidencePolicy::Trusted {
+                    node: "https://a.example:8545".to_owned()
+                },
+                true
+            )
+        );
+        assert_eq!(
+            relax(&one_host, &one_host[1..], false),
+            (SwapEvidencePolicy::Insufficient { hosts: 1 }, false)
+        );
+        let two_hosts = vec!["https://a.example".to_owned(), "https://b.example".to_owned()];
+        assert_eq!(
+            relax(&two_hosts, &two_hosts[..1], true),
+            (SwapEvidencePolicy::Insufficient { hosts: 1 }, false)
+        );
+        assert!(matches!(
+            relax(&two_hosts, &two_hosts, true),
+            (SwapEvidencePolicy::TwoNodes { .. }, false)
+        ));
         // a field outside the configured nodes is refused, with the wire form
         let err = evm_swap_evidence_policy("ETH", Some("z.example"), &configured, &probed).unwrap_err();
         assert_eq!(

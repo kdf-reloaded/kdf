@@ -18,54 +18,72 @@ or undo, and every change that needs a step from you.
   uses the swap's secret, the chain reads that step rests on (the other side's payment, whether a payment was
   claimed, refunded or not spent, and the chain time of the refund) must agree between two nodes of the coin. Two
   ports of one host are one node; two hosts of one operator are two nodes. A coin in native mode is served by your
-  own daemon and needs nothing.
-  - *What changes:* a coin with fewer than two distinct hosts in its server or node list, and no
-    `swap_evidence_node`, starts no new swap: `setprice`, `buy`, `sell` and the swap start refuse it with a
-    reason that names `swap_evidence_node`. A swap that is already running when you upgrade keeps running, but a
-    step whose reads do not agree, or that has too few answers, waits and logs how to fix it; it never refunds or
-    claims on such a read. A refund step waits like this until an hour after the refund first became possible in
-    the current run, and at least until its payment's lock time plus 3700 seconds; a swap still waiting then ends
-    as refund failed, with a text that names the kind of failure and, for reads that did not agree, the fix; after
-    fixing the node list, or once the coin answers again, you run `recover_funds_of_swap`.
+  own daemon and needs nothing, and by default a coin whose node list names only one host trusts that host (see
+  *Single-host coins* below).
+  - *What changes:* a coin with two or more distinct hosts in its server or node list swaps only on reads two of them
+    agree on. With `swap_evidence_allow_single_host` set to `false`, a coin with fewer than two distinct hosts and no
+    `swap_evidence_node` also starts no new swap: `setprice`, `buy`, `sell` and the swap start refuse it with a
+    reason that names `swap_evidence_node`. A swap that is already running when you upgrade keeps running, but a step
+    whose reads do not agree, or that has too few answers, waits and logs how to fix it; it never refunds or claims
+    on such a read. A refund step waits like this until an hour after the refund first became possible in the current
+    run, and at least until its payment's lock time plus 3700 seconds; a swap still waiting then ends as refund
+    failed, with a text that names the kind of failure and, for reads that did not agree, the fix; after fixing the
+    node list, or once the coin answers again, you run `recover_funds_of_swap`.
   - *What to do:* list a server on a second host in the activation request, or set the new activation field
     `swap_evidence_node` to one entry of the coin's own list to trust that node alone. When the trusted node does
     not answer, the step waits; no other node is asked in its place.
+  - *Single-host coins:* the new top-level `MM2.json` boolean `swap_evidence_allow_single_host`, default `true`,
+    keeps a coin whose configured node list names exactly one host swapping as before. That host is trusted as if
+    `swap_evidence_node` named it, the coin's activation answer carries `"swap_evidence_single_host": true`, and the
+    node logs one warning naming the coin. The same holds for the bchd servers of an SLP token's platform: a BCH
+    platform whose `bchd_urls` name exactly one host trusts it for the token's reads, and its activation answer
+    carries `"swap_evidence_single_bchd_host": true`. The list as configured counts, not the hosts that answer: a
+    coin listed with two or more hosts stays under the two-node rule even while one of them does not answer. Set the
+    switch to `false` to require two hosts or `swap_evidence_node` for every coin. Detail: PR #536; CRD ch.51 status
+    note of 2026-11-24 before §51.7.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
     - TRON (TRX, TRC20). TRON swaps stay off in this release; when they are switched on, their chain reads already
       follow the rule. Detail: PR #509; CRD ch.21 §21.11D.
-    - **UTXO coins over Electrum, BCH and QTUM.** Affected: every such coin whose Electrum server list names fewer
-      than two hosts (two ports of one host count as one), for example a coin activated with a single server. It no
-      longer starts a swap: `setprice`, `buy`, `sell` and the swap start refuse it, and its running swaps wait at a
-      refund or claim step until two servers agree. To fix it, add a server on a second host to the activation
-      request, or set `swap_evidence_node` to one of the coin's servers to trust that server alone. A coin in native
-      mode reads your own daemon and needs nothing. Detail: PR #522; CRD ch.38 status note of 2026-11-23 before
-      §38.6.4Q.
-    - **EVM coins and ERC20 tokens.** Affected: every such coin whose nodes that passed the activation probe name
-      fewer than two hosts, for example a coin activated with a single node URL; a legacy ERC20 `enable` counts its
-      own node list, and a token enabled with its platform counts the platform's. It no longer starts a swap:
-      `setprice`, `buy`, `sell` and the swap start refuse it, and its running swaps wait at a refund or claim step
-      until two nodes agree. To fix it, add a node on a second host to the activation request, or set
-      `swap_evidence_node` to one of the coin's nodes to trust that node alone. Detail: PR #512; CRD ch.51 §51.6G
-      R100.
-    - **Sia (SC).** A Sia coin reads one walletd node, so there is no second node to add: set `swap_evidence_node` to
-      the walletd `server_url` to trust it. Without the field, SC orders are refused and a running SC swap waits at
-      its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
+    - **UTXO coins over Electrum, BCH and QTUM.** Affected: every such coin whose Electrum server list names two or
+      more hosts (two ports of one host count as one): its swap steps wait until two servers agree. A coin whose list
+      names fewer than two hosts, for example a coin activated with a single server, trusts that server by default;
+      with `swap_evidence_allow_single_host` set to `false` it no longer starts a swap: `setprice`, `buy`, `sell` and
+      the swap start refuse it, and its running swaps wait at a refund or claim step until two servers agree. To fix
+      it, add a server on a second host to the activation request, or set `swap_evidence_node` to one of the coin's
+      servers to trust that server alone. A coin in native mode reads your own daemon and needs nothing. Detail: PR
+      #522; CRD ch.38 status note of 2026-11-23 before §38.6.4Q.
+    - **EVM coins and ERC20 tokens.** Affected: every such coin whose configured node list names two or more hosts:
+      its swap steps wait until two of its nodes that passed the activation probe agree, and while fewer than two
+      passed it starts no swap: `setprice`, `buy`, `sell` and the swap start refuse it. A coin configured with one
+      host, for example a coin activated with a single node URL, trusts that node by default; with
+      `swap_evidence_allow_single_host` set to `false` it is refused in the same way. A legacy ERC20 `enable` counts
+      its own node list, and a token enabled with its platform counts the platform's. To fix it, add a node on a
+      second host to the activation request, or set `swap_evidence_node` to one of the coin's nodes to trust that
+      node alone. Detail: PR #512; CRD ch.51 §51.6G R100.
+    - **Sia (SC).** A Sia coin reads one walletd node, so there is no second node to add: by default
+      (`swap_evidence_allow_single_host`) the walletd node is trusted as if `swap_evidence_node` named it. With that
+      switch set to `false`, set `swap_evidence_node` to the walletd `server_url`; without the field, SC orders are
+      refused and a running SC swap waits at its next chain read and logs this fix. Detail: PR #514; CRD ch.20 §20.7.
     - **ZCoin and ARRR (Light mode).** The coin's nodes are its `light_wallet_d_servers`, counted by host: list
-      servers on two hosts, or set `swap_evidence_node` to one of them. A claim that reveals the swap's secret is
-      still taken from one server. Detail: PR #515; CRD ch.39 (the status note at the end of 39.11.4).
+      servers on two hosts, or set `swap_evidence_node` to one of them; a coin configured with one host trusts it by
+      default (`swap_evidence_allow_single_host`). A claim that reveals the swap's secret is still taken from one
+      server. Detail: PR #515; CRD ch.39 (the status note at the end of 39.11.4).
     - QRC20 tokens over Electrum. The contract state of a payment, its receipt, the claim or refund found in the
       contract-event history and the chain time of the refund are read from two servers on distinct hosts. A token
       also needs two hosts that serve the contract-event history (`blockchain.contract.event.get_history`), or, with
-      `swap_evidence_node`, needs that server to serve it: each host is asked once after activation, and until enough
-      have answered, the token is refused for swaps with a reason that names the hosts. When checked on 2026-11-23,
-      both QTUM servers of the published coins file answered that request with an error, so with them alone a QRC20
-      token starts no swap: list servers on two distinct hosts that serve it, or set `swap_evidence_node` to a listed
-      server that serves it. Detail: PR #524; CRD ch.51 §51.6G, ch.38.
-    - **SLP tokens.** Affected: every SLP token whose BCH activation request lists fewer than two bchd servers on
-      different hosts. It no longer starts a swap, and its running swaps wait at a refund or claim step. The check of
-      the other side's token payment asks two bchd hosts, and the swap's other chain reads follow BCH. To fix it, add
-      a bchd server on a second host; `swap_evidence_node` does not replace the second bchd host. Detail: PR #526;
-      CRD ch.51 §51.6G R100.
+      `swap_evidence_node` or a QTUM platform configured with one host (trusted by default through
+      `swap_evidence_allow_single_host`), needs that server to serve it: each host is asked once after activation,
+      and until enough have answered, the token is refused for swaps with a reason that names the hosts. When checked
+      on 2026-11-23, both QTUM servers of the published coins file answered that request with an error, so with them
+      alone a QRC20 token starts no swap: list servers on two distinct hosts that serve it, or set
+      `swap_evidence_node` to a listed server that serves it. Detail: PR #524; CRD ch.51 §51.6G, ch.38.
+    - **SLP tokens.** Affected: every SLP token whose BCH activation request lists two or more bchd servers on
+      different hosts: the check of the other side's token payment waits until two bchd hosts agree, and the swap's
+      other chain reads follow BCH. A token whose request lists exactly one bchd host trusts that host by default
+      (`swap_evidence_allow_single_host`); with the switch set to `false`, a token with fewer than two bchd hosts no
+      longer starts a swap, and its running swaps wait at a refund or claim step. To fix it, add a bchd server on a
+      second host; `swap_evidence_node` does not replace the second bchd host. Detail: PR #526; CRD ch.51 §51.6G
+      R100.
   - Detail: PR #508; CRD ch.51 §51.6G R100.
 - **A swap database written by a newer version is refused at start-up.** When the migration state recorded in
   `MM2.db` is above the highest state this build knows (15), start-up stops with an error that names both numbers,

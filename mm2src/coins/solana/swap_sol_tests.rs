@@ -1728,9 +1728,19 @@ fn t40_6d_13_the_evidence_node_must_be_one_of_the_coins_nodes() {
         coin.evidence_node().as_deref() == Some("http://127.0.0.1:2"),
         "the node is recorded"
     );
+    // The switch off: today's behavior, no evidence node without the field (both URLs name one host).
     assert!(
-        build(request(None)).expect("no node").evidence_node().is_none(),
-        "no evidence node by default"
+        build(request(None).with_allow_single_host(false))
+            .expect("no node")
+            .evidence_node()
+            .is_none(),
+        "no evidence node with the single-host switch off"
+    );
+    // The switch on (the default): one configured host is relaxed to its first entry.
+    assert_eq!(
+        build(request(None)).expect("no node").evidence_node().as_deref(),
+        Some("http://127.0.0.1:1"),
+        "a single configured host is trusted by default"
     );
     let refused = build(request(Some("http://127.0.0.1:3")));
     assert!(

@@ -108,7 +108,13 @@ pub struct SolanaActivationParams {
     /// R100). Must be one of the nodes above.
     #[serde(default)]
     swap_evidence_node: Option<String>,
+    /// The `swap_evidence_allow_single_host` switch of the node, set by the activation; `true` unless it says
+    /// otherwise.
+    #[serde(skip, default = "allow_single_host_default")]
+    allow_single_host: bool,
 }
+
+fn allow_single_host_default() -> bool { true }
 
 /// A member that must be present: a missing `confirmation_commitment` fails request parsing, as it did before the
 /// member could be `None`.
@@ -150,7 +156,14 @@ impl SolanaActivationParams {
             client_url: None,
             client_urls: urls,
             swap_evidence_node: None,
+            allow_single_host: true,
         }
+    }
+
+    /// The same parameters with the node's `swap_evidence_allow_single_host` switch.
+    pub fn with_allow_single_host(mut self, allow: bool) -> Self {
+        self.allow_single_host = allow;
+        self
     }
 
     /// The same parameters with the evidence node of CRD ch.40 R40.6D.16.
@@ -170,11 +183,24 @@ impl SolanaActivationParams {
         &self,
         ticker: &str,
     ) -> Result<crate::swap_evidence::SwapEvidencePolicy, crate::swap_evidence::SwapEvidenceNodeNotInList> {
-        crate::swap_evidence::swap_evidence_policy_from(
-            ticker,
+        self.swap_evidence_policy_relaxed(ticker).map(|(policy, _)| policy)
+    }
+
+    /// [`Self::swap_evidence_policy`] with the single-host relaxation of the node's switch; the second member is
+    /// `true` when the policy was relaxed.
+    pub fn swap_evidence_policy_relaxed(
+        &self,
+        ticker: &str,
+    ) -> Result<(crate::swap_evidence::SwapEvidencePolicy, bool), crate::swap_evidence::SwapEvidenceNodeNotInList> {
+        let urls = self.collected_urls();
+        let policy =
+            crate::swap_evidence::swap_evidence_policy_from(ticker, self.swap_evidence_node.as_deref(), &urls)?;
+        Ok(crate::swap_evidence::relax_single_host(
+            policy,
             self.swap_evidence_node.as_deref(),
-            &self.collected_urls(),
-        )
+            &urls,
+            self.allow_single_host,
+        ))
     }
 
     /// Flattened endpoint list in dispatch order.

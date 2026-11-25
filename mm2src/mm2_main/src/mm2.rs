@@ -291,9 +291,11 @@ fn maybe_warn_unsafe_rpc_wire_dump_enabled() {
 /// Refuses a node setting that the node cannot run with, naming the key (the node does not start).
 ///
 /// `fee_estimate_cache_secs` is an integer from 0 to 30 (CRD ch.38 R38.6.6j item 2).
+/// `swap_evidence_allow_single_host` is a bool; absent or `null` is `true` (CRD ch.51 R100, single-host switch).
 /// `reactivation_registered_token` is `"refuse"` or `"keep"`; absent or `null` is `"refuse"` (CRD ch.43 D43.1F.1).
 fn validate_node_settings(conf: &Json) -> Result<(), String> {
     coins::request_fee_scope::explicit_fee_estimate_cache_secs(conf)?;
+    coins::swap_evidence::allow_single_host_from_conf(conf)?;
     coins::RegisteredTokenPolicy::from_conf(conf).map(|_| ())
 }
 

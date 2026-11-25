@@ -92,6 +92,9 @@ fn token_env(decimals: Option<u8>) -> TokenEnv {
             "dbdir": root.to_str().unwrap(),
             "electrum_server_order": "listed",
             "electrum_spread_reads": false,
+            // These tests pin the requests of activation and history over one server; with the single-host switch on,
+            // that server would be trusted and probed for the contract-event history (see qrc20_swap_evidence_tests).
+            "swap_evidence_allow_single_host": false,
         }))
         .into_mm_arc();
     CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "qrc20 electrum stub tests").unwrap();
@@ -1275,6 +1278,9 @@ fn family_env_with_decimals(decimals: Option<u8>) -> TokenEnv {
             "dbdir": root.to_str().unwrap(),
             "electrum_server_order": "listed",
             "electrum_spread_reads": false,
+            // These tests pin the requests of activation and history over one server; with the single-host switch on,
+            // that server would be trusted and probed for the contract-event history (see qrc20_swap_evidence_tests).
+            "swap_evidence_allow_single_host": false,
         }))
         .into_mm_arc();
     CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "qrc20 electrum stub tests").unwrap();
