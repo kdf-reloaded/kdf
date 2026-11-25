@@ -12,6 +12,10 @@ pub struct UtxoStandardActivationResult {
     /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
     #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
     pub swap_evidence_single_host: bool,
+    /// Present and `true` only for a BCH platform whose SLP token reads were relaxed to a single bchd host
+    /// (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    pub swap_evidence_single_bchd_host: bool,
 }
 
 /// The wallet balance of a UTXO-family activation. Both forms key their balances by the activated ticker.

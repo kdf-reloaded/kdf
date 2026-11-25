@@ -246,6 +246,7 @@ pub async fn bch_coin_from_conf_and_params_typed(
 ) -> Result<BchCoin, MmError<crate::utxo::utxo_builder::UtxoCoinBuildError>> {
     let bchd_urls = params.bchd_urls;
     let allow_single_host = crate::swap_evidence::allow_single_host(ctx);
+    record_single_bchd_host(ctx, ticker, &bchd_urls, allow_single_host);
     let slp_tokens_infos = Arc::new(Mutex::new(HashMap::new()));
     let constructor = {
         move |utxo_arc| BchCoin {
@@ -277,6 +278,7 @@ pub async fn bch_coin_from_conf_params_and_policy(
 ) -> Result<BchCoin, MmError<crate::utxo::utxo_builder::UtxoCoinBuildError>> {
     let bchd_urls = params.bchd_urls.clone();
     let allow_single_host = crate::swap_evidence::allow_single_host(ctx);
+    record_single_bchd_host(ctx, ticker, &bchd_urls, allow_single_host);
     let slp_tokens_infos = Arc::new(Mutex::new(HashMap::new()));
     let constructor = move |utxo_arc| BchCoin {
         utxo_arc,
@@ -297,6 +299,17 @@ impl BchCoin {
     pub(crate) fn slp_swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
         slp_policy_over(&self.utxo_arc.swap_evidence, &self.bchd_urls, self.allow_single_host)
     }
+}
+
+/// Decides once, at the activation of the BCH platform `ticker`, whether its SLP token reads are relaxed to a single
+/// bchd host (the switch on and exactly one distinct configured `bchd_urls` host, [`single_bchd_host_policy`]), and
+/// records the outcome apart from the Electrum-list outcome of the ticker, with one warning when relaxed. Returns it.
+///
+/// [`single_bchd_host_policy`]: crate::utxo::bchd_grpc::single_bchd_host_policy
+fn record_single_bchd_host(ctx: &MmArc, ticker: &str, bchd_urls: &[String], allow_single_host: bool) -> bool {
+    let relaxed = crate::utxo::bchd_grpc::single_bchd_host_policy(bchd_urls, allow_single_host).is_some();
+    crate::swap_evidence::record_single_bchd_host_outcome(ctx, ticker, relaxed);
+    relaxed
 }
 
 /// The policy of an SLP token whose platform holds `platform` and validates over `bchd_urls`.
@@ -369,6 +382,51 @@ mod swap_evidence_tests {
         assert_eq!(slp_policy_over(&trusted, &[], true), SwapEvidencePolicy::Insufficient {
             hosts: 0
         });
+    }
+
+    /// The activation outcome of the bchd list: one distinct configured host with the switch on is recorded (and
+    /// warned with the ticker only); two hosts, no host or the switch off record nothing and clear an earlier record.
+    /// The record is kept apart from the Electrum-list record of the same ticker.
+    #[test]
+    fn one_bchd_host_is_recorded_apart_from_the_electrum_list() {
+        use crate::swap_evidence::{record_single_host_outcome, single_bchd_host_relaxed, single_bchd_host_warning,
+                                   single_host_relaxed};
+
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let one = urls(&["https://bchd.example:8335", "https://BCHD.example:8336"]);
+        let two = urls(&["https://bchd.example:8335", "https://other.example:8335"]);
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+
+        assert!(record_single_bchd_host(&ctx, "BCH", &one, true));
+        assert!(single_bchd_host_relaxed(&ctx, "BCH"));
+        assert!(!single_bchd_host_relaxed(&ctx, "OTHER"));
+        // the bchd record does not touch the Electrum-list record of the ticker
+        assert!(!single_host_relaxed(&ctx, "BCH"));
+
+        let text = single_bchd_host_warning("BCH");
+        assert_eq!(
+            text,
+            "BCH: SLP token reads relaxed to a single bchd host (swap_evidence_allow_single_host)"
+        );
+        assert!(!text.contains("example") && !text.contains("://"), "{text}");
+
+        // two hosts, no host or the switch off: no record, and an earlier one is cleared
+        assert!(!record_single_bchd_host(&ctx, "BCH", &two, true));
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+        assert!(record_single_bchd_host(&ctx, "BCH", &one, true));
+        assert!(!record_single_bchd_host(&ctx, "BCH", &one, false));
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+        assert!(!record_single_bchd_host(&ctx, "BCH", &[], true));
+        assert!(!single_bchd_host_relaxed(&ctx, "BCH"));
+
+        // the Electrum-list record of the same ticker is unaffected by the bchd outcome either way
+        record_single_host_outcome(&ctx, "BCH", true);
+        assert!(!record_single_bchd_host(&ctx, "BCH", &two, true));
+        assert!(single_host_relaxed(&ctx, "BCH"));
+        assert!(record_single_bchd_host(&ctx, "BCH", &one, true));
+        assert!(single_host_relaxed(&ctx, "BCH"));
+        record_single_host_outcome(&ctx, "BCH", false);
+        assert!(single_bchd_host_relaxed(&ctx, "BCH"));
     }
 }
 

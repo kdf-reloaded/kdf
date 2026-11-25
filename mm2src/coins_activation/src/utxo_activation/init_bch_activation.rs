@@ -128,6 +128,7 @@ impl InitStandaloneCoinActivationOps for BchCoin {
         Ok(UtxoStandardActivationResult {
             wallet_balance: UtxoWalletBalance::iguana(&ticker, address, balance),
             swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(&ctx, &ticker),
+            swap_evidence_single_bchd_host: coins::swap_evidence::single_bchd_host_relaxed(&ctx, &ticker),
             ticker,
             current_block,
         })

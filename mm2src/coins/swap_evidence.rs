@@ -363,6 +363,33 @@ pub fn single_host_relaxed(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str) -> bool 
         .unwrap_or(false)
 }
 
+/// The one warning of a BCH platform whose SLP token reads were relaxed to its one configured bchd host: the
+/// ticker and the kind, no host, no URL.
+pub fn single_bchd_host_warning(ticker: &str) -> String {
+    format!("{ticker}: SLP token reads relaxed to a single bchd host ({ALLOW_SINGLE_HOST_KEY})")
+}
+
+/// Writes the one warning of a BCH platform whose `bchd_urls` were relaxed to one host and records the outcome of
+/// `ticker` for its activation response ([`single_bchd_host_relaxed`]). The record is kept apart from the
+/// Electrum-list record of the same ticker ([`record_single_host_outcome`]); an activation that did not relax
+/// clears an earlier bchd record of the ticker.
+pub fn record_single_bchd_host_outcome(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str, relaxed: bool) {
+    if relaxed {
+        common::log::warn!("{}", single_bchd_host_warning(ticker));
+    }
+    if let Ok(coins_ctx) = crate::CoinsContext::from_ctx(ctx) {
+        coins_ctx.set_single_bchd_host_relaxed(ticker, relaxed);
+    }
+}
+
+/// Whether the activation of the BCH platform `ticker` that just ran relaxed its SLP token reads to a single bchd
+/// host: the value of the response field `swap_evidence_single_bchd_host`.
+pub fn single_bchd_host_relaxed(ctx: &mm2_core::mm_ctx::MmArc, ticker: &str) -> bool {
+    crate::CoinsContext::from_ctx(ctx)
+        .map(|coins_ctx| coins_ctx.is_single_bchd_host_relaxed(ticker))
+        .unwrap_or(false)
+}
+
 /// A `swap_evidence_node` set for a coin that has no node list (a coin served by its own daemon).
 pub fn swap_evidence_field_without_list(ticker: &str, field: Option<&str>) -> Result<(), SwapEvidenceNodeNotInList> {
     match field {

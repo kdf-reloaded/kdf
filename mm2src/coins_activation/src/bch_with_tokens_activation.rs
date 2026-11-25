@@ -236,6 +236,10 @@ pub struct BchWithTokensActivationResult {
     /// Present and `true` only when the swap evidence was relaxed to a single host (`swap_evidence_allow_single_host`).
     #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
     swap_evidence_single_host: bool,
+    /// Present and `true` only when the SLP token reads were relaxed to a single bchd host
+    /// (`swap_evidence_allow_single_host`).
+    #[serde(skip_serializing_if = "coins::swap_evidence::is_false")]
+    swap_evidence_single_bchd_host: bool,
 }
 
 impl GetPlatformBalance for BchWithTokensActivationResult {
@@ -518,6 +522,7 @@ impl PlatformWithTokensActivationOps for BchCoin {
             bch_addresses_infos: HashMap::new(),
             slp_addresses_infos: HashMap::new(),
             swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(ctx, self.ticker()),
+            swap_evidence_single_bchd_host: coins::swap_evidence::single_bchd_host_relaxed(ctx, self.ticker()),
         };
 
         result
@@ -712,6 +717,7 @@ mod tests {
             bch_addresses_infos: bch,
             slp_addresses_infos: slp,
             swap_evidence_single_host: false,
+            swap_evidence_single_bchd_host: false,
         };
         assert_eq!(
             serde_json::to_value(&result).unwrap(),
@@ -747,6 +753,7 @@ mod tests {
             bch_addresses_infos: bch,
             slp_addresses_infos: slp,
             swap_evidence_single_host: false,
+            swap_evidence_single_bchd_host: false,
         };
         assert_eq!(
             serde_json::to_value(&result).unwrap(),
@@ -764,6 +771,32 @@ mod tests {
             })
         );
         assert_eq!(result.get_platform_balance(), BigDecimal::from(0));
+    }
+
+    /// The bchd outcome recorded at the platform build is answered as `swap_evidence_single_bchd_host: true`, apart
+    /// from the Electrum-list member; without the record the member is absent.
+    #[test]
+    fn a_single_bchd_host_is_reported_apart_from_the_electrum_list() {
+        let ctx = ctx();
+        let result_of = |ctx: &MmArc| BchWithTokensActivationResult {
+            current_block: 7,
+            bch_addresses_infos: HashMap::new(),
+            slp_addresses_infos: HashMap::new(),
+            swap_evidence_single_host: coins::swap_evidence::single_host_relaxed(ctx, "BCH"),
+            swap_evidence_single_bchd_host: coins::swap_evidence::single_bchd_host_relaxed(ctx, "BCH"),
+        };
+        let strict = serde_json::to_value(result_of(&ctx)).unwrap();
+        assert!(strict.get("swap_evidence_single_bchd_host").is_none(), "{strict}");
+        assert!(strict.get("swap_evidence_single_host").is_none(), "{strict}");
+
+        coins::swap_evidence::record_single_bchd_host_outcome(&ctx, "BCH", true);
+        let relaxed = serde_json::to_value(result_of(&ctx)).unwrap();
+        assert_eq!(relaxed["swap_evidence_single_bchd_host"], json!(true));
+        assert!(relaxed.get("swap_evidence_single_host").is_none(), "{relaxed}");
+
+        coins::swap_evidence::record_single_bchd_host_outcome(&ctx, "BCH", false);
+        let cleared = serde_json::to_value(result_of(&ctx)).unwrap();
+        assert!(cleared.get("swap_evidence_single_bchd_host").is_none(), "{cleared}");
     }
 
     #[test]

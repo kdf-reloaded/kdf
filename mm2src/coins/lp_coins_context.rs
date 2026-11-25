@@ -285,6 +285,9 @@ pub struct CoinsContext {
     pub(crate) fee_estimate_cache: Arc<FeeEstimateCache>,
     /// The tickers whose last activation relaxed their swap evidence to a single host (`swap_evidence_allow_single_host`).
     single_host_relaxed: parking_lot::Mutex<BTreeSet<String>>,
+    /// The BCH tickers whose last activation relaxed their SLP token reads to a single bchd host. A set apart from
+    /// `single_host_relaxed`, so that the bchd outcome never overwrites the Electrum-list outcome of the same ticker.
+    single_bchd_host_relaxed: parking_lot::Mutex<BTreeSet<String>>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) tx_history_db: SharedDb<TxHistoryDb>,
     #[cfg(target_arch = "wasm32")]
@@ -359,6 +362,20 @@ impl CoinsContext {
         self.single_host_relaxed.lock().contains(ticker)
     }
 
+    /// Records whether the activation of the BCH platform `ticker` relaxed its SLP token reads to a single bchd host.
+    pub(crate) fn set_single_bchd_host_relaxed(&self, ticker: &str, relaxed: bool) {
+        let mut set = self.single_bchd_host_relaxed.lock();
+        if relaxed {
+            set.insert(ticker.to_owned());
+        } else {
+            set.remove(ticker);
+        }
+    }
+
+    pub(crate) fn is_single_bchd_host_relaxed(&self, ticker: &str) -> bool {
+        self.single_bchd_host_relaxed.lock().contains(ticker)
+    }
+
     pub(crate) fn has_unfinished_swaps_view(&self) -> bool { self.unfinished_swaps_view.lock().is_some() }
 
     pub(crate) fn set_unfinished_swaps_view(&self, view: Arc<dyn crate::z_coin::UnfinishedSwapsView>) {
@@ -384,6 +401,7 @@ impl CoinsContext {
                 account_balance_task_manager: AccountBalanceTaskManager::new_shared(),
                 fee_estimate_cache: Arc::new(FeeEstimateCache::for_node(ctx)),
                 single_host_relaxed: parking_lot::Mutex::new(BTreeSet::new()),
+                single_bchd_host_relaxed: parking_lot::Mutex::new(BTreeSet::new()),
                 #[cfg(target_arch = "wasm32")]
                 tx_history_db: ConstructibleDb::new_shared(ctx),
                 #[cfg(target_arch = "wasm32")]
