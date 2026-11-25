@@ -2712,7 +2712,7 @@ poll, and survives a restart.
 > case is deferred with the two-daemon item of the in-flight note-locking plan.
 
 > **Reloaded status note (2026-11-25, Reloaded-original; informative; PR
-> #NNN).** A note the wallet database holds for the internal (change) address of
+> #541).** A note the wallet database holds for the internal (change) address of
 > the wallet's key (ZIP 32 internal scope), such as the change a Pirate wallet
 > on the same seed makes, is spent with the internal key: each note selected for
 > a light-mode build keeps its scope, an internal note is spent with the full
