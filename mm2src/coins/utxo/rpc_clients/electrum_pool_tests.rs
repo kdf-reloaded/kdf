@@ -1734,9 +1734,9 @@ fn t38_6_4q_2_history_too_large_is_final_and_an_unreadable_answer_is_final() {
     });
 }
 
-/// The contract-event history states of the usable servers: one never probed and one whose probe runs are not asked
-/// yet, one whose probe got an error failed, one that answered the read served it. A cancelled probe leaves the record
-/// as it was, and a later answer moves a failed server to served.
+/// The contract-event history states of the usable servers: one never probed and one whose first probe runs are not
+/// asked yet, one whose probe got an error failed, one that answered the read served it. A cancelled probe leaves the
+/// record as it was, a failed server stays failed while a new probe of it runs, and a later answer moves it to served.
 #[test]
 fn the_contract_history_servers_are_served_failed_or_not_yet_asked() {
     block_on(async {
@@ -1771,22 +1771,31 @@ fn the_contract_history_servers_are_served_failed_or_not_yet_asked() {
             (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
         );
 
-        // A new probe of the failed server makes it not asked yet while it runs; its error leaves it failed again.
+        // The failed server stays failed while a new probe of it runs, and its error leaves it failed.
         assert_eq!(
             pool.claim_contract_history_probes(now_float(), 0., Some(&addr(2))),
             vec![addr(2)]
         );
         assert_eq!(
             pool.contract_history_servers(),
-            (vec![addr(4)], none.clone(), vec![addr(0), addr(1), addr(2), addr(3)])
+            (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
         );
         pool.end_contract_history_probe(&addr(2), now_float(), true);
-        assert_eq!(pool.contract_history_servers().1, vec![addr(2)]);
+        assert_eq!(
+            pool.contract_history_servers(),
+            (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
+        );
 
-        // A later answer of the failed server moves it to served.
+        // A new probe of the failed server that gets the history moves it to served.
+        assert_eq!(
+            pool.claim_contract_history_probes(now_float(), 0., Some(&addr(2))),
+            vec![addr(2)]
+        );
+        assert_eq!(pool.contract_history_servers().1, vec![addr(2)]);
         pool.route_directed(rpc(CONTRACT_HISTORY, vec![]), &addr(2))
             .await
             .unwrap();
+        pool.end_contract_history_probe(&addr(2), now_float(), false);
         assert_eq!(
             pool.contract_history_servers(),
             (vec![addr(2), addr(4)], none, vec![addr(0), addr(1), addr(3)])

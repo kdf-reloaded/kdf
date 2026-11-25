@@ -1145,8 +1145,8 @@ fn a_trusted_host_that_answers_the_event_history_with_an_error_is_refused() {
         assert_eq!(
             refusal,
             format!(
-                "QRC20: the trusted Electrum server {} of QTUM answered blockchain.contract.event.get_history with an \
-                 error; QRC20 swaps need the server named by swap_evidence_node to serve \
+                "QRC20: the trusted Electrum server {} of QTUM did not serve blockchain.contract.event.get_history at \
+                 the last check; QRC20 swaps need the server named by swap_evidence_node to serve \
                  blockchain.contract.event.get_history: add a server that serves it to the server list, or name one \
                  of the list that does",
                 hosts.name(0)

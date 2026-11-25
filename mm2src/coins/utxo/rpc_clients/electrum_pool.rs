@@ -470,8 +470,8 @@ struct ContractHistoryState {
     probing: bool,
     /// When the last probe of the server ended (seconds since the epoch).
     probed_at: Option<f64>,
-    /// The last probe of the server that ended with an answer got an error or an answer that could not be read.
-    /// Cleared when the server serves the read.
+    /// The last probe of the server that was not cancelled ended without serving the read: an error answer, an answer
+    /// that could not be read, a timeout or a transport failure. Cleared when the server serves the read.
     last_probe_failed: bool,
 }
 
@@ -1150,8 +1150,10 @@ impl PoolShared {
     }
 
     /// The labels of the usable servers by what they have shown of the contract-event history read, each list in
-    /// priority order: those that have served it since the client was built, those whose last probe failed (an error
-    /// or an answer that could not be read), and those not asked yet (no probe of them has ended, or one is running).
+    /// priority order: those that have served it since the client was built, those whose last probe failed (its
+    /// request ended without serving the read: an error answer, an answer that could not be read, a timeout or a
+    /// transport failure), also while a new probe of them runs, and those not asked yet (no probe of them has ended,
+    /// or their first one is running).
     pub(super) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
         let (mut served, mut failed, mut not_asked) = (Vec::new(), Vec::new(), Vec::new());
         for slot in self.usable_slots() {
@@ -1159,10 +1161,10 @@ impl PoolShared {
             let history = &state.contract_history;
             let list = if history.served {
                 &mut served
-            } else if history.probing || !history.last_probe_failed {
-                &mut not_asked
-            } else {
+            } else if history.last_probe_failed {
                 &mut failed
+            } else {
+                &mut not_asked
             };
             list.push(slot.label.clone());
         }
@@ -1190,8 +1192,9 @@ impl PoolShared {
         claimed
     }
 
-    /// Ends the probe of `addr` that [`Self::claim_contract_history_probes`] started. `failed` records that the probe
-    /// got an error or an answer that could not be read; without it the record of the last probe stays as it is (a
+    /// Ends the probe of `addr` that [`Self::claim_contract_history_probes`] started. `failed` records that the probe's
+    /// request ended without serving the read (an error answer, an answer that could not be read, a timeout or a
+    /// transport failure); without it the record of the last probe stays as it is (a
     /// probe that got the history is recorded where every answer of the read is, and one cancelled got no answer).
     pub(super) fn end_contract_history_probe(&self, addr: &str, now: f64, failed: bool) {
         if let Some(slot) = self.slot_by_addr(addr) {

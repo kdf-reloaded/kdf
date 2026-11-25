@@ -304,7 +304,7 @@ impl Qrc20Coin {
         if let CapabilityScope::Trusted(trusted) = scope {
             let holds = |labels: &[String]| labels.iter().any(|label| node_name(label) == trusted);
             let state = if holds(&failed) {
-                "answered blockchain.contract.event.get_history with an error"
+                "did not serve blockchain.contract.event.get_history at the last check"
             } else if holds(&not_asked) {
                 "has not been asked yet; the check repeats within a minute"
             } else {
