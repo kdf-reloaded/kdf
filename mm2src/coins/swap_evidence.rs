@@ -415,18 +415,48 @@ pub fn undetermined(reason: &str, nodes: &[&str]) -> String {
 /// that quotes it counts as undetermined; that errs toward waiting, the safe side.
 pub fn is_undetermined(err: &str) -> bool { err.contains(UNDETERMINED_PREFIX) }
 
+impl UndeterminedReason {
+    /// Every reason; a new variant must be listed here (the match below does not compile without it).
+    pub const ALL: [UndeterminedReason; 4] = [
+        UndeterminedReason::Disagree,
+        UndeterminedReason::TooFewAnswers,
+        UndeterminedReason::TrustedNodeSilent,
+        UndeterminedReason::TipGap,
+    ];
+
+    /// The fixed phrase of the reason, free of any node label.
+    pub fn phrase(&self) -> &'static str {
+        match self {
+            UndeterminedReason::Disagree => "the nodes disagree",
+            UndeterminedReason::TooFewAnswers => "fewer than two nodes answered",
+            UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
+            UndeterminedReason::TipGap => "the tips of the nodes differ too much",
+        }
+    }
+}
+
+/// The label-free kind of an undetermined error text, or `None` when the text carries no marker. The text may be
+/// wrapped (`file:line] `). A known reason gives its phrase; a free reason (any other text after the marker, which
+/// may carry server names) gives the generic "undetermined". A caller can print the result, never the text.
+pub fn undetermined_reason_kind(err: &str) -> Option<&'static str> {
+    let at = err.find(UNDETERMINED_PREFIX)?;
+    let rest = &err[at + UNDETERMINED_PREFIX.len()..];
+    Some(
+        UndeterminedReason::ALL
+            .iter()
+            .map(UndeterminedReason::phrase)
+            .find(|phrase| rest.starts_with(phrase))
+            .unwrap_or("undetermined"),
+    )
+}
+
 impl Undetermined {
     /// The error text of this read: [`UNDETERMINED_PREFIX`], the reason, and what each node said, as
     /// `(label: summary; label: summary)`. A summary is the decision or the fixed error text of the node's `ask`,
     /// which carries no URL or credential by the contract of [`agree`]. [`undetermined`] builds the labels-only form
     /// for callers without an `Undetermined` value; both start with the prefix.
     pub fn to_err_string(&self) -> String {
-        let reason = match self.reason {
-            UndeterminedReason::Disagree => "the nodes disagree",
-            UndeterminedReason::TooFewAnswers => "fewer than two nodes answered",
-            UndeterminedReason::TrustedNodeSilent => "the trusted node did not answer",
-            UndeterminedReason::TipGap => "the tips of the nodes differ too much",
-        };
+        let reason = self.reason.phrase();
         if self.per_node.is_empty() {
             return format!("{UNDETERMINED_PREFIX}{reason}");
         }
@@ -769,6 +799,40 @@ mod tests {
         assert_eq!(disagree.to_string(), long);
         assert!(is_undetermined(&long));
         assert!(is_undetermined(&format!("x.rs:1] {long}")));
+    }
+
+    #[test]
+    fn undetermined_reason_kind_names_no_label() {
+        let long = Undetermined {
+            reason: UndeterminedReason::Disagree,
+            per_node: vec![
+                ("a.example:50002".to_owned(), "Claimed".to_owned()),
+                ("b.example:50002".to_owned(), "NotSpent".to_owned()),
+            ],
+        }
+        .to_err_string();
+        for text in [long.clone(), format!("x.rs:1] {long}")] {
+            let kind = undetermined_reason_kind(&text);
+            assert_eq!(kind, Some("the nodes disagree"), "the reason phrase is expected");
+            assert!(!kind.unwrap().contains(':'), "the phrase must carry no label");
+            assert!(!kind.unwrap().contains("example"), "the phrase must carry no host");
+        }
+        assert_eq!(undetermined_reason_kind("x.rs:1] connection refused"), None);
+    }
+
+    #[test]
+    fn every_reason_gives_its_phrase_and_a_free_reason_the_generic_kind() {
+        for reason in UndeterminedReason::ALL {
+            let text = Undetermined {
+                reason,
+                per_node: vec![("a.example:50002".to_owned(), "x".to_owned())],
+            }
+            .to_err_string();
+            assert_eq!(undetermined_reason_kind(&text), Some(reason.phrase()));
+        }
+        let free = undetermined("srv.example:50002 refused", &["srv.example:50002"]);
+        assert_eq!(undetermined_reason_kind(&free), Some("undetermined"));
+        assert_eq!(undetermined_reason_kind("plain text"), None);
     }
 
     #[test]

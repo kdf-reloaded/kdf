@@ -1,7 +1,7 @@
 use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, CheckBalanceResult,
                            TakerFeeAdditionalInfo};
-use super::evidence_wait::{clock_secs, refund_cap_text, refund_gate_cap_text, retry_while_undetermined,
-                           undetermined_refund_deadline, with_fix_hint, Read, WaitLog};
+use super::evidence_wait::{clock_secs, non_final_retry_text, refund_cap_text, refund_gate_cap_text,
+                           retry_while_undetermined, undetermined_refund_deadline, with_fix_hint, Read, WaitLog};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
                              ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
@@ -2095,11 +2095,12 @@ impl TakerSwap {
                         self.wait_refund_until(),
                     ) {
                         warn!(
-                            "Swap {}: the {} refund of the taker payment was rejected as non-final, retrying in {} s: {}",
-                            self.uuid,
-                            self.taker_coin.ticker(),
-                            non_final_retry_secs,
-                            node_text
+                            "{}",
+                            non_final_retry_text(&self.uuid, self.taker_coin.ticker(), "taker", non_final_retry_secs)
+                        );
+                        debug!(
+                            "Swap {}: the node's text of the non-final rejection: {}",
+                            self.uuid, node_text
                         );
                         Timer::sleep(non_final_retry_secs).await;
                         continue;
