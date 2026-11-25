@@ -748,6 +748,10 @@ pub trait UtxoCoinBuilderCommonOps {
         Ok(self.conf()["decimals"].as_u64().unwrap_or(8) as u8)
     }
 
+    /// The fixed rate, in base units per kilobyte, of a coin whose entry sets no `txfee`.
+    /// A family with its own default overrides it; the shared one is 1,000 (CRD ch.38 R38.6.6a).
+    fn default_fixed_tx_fee_per_kb(&self) -> u64 { 1000 }
+
     async fn tx_fee(&self, rpc_client: &UtxoRpcClientEnum) -> UtxoCoinBuildResult<TxFee> {
         // lightwalletd has no fee estimation: an explicit request for it (`txfee: 0`) is refused.
         // An undeclared fee keeps the shared fixed default below, as the published ARRR entry relies
@@ -761,7 +765,14 @@ pub trait UtxoCoinBuilderCommonOps {
                 ticker: self.ticker().to_owned(),
             });
         }
-        let tx_fee = match classify_tx_fee_conf(self.conf()) {
+        let class = match classify_tx_fee_conf(self.conf()) {
+            // An absent `txfee` takes the builder's own default rate (the shared one unless a family overrides it).
+            TxFeeConfClass::Fixed(_) if self.conf()["txfee"].as_u64().is_none() => {
+                TxFeeConfClass::Fixed(self.default_fixed_tx_fee_per_kb())
+            },
+            class => class,
+        };
+        let tx_fee = match class {
             TxFeeConfClass::Fixed(fee) => TxFee::FixedPerKb(fee),
             TxFeeConfClass::WholeKbFixed(fee) => TxFee::FixedPerStartedKb(fee),
             TxFeeConfClass::Zip317(legacy_rate_per_kb) => TxFee::Zip317 { legacy_rate_per_kb },

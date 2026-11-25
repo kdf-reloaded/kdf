@@ -4,6 +4,10 @@ use super::z_tx_addresses::AddressSide;
 use super::z_tx_assembler::TxAssembler;
 use super::*;
 
+/// The fixed fee, in base units, of a transaction of a ZCoin whose entry sets no `txfee`: Pirate's standard
+/// 10,000 (CRD ch.39 R39.6.5f for the Ironwood fee; ch.08 for trade fees).
+pub(crate) const ZCOIN_DEFAULT_TX_FEE_SAT: u64 = 10_000;
+
 /// How long a send waits for an in-flight shielded spend to be scanned before it
 /// gives up (R39.8.0at requires the wait to be bounded and to end in a typed
 /// failure). One pass costs at most a block plus a shielded-sync poll period, so
@@ -383,8 +387,13 @@ impl ZCoin {
         Ok(unspents)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn get_one_kbyte_tx_fee(&self) -> UtxoRpcResult<BigDecimal> {
+        let sat = self.get_fixed_tx_fee_sat().await?;
+        Ok(big_decimal_from_sat_unsigned(sat, self.decimals()))
+    }
+
+    /// The one fixed fee a transaction of this coin pays, in base units.
+    pub(crate) async fn get_fixed_tx_fee_sat(&self) -> UtxoRpcResult<u64> {
         let fee = self.get_tx_fee().await?;
         // A shielded coin pays one fixed fee per transaction; a ZIP 317 coin has no such fee, so it is refused
         // here rather than priced per kilobyte.
@@ -393,7 +402,7 @@ impl ZCoin {
                 "a shielded coin cannot follow the ZIP 317 fee rule".to_owned(),
             ))
         })?;
-        Ok(big_decimal_from_sat_unsigned(rate_per_kb, self.decimals()))
+        Ok(rate_per_kb)
     }
 
     /// Generates a tx sending outputs from our address

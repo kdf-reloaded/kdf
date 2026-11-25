@@ -1559,6 +1559,16 @@ alone is 2,720 + 2 × 2,272 bytes, and the chain's relay floor of 100 base units
 kilobyte then asks for about 1,060. Withdrawals to a Sapling address keep the configured
 fee.
 
+> **Reloaded status note (2026-11-26, Reloaded-original; informative; PR
+> #NNN).** A shielded coin whose entry declares no `txfee` now pays a fixed
+> 10,000 base units (0.0001 ARRR) for every transaction, not the shared default
+> of 1,000 of R39.5.2, which other UTXO coins keep; a configured `txfee` still
+> wins. The fee of the HTLC spend and refund follows the same coin fee in place
+> of a fixed 1,000, and the figures reported before a trade (the sender and
+> taker-fee fees, the receiver fee and the amount kept back for the spend) are
+> that same fee in place of a size estimate, so they equal what the transactions
+> pay. The Ironwood payment of this rule keeps its fixed 10,000.
+
 R39.6.5g **Recording the broadcast.** When the backend accepts a submitted Pirate1
 withdrawal, the coin shall record it exactly as it records a withdrawal to a Sapling
 address (D39.8.0e): the in-flight exclusion of its Sapling notes (R39.8.0ao, R39.8.0ap),
@@ -9633,3 +9643,7 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   R39.11.5A.1 and chapter 51 R7 and R18, takes no forbidden-class input, so
   chapter 01 R38 is not engaged and no gate pass is required. No cleared
   sentence is edited.
+- *Reloaded-original addition (2026-11-26) -- the status note of that date under
+  R39.6.5f.* The fixed fee of a shielded coin without `txfee`, as built. It
+  describes this repository's code; no forbidden-class input, so it needs no
+  Dirty Gate pass.

@@ -227,7 +227,13 @@ pub async fn z_p2sh_spend(
         sequence: input_sequence,
         signer,
     });
-    let fee = Amount::const_from_u64(1_000);
+    // The coin's one fixed fee, the same value the estimates before the swap report (CRD ch.08).
+    let fee_sat = coin.get_fixed_tx_fee_sat().await.mm_err(ZP2SHSpendError::Rpc)?;
+    let fee = Amount::from_u64(fee_sat).map_err(|_| {
+        MmError::new(ZP2SHSpendError::InvalidPaymentTx(format!(
+            "invalid spend fee {fee_sat}"
+        )))
+    })?;
     let payment_value = p2sh_tx
         .transparent_bundle()
         .and_then(|bundle| bundle.vout.first())
