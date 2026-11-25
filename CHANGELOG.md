@@ -35,10 +35,12 @@ or undo, and every change that needs a step from you.
   - *Single-host coins:* the new top-level `MM2.json` boolean `swap_evidence_allow_single_host`, default `true`,
     keeps a coin whose configured node list names exactly one host swapping as before. That host is trusted as if
     `swap_evidence_node` named it, the coin's activation answer carries `"swap_evidence_single_host": true`, and the
-    node logs one warning naming the coin. The list as configured counts, not the hosts that answer: a coin listed
-    with two or more hosts stays under the two-node rule even while one of them does not answer. Set the switch to
-    `false` to require two hosts or `swap_evidence_node` for every coin. Detail: PR #536; CRD ch.51 status note of
-    2026-11-24 before §51.7.
+    node logs one warning naming the coin. The same holds for the bchd servers of an SLP token's platform: a BCH
+    platform whose `bchd_urls` name exactly one host trusts it for the token's reads, and its activation answer
+    carries `"swap_evidence_single_bchd_host": true`. The list as configured counts, not the hosts that answer: a
+    coin listed with two or more hosts stays under the two-node rule even while one of them does not answer. Set the
+    switch to `false` to require two hosts or `swap_evidence_node` for every coin. Detail: PR #536; CRD ch.51 status
+    note of 2026-11-24 before §51.7.
   - *Coin families covered* (the rule is switched on family by family as each family's chain reads move onto it):
     - TRON (TRX, TRC20). TRON swaps stay off in this release; when they are switched on, their chain reads already
       follow the rule. Detail: PR #509; CRD ch.21 §21.11D.
