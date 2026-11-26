@@ -2041,8 +2041,9 @@ impl LightwalletdBackend {
 
     /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of the
     /// coin `ticker` under its effective `policy`, over the admitted endpoints only, the ones the swap reads ask
-    /// ([`LightwalletdBackend::admitted`]): an excluded endpoint never counts, a trusted one included, and when no
-    /// endpoint is admitted none answers. An endpoint counts as answering when it answered within
+    /// ([`LightwalletdBackend::last_admitted`], read without evaluating it, so a stale admission is used as it is and
+    /// no admission round ever runs here): an excluded endpoint never counts, a trusted one included, and when no
+    /// endpoint is admitted, or no admission has run yet, none answers. An endpoint counts as answering when it answered within
     /// [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise, and only while the answering hosts are not enough, it
     /// is asked for its latest block, bounded by [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per
     /// window per host.
@@ -2056,8 +2057,9 @@ impl LightwalletdBackend {
         let admitted = match policy {
             // Decided without any endpoint.
             SwapEvidencePolicy::NotAdopted | SwapEvidencePolicy::Insufficient { .. } => Vec::new(),
-            // A failed admission admits no endpoint: then no endpoint answers for the check.
-            _ => self.admitted().await.unwrap_or_default(),
+            // The last admission, stale or not, and never a new round: the check must not wait on the probes of an
+            // admission. No admission yet admits no endpoint, so no endpoint answers for the check.
+            _ => self.last_admitted(),
         };
         let now = common::now_float();
         let scope = format!("zhtlc:{ticker}");
@@ -2082,6 +2084,14 @@ impl LightwalletdBackend {
             },
         )
         .await
+    }
+
+    /// Makes the cached admission `age` older, as if it had run that long ago.
+    #[cfg(test)]
+    pub(crate) fn age_admission(&self, age: Duration) {
+        if let Some(cached) = self.cached.lock().as_mut() {
+            cached.at -= age;
+        }
     }
 
     /// Forgets every endpoint's last answer, as if none had answered within the readiness window.
@@ -2113,6 +2123,16 @@ impl LightwalletdBackend {
             .as_ref()
             .filter(|cached| cached.at.elapsed() < ADMISSION_REEVALUATION_INTERVAL)
             .map(|cached| self.to_servers(&cached.outcome.admitted))
+    }
+
+    /// The endpoints of the last admission (configured spelling, configured order), also when it is older than
+    /// [`ADMISSION_REEVALUATION_INTERVAL`]; empty when none has run yet. Never starts an admission round.
+    fn last_admitted(&self) -> Vec<String> {
+        self.cached
+            .lock()
+            .as_ref()
+            .map(|cached| self.to_servers(&cached.outcome.admitted))
+            .unwrap_or_default()
     }
 
     /// The configured spelling of each endpoint named by one of `labels`.

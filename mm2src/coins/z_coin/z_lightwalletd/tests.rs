@@ -425,6 +425,8 @@ pub(crate) struct Script {
     pub(crate) block_hashes: HashMap<u64, [u8; 32]>,
     /// Added to the time of every block this endpoint serves, so two endpoints can have different clocks.
     pub(crate) block_time_offset: u32,
+    /// `GetLightdInfo` never answers, as an endpoint that holds the request.
+    pub(crate) info_hold: bool,
 }
 
 /// Called with the bytes of every broadcast, before the scripted answer is returned.
@@ -465,6 +467,9 @@ impl FakeTransport {
 impl LightwalletdTransport for FakeTransport {
     async fn light_info(&self, server: &str) -> Result<ServerInfo, EndpointError> {
         self.record(server, "info");
+        if self.scripts.lock().get(server).is_some_and(|s| s.info_hold) {
+            std::future::pending::<()>().await;
+        }
         self.scripts
             .lock()
             .get(server)
@@ -2831,6 +2836,8 @@ async fn swap_evidence_readiness_ignores_an_excluded_endpoint() {
     let two_nodes = SwapEvidencePolicy::TwoNodes {
         hosts: vec!["a".into(), "b".into()],
     };
+    // The readiness check reads the last admission; it never runs one.
+    backend.admitted().await.unwrap();
 
     assert_eq!(
         backend.swap_evidence_ready("ARRRXCL", &two_nodes).await,
@@ -2847,4 +2854,57 @@ async fn swap_evidence_readiness_ignores_an_excluded_endpoint() {
     assert_eq!(transport.called(fork, "tip"), 0);
     let trusted_a = SwapEvidencePolicy::Trusted { node: a.to_owned() };
     assert_eq!(backend.swap_evidence_ready("ARRRXCL", &trusted_a).await, Ok(()));
+}
+
+/// The readiness check never starts an admission round: a stale admission is read as it is, and a backend with no
+/// admission yet has no endpoint answering. A transport that holds `GetLightdInfo` cannot delay the check.
+#[tokio::test]
+async fn swap_evidence_readiness_never_starts_an_admission() {
+    let transport = Arc::new(FakeTransport::default());
+    let (a, b) = ("https://rdy-lwd-s1.example:9067", "https://rdy-lwd-s2.example:9067");
+    transport.serve(a, healthy(&[]));
+    transport.serve(b, healthy(&[]));
+    let backend = backend_over(&transport, &[a, b]);
+    let two_nodes = SwapEvidencePolicy::TwoNodes {
+        hosts: vec!["a".into(), "b".into()],
+    };
+
+    // No admission yet: nothing answers, nothing is asked.
+    assert_eq!(
+        backend.swap_evidence_ready("ARRRSTL", &two_nodes).await,
+        Err("ARRRSTL: swap evidence not available (fewer than two hosts answering)".to_owned())
+    );
+    for server in [a, b] {
+        for method in ["info", "cache", "tip"] {
+            assert_eq!(transport.called(server, method), 0);
+        }
+    }
+
+    // A stale admission, and endpoints that hold `GetLightdInfo`: the check ends within the probe bound, over the
+    // endpoints of that admission, and sends no admission request.
+    assert_eq!(backend.admitted().await.unwrap().len(), 2);
+    backend.forget_readiness_answers();
+    backend.age_admission(ADMISSION_REEVALUATION_INTERVAL + Duration::from_secs(1));
+    let (info_a, info_b) = (transport.called(a, "info"), transport.called(b, "info"));
+    for server in [a, b] {
+        transport.serve(server, Script {
+            info_hold: true,
+            tip_floor: Some(100),
+            ..Script::default()
+        });
+    }
+    let result = tokio::time::timeout(
+        Duration::from_secs_f64(crate::swap_evidence::READY_PROBE_TIMEOUT_SECS + 1.0),
+        backend.swap_evidence_ready("ARRRSTL", &two_nodes),
+    )
+    .await
+    .expect("the readiness check is bounded by the probe timeout");
+    assert_eq!(result, Ok(()));
+    assert_eq!(transport.called(a, "info"), info_a);
+    assert_eq!(transport.called(b, "info"), info_b);
+    assert_eq!(
+        transport.called(a, "cache") + transport.called(b, "cache"),
+        2,
+        "admission asked once each"
+    );
 }
