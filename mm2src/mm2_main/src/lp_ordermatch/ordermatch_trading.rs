@@ -1735,10 +1735,14 @@ pub(crate) async fn enforce_floor_on_saved_orders_with(
                         order.min_base_vol.to_decimal(),
                         new_min.to_decimal()
                     );
-                    order.min_base_vol = new_min.clone();
-                    order.updated_at = Some(now_ms());
-                    match PublishedState::publish(ordermatch_ctx, &order, true) {
+                    // The order changes only where its state is published: `None` means the order has been removed
+                    // meanwhile, so there is nothing to store, announce or retry.
+                    let mut raised = order.clone();
+                    raised.min_base_vol = new_min.clone();
+                    raised.updated_at = Some(now_ms());
+                    match PublishedState::publish(ordermatch_ctx, &raised, true) {
                         Some(published) => {
+                            *order = raised;
                             log::info!("{}", line);
                             lines.push(line);
                             if !ordermatch_ctx.order_is_untradable(ctx, "Maker", &order.uuid, &base, &rel) {

@@ -8838,6 +8838,44 @@ mod tendermint_saved_orders {
         assert!(block_on(enforce_floor_on_saved_orders_with(&node.ctx, &octx, &base_floor_scope)).is_empty());
     }
 
+    /// A raise whose state cannot be published, because the order was removed meanwhile, leaves the order as it was:
+    /// no line, no announcement, nothing stored.
+    #[test]
+    fn a_raise_of_an_order_removed_meanwhile_changes_nothing() {
+        mock_balance("20");
+        mock_floor_of_base();
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        let low_min = saved("10", "0.0005");
+        node.save(&[&low_min], &[]);
+        block_on(orders_kick_start(&node.ctx)).unwrap();
+        node.activate(&TEST_COINS);
+        node.published();
+        let octx = node.octx();
+        let order_mutex = octx.maker_orders_ctx.lock().get_order(&low_min.uuid).unwrap();
+
+        let lines = block_on(async {
+            // The order's lock is held while the pass starts, so the pass waits at its first lock; the order is then
+            // removed (its write gate is marked removed) and the lock released.
+            let guard = order_mutex.lock().await;
+            let mut pass = Box::pin(enforce_floor_on_saved_orders_with(&node.ctx, &octx, &base_floor_scope));
+            assert!(futures::poll!(pass.as_mut()).is_pending());
+            let removed = RemovedMakerOrder::take_out(&octx, &guard).unwrap();
+            drop(guard);
+            let lines = pass.await;
+            drop(removed);
+            lines
+        });
+
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(
+            block_on(order_mutex.lock()).min_base_vol,
+            MmNumber::from("0.0005"),
+            "the order keeps its minimum"
+        );
+        assert_eq!(stored_min(&node, &low_min.uuid), MmNumber::from("0.0005"));
+        assert!(node.published().is_empty());
+    }
+
     /// The rule applies to the coins the scope names only: with no scope for a coin, its saved orders are untouched.
     #[test]
     fn saved_orders_of_coins_outside_the_scope_are_not_touched() {
