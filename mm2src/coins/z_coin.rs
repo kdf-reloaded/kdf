@@ -2394,10 +2394,10 @@ mod light_backend_tests {
         });
     }
 
-    /// The published mainnet ARRR entry has no `txfee`: it must build and keep the shared fixed
-    /// default (no estimation is involved).
+    /// The published mainnet ARRR entry has no `txfee`: it must build with the ZCoin fixed default of
+    /// 10,000 (no estimation is involved), and a configured `txfee` still wins.
     #[test]
-    fn a_light_coin_with_no_txfee_key_keeps_the_fixed_default() {
+    fn a_light_coin_with_no_txfee_key_takes_the_zcoin_fixed_default() {
         let ctx = MmCtxBuilder::default().into_mm_arc();
         let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
         let conf = json!({ "coin": "ARRR" });
@@ -2408,7 +2408,17 @@ mod light_backend_tests {
         let builder = builder_for(&ctx, &conf, &params, backend);
         let client = block_on(builder.rpc_client()).unwrap();
         let fee = block_on(builder.tx_fee(&client)).unwrap();
-        assert!(matches!(fee, crate::utxo::TxFee::FixedPerKb(1000)));
+        assert!(matches!(fee, crate::utxo::TxFee::FixedPerKb(10000)));
+        assert_eq!(z_coin_ops::ZCOIN_DEFAULT_TX_FEE_SAT, 10_000);
+
+        let configured = json!({ "coin": "ARRR", "txfee": 25000 });
+        let builder = builder_for(&ctx, &configured, &params, ZcoinBackend::Light {
+            light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()],
+            electrum_servers: Vec::new(),
+        });
+        let client = block_on(builder.rpc_client()).unwrap();
+        let fee = block_on(builder.tx_fee(&client)).unwrap();
+        assert!(matches!(fee, crate::utxo::TxFee::FixedPerKb(25000)));
     }
 
     /// lightwalletd has no fee estimation: an explicit request for it (`txfee: 0`) is refused.
@@ -2429,6 +2439,80 @@ mod light_backend_tests {
                 "{err:?}"
             );
         }
+    }
+
+    /// A ZCoin entry that resolves to fee estimation or to the ZIP 317 rule is refused at activation with the
+    /// text that names the fix (a swap spend or refund could not pay it); no `txfee` or a positive one builds.
+    #[test]
+    fn an_entry_without_a_fixed_fee_class_is_refused_at_activation() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        let light = || ZcoinBackend::Light {
+            light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()],
+            electrum_servers: Vec::new(),
+        };
+        let zip317 = json!({
+            "coin": "ARRR", "overwintered": 1, "txversion": 5, "consensus_branch_id": "0x77190ad9", "txfee": 10000
+        });
+        let zip317_estimate = json!({
+            "coin": "ARRR", "overwintered": 1, "txversion": 5, "consensus_branch_id": "0x77190ad9", "txfee": 0
+        });
+        for conf in [zip317, zip317_estimate] {
+            let builder = builder_for(&ctx, &conf, &params, light());
+            let client = block_on(builder.rpc_client()).unwrap();
+            let err = block_on(builder.tx_fee(&client)).unwrap_err();
+            assert!(
+                matches!(err.get_inner(), UtxoCoinBuildError::ShieldedCoinNeedsFixedFee { .. }),
+                "{err:?}"
+            );
+            assert!(
+                err.to_string().contains("set a positive `txfee` or leave it out"),
+                "{err}"
+            );
+        }
+        // `txfee: 0` on the native backend (no lightwalletd check ahead of it).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let conf = json!({ "coin": "ARRR", "txfee": 0 });
+            let builder = builder_for(&ctx, &conf, &params, ZcoinBackend::Native);
+            if let Ok(client) = block_on(builder.rpc_client()) {
+                let err = block_on(builder.tx_fee(&client)).unwrap_err();
+                assert!(
+                    matches!(err.get_inner(), UtxoCoinBuildError::ShieldedCoinNeedsFixedFee { .. }),
+                    "{err:?}"
+                );
+            }
+        }
+        for conf in [json!({ "coin": "ARRR" }), json!({ "coin": "ARRR", "txfee": 20000 })] {
+            let builder = builder_for(&ctx, &conf, &params, light());
+            let client = block_on(builder.rpc_client()).unwrap();
+            assert!(block_on(builder.tx_fee(&client)).is_ok(), "{conf}");
+        }
+    }
+
+    /// The minimum trading volume is ten times the fixed fee: 0.001 ARRR by default, scaled by a configured
+    /// `txfee`, never below ten times the dust; a payment at the floor less the spend fee is positive.
+    #[test]
+    fn the_minimum_trading_volume_is_ten_times_the_fixed_fee() {
+        use crate::utxo::TxFee;
+        let multiple = z_coin_ops::ZCOIN_MIN_VOL_FEE_MULTIPLE;
+        let default_fee = z_coin_ops::ZCOIN_DEFAULT_TX_FEE_SAT;
+        assert_eq!(multiple, 10);
+        assert_eq!(
+            z_coin_ops::zcoin_min_trading_vol_sat(1000, &TxFee::FixedPerKb(default_fee)),
+            100_000,
+            "0.001 ARRR"
+        );
+        for fee in [default_fee, 25_000, 1_000] {
+            let floor = z_coin_ops::zcoin_min_trading_vol_sat(0, &TxFee::FixedPerKb(fee));
+            assert_eq!(floor, fee * multiple);
+            assert!(floor - fee > 0);
+        }
+        // Dust still bounds it from below.
+        assert_eq!(
+            z_coin_ops::zcoin_min_trading_vol_sat(5_000, &TxFee::FixedPerKb(100)),
+            50_000
+        );
     }
 
     #[test]
@@ -3226,6 +3310,12 @@ impl<'a> UtxoCoinBuilderCommonOps for ZCoinBuilder<'a> {
 
     fn ticker(&self) -> &str { self.ticker }
 
+    /// A ZCoin whose entry sets no `txfee` pays one fixed fee per transaction (CRD ch.39 R39.6.5f, ch.08).
+    fn default_fixed_tx_fee_per_kb(&self) -> u64 { z_coin_ops::ZCOIN_DEFAULT_TX_FEE_SAT }
+
+    /// A swap spend or refund must always be able to pay the one fixed fee (CRD ch.39 R39.6.5f).
+    fn requires_fixed_tx_fee(&self) -> bool { true }
+
     /// The policy is over the lightwalletd servers of a Light-mode coin; `swap_evidence_node` must be one of them.
     /// A Native-mode coin is served by its own daemon (CRD ch.51 R100).
     fn swap_evidence_policy(&self) -> UtxoCoinBuildResult<crate::SwapEvidencePolicy> {
@@ -3745,7 +3835,9 @@ impl MarketCoinOps for ZCoin {
 
     fn min_tx_amount(&self) -> BigDecimal { utxo_common::min_tx_amount(self.as_ref()) }
 
-    fn min_trading_vol(&self) -> MmNumber { utxo_common::min_trading_vol(self.as_ref()) }
+    /// Ten times the coin's fixed fee, so a payment at the floor still leaves ten times the spend fee
+    /// (CRD ch.39 R39.5.2, ch.08). The default minimum volume of an order derives from this figure.
+    fn min_trading_vol(&self) -> MmNumber { z_coin_ops::zcoin_min_trading_vol(self.as_ref()) }
 
     fn sign_raw_tx(&self, args: &SignRawTransactionRequest) -> RawTransactionFut {
         Box::new(utxo_common::sign_raw_tx(self.clone(), args.clone()).boxed().compat())
@@ -4048,12 +4140,33 @@ impl MmCoin for ZCoin {
         })
     }
 
+    /// The fixed fee of the HTLC spend plus the coin's dust: a shielded spend pays the coin's one fixed fee,
+    /// not a size-based one (CRD ch.08).
     async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> {
-        utxo_common::spend_safe_amount(self).await
+        let fee = self
+            .get_fixed_tx_fee_sat()
+            .await
+            .mm_err(|e| SpendSafeAmountError::EstimateUnavailable(e.to_string()))?;
+        let safe_amount = fee
+            .checked_add(self.as_ref().dust_amount)
+            .or_mm_err(|| SpendSafeAmountError::EstimateUnavailable(format!("spend fee {fee} plus dust overflows")))?;
+        Ok(Some(
+            big_decimal_from_sat_unsigned(safe_amount, self.as_ref().decimals).into(),
+        ))
     }
 
+    /// The fee of the HTLC spend, deducted from the received amount: the coin's one fixed fee (CRD ch.08).
     fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
-        utxo_common::get_receiver_trade_fee(self.clone())
+        let coin = self.clone();
+        let fut = async move {
+            let fee = coin.get_one_kbyte_tx_fee().await.mm_err(Into::into)?;
+            Ok(TradeFee {
+                coin: coin.ticker().to_owned(),
+                amount: fee.into(),
+                paid_from_trading_vol: true,
+            })
+        };
+        Box::new(fut.boxed().compat())
     }
 
     #[cfg(not(target_arch = "wasm32"))]

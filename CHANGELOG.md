@@ -220,6 +220,20 @@ or undo, and every change that needs a step from you.
     entry for the platform ticker. A client that reads the platform ticker's balance of every listed address must
     accept an empty map. A later `account_balance` lists those addresses with the full map and zero values.
   - Detail: PR #478; CRD ch.49 R49.35, R49.36.
+- **ARRR pays a fixed 0.0001 ARRR per transaction and trades at least 0.001 ARRR; saved ARRR orders follow at
+  start-up.**
+  - *What changes:* with no `txfee` in its coin entry, ARRR pays 0.0001 ARRR (10,000 base units) for every
+    transaction, and its minimum trading volume is 0.001 ARRR in place of 0.0001 ARRR; `setprice`, `buy` and `sell`
+    below it fail with `VolumeTooLow`. Once both coins of a saved order are active after start-up, and when a
+    good-till-cancelled taker order becomes a maker order, an order with ARRR on either side whose minimum volume is
+    below 0.001 ARRR keeps trading with its minimum raised to 0.001 ARRR; one whose whole volume is below it is
+    cancelled. Each such order is named in one log line. An ARRR coin entry with `txfee: 0` or the ZIP 317 fee class
+    is refused at activation.
+  - *What to do:* nothing for the published ARRR entry. Raise any ARRR volume or minimum below 0.001 ARRR in your
+    scripts (saved orders are adjusted at start-up as above), and give an ARRR coin entry with `txfee: 0` or the ZIP
+    317 class a positive `txfee`, or remove it. A `txfee` of 1000 gives the earlier fee and a minimum of 0.0001 ARRR
+    back.
+  - Detail: PR #544; CRD ch.39 R39.6.5f (status note of 2026-11-26); the item under "Changed" / "Shielded coins".
 
 #### Coins that are no longer visible after an upgrade
 
@@ -788,6 +802,15 @@ the previous version used. The safe way:
   (default 1, lowest 1). Other `.bak` files are left alone. To go back to an older build, put the
   backup over the wallet database file as described in `RELOADED_VS_GLEEC.md`.
   Detail: PR #407; CRD ch.39 R39.8.0bc, T39.8.0j.
+- **ARRR pays one fixed fee of 0.0001 ARRR (10,000 base units) for every transaction, the fees shown before a trade
+  are that fee, and its minimum trading volume is 0.001 ARRR.** With no `txfee` in its coin entry (the published
+  ARRR entry has none), a shielded coin pays 10,000 base units for a withdrawal, a swap payment, the DEX fee, and
+  the spend and refund of a swap payment, in place of 1,000; `trade_preimage` and the swap figures report the same
+  10,000 (the receiver fee was 496 before), so what a trade is quoted equals what it pays. The minimum trading
+  volume, and the default minimum volume of a new order, is ten times that fee: 0.001 ARRR in place of 0.0001 ARRR.
+  A `txfee` in the coin entry still sets the fee and scales the minimum; an entry with `txfee: 0` or the ZIP 317 fee
+  class is refused at activation. Other UTXO coins keep their default. Detail: PR #544; CRD ch.39 R39.6.5f (status
+  note of 2026-11-26).
 
 #### Tendermint (Cosmos) coins
 

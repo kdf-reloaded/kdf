@@ -1223,6 +1223,7 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
 
         handle_timed_out_taker_orders(ctx.clone(), &ordermatch_ctx).await;
         handle_timed_out_maker_matches(ctx.clone(), &ordermatch_ctx).await;
+        enforce_floor_on_saved_orders(&ctx, &ordermatch_ctx).await;
         check_balance_for_maker_orders(ctx.clone(), &ordermatch_ctx).await;
 
         // Collect maker orders whose per-order timeout has elapsed (TimedMap TTL).
@@ -1483,6 +1484,16 @@ pub async fn clean_memory_loop(ctx_weak: MmWeak) {
 ///
 /// The function locks the [`OrdermatchContext::maker_orders_ctx`] and [`OrdermatchContext::my_taker_orders`] mutexes.
 pub(crate) async fn handle_timed_out_taker_orders(ctx: MmArc, ordermatch_ctx: &OrdermatchContext) {
+    handle_timed_out_taker_orders_with(ctx, ordermatch_ctx, &shielded_coin_floor).await
+}
+
+/// [`handle_timed_out_taker_orders`] with the scope of the coin floor given: `floor_of` names the minimum trading
+/// volume that applies to a coin of a saved order, or `None` where none applies.
+pub(crate) async fn handle_timed_out_taker_orders_with(
+    ctx: MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    floor_of: &CoinFloorScope<'_>,
+) {
     let mut my_taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
 
     let storage = MyOrdersStorage::new(ctx.clone());
@@ -1504,11 +1515,49 @@ pub(crate) async fn handle_timed_out_taker_orders(ctx: MmArc, ordermatch_ctx: &O
 
         // transform the timed out taker order to maker
 
-        delete_my_taker_order(ctx.clone(), order.clone(), TakerOrderCancellationReason::ToMaker)
+        let mut maker_order: MakerOrder = order.clone().into();
+        // The minimum trading volume of the coins applies to the order that is about to be created. Where a coin
+        // is not active the order is created and checked once both coins are.
+        match find_pair(&ctx, &maker_order.base, &maker_order.rel).await {
+            Ok(Some((base, rel))) => {
+                match saved_order_floor_decision(&maker_order, floor_of(&base).as_ref(), floor_of(&rel).as_ref()) {
+                    SavedOrderFloor::Keep => {},
+                    SavedOrderFloor::Cancel(reason) => {
+                        log::info!(
+                            "Taker order {} ({}/{}) is cancelled instead of becoming a maker order: {}",
+                            maker_order.uuid,
+                            maker_order.base,
+                            maker_order.rel,
+                            reason
+                        );
+                        delete_my_taker_order(ctx.clone(), order, TakerOrderCancellationReason::Cancelled)
+                            .compat()
+                            .await
+                            .ok();
+                        continue;
+                    },
+                    SavedOrderFloor::Raise(new_min) => {
+                        log::info!(
+                            "Taker order {} ({}/{}) becomes a maker order with its minimum volume raised from {} to {}, \
+                             the minimum trading volume of its coins",
+                            maker_order.uuid,
+                            maker_order.base,
+                            maker_order.rel,
+                            maker_order.min_base_vol.to_decimal(),
+                            new_min.to_decimal()
+                        );
+                        maker_order.min_base_vol = new_min;
+                    },
+                }
+            },
+            _ => {
+                ordermatch_ctx.saved_floor_pending.lock().insert(maker_order.uuid);
+            },
+        }
+        delete_my_taker_order(ctx.clone(), order, TakerOrderCancellationReason::ToMaker)
             .compat()
             .await
             .ok();
-        let maker_order: MakerOrder = order.into();
         {
             let order_arc = Arc::new(AsyncMutex::new(maker_order.clone()));
             ordermatch_ctx
@@ -1545,6 +1594,185 @@ pub(crate) async fn handle_timed_out_taker_orders(ctx: MmArc, ordermatch_ctx: &O
     }
 
     *my_taker_orders = my_actual_taker_orders;
+}
+
+/// The minimum trading volume that applies to a coin of a saved order, or `None` where none applies.
+pub(crate) type CoinFloorScope<'a> = dyn Fn(&MmCoinEnum) -> Option<MmNumber> + Sync + 'a;
+
+/// The scope of the saved-order floor: a shielded (ZHTLC) coin carries its own minimum trading volume, derived from
+/// its one fixed fee, and the orders saved before that figure rose are brought up to it. No other coin is touched
+/// (CRD ch.39 R39.5.2, ch.60).
+pub(crate) fn shielded_coin_floor(coin: &MmCoinEnum) -> Option<MmNumber> {
+    matches!(coin, MmCoinEnum::ZCoin(_)).then(|| coin.min_trading_vol())
+}
+
+/// What the minimum trading volume of the coins does to a saved maker order.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SavedOrderFloor {
+    /// The order is left as it is.
+    Keep,
+    /// The order's whole available volume is below a floor; the text says which.
+    Cancel(String),
+    /// The order's minimum volume is raised to the figure.
+    Raise(MmNumber),
+}
+
+/// The decision for `order` under the floors of its base and rel coins (`None`: no floor applies to that coin).
+/// The order is cancelled when its whole available volume is below the base floor, or its available volume times its
+/// price is below the rel floor. Otherwise its minimum base volume is raised to the larger of the base floor and the
+/// rel floor over the price, when it is lower.
+pub(crate) fn saved_order_floor_decision(
+    order: &MakerOrder,
+    base_floor: Option<&MmNumber>,
+    rel_floor: Option<&MmNumber>,
+) -> SavedOrderFloor {
+    let available = order.available_amount();
+    if let Some(floor) = base_floor {
+        if available < *floor {
+            return SavedOrderFloor::Cancel(format!(
+                "volume {} below the {} minimum trading volume of {}",
+                available.to_decimal(),
+                order.base,
+                floor.to_decimal()
+            ));
+        }
+    }
+    if let Some(floor) = rel_floor {
+        let rel_volume = &available * &order.price;
+        if rel_volume < *floor {
+            return SavedOrderFloor::Cancel(format!(
+                "volume {} below the {} minimum trading volume of {}",
+                rel_volume.to_decimal(),
+                order.rel,
+                floor.to_decimal()
+            ));
+        }
+    }
+    let mut threshold = MmNumber::from(0);
+    if let Some(floor) = base_floor {
+        threshold = floor.clone();
+    }
+    if let Some(floor) = rel_floor {
+        let by_rel = floor / &order.price;
+        if by_rel > threshold {
+            threshold = by_rel;
+        }
+    }
+    if order.min_base_vol < threshold {
+        SavedOrderFloor::Raise(threshold)
+    } else {
+        SavedOrderFloor::Keep
+    }
+}
+
+/// Applies the minimum trading volume of the coins to the saved maker orders restored at startup, once both coins
+/// of an order are active (the restore itself runs before any coin is). See [`enforce_floor_on_saved_orders_with`].
+pub(crate) async fn enforce_floor_on_saved_orders(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext) -> Vec<String> {
+    enforce_floor_on_saved_orders_with(ctx, ordermatch_ctx, &shielded_coin_floor).await
+}
+
+/// [`enforce_floor_on_saved_orders`] with the scope of the floor given. An order whose whole available volume is below
+/// a floor is cancelled through the normal removal (announcement, storage, history); otherwise a minimum volume below
+/// the floor is raised to it, stored and announced. One INFO line is logged per cancelled or raised order, and
+/// returned. An order with ongoing matches waits for a later pass; an order whose coins are not both active waits too.
+pub(crate) async fn enforce_floor_on_saved_orders_with(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    floor_of: &CoinFloorScope<'_>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let pending: Vec<Uuid> = ordermatch_ctx.saved_floor_pending.lock().iter().copied().collect();
+    for uuid in pending {
+        let order_mutex = match ordermatch_ctx.maker_orders_ctx.lock().get_order(&uuid) {
+            Some(order) => order,
+            None => {
+                ordermatch_ctx.saved_floor_pending.lock().remove(&uuid);
+                continue;
+            },
+        };
+        let (base_ticker, rel_ticker) = {
+            let order = order_mutex.lock().await;
+            (order.base.clone(), order.rel.clone())
+        };
+        let (base, rel) = match find_pair(ctx, &base_ticker, &rel_ticker).await {
+            Ok(Some(pair)) => pair,
+            _ => continue,
+        };
+        let (base_floor, rel_floor) = (floor_of(&base), floor_of(&rel));
+
+        enum Done {
+            Cancelled(Box<RemovedMakerOrder>),
+            Raised(PublishedState),
+        }
+        let done = {
+            let mut order = order_mutex.lock().await;
+            if order.has_ongoing_matches() {
+                continue;
+            }
+            ordermatch_ctx.saved_floor_pending.lock().remove(&uuid);
+            match saved_order_floor_decision(&order, base_floor.as_ref(), rel_floor.as_ref()) {
+                SavedOrderFloor::Keep => None,
+                SavedOrderFloor::Cancel(reason) => {
+                    // This checks that the order hasn't been removed by another process
+                    RemovedMakerOrder::take_out(ordermatch_ctx, &order).map(|removed| {
+                        let line = format!(
+                            "Saved maker order {} ({}/{}) is cancelled: {}",
+                            order.uuid, order.base, order.rel, reason
+                        );
+                        log::info!("{}", line);
+                        lines.push(line);
+                        maker_order_cancelled_p2p_notify(ctx.clone(), &order);
+                        Done::Cancelled(Box::new(removed))
+                    })
+                },
+                SavedOrderFloor::Raise(new_min) => {
+                    let line = format!(
+                        "Saved maker order {} ({}/{}): minimum volume raised from {} to {}, the minimum trading \
+                         volume of its coins",
+                        order.uuid,
+                        order.base,
+                        order.rel,
+                        order.min_base_vol.to_decimal(),
+                        new_min.to_decimal()
+                    );
+                    // The order changes only where its state is published: `None` means the order has been removed
+                    // meanwhile, so there is nothing to store, announce or retry.
+                    let mut raised = order.clone();
+                    raised.min_base_vol = new_min.clone();
+                    raised.updated_at = Some(now_ms());
+                    match PublishedState::publish(ordermatch_ctx, &raised, true) {
+                        Some(published) => {
+                            *order = raised;
+                            log::info!("{}", line);
+                            lines.push(line);
+                            if !ordermatch_ctx.order_is_untradable(ctx, "Maker", &order.uuid, &base, &rel) {
+                                let mut update_msg = new_protocol::MakerOrderUpdated::new(order.uuid);
+                                update_msg.with_new_min_volume(new_min.into());
+                                update_msg.with_new_max_volume(order.available_amount().into());
+                                maker_order_updated_p2p_notify(
+                                    ctx.clone(),
+                                    order.orderbook_topic(),
+                                    update_msg,
+                                    order.p2p_keypair(),
+                                );
+                            }
+                            Some(Done::Raised(published))
+                        },
+                        None => None,
+                    }
+                },
+            }
+        };
+        match done {
+            Some(Done::Cancelled(removed)) => removed.delete(ctx, MakerOrderCancellationReason::Cancelled).await,
+            Some(Done::Raised(published)) => published
+                .complete(ctx)
+                .await
+                .error_log_with_msg("!write the raised minimum volume of a saved order"),
+            None => {},
+        }
+    }
+    lines
 }
 
 /// # Safety
@@ -3926,6 +4154,8 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
         coins.insert(order.rel.clone());
         let order_arc = Arc::new(AsyncMutex::new(order.clone()));
         ordermatch_ctx.maker_orders_ctx.lock().add_order(&order, order_arc);
+        // The coins are not active yet: the minimum trading volume is applied to the order once they are.
+        ordermatch_ctx.saved_floor_pending.lock().insert(order.uuid);
         if untradable {
             // No balance is ever read for it, so it starts no watch.
             continue;

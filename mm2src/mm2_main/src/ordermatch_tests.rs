@@ -8009,6 +8009,12 @@ mod tendermint_saved_orders {
                 .into_mm_arc();
             std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
             std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+            std::fs::create_dir_all(my_orders_history_dir(&ctx)).unwrap();
+            let connection = Connection::open_in_memory().unwrap();
+            connection
+                .execute(crate::mm2::database::my_orders::CREATE_MY_ORDERS_TABLE, [])
+                .unwrap();
+            let _ = ctx.sqlite_connection.pin(Arc::new(Mutex::new(connection)));
             let (tx, p2p_rx) = mpsc::channel(100);
             P2PContext::new(tx).store_to_mm_arc(&ctx);
             Restart { ctx, p2p_rx, dbdir }
@@ -8728,6 +8734,222 @@ mod tendermint_saved_orders {
         assert_eq!(node.lines_of(&untradable.request.uuid), 1);
         assert_eq!(node.lines().len(), 1);
     }
+
+    // The minimum trading volume of a coin applied to saved orders: BASE has the floor 0.001, REL none.
+
+    fn mock_floor_of_base() {
+        TestCoin::min_trading_vol.mock_safe(|coin| {
+            let floor = if coin.ticker() == "BASE" { "0.001" } else { "0" };
+            MockResult::Return(MmNumber::from(floor))
+        });
+    }
+
+    fn base_floor_scope(coin: &MmCoinEnum) -> Option<MmNumber> {
+        (coin.ticker() == "BASE").then(|| coin.min_trading_vol())
+    }
+
+    fn saved(max: &'static str, min: &'static str) -> MakerOrder {
+        MakerOrder {
+            max_base_vol: MmNumber::from(max),
+            min_base_vol: MmNumber::from(min),
+            save_in_history: true,
+            ..announceable("BASE", "REL")
+        }
+    }
+
+    fn stored_min(node: &Restart, uuid: &Uuid) -> MmNumber {
+        let stored = block_on(MyOrdersStorage::new(node.ctx.clone()).load_active_maker_orders()).unwrap();
+        stored.into_iter().find(|o| o.uuid == *uuid).unwrap().min_base_vol
+    }
+
+    /// A saved order whose minimum volume is below the floor is kept with the minimum raised to the floor, stored
+    /// and announced; an order whose whole volume is below the floor is cancelled (memory, storage, history, peers);
+    /// an order above the floor is untouched; each changed order has one line; the check runs once.
+    #[test]
+    fn saved_orders_are_brought_up_to_the_coin_floor_once_the_coins_are_active() {
+        mock_balance("20");
+        mock_floor_of_base();
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        let low_min = saved("10", "0.0005");
+        let tiny = saved("0.0005", "0.0001");
+        let fine = saved("10", "1");
+        node.save(&[&low_min, &tiny, &fine], &[]);
+        block_on(orders_kick_start(&node.ctx)).unwrap();
+        let octx = node.octx();
+        // The coins are not active at the restore: nothing is decided yet.
+        let lines = block_on(enforce_floor_on_saved_orders_with(&node.ctx, &octx, &base_floor_scope));
+        assert!(lines.is_empty());
+        assert_eq!(node.maker_uuids().len(), 3);
+        node.activate(&TEST_COINS);
+        node.published();
+
+        let lines = block_on(enforce_floor_on_saved_orders_with(&node.ctx, &octx, &base_floor_scope));
+
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let line_of = |uuid: &Uuid| {
+            lines
+                .iter()
+                .filter(|l| l.contains(&uuid.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(line_of(&low_min.uuid).len(), 1);
+        assert!(
+            line_of(&low_min.uuid)[0].contains("raised from 0.0005 to 0.001"),
+            "{lines:?}"
+        );
+        assert_eq!(line_of(&tiny.uuid).len(), 1);
+        assert!(
+            line_of(&tiny.uuid)[0].contains("volume 0.0005 below the BASE minimum trading volume of 0.001"),
+            "{lines:?}"
+        );
+        assert!(line_of(&fine.uuid).is_empty());
+
+        // Raised and kept, saved.
+        assert!(node.maker_uuids().contains(&low_min.uuid));
+        let in_memory = block_on(octx.maker_orders_ctx.lock().get_order(&low_min.uuid).unwrap().lock())
+            .min_base_vol
+            .clone();
+        assert_eq!(in_memory, MmNumber::from("0.001"));
+        assert_eq!(stored_min(&node, &low_min.uuid), MmNumber::from("0.001"));
+        // Cancelled: gone from memory, storage and the order book, and the history records the cancel.
+        assert!(!node.maker_uuids().contains(&tiny.uuid));
+        assert!(!node.stored_maker_uuids().contains(&tiny.uuid));
+        assert!(!octx.orderbook.lock().order_set.contains_key(&tiny.uuid));
+        let status = block_on(removal_recorded_in_history(
+            &MyOrdersStorage::new(node.ctx.clone()),
+            &tiny,
+        ));
+        assert!(status.is_some(), "the history records the cancel: {status:?}");
+        // Untouched.
+        assert_eq!(stored_min(&node, &fine.uuid), MmNumber::from(1));
+        assert!(node.maker_uuids().contains(&fine.uuid));
+        // The peers were told: an update for the raised order, a cancellation for the other.
+        let published = node.published();
+        assert!(published
+            .iter()
+            .any(|m| matches!(m, new_protocol::OrdermatchMessage::MakerOrderUpdated(u)
+            if u.uuid() == low_min.uuid)));
+        assert!(published
+            .iter()
+            .any(|m| matches!(m, new_protocol::OrdermatchMessage::MakerOrderCancelled(c)
+            if Uuid::from(c.uuid) == tiny.uuid)));
+
+        // Once: a second pass changes nothing and logs nothing.
+        assert!(block_on(enforce_floor_on_saved_orders_with(&node.ctx, &octx, &base_floor_scope)).is_empty());
+    }
+
+    /// A raise whose state cannot be published, because the order was removed meanwhile, leaves the order as it was:
+    /// no line, no announcement, nothing stored.
+    #[test]
+    fn a_raise_of_an_order_removed_meanwhile_changes_nothing() {
+        mock_balance("20");
+        mock_floor_of_base();
+        let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+        let low_min = saved("10", "0.0005");
+        node.save(&[&low_min], &[]);
+        block_on(orders_kick_start(&node.ctx)).unwrap();
+        node.activate(&TEST_COINS);
+        node.published();
+        let octx = node.octx();
+        let order_mutex = octx.maker_orders_ctx.lock().get_order(&low_min.uuid).unwrap();
+
+        let lines = block_on(async {
+            // The order's lock is held while the pass starts, so the pass waits at its first lock; the order is then
+            // removed (its write gate is marked removed) and the lock released.
+            let guard = order_mutex.lock().await;
+            let mut pass = Box::pin(enforce_floor_on_saved_orders_with(&node.ctx, &octx, &base_floor_scope));
+            assert!(futures::poll!(pass.as_mut()).is_pending());
+            let removed = RemovedMakerOrder::take_out(&octx, &guard).unwrap();
+            drop(guard);
+            let lines = pass.await;
+            drop(removed);
+            lines
+        });
+
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(
+            block_on(order_mutex.lock()).min_base_vol,
+            MmNumber::from("0.0005"),
+            "the order keeps its minimum"
+        );
+        assert_eq!(stored_min(&node, &low_min.uuid), MmNumber::from("0.0005"));
+        assert!(node.published().is_empty());
+    }
+
+    /// The rule applies to the coins the scope names only: with no scope for a coin, its saved orders are untouched.
+    #[test]
+    fn saved_orders_of_coins_outside_the_scope_are_not_touched() {
+        mock_balance("20");
+        mock_floor_of_base();
+        let node = Restart::new(conf_with_a_wallet_only_test_coin());
+        let tiny = saved("0.0005", "0.0001");
+        node.save(&[&tiny], &[]);
+        block_on(orders_kick_start(&node.ctx)).unwrap();
+        node.activate(&TEST_COINS);
+        let octx = node.octx();
+        let lines = block_on(enforce_floor_on_saved_orders_with(&node.ctx, &octx, &|_| None));
+        assert!(lines.is_empty());
+        assert_eq!(node.maker_uuids(), HashSet::from([tiny.uuid]));
+        assert_eq!(stored_min(&node, &tiny.uuid), MmNumber::from("0.0001"));
+    }
+
+    /// A good-till-cancelled taker order that times out becomes a maker order under the same rule: cancelled when its
+    /// whole volume is below the floor, with its minimum volume raised when only that is below, untouched above.
+    #[test]
+    fn a_timed_out_taker_order_is_brought_up_to_the_coin_floor() {
+        mock_balance("20");
+        mock_floor_of_base();
+        let node = Restart::new(conf_with_a_wallet_only_test_coin());
+        node.activate(&TEST_COINS);
+        let cancelled = Arc::new(Mutex::new(Vec::<(Uuid, String)>::new()));
+        let cancelled_log = cancelled.clone();
+        delete_my_taker_order.mock_safe(move |_, order, reason| {
+            cancelled_log
+                .lock()
+                .unwrap()
+                .push((order.request.uuid, reason.to_string()));
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        let timed_out = |base_amount: &'static str, min_volume: &'static str| {
+            let mut order = taker("BASE", "REL");
+            order.request.action = TakerAction::Sell;
+            order.request.base_amount = MmNumber::from(base_amount);
+            order.request.rel_amount = MmNumber::from(base_amount);
+            order.request.conf_settings = Some(OrderConfirmationsSettings::default());
+            order.min_volume = MmNumber::from(min_volume);
+            order.created_at = now_ms() - 60_000;
+            order
+        };
+        let tiny = timed_out("0.0005", "0.0001");
+        let low_min = timed_out("10", "0.0002");
+        let fine = timed_out("10", "1");
+        for order in [&tiny, &low_min, &fine] {
+            add_taker(&node, order);
+        }
+        let octx = node.octx();
+
+        block_on(handle_timed_out_taker_orders_with(
+            node.ctx.clone(),
+            &octx,
+            &base_floor_scope,
+        ));
+
+        assert_eq!(
+            node.maker_uuids(),
+            HashSet::from([low_min.request.uuid, fine.request.uuid])
+        );
+        let min_of = |uuid: &Uuid| {
+            block_on(octx.maker_orders_ctx.lock().get_order(uuid).unwrap().lock())
+                .min_base_vol
+                .clone()
+        };
+        assert_eq!(min_of(&low_min.request.uuid), MmNumber::from("0.001"));
+        assert_eq!(min_of(&fine.request.uuid), MmNumber::from(1));
+        let log = cancelled.lock().unwrap().clone();
+        assert!(log.contains(&(tiny.request.uuid, "Cancelled".to_owned())), "{log:?}");
+        assert!(log.contains(&(low_min.request.uuid, "ToMaker".to_owned())), "{log:?}");
+        assert!(log.contains(&(fine.request.uuid, "ToMaker".to_owned())), "{log:?}");
+    }
 }
 
 // CRD ch.32 R-T3b tests: queue order under concurrency (T-T4) and reads that never run ahead of
@@ -8753,6 +8975,7 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
         pending_maker_reserved: Default::default(),
         maker_outbox: Default::default(),
         untradable_orders: Default::default(),
+        saved_floor_pending: Default::default(),
         orderbook_tickers: Default::default(),
         original_tickers: Default::default(),
     };

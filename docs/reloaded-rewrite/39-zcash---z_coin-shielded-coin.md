@@ -1559,6 +1559,26 @@ alone is 2,720 + 2 × 2,272 bytes, and the chain's relay floor of 100 base units
 kilobyte then asks for about 1,060. Withdrawals to a Sapling address keep the configured
 fee.
 
+> **Reloaded status note (2026-11-26, Reloaded-original; informative; PR
+> #544).** A shielded coin whose entry declares no `txfee` now pays a fixed
+> 10,000 base units (0.0001 ARRR) for every transaction, not the shared default
+> of 1,000 of R39.5.2, which other UTXO coins keep; a configured `txfee` still
+> wins. The fee of the HTLC spend and refund follows the same coin fee in place
+> of a fixed 1,000, and the figures reported before a trade (the sender and
+> taker-fee fees, the receiver fee and the amount kept back for the spend) are
+> that same fee in place of a size estimate, so they equal what the transactions
+> pay. The Ironwood payment of this rule keeps its fixed 10,000. The minimum
+> trading volume of R39.5.2 becomes ten times that fee, 0.001 ARRR at the
+> default (100,000 base units), so a payment at the floor stays spendable after
+> the spend fee; a configured `txfee` scales it. A shielded coin entry whose fee
+> is not one fixed amount (`txfee` 0, or the ZIP 317 class) is refused at
+> activation. A saved order with a shielded coin on either side whose minimum
+> volume is below the floor has its minimum raised to the floor once both its
+> coins are active, and one whose whole volume is below the floor is cancelled;
+> the same holds when a good-till-cancelled taker order becomes a maker order
+> (maintainer decision of 2026-11-26). For these figures R39.5.2's "Reloaded
+> matches" no longer holds.
+
 R39.6.5g **Recording the broadcast.** When the backend accepts a submitted Pirate1
 withdrawal, the coin shall record it exactly as it records a withdrawal to a Sapling
 address (D39.8.0e): the in-flight exclusion of its Sapling notes (R39.8.0ao, R39.8.0ap),
@@ -9648,3 +9668,7 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   R39.8.0ag1.* The spending of internal-scope (change-address) notes, as built.
   It describes this repository's code and ZIP 32's internal key; no
   forbidden-class input, so it needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-26) -- the status note of that date under
+  R39.6.5f.* The fixed fee of a shielded coin without `txfee`, as built. It
+  describes this repository's code; no forbidden-class input, so it needs no
+  Dirty Gate pass.
