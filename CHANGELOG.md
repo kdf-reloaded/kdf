@@ -232,6 +232,20 @@ the previous version used. The safe way:
 2. Start the previous version again, with the same passphrase, `MM2.json` and activation requests.
 3. Move the coins to the address you noted, or close the Lightning channels.
 4. Upgrade again.
+- **ARRR pays a fixed 0.0001 ARRR per transaction and trades at least 0.001 ARRR; saved ARRR orders follow at
+  start-up.**
+  - *What changes:* with no `txfee` in its coin entry, ARRR pays 0.0001 ARRR (10,000 base units) for every
+    transaction, and its minimum trading volume is 0.001 ARRR in place of 0.0001 ARRR; `setprice`, `buy` and `sell`
+    below it fail with `VolumeTooLow`. Once both coins of a saved order are active after start-up, and when a
+    good-till-cancelled taker order becomes a maker order, an order with ARRR on either side whose minimum volume is
+    below 0.001 ARRR keeps trading with its minimum raised to 0.001 ARRR; one whose whole volume is below it is
+    cancelled. Each such order is named in one log line. An ARRR coin entry with `txfee: 0` or the ZIP 317 fee class
+    is refused at activation.
+  - *What to do:* nothing for the published ARRR entry. Raise any ARRR volume or minimum below 0.001 ARRR in your
+    scripts (saved orders are adjusted at start-up as above), and give an ARRR coin entry with `txfee: 0` or the ZIP
+    317 class a positive `txfee`, or remove it. A `txfee` of 1000 gives the earlier fee and a minimum of 0.0001 ARRR
+    back.
+  - Detail: PR #544; CRD ch.39 R39.6.5f (status note of 2026-11-26); the item under "Changed" / "Shielded coins".
 
 ### Added
 

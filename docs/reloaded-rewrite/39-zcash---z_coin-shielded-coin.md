@@ -1572,7 +1572,12 @@ fee.
 > default (100,000 base units), so a payment at the floor stays spendable after
 > the spend fee; a configured `txfee` scales it. A shielded coin entry whose fee
 > is not one fixed amount (`txfee` 0, or the ZIP 317 class) is refused at
-> activation. For these figures R39.5.2's "Reloaded matches" no longer holds.
+> activation. A saved order with a shielded coin on either side whose minimum
+> volume is below the floor has its minimum raised to the floor once both its
+> coins are active, and one whose whole volume is below the floor is cancelled;
+> the same holds when a good-till-cancelled taker order becomes a maker order
+> (maintainer decision of 2026-11-26). For these figures R39.5.2's "Reloaded
+> matches" no longer holds.
 
 R39.6.5g **Recording the broadcast.** When the backend accepts a submitted Pirate1
 withdrawal, the coin shall record it exactly as it records a withdrawal to a Sapling

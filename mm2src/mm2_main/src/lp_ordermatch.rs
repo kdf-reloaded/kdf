@@ -454,6 +454,9 @@ pub(crate) struct OrdermatchContext {
     pub maker_outbox: MakerOutbox,
     /// The own orders of coins this build cannot trade: kept, never announced or matched (CRD ch.60 R60.6.5).
     pub(crate) untradable_orders: PaMutex<UntradableOrders>,
+    /// The saved maker orders restored at startup whose coins' minimum trading volume has not been applied to them
+    /// yet; the check waits until both coins of the order are active (the coins are not active at the restore).
+    pub(crate) saved_floor_pending: PaMutex<HashSet<Uuid>>,
     #[cfg(target_arch = "wasm32")]
     ordermatch_db: ConstructibleDb<OrdermatchDb>,
 }
@@ -490,6 +493,7 @@ impl Default for OrdermatchContext {
             pending_maker_reserved: Default::default(),
             maker_outbox: Default::default(),
             untradable_orders: Default::default(),
+            saved_floor_pending: Default::default(),
             orderbook_tickers: Default::default(),
             original_tickers: Default::default(),
         }
@@ -541,6 +545,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         pending_maker_reserved: Default::default(),
         maker_outbox: Default::default(),
         untradable_orders: Default::default(),
+        saved_floor_pending: Default::default(),
         orderbook_tickers,
         original_tickers,
         #[cfg(target_arch = "wasm32")]
@@ -578,6 +583,7 @@ impl OrdermatchContext {
                 pending_maker_reserved: Default::default(),
                 maker_outbox: Default::default(),
                 untradable_orders: Default::default(),
+                saved_floor_pending: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
             })
@@ -608,6 +614,7 @@ impl OrdermatchContext {
                 pending_maker_reserved: Default::default(),
                 maker_outbox: Default::default(),
                 untradable_orders: Default::default(),
+                saved_floor_pending: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
                 ordermatch_db: ConstructibleDb::new(&ctx2),
