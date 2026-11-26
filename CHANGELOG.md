@@ -788,12 +788,15 @@ the previous version used. The safe way:
   (default 1, lowest 1). Other `.bak` files are left alone. To go back to an older build, put the
   backup over the wallet database file as described in `RELOADED_VS_GLEEC.md`.
   Detail: PR #407; CRD ch.39 R39.8.0bc, T39.8.0j.
-- **ARRR pays one fixed fee of 0.0001 ARRR (10,000 arrrtoshi) for every transaction, and the fees shown before a
-  trade are that fee.** With no `txfee` in its coin entry (the published ARRR entry has none), a shielded coin pays
-  10,000 for a withdrawal, a swap payment, the DEX fee, and the spend and refund of a swap payment, in place of
-  1,000; `trade_preimage` and the swap figures report the same 10,000 (the receiver fee was 496 before), so what a
-  trade is quoted equals what it pays. A `txfee` in the coin entry still sets the fee. Other UTXO coins keep their
-  default. Detail: PR #544; CRD ch.39 R39.6.5f (status note of 2026-11-26).
+- **ARRR pays one fixed fee of 0.0001 ARRR (10,000 base units) for every transaction, the fees shown before a trade
+  are that fee, and its minimum trading volume is 0.001 ARRR.** With no `txfee` in its coin entry (the published
+  ARRR entry has none), a shielded coin pays 10,000 base units for a withdrawal, a swap payment, the DEX fee, and
+  the spend and refund of a swap payment, in place of 1,000; `trade_preimage` and the swap figures report the same
+  10,000 (the receiver fee was 496 before), so what a trade is quoted equals what it pays. The minimum trading
+  volume, and the default minimum volume of a new order, is ten times that fee: 0.001 ARRR in place of 0.0001 ARRR.
+  A `txfee` in the coin entry still sets the fee and scales the minimum; an entry with `txfee: 0` or the ZIP 317 fee
+  class is refused at activation. Other UTXO coins keep their default. Detail: PR #544; CRD ch.39 R39.6.5f (status
+  note of 2026-11-26).
 
 #### Tendermint (Cosmos) coins
 

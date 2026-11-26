@@ -428,7 +428,7 @@ pub fn min_trading_vol(coin: &UtxoCoinFields) -> MmNumber {
 /// dynamic-fee coin, `floor(fee_per_kb * 496 / 1000)` for a fixed-fee coin and the ZIP 317 fee of the standard
 /// HTLC claim for a ZIP 317 coin. The only rounding is the
 /// truncation inside `F`.
-fn utxo_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
+pub(crate) fn utxo_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
     let dust_based = dust_amount.saturating_mul(10);
 
     let fee_based = match tx_fee {

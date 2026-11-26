@@ -139,6 +139,15 @@ pub enum UtxoCoinBuildError {
     NoFixedFeeDeclared {
         ticker: String,
     },
+    /// A shielded coin pays one fixed fee per transaction, so an entry that asks for fee estimation or selects
+    /// the ZIP 317 rule is refused at activation (CRD ch.39 R39.6.5f, ch.08).
+    #[display(
+        fmt = "{}: a shielded coin pays one fixed fee per transaction, but this entry asks for fee estimation or the ZIP 317 rule; set a positive `txfee` or leave it out",
+        ticker
+    )]
+    ShieldedCoinNeedsFixedFee {
+        ticker: String,
+    },
     #[display(fmt = "Can not detect the user home directory")]
     CantDetectUserHome,
     #[display(fmt = "Can not detect the default data directory: {}", _0)]
@@ -752,6 +761,10 @@ pub trait UtxoCoinBuilderCommonOps {
     /// A family with its own default overrides it; the shared one is 1,000 (CRD ch.38 R38.6.6a).
     fn default_fixed_tx_fee_per_kb(&self) -> u64 { 1000 }
 
+    /// Whether the coin can only pay a fixed per-kilobyte fee; an entry that resolves to estimation or the
+    /// ZIP 317 rule is then refused. False for every family but the shielded one.
+    fn requires_fixed_tx_fee(&self) -> bool { false }
+
     async fn tx_fee(&self, rpc_client: &UtxoRpcClientEnum) -> UtxoCoinBuildResult<TxFee> {
         // lightwalletd has no fee estimation: an explicit request for it (`txfee: 0`) is refused.
         // An undeclared fee keeps the shared fixed default below, as the published ARRR entry relies
@@ -772,6 +785,11 @@ pub trait UtxoCoinBuilderCommonOps {
             },
             class => class,
         };
+        if self.requires_fixed_tx_fee() && matches!(class, TxFeeConfClass::Dynamic | TxFeeConfClass::Zip317(_)) {
+            return MmError::err(UtxoCoinBuildError::ShieldedCoinNeedsFixedFee {
+                ticker: self.ticker().to_owned(),
+            });
+        }
         let tx_fee = match class {
             TxFeeConfClass::Fixed(fee) => TxFee::FixedPerKb(fee),
             TxFeeConfClass::WholeKbFixed(fee) => TxFee::FixedPerStartedKb(fee),

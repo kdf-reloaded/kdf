@@ -141,3 +141,17 @@ async fn the_payment_the_spend_and_the_refund_pay_the_fixed_fee() {
         assert_eq!(spend_fee(&refund, 100_000), fee, "the refund");
     }
 }
+
+/// The coin's own minimum trading volume and the default minimum volume of a new order built from it are
+/// 0.001 ARRR (ten times the fixed fee), and a payment at that floor less the spend fee is positive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_coin_floor_is_ten_times_the_fixed_fee() {
+    for (fee, floor) in [(ZCOIN_DEFAULT_TX_FEE_SAT, 100_000u64), (25_000, 250_000)] {
+        let Some(fixture) = LightCoinFixture::with_notes_under(1, 2, test_params_with_zip212(), fee) else {
+            return;
+        };
+        let min = MarketCoinOps::min_trading_vol(&fixture.coin);
+        assert_eq!(sat(&min), floor);
+        assert!(floor - fee > 0);
+    }
+}
