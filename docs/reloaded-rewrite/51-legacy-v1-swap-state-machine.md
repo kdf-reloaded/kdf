@@ -3870,7 +3870,7 @@ reference rows alike.
   Reloaded-original; it records the maintainer's decision of 2026-11-24,
   takes no reference input and no forbidden-class input, and changes no
   sentence of the chapter.
-- *Clean-side addition of 2026-11-26 (PR #NNN):* the status note before §51.7
+- *Clean-side addition of 2026-11-26 (PR #547):* the status note before §51.7
   on a readiness check before a swap starts. Reloaded-original; it records the
   maintainer's decision of 2026-11-25, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
