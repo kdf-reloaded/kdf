@@ -1017,9 +1017,11 @@ the previous version used. The safe way:
   line marks each change. A new order on such a coin is accepted and starts paused. A taker's `buy` or `sell` is
   refused with `error_type` `SwapEvidenceNotReady` (HTTP 503) and the text "<TICKER>: swap evidence not available
   (<kind>); try again when the coin's servers answer", where <kind> is "fewer than two hosts answering", "the trusted
-  node is not answering", "the own daemon is not answering" or "fewer than two nodes listed", and a taker swap whose
-  coins cannot meet it stops before the taker fee is paid. This adds no condition to the rule itself; it only keeps a
-  swap from starting that would have to wait. Detail: PR #547; CRD ch.51 §51.6G, status note of 2026-11-26.
+  node is not answering", "the own daemon is not answering", "fewer than two nodes listed", and for a QRC20 token
+  also "fewer than two hosts serve the contract-event history" or "the trusted node does not serve the contract-event
+  history", and a taker swap whose coins cannot meet it stops before the taker fee is paid. This adds no condition to
+  the rule itself; it only keeps a swap from starting that would have to wait. Detail: PR #547; CRD ch.51 §51.6G,
+  status note of 2026-11-26.
 
 ### Fixed
 
