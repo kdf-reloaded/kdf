@@ -32,6 +32,70 @@ pub(crate) fn evidence_nodes(coin: &UtxoCoinFields, policy: &SwapEvidencePolicy)
     }
 }
 
+/// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of an
+/// Electrum-backed or daemon-backed UTXO, QTUM or BCH coin under its effective `policy`. Over Electrum the servers are
+/// judged by [`ElectrumClient::swap_evidence_ready`]; a coin read through the operator's own daemon is ready while the
+/// daemon answers `getblockcount` within [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`] (asked at most once per
+/// window). A coin whose family has not adopted R100 is ready.
+///
+/// # Errors
+///
+/// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
+pub(crate) async fn swap_evidence_ready(coin: &UtxoCoinFields, policy: &SwapEvidencePolicy) -> Result<(), String> {
+    swap_evidence_ready_as(&coin.conf.ticker, coin, policy).await
+}
+
+/// [`swap_evidence_ready`] of the nodes of `coin`, named in the text as `ticker` (an SLP token names itself while
+/// its platform's servers are judged).
+pub(crate) async fn swap_evidence_ready_as(
+    ticker: &str,
+    coin: &UtxoCoinFields,
+    policy: &SwapEvidencePolicy,
+) -> Result<(), String> {
+    if matches!(policy, SwapEvidencePolicy::NotAdopted) {
+        return Ok(());
+    }
+    match &coin.rpc_client {
+        UtxoRpcClientEnum::Electrum(client) => client.swap_evidence_ready(ticker, policy, false).await,
+        UtxoRpcClientEnum::Native(native) => {
+            // The daemon is the node the operator trusts (R100 item 6), whatever form the stored policy takes.
+            let policy = match policy {
+                SwapEvidencePolicy::Insufficient { .. } => policy.clone(),
+                _ => SwapEvidencePolicy::OwnDaemon,
+            };
+            own_daemon_ready(ticker, &policy, || {
+                let native = native.clone();
+                async move { native.get_block_count().compat().await.is_ok() }
+            })
+            .await
+        },
+        // A Light-mode ZHTLC coin judges its lightwalletd servers itself (`ZCoin::swap_evidence_ready`); no UTXO
+        // coin is built over this backend.
+        #[cfg(not(target_arch = "wasm32"))]
+        UtxoRpcClientEnum::LightWalletD(_) => Ok(()),
+    }
+}
+
+/// The readiness of a coin read through the operator's own daemon: `probe` asks the daemon a cheap call; its outcome
+/// is kept for the window in the shared probe record under the coin's ticker.
+pub(crate) async fn own_daemon_ready<F, Fut>(ticker: &str, policy: &SwapEvidencePolicy, probe: F) -> Result<(), String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    crate::swap_evidence::evidence_ready(
+        ticker,
+        policy,
+        &["own daemon"],
+        |label| (*label).to_owned(),
+        |_| crate::swap_evidence::HostReadiness::Unknown,
+        crate::swap_evidence::shared_readiness_probes(),
+        ticker,
+        |_| probe(),
+    )
+    .await
+}
+
 /// The error text of a failed ask: never the server's own text, which may name an address.
 fn ask_error(what: &str, label: &str, detail: impl std::fmt::Display) -> String {
     debug!("swap evidence: {what} on {label} failed: {detail}");

@@ -1,7 +1,8 @@
 /// https://bchd.cash/
 /// https://bchd.fountainhead.cash/
 use super::bchd_pb::*;
-use crate::swap_evidence::{agree, distinct_hosts, node_name, relax_single_host, Agreement};
+use crate::swap_evidence::{agree, distinct_hosts, evidence_ready, node_name, relax_single_host,
+                           shared_readiness_probes, Agreement, HostReadiness};
 use crate::utxo::slp::SlpUnspent;
 use crate::SwapEvidencePolicy;
 use chain::OutPoint;
@@ -230,11 +231,15 @@ pub async fn validate_slp_utxos_under(
     validate_slp_utxos_with(policy, bchd_urls, allow_single_host, utxos, token_id, |url: &String| {
         let request = &request;
         let endpoint = url.clone() + "/pb.bchrpc/GetSlpTrustedValidation";
+        let label = bchd_label(url);
         async move {
-            post_grpc_web::<_, GetSlpTrustedValidationResponse>(&endpoint, request)
+            let response = post_grpc_web::<_, GetSlpTrustedValidationResponse>(&endpoint, request)
                 .await
                 // The text of the transport error may name the URL; the node's label is added by `agree`.
-                .map_err(|_| "the request failed".to_owned())
+                .map_err(|_| "the request failed".to_owned())?;
+            // The readiness check before a swap starts counts this as an answer of the node.
+            shared_readiness_probes().note_answer(BCHD_READINESS_SCOPE, &label, common::now_float());
+            Ok(response)
         }
     })
     .await
@@ -293,6 +298,69 @@ where
             kind: ValidateSlpUtxosErrKind::Undetermined(undetermined.to_err_string()),
         }),
     }
+}
+
+/// The scope of the bchd nodes in the shared readiness probe record.
+const BCHD_READINESS_SCOPE: &str = "bchd";
+
+/// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of the bchd
+/// nodes of an SLP token `ticker` whose effective policy is `policy`: the bchd nodes are judged under the policy their
+/// reads take ([`validate_slp_utxos_with`]): two distinct hosts answering, or the one configured host the single-host
+/// switch trusts. A node counts as answering when it served a validation within the window; otherwise, and only while
+/// the answering hosts are not enough, it gets one `GetBlockchainInfo` request bounded by
+/// [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per window per host.
+///
+/// # Errors
+///
+/// The text of [`crate::swap_evidence::not_ready_text`], which names the token and the kind only.
+pub(crate) async fn bchd_ready(
+    ticker: &str,
+    policy: &SwapEvidencePolicy,
+    bchd_urls: &[String],
+    allow_single_host: bool,
+) -> Result<(), String> {
+    bchd_ready_with(ticker, policy, bchd_urls, allow_single_host, |url: &String| {
+        let endpoint = url.clone() + "/pb.bchrpc/GetBlockchainInfo";
+        async move {
+            post_grpc_web::<_, GetBlockchainInfoResponse>(&endpoint, &GetBlockchainInfoRequest {})
+                .await
+                .is_ok()
+        }
+    })
+    .await
+}
+
+/// [`bchd_ready`] with the probe of one node given by the caller (a scripted node in tests).
+pub(crate) async fn bchd_ready_with<F, Fut>(
+    ticker: &str,
+    policy: &SwapEvidencePolicy,
+    bchd_urls: &[String],
+    allow_single_host: bool,
+    probe: F,
+) -> Result<(), String>
+where
+    F: Fn(&String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let bchd_policy = match (policy, single_bchd_host_policy(bchd_urls, allow_single_host)) {
+        (SwapEvidencePolicy::NotAdopted, _) => return Ok(()),
+        (_, Some(trusted)) => trusted,
+        (SwapEvidencePolicy::Insufficient { hosts }, None) => SwapEvidencePolicy::Insufficient { hosts: *hosts },
+        (_, None) => SwapEvidencePolicy::TwoNodes {
+            hosts: distinct_hosts(bchd_urls),
+        },
+    };
+    evidence_ready(
+        ticker,
+        &bchd_policy,
+        bchd_urls,
+        |url| bchd_label(url),
+        |_| HostReadiness::Unknown,
+        shared_readiness_probes(),
+        BCHD_READINESS_SCOPE,
+        probe,
+    )
+    .await
 }
 
 /// The decision two bchd answers are compared on.

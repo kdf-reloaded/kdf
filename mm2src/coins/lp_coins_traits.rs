@@ -721,6 +721,15 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
         }
     }
 
+    /// Whether this coin's swap-evidence reads can be agreed right now, so that a swap with it may start
+    /// (maintainer decision of 2026-11-25/26 under CRD ch.51 R100; see [`crate::swap_evidence::evidence_ready`]).
+    /// The default, for a family that has not adopted R100 or whose swaps are off, is ready.
+    ///
+    /// # Errors
+    ///
+    /// The text `"{ticker}: swap evidence not available ({kind})"`, which names the coin and the kind only.
+    async fn swap_evidence_ready(&self) -> Result<(), String> { Ok(()) }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut;
 
     /// Maximum number of digits after decimal point used to denominate integer coin units (satoshis, wei, etc.)

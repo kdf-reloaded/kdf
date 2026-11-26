@@ -1504,6 +1504,33 @@ mod swap_evidence_read_tests {
         (coin, seen)
     }
 
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): the one
+    /// walletd node the field trusts must answer; without the field the coin is never ready.
+    #[test]
+    fn sia_readiness_follows_its_walletd_node() {
+        let (mut up, seen) = trusted_coin(|_| http_response("200 OK", "application/json", TIP.as_bytes()));
+        up.conf.ticker = "SCRDYUP".to_owned();
+        assert_eq!(common::block_on(MmCoin::swap_evidence_ready(&up)), Ok(()));
+        let asked = seen.load(AtomicOrdering::SeqCst);
+        // The probe's answer counts for the window: nothing extra is sent.
+        assert_eq!(common::block_on(MmCoin::swap_evidence_ready(&up)), Ok(()));
+        assert_eq!(seen.load(AtomicOrdering::SeqCst), asked);
+
+        let (mut down, _) = trusted_coin(|_| http_response("500 Internal Server Error", "text/plain", b"down"));
+        down.conf.ticker = "SCRDYDOWN".to_owned();
+        assert_eq!(
+            common::block_on(MmCoin::swap_evidence_ready(&down)),
+            Err("SCRDYDOWN: swap evidence not available (the trusted node is not answering)".to_owned())
+        );
+
+        let (mut without, _) = coin_with(SwapEvidencePolicy::Insufficient { hosts: 1 }, |_| tipstate());
+        without.conf.ticker = "SCRDYNONE".to_owned();
+        assert_eq!(
+            common::block_on(MmCoin::swap_evidence_ready(&without)),
+            Err("SCRDYNONE: swap evidence not available (fewer than two nodes listed)".to_owned())
+        );
+    }
+
     /// `Ok(None)`: the gate is open; `Ok(Some(seconds))`: closed for that long.
     fn can_refund(coin: &SiaCoin, lock: u64) -> Result<Option<u64>, String> {
         common::block_on(coin.can_refund_htlc(lock).compat()).map(|gate| match gate {

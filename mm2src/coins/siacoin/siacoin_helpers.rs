@@ -166,7 +166,21 @@ impl SiaCoin {
     {
         let policy = MmCoin::swap_evidence_policy(self);
         let nodes = [self.swap_evidence_node_name.clone()];
-        match crate::swap_evidence::agree(&policy, &nodes, |node| node.clone(), |_| ask(), classify, proves_itself)
+        let scope = self.readiness_scope();
+        // An answer of the node is its last answer for the readiness check before a swap starts.
+        let ask_noted = |node: &String| {
+            let answer = ask();
+            let scope = scope.clone();
+            let node = node.clone();
+            async move {
+                let answer = answer.await;
+                if answer.is_ok() {
+                    crate::swap_evidence::shared_readiness_probes().note_answer(&scope, &node, common::now_float());
+                }
+                answer
+            }
+        };
+        match crate::swap_evidence::agree(&policy, &nodes, |node| node.clone(), ask_noted, classify, proves_itself)
             .await
         {
             crate::swap_evidence::Agreement::Agreed { answer, decision } => Ok((answer, decision)),
@@ -174,6 +188,37 @@ impl SiaCoin {
                 Err(self.swap_evidence_undetermined_text(&policy, &undetermined))
             },
         }
+    }
+
+    /// The scope of the coin's walletd node in the shared readiness probe record.
+    fn readiness_scope(&self) -> String { format!("sia:{}", self.conf.ticker) }
+
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of the
+    /// coin's one walletd node under its effective policy. The node counts as answering when a swap read was
+    /// answered within [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise it is asked for the current height,
+    /// bounded by [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per window.
+    ///
+    /// # Errors
+    ///
+    /// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
+    pub(super) async fn evidence_ready(&self) -> Result<(), String> {
+        let policy = MmCoin::swap_evidence_policy(self);
+        let nodes = [self.swap_evidence_node_name.clone()];
+        let client = self.client.clone();
+        crate::swap_evidence::evidence_ready(
+            &self.conf.ticker,
+            &policy,
+            &nodes,
+            |node| node.clone(),
+            |_| crate::swap_evidence::HostReadiness::Unknown,
+            crate::swap_evidence::shared_readiness_probes(),
+            &self.readiness_scope(),
+            |_| {
+                let client = client.clone();
+                async move { client.current_height().await.is_ok() }
+            },
+        )
+        .await
     }
 
     /// The text of an undetermined read: the reason with the node asked (R100 item 9), then the fix.

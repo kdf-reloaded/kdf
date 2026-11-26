@@ -1540,6 +1540,9 @@ pub(crate) struct LightwalletdBackend {
     /// For each swap step whose read was last undetermined, the text that was logged, so a step that stays
     /// undetermined is logged once (R100 item 9).
     undetermined_logged: Mutex<Vec<(String, String)>>,
+    /// When each endpoint last gave a successful answer (seconds since the epoch); the readiness check before a swap
+    /// starts reads it (maintainer decision of 2026-11-25/26 under CRD ch.51 R100).
+    last_answers: Mutex<HashMap<String, f64>>,
 }
 
 impl fmt::Debug for LightwalletdBackend {
@@ -1596,6 +1599,7 @@ impl LightwalletdBackend {
             swap_evidence: SwapEvidencePolicy::NotAdopted,
             ticker: String::new(),
             undetermined_logged: Mutex::new(Vec::new()),
+            last_answers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2026,11 +2030,50 @@ impl LightwalletdBackend {
         );
     }
 
-    /// A successful answer of any method resets `server` (R39.11.31(b)).
+    /// A successful answer of any method resets `server` (R39.11.31(b)), and is the endpoint's last answer for the
+    /// readiness check before a swap starts.
     pub(crate) fn reset_suspension(&self, server: &str) {
         if let Some(suspension) = self.suspensions.lock().get_mut(server) {
             suspension.on_success();
         }
+        self.last_answers.lock().insert(server.to_owned(), common::now_float());
+    }
+
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of the
+    /// coin `ticker` under its effective `policy`, over the configured endpoints. An endpoint counts as answering
+    /// when it answered within [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise, and only while the answering
+    /// hosts are not enough, it is asked for its latest block, bounded by
+    /// [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per window per host.
+    ///
+    /// # Errors
+    ///
+    /// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
+    pub(crate) async fn swap_evidence_ready(&self, ticker: &str, policy: &SwapEvidencePolicy) -> Result<(), String> {
+        use crate::swap_evidence::{evidence_ready, shared_readiness_probes, HostReadiness, READY_WINDOW_SECS};
+
+        let now = common::now_float();
+        let scope = format!("zhtlc:{ticker}");
+        evidence_ready(
+            ticker,
+            policy,
+            &self.servers,
+            |server| node_name(server),
+            |server| match self.last_answers.lock().get(server) {
+                Some(at) if now - at < READY_WINDOW_SECS => HostReadiness::Answering,
+                _ => HostReadiness::Unknown,
+            },
+            shared_readiness_probes(),
+            &scope,
+            |server| {
+                let transport = self.transport.clone();
+                let server = server.clone();
+                async move {
+                    let answered = transport.latest_block(&server).await.is_ok();
+                    answered
+                }
+            },
+        )
+        .await
     }
 
     /// `endpoints` with the suspended ones moved behind the others: the unsuspended ones first, in configured

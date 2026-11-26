@@ -409,6 +409,28 @@ impl Qrc20Coin {
         }
     }
 
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): the
+    /// platform's Electrum servers as [`ElectrumClient::swap_evidence_ready`] judges them, counting only the servers
+    /// that have served the contract-event history while the capability rule applies (two such hosts answering under
+    /// two nodes, the trusted server answering and capable under a trusted one). A token read through the operator's
+    /// own daemon is ready while the daemon answers.
+    ///
+    /// # Errors
+    ///
+    /// The text of [`crate::swap_evidence::not_ready_text`], which names the token and the kind only.
+    pub(super) async fn evidence_ready(&self) -> Result<(), String> {
+        let policy = self.evidence_policy();
+        match &self.utxo.rpc_client {
+            UtxoRpcClientEnum::Electrum(client) if policy != SwapEvidencePolicy::NotAdopted => {
+                let contract_history = self.capability_scope().is_some();
+                client
+                    .swap_evidence_ready(&self.utxo.conf.ticker, &policy, contract_history)
+                    .await
+            },
+            _ => utxo_common::swap_evidence_ready(&self.utxo, &policy).await,
+        }
+    }
+
     /// The policy and the Electrum client this token's swap reads are agreed under (CRD ch.51 R100), or `None` when
     /// they are read as before: the family has not adopted the rule, or the coin is served by the operator's own
     /// daemon.

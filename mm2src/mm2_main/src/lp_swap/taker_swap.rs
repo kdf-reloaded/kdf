@@ -1443,6 +1443,16 @@ impl TakerSwap {
             ]));
         }
 
+        // A coin whose swap-evidence reads cannot be agreed now: the swap stops before any fee is sent (maintainer
+        // decision of 2026-11-25/26 under CRD ch.51 R100).
+        if let Some(not_ready) = crate::mm2::lp_ordermatch::pair_not_ready(&self.maker_coin, &self.taker_coin).await {
+            return Ok((Some(TakerSwapCommand::Finish), vec![
+                TakerSwapEvent::TakerFeeSendFailed(
+                    ERRL!("{}", crate::mm2::lp_ordermatch::taker_refusal_text(&not_ready)).into(),
+                ),
+            ]));
+        }
+
         let my_taker_coin_htlc_pub = self.r().my_taker_coin_htlc_pub.to_vec();
         let dex_fee = compute_dex_fee_with_taker_pubkey(
             self.net_cfg(),
@@ -3859,6 +3869,51 @@ mod taker_swap_tests {
             7800,
             None,
         )
+    }
+
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): a coin
+    /// whose swap-evidence reads cannot be agreed now fails the swap on the step that sends the fee, before the fee:
+    /// no fee transaction is built or sent.
+    #[test]
+    fn the_taker_fee_is_not_sent_while_a_coin_is_not_ready() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static FEES: AtomicUsize = AtomicUsize::new(0);
+
+        let swap = taker_swap_with_coins("MAKERRDY", "TAKERRDY");
+        {
+            let mut data = swap.w();
+            data.data.started_at = now_ms() / 1000;
+            data.data.lock_duration = 7800;
+        }
+        TestCoin::swap_evidence_ready.mock_safe(|coin| {
+            let result = match coins::MarketCoinOps::ticker(coin) {
+                "MAKERRDY" => Err(coins::swap_evidence::not_ready_text(
+                    "MAKERRDY",
+                    coins::swap_evidence::NotReadyKind::TooFewHostsAnswering,
+                )),
+                _ => Ok(()),
+            };
+            MockResult::Return(Box::pin(async move { result }))
+        });
+        TestCoin::send_taker_fee.mock_safe(|_, _, _, _| {
+            FEES.fetch_add(1, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let (command, events) = block_on(swap.send_taker_fee()).unwrap();
+        assert!(matches!(command, Some(TakerSwapCommand::Finish)));
+        match events.as_slice() {
+            [TakerSwapEvent::TakerFeeSendFailed(err)] => assert!(
+                err.error.ends_with(
+                    "MAKERRDY: swap evidence not available (fewer than two hosts answering); try again when the \
+                     coin's servers answer"
+                ),
+                "{}",
+                err.error
+            ),
+            other => panic!("expected TakerFeeSendFailed, got {other:?}"),
+        }
+        assert_eq!(FEES.load(Ordering::SeqCst), 0, "no fee was sent");
     }
 
     /// T39.11.s (CRD ch.39 R39.11.28): a taker whose own payment coin cannot be watched is refused at start with
