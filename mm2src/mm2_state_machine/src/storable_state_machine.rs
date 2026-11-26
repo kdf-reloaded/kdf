@@ -80,6 +80,10 @@ pub struct RestoredMachine<M: StorableStateMachine> {
 impl<M: StorableStateMachine> RestoredMachine<M> {
     pub fn new(machine: M) -> Self { RestoredMachine { machine } }
 
+    /// The recreated machine itself, for a caller that runs one step of a state by hand instead of resuming the
+    /// machine (a manual recovery).
+    pub fn into_inner(self) -> M { self.machine }
+
     /// Resume execution from a recovered state.
     pub async fn kickstart(
         &mut self,

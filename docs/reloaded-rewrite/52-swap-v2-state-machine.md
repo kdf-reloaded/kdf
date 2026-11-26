@@ -485,6 +485,21 @@ to `MakerPaymentRefundRequired`.
 > not read in time. A determined failure, a read that timed out after
 > asking the nodes included, keeps R19's transition.
 
+> *Status note (2026-11-26, Reloaded-original; maintainer decisions of
+> 2026-11-23 and 2026-11-26).* In `TakerPaymentSpent` the wait for the
+> confirmation of the maker's own claim tells a claim that is not
+> confirmed yet from a claim that was mined but failed. A claim that was
+> mined but failed is sent again: the same spend of the taker payment,
+> built and broadcast anew, before the bound of the note of 2026-11-23
+> above; the wait then reads the claim sent again. A claim that is not
+> confirmed yet is only read again. Neither leads to a refund. The coin
+> tells a claim that was mined but failed by one fixed marker in the
+> error text of its confirmation read; only a coin whose mined
+> transactions can fail gives it, and a UTXO coin never does. The claim
+> sent again is not stored with the swap; a resumed swap reads the claim
+> its event holds. No state, event field or discriminant is added. No
+> sentence of R19 is changed.
+
 **R20.** *The propagation gate.* Before committing its own payment, the
 maker MUST establish that the taker's funding transaction is actually on
 the network. The gate MUST be: poll the taker coin for the transaction
@@ -532,6 +547,34 @@ this path reaches it with the maker payment on chain and unrefunded.
 > payment locktime. At the bound the state ends in `Aborted` with the
 > existing `InternalError` discriminant. A transient error that is not
 > undetermined keeps its retry.
+
+> *Status note (2026-11-26, Reloaded-original; maintainer decisions of
+> 2026-11-23 and 2026-11-26).* `MakerPaymentRefundRequired` looks at the
+> taker payment before it builds the refund, as chapter 51 R82 does for
+> the legacy maker. Each attempt of the state reads the refund gate
+> first; when the gate answers that the refund can be sent and the swap
+> reached the claim of the taker payment, it searches the taker coin for
+> the spend of the taker payment, from the taker-coin start block:
+>
+> 1. a spend that reveals the maker's own secret is the maker's claim:
+>    the state goes to `TakerPaymentSpent` with that spend and never
+>    refunds; this transition is added to the maker machine;
+> 2. a spend without that secret (the taker's refund), or a search that
+>    asked the nodes and found no spend, lets the refund go on;
+> 3. a search that fails or is undetermined under chapter 51 §51.6G R100
+>    builds no refund; the state reads again after thirty seconds.
+>
+> A swap that did not reach the claim makes no search. The taker payment
+> and whether the claim was reached are read from the swap's saved
+> events, since the event of this state does not hold them. When the
+> saved events hold neither the taker payment nor the maker payment's
+> own event, the search cannot run, and the state waits as for an
+> undetermined read. Every such wait follows the note of 2026-11-24
+> above; at the bound the state ends in `Aborted` with the existing
+> `InternalError` discriminant, whose text names the read, the coin and
+> what is not refunded, says when the saved events lack what the read
+> needs, and carries no error text of a node read. No state, event field
+> or discriminant is added. No sentence of R21 is changed.
 
 **R22.** *Maker event set, resume map, and reason vocabularies.* The
 maker machine MUST use exactly the eleven event types below with exactly
@@ -796,6 +839,16 @@ and a ten-second poll interval. Failure MUST transition to
 > states. R44 applies: this `Aborted` is reached with the claim on the
 > network.
 
+> *Status note (2026-11-26, Reloaded-original; maintainer decisions of
+> 2026-11-23 and 2026-11-26).* In `MakerPaymentSpent` a claim of the
+> maker payment that was mined but failed is sent again, as the note of
+> this date after R19 states for the maker: the same spend, with the
+> maker's secret read from the spend of the taker payment that the
+> swap's saved events hold and used only when its hash matches (the note
+> after R32). A claim that is not confirmed yet is only read again.
+> Neither leads to a refund, and the bound of the note above is
+> unchanged. No sentence of R33 is changed.
+
 **R34.** *Two independent refund states.*
 `TakerFundingRefundRequired` MUST immediately broadcast the
 secret-reveal refund of the funding output, revealing the taker's *own*
@@ -819,6 +872,52 @@ is the whole purpose of the two-stage taker flow.
 > counted from the taker payment locktime. At the bound the state ends
 > in `Aborted` with the existing discriminant of a taker-payment refund
 > failure.
+
+> *Status note (2026-11-26, Reloaded-original; maintainer decisions of
+> 2026-11-23 and 2026-11-26).* Both refund states read the chain before
+> they broadcast, as chapter 51 R31a and §51.6G R100 bind.
+>
+> 1. *`TakerPaymentRefundRequired`.* Each attempt reads the refund gate
+>    first; when it answers that the refund can be sent, the state
+>    searches the taker coin for the maker's spend of the taker payment,
+>    from the taker-coin start block. A spend whose secret matches the
+>    maker's secret hash (chapter 51 R71) goes to `TakerPaymentSpent`,
+>    the claim of the maker payment, and never refunds; this transition
+>    is added. A search that asked the nodes and found no spend is a
+>    determined "not spent", and the refund is built. A search that
+>    fails or is undetermined, and a spend whose secret does not match,
+>    build no refund; the state reads again after thirty seconds.
+> 2. *`TakerFundingRefundRequired`.* Each attempt first searches for
+>    the spend of the funding. Only a determined "not spent" lets the
+>    refund be built. Before the taker funding locktime the refund is
+>    the one that reveals the taker's own secret, as R34 states; from
+>    that locktime on it is the timelock refund of the funding, built
+>    after the refund gate answers that it can be sent. A refund of the
+>    funding found on chain ends in `TakerFundingRefunded` with it. A
+>    funding found spent into the taker payment goes to
+>    `TakerPaymentRefundRequired` with that payment, which then follows
+>    item 1; this transition is added, and of R35's list
+>    `TakerFundingRefundRequired` is a further state from which
+>    `TakerPaymentRefundRequired` is reachable. A search or gate that
+>    fails or is undetermined builds no refund; the state reads again
+>    after thirty seconds.
+> 3. *Inputs from the saved events.* The maker payment and both start
+>    blocks that item 1 needs are read from the latest of the swap's
+>    saved events that holds them, since the event of
+>    `TakerPaymentRefundRequired` does not. When no saved event holds
+>    them, the search cannot run, and the state waits as for an
+>    undetermined read.
+> 4. *Bound.* Every wait of items 1 to 3 follows the note of 2026-11-24
+>    after R18. The bound is counted from the taker payment locktime in
+>    item 1 and from the taker funding locktime in item 2. At the bound
+>    the state ends in `Aborted` with the existing discriminant of its
+>    refund failure (`TakerPaymentRefundFailed` or
+>    `TakerFundingRefundFailed`), whose text names the read, the coin
+>    and what is not refunded, says when the saved events lack what the
+>    read needs, and carries no error text of a node read.
+>
+> No state, event field or discriminant is added. No sentence of R34 or
+> R35 is changed.
 
 **R35.** *No refund state is reachable from a state whose funds are not
 yet committed.* `TakerFundingRefundRequired` MUST be reachable only from
@@ -1921,3 +2020,10 @@ divergence rather than resolving it.
   2026-11-23 on how the version-two states wait on an undetermined read
   and on the bound of that wait. Reloaded-original; no forbidden-class
   input.
+- *Clean-side addition of 2026-11-26:* the status notes of that date
+  after R19, R21, R33 and R34, the maintainer's decisions of 2026-11-23
+  and 2026-11-26: the reads of the counterparty before each refund, the
+  refund inputs read from the saved events, the funding refund with its
+  secret and timelock branches, three added transitions, and a claim
+  that was mined but failed sent again. Reloaded-original; no
+  forbidden-class input.

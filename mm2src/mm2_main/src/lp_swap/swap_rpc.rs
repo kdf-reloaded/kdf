@@ -788,6 +788,14 @@ pub async fn coins_needed_for_kick_start(ctx: MmArc) -> Result<Response<Vec<u8>>
 
 pub async fn recover_funds_of_swap(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let uuid: Uuid = try_s!(json::from_value(req["params"]["uuid"].clone()));
+    // A swap of version two is recovered from its own record (CRD ch.51 §51.6D, status note of 2026-11-24).
+    if let Ok(Some(swap_type)) = super::swap_v2_rpcs::get_swap_type(&ctx, &uuid).await {
+        if swap_type == super::MAKER_SWAP_V2_TYPE || swap_type == super::TAKER_SWAP_V2_TYPE {
+            let recover_data = super::swap_v2_common::recover_funds_of_swap_v2(&ctx, uuid, swap_type).await?;
+            let res = try_s!(json::to_vec(&recovered_swap_response(&recover_data)));
+            return Ok(try_s!(Response::builder().body(res)));
+        }
+    }
     let swap = match SavedSwap::load_my_swap_from_db(&ctx, uuid).await {
         Ok(Some(swap)) => swap,
         Ok(None) => return ERR!("swap data is not found"),

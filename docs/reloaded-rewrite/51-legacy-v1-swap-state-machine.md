@@ -1280,6 +1280,51 @@ rule.
 > Run on 2026-11-13: `cargo test -p mm2_main --lib lp_swap::maker_swap` passed, 96 tests of which these
 > seven are new.
 
+> **Status note (2026-11-26, Reloaded-original, clean side; maintainer
+> decisions of 2026-11-23, 2026-11-24 and 2026-11-26).** `recover_funds_of_swap`
+> also accepts a swap of version two (chapter 52). It recovers a version-two
+> swap only when the swap ended at the bound of a refund step, judged by the
+> structure of its saved events: the last event is `Aborted`, the event before
+> it is the refund-required event of that step, and the abort carries the
+> discriminant that step ends with at its bound. The recoverable endings are:
+>
+> 1. the maker: `MakerPaymentRefundRequired`, then `Aborted` with
+>    `InternalError`;
+> 2. the taker's refund of its payment: `TakerPaymentRefundRequired`, then
+>    `Aborted` with `TakerPaymentRefundFailed`;
+> 3. the taker's refund of its funding: `TakerFundingRefundRequired`, then
+>    `Aborted` with `TakerFundingRefundFailed`.
+>
+> No text marker is read. An abort of the same step with the same
+> discriminant for another reason (a refund broadcast that failed) is
+> recovered as well; that is safe because the recovery repeats every read
+> and refunds only on determined answers. The recovery makes one attempt of
+> that refund step, with fresh reads under §51.6G R100 (two agreeing nodes,
+> or the node the operator trusts) and without any wait: the refund gate, the
+> look at the taker payment (the maker after the claim step, the taker always)
+> or the search for the spend of the funding, and then the refund. A read
+> that is undetermined under R100, or that fails, builds no refund. Inputs
+> the refund-required event does not hold are read from the swap's saved
+> events, as chapter 52 states. It answers in the existing shapes:
+>
+> 1. the refund was broadcast: `RefundedMyPayment` with the refund;
+> 2. the taker's look found the maker's spend of the taker payment, whose
+>    secret matches the hash: the maker payment is claimed, and the answer
+>    is `SpentOtherPayment` with the claim;
+> 3. the taker's funding was spent into the taker payment: the attempt goes
+>    on as the refund of that payment (items 1 and 2);
+> 4. an error, building no transaction, when the maker's own claim of the
+>    taker payment is found, when the funding is already refunded, when the
+>    refund gate asks to wait (with the seconds), when a read gives no answer
+>    the refund may rest on (naming the read, the coin and, for a read
+>    undetermined under R100, the fix), or when the saved events lack what a
+>    read needs;
+> 5. for every other ending of a version-two swap, the error that the swap is
+>    not recoverable.
+>
+> A recovery records no event with the swap. The answers for a legacy swap are
+> unchanged.
+
 ## 51.6E Reference Behavior of the Coin Families: Spend Search, Secret Extraction, Refund Eligibility
 
 > **Status (2026-11-22; KDF Spec Reader, round 0.5.0-23).** Reference record,

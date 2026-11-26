@@ -144,6 +144,32 @@ pub(crate) fn maker_refund_gate_cap_text(ticker: &str, reason: &str) -> String {
     cap_text(Read::Gate, ticker, reason, "maker")
 }
 
+/// The same for the taker's refund of its funding, whose search for the spend of the funding stayed undetermined.
+pub(crate) fn funding_refund_cap_text(ticker: &str, reason: &str) -> String {
+    cap_text(Read::TakerFundingSearch, ticker, reason, "taker funding")
+}
+
+/// The same for the refund gate of the taker's funding.
+pub(crate) fn funding_refund_gate_cap_text(ticker: &str, reason: &str) -> String {
+    cap_text(Read::Gate, ticker, reason, "taker funding")
+}
+
+/// The error a manual recovery answers when a read its refund rests on gave no answer it may act on: the read,
+/// the coin, the kind and, for a read undetermined under R100, the fix. `reason` only decides the kind; no part of
+/// it is in the text. `payment` names what is not refunded.
+pub(crate) fn recovery_unanswered_text(ticker: &str, read: Read, reason: &str, payment: &str) -> String {
+    let fix = if is_undetermined(reason) {
+        format!("; {FIX_HINT}, then run `recover_funds_of_swap` again")
+    } else {
+        "; run `recover_funds_of_swap` again once the coin answers".to_owned()
+    };
+    format!(
+        "{} on {ticker} did not give an answer the refund may rest on {}; the {payment} is not refunded{fix}",
+        read.capped_on(),
+        kind(read, reason)
+    )
+}
+
 /// The WARN line of a refund the node rejected as non-final: the swap, the ticker and the kind, never the node's
 /// text (CRD ch.51 R80); `side` is "maker" or "taker".
 pub(crate) fn non_final_retry_text(uuid: &Uuid, ticker: &str, side: &str, retry_secs: f64) -> String {
