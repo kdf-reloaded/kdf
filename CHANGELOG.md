@@ -220,18 +220,6 @@ or undo, and every change that needs a step from you.
     entry for the platform ticker. A client that reads the platform ticker's balance of every listed address must
     accept an empty map. A later `account_balance` lists those addresses with the full map and zero values.
   - Detail: PR #478; CRD ch.49 R49.35, R49.36.
-
-#### Coins that are no longer visible after an upgrade
-
-**If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
-before you move or spend anything.** For some coin families a release can change the rule
-that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
-an HD login. The node then shows a different address for that coin, and the funds stay at the address
-the previous version used. The safe way:
-1. Note the address the new version shows for that coin.
-2. Start the previous version again, with the same passphrase, `MM2.json` and activation requests.
-3. Move the coins to the address you noted, or close the Lightning channels.
-4. Upgrade again.
 - **ARRR pays a fixed 0.0001 ARRR per transaction and trades at least 0.001 ARRR; saved ARRR orders follow at
   start-up.**
   - *What changes:* with no `txfee` in its coin entry, ARRR pays 0.0001 ARRR (10,000 base units) for every
@@ -246,6 +234,18 @@ the previous version used. The safe way:
     317 class a positive `txfee`, or remove it. A `txfee` of 1000 gives the earlier fee and a minimum of 0.0001 ARRR
     back.
   - Detail: PR #544; CRD ch.39 R39.6.5f (status note of 2026-11-26); the item under "Changed" / "Shielded coins".
+
+#### Coins that are no longer visible after an upgrade
+
+**If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
+before you move or spend anything.** For some coin families a release can change the rule
+that picks a coin's key or address, for example which key is used for a given `priv_key_policy` under
+an HD login. The node then shows a different address for that coin, and the funds stay at the address
+the previous version used. The safe way:
+1. Note the address the new version shows for that coin.
+2. Start the previous version again, with the same passphrase, `MM2.json` and activation requests.
+3. Move the coins to the address you noted, or close the Lightning channels.
+4. Upgrade again.
 
 ### Added
 
