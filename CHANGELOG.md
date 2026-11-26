@@ -1710,6 +1710,40 @@ the previous version used. The safe way:
   seed keeps in it, stay safe and can be spent from that Pirate wallet; the balance KDF Reloaded
   shows covers the Sapling part only. A coin in native mode is still refused at activation.
 
+## [0.4.2-beta.1] — 2026-11-26
+
+### Changed
+
+#### Transport, TLS and dependencies
+
+- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** The `url` crate moved from
+  2.5.8 to 2.5.9, and `form_urlencoded`, which the new version requires, from 1.2.2 to 1.2.3. KDF
+  Reloaded's own code does not call the affected function. The dependency policy needs no exception
+  for this advisory. Detail: PR #545, the release-line port of PR #492.
+
+### Fixed
+
+#### Shielded coins (ARRR)
+
+- **ARRR can spend the notes on the wallet's change address, and the balance it shows can be
+  spent.** In Light mode, ARRR notes on the wallet's change address (the internal address of the
+  same seed), such as the change that a Pirate wallet on the same seed makes, are now spent like any
+  other note: a withdrawal, a withdrawal to a `pirate1` address and a swap payment can use them. A
+  shielded spend signs each note with the key of the ZIP-32 scope the note belongs to. `my_balance`
+  counts these notes as before, and the amount it shows can now be spent: a withdrawal of the
+  maximum spends exactly that balance. KDF Reloaded's own change goes to the wallet's external `zs1`
+  address and was not affected. Nothing needs to be done: no rescan and no new activation, since the
+  wallet database already holds these notes. Detail: PR #541; CRD ch.39 R39.8.0ag1 (status note of
+  2026-11-25).
+
+### Known limitations
+
+- **KDF Reloaded neither shows nor spends ARRR funds held in the Ironwood pool.** The Ironwood pool
+  is Pirate Chain's newer shielded pool. Funds there, for example funds a Pirate wallet on the same
+  seed keeps in it, stay safe and can be spent from that Pirate wallet; the balance KDF Reloaded
+  shows covers the Sapling part only. A coin in native mode is refused at activation in this
+  release, as before.
+
 ## [0.4.1-beta.1] — 2026-11-21
 
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". -->
