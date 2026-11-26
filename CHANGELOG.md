@@ -1015,7 +1015,7 @@ the previous version used. The safe way:
   as the other v2 waits. Values a refund step needs and its own record does not hold are read from the swap's saved
   events. A claim that was mined but failed is sent again. `recover_funds_of_swap` makes one attempt of the refund
   step of a v2 swap that ended at its deadline, with fresh reads, and answers in its existing shapes.
-  - Detail: PR #N; CRD ch.52 R19, R21, R33, R34 and their status notes of 2026-11-26, ch.51 §51.6D, §51.6G R100.
+  - Detail: PR #548; CRD ch.52 R19, R21, R33, R34 and their status notes of 2026-11-26, ch.51 §51.6D, §51.6G R100.
 
 #### Legacy swaps and orders
 
