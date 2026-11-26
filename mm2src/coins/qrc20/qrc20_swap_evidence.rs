@@ -37,6 +37,7 @@ use super::rpc_clients::directed_error_text;
 use super::swap::{bound_swap_event_output, find_swap_contract_call_with_swap_id, holds_swap_call, is_swap_event_log,
                   swap_calls_completed, Erc20PaymentDetails, ExpectedSwapEvent};
 use super::*;
+use crate::swap_evidence::NotReadyKind;
 use crate::swap_evidence::{agree_with_tips, distinct_hosts, effective_policy, insufficient_refusal, node_name,
                            Agreement, SwapFamily, Undetermined, UndeterminedReason};
 use crate::SwapEvidencePolicy;
@@ -406,6 +407,36 @@ impl Qrc20Coin {
         // A token disabled meanwhile starts nothing; the guards then release the servers.
         if self.capability_probes.add(handle) {
             common::executor::spawn(probe.map(|_| ()));
+        }
+    }
+
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): the
+    /// platform's Electrum servers as [`ElectrumClient::swap_evidence_ready`] judges them, counting only the servers
+    /// that have served the contract-event history while the capability rule applies (two such hosts answering under
+    /// two nodes, the trusted server answering and capable under a trusted one). A token read through the operator's
+    /// own daemon is ready while the daemon answers.
+    ///
+    /// # Errors
+    ///
+    /// The text of [`crate::swap_evidence::not_ready_text`], which names the token and the kind only.
+    pub(super) async fn evidence_ready(&self) -> Result<(), String> {
+        let policy = self.evidence_policy();
+        // A token refused by the capability rule is told so, not that its nodes are too few in the list.
+        if let (SwapEvidencePolicy::Insufficient { .. }, Some((_, scope))) = (&policy, self.capability_scope()) {
+            let kind = match scope {
+                CapabilityScope::TwoHosts => NotReadyKind::TooFewContractHistoryHosts,
+                CapabilityScope::Trusted(_) => NotReadyKind::TrustedNodeNoContractHistory,
+            };
+            return Err(crate::swap_evidence::not_ready_text(&self.utxo.conf.ticker, kind));
+        }
+        match &self.utxo.rpc_client {
+            UtxoRpcClientEnum::Electrum(client) if policy != SwapEvidencePolicy::NotAdopted => {
+                let contract_history = self.capability_scope().is_some();
+                client
+                    .swap_evidence_ready(&self.utxo.conf.ticker, &policy, contract_history)
+                    .await
+            },
+            _ => utxo_common::swap_evidence_ready(&self.utxo, &policy).await,
         }
     }
 

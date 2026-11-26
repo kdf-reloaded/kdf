@@ -315,7 +315,7 @@ fn record_single_bchd_host(ctx: &MmArc, ticker: &str, bchd_urls: &[String], allo
 /// The policy of an SLP token whose platform holds `platform` and validates over `bchd_urls`.
 ///
 /// With `allow_single_host` and exactly one distinct configured `bchd_urls` host, the token takes the platform's policy.
-fn slp_policy_over(
+pub(crate) fn slp_policy_over(
     platform: &crate::SwapEvidencePolicy,
     bchd_urls: &[String],
     allow_single_host: bool,
@@ -999,6 +999,10 @@ impl MmCoin for BchCoin {
 
     fn swap_evidence_policy(&self) -> crate::SwapEvidencePolicy {
         crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Bch, &self.utxo_arc.swap_evidence)
+    }
+
+    async fn swap_evidence_ready(&self) -> Result<(), String> {
+        utxo_common::swap_evidence_ready(&self.utxo_arc, &self.swap_evidence_policy()).await
     }
 
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {

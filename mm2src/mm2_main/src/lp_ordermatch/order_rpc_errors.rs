@@ -706,6 +706,11 @@ pub enum TakerOrderError {
     /// item 4). The payload is the text, which names `swap_evidence_node`.
     #[display(fmt = "{}", _0)]
     SwapEvidenceInsufficient(String),
+    /// A coin of the pair cannot have its swap-evidence reads agreed right now: too few of its nodes answer
+    /// (maintainer decision of 2026-11-25/26 under CRD ch.51 R100). The payload is the text, which names the coin
+    /// and the kind only.
+    #[display(fmt = "{}", _0)]
+    SwapEvidenceNotReady(String),
     /// The computer's clock is off by more than the limit (CRD ch.45 R45.6C.8). The payload is the refusal text as the
     /// clock check renders it.
     #[display(fmt = "{}", _0)]
@@ -910,6 +915,8 @@ impl HttpStatusCode for TakerOrderError {
             | TakerOrderError::MaxBaseVolBelowMinBaseVol { .. } => StatusCode::BAD_REQUEST,
             // The node's own clock is off: not a fault of the request, and it ends by itself once a check passes.
             TakerOrderError::ClockOutOfRange(_) => StatusCode::SERVICE_UNAVAILABLE,
+            // The coin's nodes do not answer now: not a fault of the request, and it ends once they answer.
+            TakerOrderError::SwapEvidenceNotReady(_) => StatusCode::SERVICE_UNAVAILABLE,
             // Like `Transport`: a node's verdict on a fee the daemon chose, not a fault of the request.
             TakerOrderError::Transport(_)
             | TakerOrderError::FeeCapBelowBaseFee(_)

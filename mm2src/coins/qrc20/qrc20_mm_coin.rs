@@ -14,6 +14,8 @@ impl MmCoin for Qrc20Coin {
 
     fn swap_evidence_refusal(&self) -> Option<String> { self.evidence_refusal() }
 
+    async fn swap_evidence_ready(&self) -> Result<(), String> { self.evidence_ready().await }
+
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         Box::new(qrc20_withdraw(self.clone(), req).boxed().compat())
     }

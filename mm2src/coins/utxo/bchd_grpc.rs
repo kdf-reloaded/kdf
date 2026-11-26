@@ -1,7 +1,8 @@
 /// https://bchd.cash/
 /// https://bchd.fountainhead.cash/
 use super::bchd_pb::*;
-use crate::swap_evidence::{agree, distinct_hosts, node_name, relax_single_host, Agreement};
+use crate::swap_evidence::{agree, distinct_hosts, evidence_ready, node_name, relax_single_host,
+                           shared_readiness_probes, Agreement, HostReadiness};
 use crate::utxo::slp::SlpUnspent;
 use crate::SwapEvidencePolicy;
 use chain::OutPoint;
@@ -218,8 +219,10 @@ pub(crate) fn single_bchd_host_policy(bchd_urls: &[String], allow_single_host: b
 
 /// How the validity of the counterparty's token output is read (CRD ch.51 R100): the legacy all-nodes read while the
 /// family has not adopted R100; the one bchd host alone when the single-host switch relaxed the token
-/// ([`single_bchd_host_policy`]); else two distinct bchd hosts must agree.
+/// ([`single_bchd_host_policy`]); else two distinct bchd hosts must agree. An answer counts for the readiness check
+/// of the bchd nodes of the BCH platform `platform`.
 pub async fn validate_slp_utxos_under(
+    platform: &str,
     policy: &SwapEvidencePolicy,
     bchd_urls: &[String],
     allow_single_host: bool,
@@ -227,14 +230,20 @@ pub async fn validate_slp_utxos_under(
     token_id: &H256,
 ) -> Result<(), MmError<ValidateSlpUtxosErr>> {
     let request = validation_request(utxos);
+    let scope = bchd_readiness_scope(platform);
     validate_slp_utxos_with(policy, bchd_urls, allow_single_host, utxos, token_id, |url: &String| {
         let request = &request;
+        let scope = &scope;
         let endpoint = url.clone() + "/pb.bchrpc/GetSlpTrustedValidation";
+        let label = bchd_label(url);
         async move {
-            post_grpc_web::<_, GetSlpTrustedValidationResponse>(&endpoint, request)
+            let response = post_grpc_web::<_, GetSlpTrustedValidationResponse>(&endpoint, request)
                 .await
                 // The text of the transport error may name the URL; the node's label is added by `agree`.
-                .map_err(|_| "the request failed".to_owned())
+                .map_err(|_| "the request failed".to_owned())?;
+            // The readiness check before a swap starts counts this as an answer of the node.
+            shared_readiness_probes().note_answer(scope, &label, common::now_float());
+            Ok(response)
         }
     })
     .await
@@ -293,6 +302,102 @@ where
             kind: ValidateSlpUtxosErrKind::Undetermined(undetermined.to_err_string()),
         }),
     }
+}
+
+/// The scope of the bchd nodes of the BCH platform `platform` in the shared readiness probe record: two platforms
+/// whose bchd nodes share a host keep apart records.
+pub(crate) fn bchd_readiness_scope(platform: &str) -> String { format!("bchd:{platform}") }
+
+/// One readiness probe of the bchd node `url`: a `GetBlockchainInfo` whose whole exchange is bounded by
+/// [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`] inside the task that runs it, so a node that accepts and never
+/// answers keeps no task and no socket past the bound. `true` when the node answered.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn bchd_readiness_probe(url: &str) -> bool {
+    use crate::swap_evidence::READY_PROBE_TIMEOUT_SECS;
+    use mm2_net::grpc_web::post_grpc_web_bounded;
+
+    let endpoint = url.to_owned() + "/pb.bchrpc/GetBlockchainInfo";
+    post_grpc_web_bounded::<_, GetBlockchainInfoResponse>(
+        &endpoint,
+        &GetBlockchainInfoRequest {},
+        READY_PROBE_TIMEOUT_SECS,
+    )
+    .await
+    .is_ok()
+}
+
+/// One readiness probe of the bchd node `url` in the browser: the fetch ends with the check's bound around it.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn bchd_readiness_probe(url: &str) -> bool {
+    let endpoint = url.to_owned() + "/pb.bchrpc/GetBlockchainInfo";
+    post_grpc_web::<_, GetBlockchainInfoResponse>(&endpoint, &GetBlockchainInfoRequest {})
+        .await
+        .is_ok()
+}
+
+/// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of the bchd
+/// nodes of the BCH platform `platform` for an SLP token `ticker` whose effective policy is `policy`: the bchd nodes
+/// are judged under the policy their reads take ([`validate_slp_utxos_with`]): two distinct hosts answering, or the
+/// one configured host the single-host switch trusts. A node counts as answering when it served a validation within
+/// the window; otherwise, and only while the answering hosts are not enough, it gets one probe
+/// ([`bchd_readiness_probe`]), at most once per window per host of the platform.
+///
+/// # Errors
+///
+/// The text of [`crate::swap_evidence::not_ready_text`], which names the token and the kind only.
+pub(crate) async fn bchd_ready(
+    ticker: &str,
+    platform: &str,
+    policy: &SwapEvidencePolicy,
+    bchd_urls: &[String],
+    allow_single_host: bool,
+) -> Result<(), String> {
+    bchd_ready_with(
+        ticker,
+        platform,
+        policy,
+        bchd_urls,
+        allow_single_host,
+        |url: &String| {
+            let url = url.clone();
+            async move { bchd_readiness_probe(&url).await }
+        },
+    )
+    .await
+}
+
+/// [`bchd_ready`] with the probe of one node given by the caller (a scripted node in tests).
+pub(crate) async fn bchd_ready_with<F, Fut>(
+    ticker: &str,
+    platform: &str,
+    policy: &SwapEvidencePolicy,
+    bchd_urls: &[String],
+    allow_single_host: bool,
+    probe: F,
+) -> Result<(), String>
+where
+    F: Fn(&String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let bchd_policy = match (policy, single_bchd_host_policy(bchd_urls, allow_single_host)) {
+        (SwapEvidencePolicy::NotAdopted, _) => return Ok(()),
+        (_, Some(trusted)) => trusted,
+        (SwapEvidencePolicy::Insufficient { hosts }, None) => SwapEvidencePolicy::Insufficient { hosts: *hosts },
+        (_, None) => SwapEvidencePolicy::TwoNodes {
+            hosts: distinct_hosts(bchd_urls),
+        },
+    };
+    evidence_ready(
+        ticker,
+        &bchd_policy,
+        bchd_urls,
+        |url| bchd_label(url),
+        |_| HostReadiness::Unknown,
+        shared_readiness_probes(),
+        &bchd_readiness_scope(platform),
+        probe,
+    )
+    .await
 }
 
 /// The decision two bchd answers are compared on.

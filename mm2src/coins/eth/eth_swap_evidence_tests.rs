@@ -191,6 +191,8 @@ fn answer(world: &World, call: &Call) -> Reply {
             assert_eq!(params[0], json!("latest"), "only the latest block is read");
             rpc_block(node.tip, node.timestamp)
         },
+        // The readiness probe before a swap starts.
+        "eth_blockNumber" => json!(format!("{:#x}", node.tip)),
         other => panic!("the scripted node does not serve `{other}`"),
     };
     Reply::Body(result_body(&call.request, &result.to_string()))
@@ -1069,4 +1071,106 @@ fn an_undetermined_read_is_warned_about_once_without_a_node_and_logged_in_full_a
             "{line}"
         );
     }
+}
+
+// ---- The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under R100) ----
+
+/// How many readiness probes (`eth_blockNumber`) each host got so far.
+fn probes_of(fx: &Fixture, host: &str) -> usize {
+    fx.world
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(seen, method, _)| seen == host && method == "eth_blockNumber")
+        .count()
+}
+
+fn set_down(fx: &Fixture, url: &str, down: bool) {
+    fx.world.nodes.lock().unwrap().get_mut(&host_of(url)).unwrap().down = down;
+}
+
+/// Two of three hosts answering: ready; one of three: not ready, with a text that names no host. Unknown hosts are
+/// probed once each, and not again within the window.
+#[test]
+fn readiness_needs_two_answering_hosts_and_probes_once_per_window() {
+    const RA: &str = "http://rdy-a.example:8545";
+    const RB: &str = "http://rdy-b.example:8545";
+    const RC: &str = "http://rdy-c.example:8545";
+    let fx = Fixture::eth(&[RA, RB, RC], listed(&[RA, RB, RC]));
+    set_down(&fx, RC, true);
+    assert_eq!(block_on(fx.coin.swap_evidence_ready()), Ok(()));
+    assert_eq!(probes_of(&fx, "rdy-a.example"), 1);
+    // The answers of the probes count for the window: nothing extra is sent.
+    assert_eq!(block_on(fx.coin.swap_evidence_ready()), Ok(()));
+    assert_eq!(
+        probes_of(&fx, "rdy-a.example"),
+        1,
+        "the healthy case sends nothing extra"
+    );
+    assert_eq!(
+        probes_of(&fx, "rdy-c.example"),
+        1,
+        "a failed host is not probed again within the window"
+    );
+
+    const SA: &str = "http://rdy-sa.example:8545";
+    const SB: &str = "http://rdy-sb.example:8545";
+    const SC: &str = "http://rdy-sc.example:8545";
+    let fx = Fixture::eth(&[SA, SB, SC], listed(&[SA, SB, SC]));
+    set_down(&fx, SB, true);
+    set_down(&fx, SC, true);
+    let error = block_on(fx.coin.swap_evidence_ready()).unwrap_err();
+    assert_eq!(
+        error,
+        "ETH: swap evidence not available (fewer than two hosts answering)"
+    );
+    assert!(!error.contains("example"), "{error}");
+    set_down(&fx, SB, false);
+    assert!(
+        block_on(fx.coin.swap_evidence_ready()).is_err(),
+        "no new probe within the window"
+    );
+    assert_eq!(probes_of(&fx, "rdy-sb.example"), 1);
+}
+
+/// A trusted node: ready while it answers, not while it does not, whatever the other node does.
+#[test]
+fn readiness_of_a_trusted_node() {
+    const TA: &str = "http://rdy-ta.example:8545";
+    const TB: &str = "http://rdy-tb.example:8545";
+    let fx = Fixture::eth(&[TA, TB], trusting(TB, &[TA, TB]));
+    set_down(&fx, TB, true);
+    assert_eq!(
+        block_on(fx.coin.swap_evidence_ready()),
+        Err("ETH: swap evidence not available (the trusted node is not answering)".to_owned())
+    );
+    assert_eq!(
+        probes_of(&fx, "rdy-ta.example"),
+        0,
+        "another node never stands in for the trusted one"
+    );
+
+    const UA: &str = "http://rdy-ua.example:8545";
+    const UB: &str = "http://rdy-ub.example:8545";
+    let fx = Fixture::eth(&[UA, UB], trusting(UB, &[UA, UB]));
+    set_down(&fx, UA, true);
+    assert_eq!(block_on(fx.coin.swap_evidence_ready()), Ok(()));
+}
+
+/// The readiness probe bounds its own exchange by the probe bound of 3 s, not by the 30 s of the node's direct
+/// provider, so a node that accepts and never answers keeps nothing running past the probe.
+#[test]
+fn the_readiness_probe_bounds_its_own_exchange() {
+    const PA: &str = "http://rdy-pa.example:8545";
+    let (web3, sender) = stub_provider(&[PA], 30., |call| {
+        Reply::Body(result_body(&call.request, &json!("0x64").to_string()))
+    });
+    let instance = Web3Instance {
+        url: PA.to_owned(),
+        web3,
+        is_parity: false,
+    };
+    assert!(block_on(instance.readiness_probe()));
+    assert_eq!(sender.bounds(), vec![crate::swap_evidence::READY_PROBE_TIMEOUT_SECS]);
 }

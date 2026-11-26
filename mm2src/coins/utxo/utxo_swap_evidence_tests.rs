@@ -833,3 +833,196 @@ fn a_one_server_coin_is_refused_and_accepted_with_the_evidence_node() {
         assert_eq!(relaxed.swap_evidence_refusal(), None);
     });
 }
+
+// ---- The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under R100) ----
+
+mod readiness {
+    use super::*;
+    use crate::swap_evidence::{relax_single_host, NOT_READY_MARKER};
+    use crate::utxo::rpc_clients::ElectrumClient;
+    use crate::MmCoin;
+
+    fn client_of(coin: &UtxoStandardCoin) -> ElectrumClient {
+        match &coin.as_ref().rpc_client {
+            UtxoRpcClientEnum::Electrum(client) => client.clone(),
+            _ => panic!("an Electrum coin"),
+        }
+    }
+
+    fn pings(servers: &[StubServer]) -> Vec<usize> {
+        servers.iter().map(|server| server.requests("server.ping")).collect()
+    }
+
+    /// Two of three hosts answering: ready, and nothing extra is sent; one of three: not ready.
+    #[test]
+    fn two_of_three_hosts_answering_is_ready_one_is_not() {
+        block_on(async {
+            let servers = start_servers(3).await;
+            let coin = utxo_coin(&[&servers[0], &servers[1], &servers[2]], None);
+            // Every server answered while the coin was built: the healthy case sends no probe.
+            let before = pings(&servers);
+            assert_eq!(coin.swap_evidence_ready().await, Ok(()));
+            assert_eq!(pings(&servers), before, "the healthy case sends nothing extra");
+
+            // The third host is down and nothing is known of any host: the probes find two answering.
+            servers[2].set_behavior(StubBehavior::Down).await;
+            client_of(&coin).forget_readiness_answers();
+            assert_eq!(coin.swap_evidence_ready().await, Ok(()), "two of three answer");
+
+            let servers = start_servers(3).await;
+            let coin = utxo_coin(&[&servers[0], &servers[1], &servers[2]], None);
+            servers[1].set_behavior(StubBehavior::Down).await;
+            servers[2].set_behavior(StubBehavior::Down).await;
+            let client = client_of(&coin);
+            client.forget_readiness_answers();
+            let error = coin.swap_evidence_ready().await.expect_err("one of three answers");
+            assert_eq!(
+                error,
+                "DOC: swap evidence not available (fewer than two hosts answering)"
+            );
+            assert!(!error.contains("127.0.0"), "the text names no host: {error}");
+        });
+    }
+
+    /// Unknown hosts are probed with one `server.ping` each, only while the answering hosts are not enough, and a
+    /// host is not probed again within the window.
+    #[test]
+    fn unknown_hosts_are_probed_once_per_window() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let client = client_of(&coin);
+            servers[1].set_behavior(StubBehavior::Down).await;
+            client.forget_readiness_answers();
+
+            let before = pings(&servers);
+            let error = coin.swap_evidence_ready().await.expect_err("one host answers");
+            assert!(error.contains(NOT_READY_MARKER), "{error}");
+            assert_eq!(
+                pings(&servers)[0],
+                before[0] + 1,
+                "the unknown host that is up got one ping"
+            );
+
+            // Within the window: the first host's probe answer counts, the second is not probed again, even once
+            // it is back.
+            servers[1].set_behavior(StubBehavior::Answer).await;
+            let before = pings(&servers);
+            assert!(coin.swap_evidence_ready().await.is_err());
+            assert_eq!(pings(&servers), before, "no probe within the window");
+        });
+    }
+
+    /// The probe of a host that accepts the connection and never answers ends at the 3 s bound.
+    #[test]
+    fn a_silent_host_is_given_up_at_the_probe_bound() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let client = client_of(&coin);
+            servers[1].set_behavior(StubBehavior::Down).await;
+            client.forget_readiness_answers();
+            servers[1].set_behavior(StubBehavior::Silent).await;
+            let started = std::time::Instant::now();
+            assert!(coin.swap_evidence_ready().await.is_err());
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed.as_secs_f64() < 5.,
+                "the probe bound was not honored: {elapsed:?}"
+            );
+        });
+    }
+
+    /// A trusted server: ready while it answers, not while it does not, whatever the other server does.
+    #[test]
+    fn a_trusted_server_up_and_down() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let trusted = servers[0].addr();
+            let coin = utxo_coin(&[&servers[0], &servers[1]], Some(&trusted));
+            assert_eq!(coin.swap_evidence_ready().await, Ok(()));
+            servers[0].set_behavior(StubBehavior::Down).await;
+            client_of(&coin).forget_readiness_answers();
+            assert_eq!(
+                coin.swap_evidence_ready().await,
+                Err("DOC: swap evidence not available (the trusted node is not answering)".to_owned())
+            );
+        });
+    }
+
+    /// The single-host switch: a coin relaxed to its one host is ready only while that host answers.
+    #[test]
+    fn a_relaxed_single_host_coin_is_ready_only_while_its_host_answers() {
+        block_on(async {
+            let servers = start_servers(1).await;
+            let mut fields = adopted_fields(&[&servers[0]], None);
+            let configured = vec![servers[0].addr()];
+            let (policy, relaxed) = relax_single_host(fields.swap_evidence.clone(), None, &configured, true);
+            assert!(relaxed);
+            fields.swap_evidence = policy;
+            let coin = utxo_coin_from_fields(fields);
+            assert_eq!(coin.swap_evidence_ready().await, Ok(()));
+            servers[0].set_behavior(StubBehavior::Down).await;
+            client_of(&coin).forget_readiness_answers();
+            assert_eq!(
+                coin.swap_evidence_ready().await,
+                Err("DOC: swap evidence not available (the trusted node is not answering)".to_owned())
+            );
+        });
+    }
+
+    /// The own daemon: ready while it answers `getblockcount`; a coin with too few nodes is never ready; a family
+    /// that has not adopted R100 always is.
+    #[test]
+    fn own_daemon_too_few_nodes_and_not_adopted() {
+        block_on(async {
+            use crate::utxo::rpc_clients::NativeClientImpl;
+            use mocktopus::mocking::{MockResult, Mockable};
+
+            let native = || {
+                utxo_coin_fields_for_test(
+                    UtxoRpcClientEnum::Native(crate::utxo::utxo_tests::native_client_for_test()),
+                    None,
+                    false,
+                )
+            };
+            let mut fields = native();
+            fields.conf.ticker = "OWNUP".into();
+            NativeClientImpl::get_block_count
+                .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(800u64))));
+            assert_eq!(
+                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::OwnDaemon).await,
+                Ok(())
+            );
+            let mut fields = native();
+            fields.conf.ticker = "OWNDOWN".into();
+            NativeClientImpl::get_block_count.mock_safe(|_| {
+                let error = common::jsonrpc_client::JsonRpcError {
+                    client_info: "test".into(),
+                    request: common::jsonrpc_client::JsonRpcRequestEnum::Single(
+                        common::jsonrpc_client::JsonRpcRequest {
+                            jsonrpc: "2.0".into(),
+                            id: "1".into(),
+                            method: "getblockcount".into(),
+                            params: vec![],
+                        },
+                    ),
+                    error: common::jsonrpc_client::JsonRpcErrorType::Transport("down".into()),
+                };
+                MockResult::Return(Box::new(futures01::future::err(error)))
+            });
+            assert_eq!(
+                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::OwnDaemon).await,
+                Err("OWNDOWN: swap evidence not available (the own daemon is not answering)".to_owned())
+            );
+            assert_eq!(
+                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::Insufficient { hosts: 1 }).await,
+                Err("OWNDOWN: swap evidence not available (fewer than two nodes listed)".to_owned())
+            );
+            assert_eq!(
+                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::NotAdopted).await,
+                Ok(())
+            );
+        });
+    }
+}

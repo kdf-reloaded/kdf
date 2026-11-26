@@ -173,3 +173,191 @@ fn slp_wait_for_spend_takes_an_agreed_claim() {
         );
     });
 }
+
+/// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under R100) of the bchd nodes:
+/// two distinct bchd hosts must answer (a validation within the window counts, otherwise one probe each); the one
+/// host the single-host switch trusts must answer; a family that has not adopted R100 is ready.
+#[test]
+fn slp_bchd_readiness() {
+    use crate::swap_evidence::{shared_readiness_probes, NOT_READY_MARKER};
+    use crate::utxo::bchd_grpc::{bchd_readiness_scope, bchd_ready_with};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const PLATFORM: &str = "BCHRDY";
+    let scope = bchd_readiness_scope(PLATFORM);
+
+    let two_nodes = SwapEvidencePolicy::TwoNodes {
+        hosts: vec!["a".into(), "b".into()],
+    };
+    let urls = |list: &[&str]| list.iter().map(|url| (*url).to_owned()).collect::<Vec<String>>();
+    let probes = AtomicUsize::new(0);
+    let probe = |answers: bool| {
+        let probes = &probes;
+        move |_: &String| {
+            probes.fetch_add(1, Ordering::Relaxed);
+            async move { answers }
+        }
+    };
+
+    // Both hosts served a validation just now: ready with no probe.
+    let both = urls(&["https://rdy-bchd1.example", "https://rdy-bchd2.example"]);
+    for url in &both {
+        shared_readiness_probes().note_answer(&scope, &crate::swap_evidence::node_name(url), common::now_float());
+    }
+    assert_eq!(
+        block_on(bchd_ready_with(
+            "FUSD",
+            PLATFORM,
+            &two_nodes,
+            &both,
+            false,
+            probe(false)
+        )),
+        Ok(())
+    );
+    assert_eq!(probes.load(Ordering::Relaxed), 0, "nothing extra is sent");
+
+    // One host answered, the other fails its probe: not ready.
+    let one = urls(&["https://rdy-bchd3.example", "https://rdy-bchd4.example"]);
+    shared_readiness_probes().note_answer(&scope, &crate::swap_evidence::node_name(&one[0]), common::now_float());
+    let error = block_on(bchd_ready_with("FUSD", PLATFORM, &two_nodes, &one, false, probe(false))).unwrap_err();
+    assert_eq!(
+        error,
+        "FUSD: swap evidence not available (fewer than two hosts answering)"
+    );
+    assert!(error.contains(NOT_READY_MARKER) && !error.contains("example"));
+    assert_eq!(
+        probes.load(Ordering::Relaxed),
+        1,
+        "one probe, of the host not known to answer"
+    );
+
+    // The single-host switch: the one configured bchd host must answer.
+    let single = urls(&["https://rdy-bchd5.example:8335"]);
+    assert_eq!(
+        block_on(bchd_ready_with(
+            "FUSD",
+            PLATFORM,
+            &two_nodes,
+            &single,
+            true,
+            probe(true)
+        )),
+        Ok(())
+    );
+    let silent = urls(&["https://rdy-bchd6.example:8335"]);
+    assert_eq!(
+        block_on(bchd_ready_with(
+            "FUSD",
+            PLATFORM,
+            &two_nodes,
+            &silent,
+            true,
+            probe(false)
+        )),
+        Err("FUSD: swap evidence not available (the trusted node is not answering)".to_owned())
+    );
+    // Without the switch one host is too few: the token's policy is `Insufficient` then; a family that has not
+    // adopted R100 is ready.
+    let one_host = crate::utxo::bch::slp_policy_over(&two_nodes, &silent, false);
+    assert_eq!(one_host, SwapEvidencePolicy::Insufficient { hosts: 1 });
+    assert_eq!(
+        block_on(bchd_ready_with(
+            "FUSD",
+            PLATFORM,
+            &one_host,
+            &silent,
+            false,
+            probe(true)
+        )),
+        Err("FUSD: swap evidence not available (fewer than two nodes listed)".to_owned())
+    );
+    // Another platform keeps its own record of the same host.
+    let before = probes.load(Ordering::Relaxed);
+    assert_eq!(
+        block_on(bchd_ready_with(
+            "FUSD",
+            "BCHRDY2",
+            &two_nodes,
+            &single,
+            true,
+            probe(true)
+        )),
+        Ok(())
+    );
+    assert_eq!(
+        probes.load(Ordering::Relaxed),
+        before + 1,
+        "the answer recorded under another platform does not count"
+    );
+    assert_eq!(
+        block_on(bchd_ready_with(
+            "FUSD",
+            PLATFORM,
+            &SwapEvidencePolicy::NotAdopted,
+            &silent,
+            false,
+            probe(false)
+        )),
+        Ok(())
+    );
+}
+
+/// An SLP token is ready only while its BCH platform's Electrum servers are: with the platform down to one
+/// answering host, the token is not ready, and the text names the token.
+#[test]
+fn slp_token_readiness_follows_its_platform() {
+    use crate::swap_evidence::shared_readiness_probes;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubBehavior;
+
+    block_on(async {
+        let servers = start_servers(2).await;
+        let bchd = ["https://plat-bchd1.example", "https://plat-bchd2.example"];
+        let token = slp_token(adopted_fields(&[&servers[0], &servers[1]], None), &bchd);
+        let scope = crate::utxo::bchd_grpc::bchd_readiness_scope(token.platform_coin.ticker());
+        for url in bchd {
+            shared_readiness_probes().note_answer(&scope, &crate::swap_evidence::node_name(url), common::now_float());
+        }
+        assert_eq!(token.swap_evidence_ready().await, Ok(()));
+        servers[1].set_behavior(StubBehavior::Down).await;
+        match &token.platform_coin.as_ref().rpc_client {
+            UtxoRpcClientEnum::Electrum(client) => client.forget_readiness_answers(),
+            _ => panic!("an Electrum platform"),
+        }
+        assert_eq!(
+            token.swap_evidence_ready().await,
+            Err("FUSD: swap evidence not available (fewer than two hosts answering)".to_owned())
+        );
+    });
+}
+
+/// The bchd readiness probe has a real bound: a node that accepts the connection and never answers ends the probe
+/// within [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], and the connection is closed then.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn slp_bchd_readiness_probe_is_bounded_on_a_silent_node() {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf); // the request, never answered
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.read(&mut buf).map_err(|e| e.kind())
+    });
+
+    let started = Instant::now();
+    let answered = block_on(crate::utxo::bchd_grpc::bchd_readiness_probe(&format!(
+        "http://127.0.0.1:{port}"
+    )));
+    let elapsed = started.elapsed();
+    assert!(!answered);
+    assert!(
+        elapsed < Duration::from_secs_f64(crate::swap_evidence::READY_PROBE_TIMEOUT_SECS + 1.),
+        "the probe ended after {elapsed:?}"
+    );
+    assert_eq!(peer.join().unwrap(), Ok(0), "the node sees its connection closed");
+}

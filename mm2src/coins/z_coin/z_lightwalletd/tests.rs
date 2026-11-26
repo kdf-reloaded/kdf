@@ -425,6 +425,8 @@ pub(crate) struct Script {
     pub(crate) block_hashes: HashMap<u64, [u8; 32]>,
     /// Added to the time of every block this endpoint serves, so two endpoints can have different clocks.
     pub(crate) block_time_offset: u32,
+    /// `GetLightdInfo` never answers, as an endpoint that holds the request.
+    pub(crate) info_hold: bool,
 }
 
 /// Called with the bytes of every broadcast, before the scripted answer is returned.
@@ -465,6 +467,9 @@ impl FakeTransport {
 impl LightwalletdTransport for FakeTransport {
     async fn light_info(&self, server: &str) -> Result<ServerInfo, EndpointError> {
         self.record(server, "info");
+        if self.scripts.lock().get(server).is_some_and(|s| s.info_hold) {
+            std::future::pending::<()>().await;
+        }
         self.scripts
             .lock()
             .get(server)
@@ -2742,4 +2747,164 @@ mod r100 {
             crate::swap_evidence::SwapFamily::Zcoin
         ));
     }
+}
+
+/// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): two
+/// admitted endpoints on distinct hosts must answer. An endpoint that answered within the window counts with no probe;
+/// an unknown one is asked for its latest block once, and not again within the window; a trusted endpoint must answer.
+#[tokio::test]
+async fn swap_evidence_readiness_of_the_endpoints() {
+    let transport = Arc::new(FakeTransport::default());
+    let (a, b, c) = (
+        "https://rdy-lwd-a.example:9067",
+        "https://rdy-lwd-b.example:9067",
+        "https://rdy-lwd-c.example:9067",
+    );
+    transport.serve(a, Script {
+        tip_floor: Some(100),
+        ..healthy(&[])
+    });
+    transport.serve(b, healthy(&[]));
+    transport.serve(c, healthy(&[]));
+    let backend = backend_over(&transport, &[a, b, c]);
+    let two_nodes = SwapEvidencePolicy::TwoNodes {
+        hosts: vec!["a".into(), "b".into()],
+    };
+    // Every endpoint is admitted; the answers of the admission are forgotten, as if they were older than the window.
+    assert_eq!(backend.admitted().await.unwrap().len(), 3);
+    backend.forget_readiness_answers();
+
+    // `a` answered a read just now; `b` and `c` fail their probe: one host answering is too few.
+    backend.reset_suspension(a);
+    let error = backend.swap_evidence_ready("ARRRRDY", &two_nodes).await.unwrap_err();
+    assert_eq!(
+        error,
+        "ARRRRDY: swap evidence not available (fewer than two hosts answering)"
+    );
+    assert!(!error.contains("example"), "{error}");
+    assert_eq!(transport.called(a, "tip"), 0, "an endpoint that answered is not probed");
+    assert_eq!(transport.called(b, "tip"), 1);
+    assert_eq!(transport.called(c, "tip"), 1);
+
+    // Within the window nothing is probed again, even once `b` answers.
+    transport.serve(b, Script {
+        tip_floor: Some(100),
+        ..Script::default()
+    });
+    assert!(backend.swap_evidence_ready("ARRRRDY", &two_nodes).await.is_err());
+    assert_eq!(transport.called(b, "tip"), 1);
+
+    // Two endpoints that answered: ready, nothing sent.
+    backend.reset_suspension(b);
+    assert_eq!(backend.swap_evidence_ready("ARRRRDY", &two_nodes).await, Ok(()));
+    assert_eq!(transport.called(a, "tip") + transport.called(b, "tip"), 1);
+
+    // A trusted endpoint that does not answer is not stood in for.
+    let trusted = SwapEvidencePolicy::Trusted { node: c.to_owned() };
+    assert_eq!(
+        backend.swap_evidence_ready("ARRRRDY", &trusted).await,
+        Err("ARRRRDY: swap evidence not available (the trusted node is not answering)".to_owned())
+    );
+    let trusted_a = SwapEvidencePolicy::Trusted { node: a.to_owned() };
+    assert_eq!(backend.swap_evidence_ready("ARRRRDY", &trusted_a).await, Ok(()));
+}
+
+/// The readiness check judges the admitted endpoints only, the ones the swap reads ask: an endpoint excluded by
+/// admission (here one on a stale branch) never counts as answering, although it answered the admission and would
+/// answer its latest block, and an excluded trusted endpoint is not ready.
+#[tokio::test]
+async fn swap_evidence_readiness_ignores_an_excluded_endpoint() {
+    struct Bound;
+    impl WalletBranchStore for Bound {
+        fn state(&self) -> Result<WalletBranchState, String> { Ok(scanned_wallet(IRONWOOD_BRANCH)) }
+
+        fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+    }
+
+    let transport = Arc::new(FakeTransport::default());
+    let (fork, a) = ("https://rdy-lwd-fork.example:9067", "https://rdy-lwd-ok.example:9067");
+    transport.serve(fork, Script {
+        tip_floor: Some(ARRR_TIP + 5_000),
+        ..stale_fork()
+    });
+    transport.serve(a, Script {
+        tip_floor: Some(ARRR_TIP),
+        ..healthy(&[])
+    });
+    let backend = backend_over(&transport, &[fork, a]);
+    backend.bind_wallet(Arc::new(Bound));
+    let two_nodes = SwapEvidencePolicy::TwoNodes {
+        hosts: vec!["a".into(), "b".into()],
+    };
+    // The readiness check reads the last admission; it never runs one.
+    backend.admitted().await.unwrap();
+
+    assert_eq!(
+        backend.swap_evidence_ready("ARRRXCL", &two_nodes).await,
+        Err("ARRRXCL: swap evidence not available (fewer than two hosts answering)".to_owned())
+    );
+    assert_eq!(backend.excluded_endpoints().len(), 1, "the stale endpoint is excluded");
+    assert_eq!(transport.called(fork, "tip"), 0, "an excluded endpoint is not probed");
+
+    let trusted_fork = SwapEvidencePolicy::Trusted { node: fork.to_owned() };
+    assert_eq!(
+        backend.swap_evidence_ready("ARRRXCL", &trusted_fork).await,
+        Err("ARRRXCL: swap evidence not available (the trusted node is not answering)".to_owned())
+    );
+    assert_eq!(transport.called(fork, "tip"), 0);
+    let trusted_a = SwapEvidencePolicy::Trusted { node: a.to_owned() };
+    assert_eq!(backend.swap_evidence_ready("ARRRXCL", &trusted_a).await, Ok(()));
+}
+
+/// The readiness check never starts an admission round: a stale admission is read as it is, and a backend with no
+/// admission yet has no endpoint answering. A transport that holds `GetLightdInfo` cannot delay the check.
+#[tokio::test]
+async fn swap_evidence_readiness_never_starts_an_admission() {
+    let transport = Arc::new(FakeTransport::default());
+    let (a, b) = ("https://rdy-lwd-s1.example:9067", "https://rdy-lwd-s2.example:9067");
+    transport.serve(a, healthy(&[]));
+    transport.serve(b, healthy(&[]));
+    let backend = backend_over(&transport, &[a, b]);
+    let two_nodes = SwapEvidencePolicy::TwoNodes {
+        hosts: vec!["a".into(), "b".into()],
+    };
+
+    // No admission yet: nothing answers, nothing is asked.
+    assert_eq!(
+        backend.swap_evidence_ready("ARRRSTL", &two_nodes).await,
+        Err("ARRRSTL: swap evidence not available (fewer than two hosts answering)".to_owned())
+    );
+    for server in [a, b] {
+        for method in ["info", "cache", "tip"] {
+            assert_eq!(transport.called(server, method), 0);
+        }
+    }
+
+    // A stale admission, and endpoints that hold `GetLightdInfo`: the check ends within the probe bound, over the
+    // endpoints of that admission, and sends no admission request.
+    assert_eq!(backend.admitted().await.unwrap().len(), 2);
+    backend.forget_readiness_answers();
+    backend.age_admission(ADMISSION_REEVALUATION_INTERVAL + Duration::from_secs(1));
+    let (info_a, info_b) = (transport.called(a, "info"), transport.called(b, "info"));
+    for server in [a, b] {
+        transport.serve(server, Script {
+            info_hold: true,
+            tip_floor: Some(100),
+            ..Script::default()
+        });
+    }
+    let result = tokio::time::timeout(
+        Duration::from_secs_f64(crate::swap_evidence::READY_PROBE_TIMEOUT_SECS + 1.0),
+        backend.swap_evidence_ready("ARRRSTL", &two_nodes),
+    )
+    .await
+    .expect("the readiness check is bounded by the probe timeout");
+    assert_eq!(result, Ok(()));
+    assert_eq!(transport.called(a, "info"), info_a);
+    assert_eq!(transport.called(b, "info"), info_b);
+    assert_eq!(
+        transport.called(a, "cache") + transport.called(b, "cache"),
+        2,
+        "admission asked once each"
+    );
 }

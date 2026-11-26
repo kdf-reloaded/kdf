@@ -96,9 +96,64 @@ where
     }
 }
 
+impl EthCoin {
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): the
+    /// coin's probe-passed nodes (a token's are its platform's) under its effective policy. A node counts as
+    /// answering when it answered a request within [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise, and only
+    /// while the answering hosts are not enough, it gets one `eth_blockNumber` bounded by
+    /// [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per window per host. A TRON coin, whose swaps
+    /// are off, is ready.
+    ///
+    /// # Errors
+    ///
+    /// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
+    pub(crate) async fn evidence_ready(&self) -> Result<(), String> {
+        use crate::swap_evidence::{evidence_ready, shared_readiness_probes, HostReadiness, READY_WINDOW_SECS};
+
+        if self.is_tron_family() {
+            return Ok(());
+        }
+        let policy = self.swap_evidence_policy();
+        let scope = format!("evm:{}", self.platform_ticker());
+        evidence_ready(
+            self.ticker(),
+            &policy,
+            &self.web3_instances,
+            |instance| instance.node_name(),
+            |instance| match super::alloy_compat::transport::node_last_answer(&instance.url) {
+                Some(at) if common::now_float() - at < READY_WINDOW_SECS => HostReadiness::Answering,
+                _ => HostReadiness::Unknown,
+            },
+            shared_readiness_probes(),
+            &scope,
+            |instance| {
+                let instance = instance.clone();
+                assert_send_future(async move { instance.readiness_probe().await })
+            },
+        )
+        .await
+    }
+}
+
 impl Web3Instance {
     /// The form in which a log line or an error text names this node: `host[:port]`.
     pub(crate) fn node_name(&self) -> String { node_name(&self.url) }
+
+    /// One readiness probe of this node (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): an
+    /// `eth_blockNumber` whose exchange is bounded by [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`] itself, not
+    /// by the lower-layer bound of the node's direct provider, so a node that accepts and never answers keeps nothing
+    /// running past the probe's bound. `true` when the node answered.
+    pub(crate) async fn readiness_probe(&self) -> bool {
+        use crate::swap_evidence::READY_PROBE_TIMEOUT_SECS;
+        use alloy::providers::Provider;
+
+        match super::alloy_compat::provider::provider_with_cutoff(&self.web3, READY_PROBE_TIMEOUT_SECS) {
+            Some(provider) => provider.get_block_number().await.is_ok(),
+            // A provider not backed by the project's transport (none is built in production): its own bound, and the
+            // check's bound around the probe.
+            None => self.web3.get_block_number().await.is_ok(),
+        }
+    }
 
     /// The height and the timestamp of this node's latest block (`eth_getBlockByNumber`).
     pub(crate) async fn latest_block(&self) -> Result<TipBlock, String> {

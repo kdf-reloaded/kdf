@@ -1006,6 +1006,23 @@ the previous version used. The safe way:
   in another way is handled as the step's own rule says.
   - Detail: PR #533; CRD ch.52 R18, R19, R21, R30, R31, R34 and their status notes of 2026-11-24, ch.51 §51.6G R100.
 
+#### Legacy swaps and orders
+
+- **A swap starts only when its chain reads can be agreed right now.** Before a swap starts, the node checks that
+  both coins can give the reads the two-node rule needs (see the breaking change "A new swap needs two nodes of the
+  coin that agree"): at least two hosts of the coin that have answered within the last minute, or the trusted node or
+  your own daemon answering. A host not heard from in that time gets one quick check. A maker that cannot meet this
+  does not answer a taker's request, so the taker pays nothing, and while a coin cannot meet it, the maker's orders
+  with that coin stay saved but are not announced; they are announced again when the coin's servers answer, and a log
+  line marks each change. A new order on such a coin is accepted and starts paused. A taker's `buy` or `sell` is
+  refused with `error_type` `SwapEvidenceNotReady` (HTTP 503) and the text "<TICKER>: swap evidence not available
+  (<kind>); try again when the coin's servers answer", where <kind> is "fewer than two hosts answering", "the trusted
+  node is not answering", "the own daemon is not answering", "fewer than two nodes listed", and for a QRC20 token
+  also "fewer than two hosts serve the contract-event history" or "the trusted node does not serve the contract-event
+  history", and a taker swap whose coins cannot meet it stops before the taker fee is paid. This adds no condition to
+  the rule itself; it only keeps a swap from starting that would have to wait. Detail: PR #547; CRD ch.51 §51.6G,
+  status note of 2026-11-26.
+
 ### Fixed
 
 #### Orders

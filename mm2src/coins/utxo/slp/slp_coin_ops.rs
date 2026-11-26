@@ -16,6 +16,22 @@ impl MmCoin for SlpToken {
         )
     }
 
+    /// The BCH platform's servers under the token's policy, then the platform's bchd nodes (maintainer decision of
+    /// 2026-11-25/26 under CRD ch.51 R100). The text names the token.
+    async fn swap_evidence_ready(&self) -> Result<(), String> {
+        let policy = self.swap_evidence_policy();
+        let ticker = self.ticker();
+        utxo_common::swap_evidence_ready_as(ticker, self.platform_coin.as_ref(), &policy).await?;
+        crate::utxo::bchd_grpc::bchd_ready(
+            ticker,
+            self.platform_coin.ticker(),
+            &policy,
+            self.platform_coin.bchd_urls(),
+            self.platform_coin.allow_single_host(),
+        )
+        .await
+    }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(
             utxo_common::get_raw_transaction(self.platform_coin.as_ref(), req)

@@ -27,6 +27,7 @@ use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, Head
                                  SessionEnded, TlsNotice};
 use super::*;
 use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
+use crate::swap_evidence::READY_WINDOW_SECS;
 use common::log::{debug, warn};
 use futures::channel::mpsc as futures_mpsc;
 use futures::future::{join_all, select as select_future, BoxFuture, Either as EitherFuture};
@@ -627,6 +628,9 @@ struct SlotState {
     /// item 12).
     header_resolved: bool,
     contract_history: ContractHistoryState,
+    /// When the server last answered a request over any of its connections (seconds since the epoch); the readiness
+    /// check before a swap starts reads it (maintainer decision of 2026-11-25/26 under CRD ch.51 R100).
+    last_answer: Option<f64>,
 }
 
 /// One server of the pool. `id` is its place in the list of the pool and never changes. `rank` is its place
@@ -673,6 +677,7 @@ impl ServerSlot {
                 probing: false,
                 header_resolved: false,
                 contract_history: ContractHistoryState::default(),
+                last_answer: None,
             }),
         }
     }
@@ -701,6 +706,18 @@ impl ServerSlot {
     }
 }
 
+/// One usable server as the readiness check before a swap starts sees it (maintainer decision of 2026-11-25/26 under
+/// CRD ch.51 R100; see [`PoolShared::readiness_view`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServerReadiness {
+    /// The server's address as listed; name it by [`crate::swap_evidence::node_name`] only.
+    pub(crate) addr: String,
+    /// It answered within the readiness window, or holds a maintained connection that keeps answering its pings.
+    pub(crate) answering: bool,
+    /// It has served the contract-event history read since the client was built.
+    pub(crate) serves_contract_history: bool,
+}
+
 /// The connections a call opened, to be released when the call ends if their servers are not maintained then.
 #[derive(Default)]
 pub(super) struct OpenedConnections {
@@ -710,6 +727,27 @@ pub(super) struct OpenedConnections {
 }
 
 pub(super) type OpenedByCall = Arc<StdMutex<OpenedConnections>>;
+
+/// The connections a call opened, released when the guard is dropped ([`PoolShared::release_opened`]): the release
+/// runs however the call ends, also when a bound that wraps the call drops it before it returns, and a connection
+/// that is established after that is released at once.
+struct ReleaseOpenedOnDrop {
+    pool: Arc<PoolShared>,
+    opened: OpenedByCall,
+}
+
+impl ReleaseOpenedOnDrop {
+    fn new(pool: &Arc<PoolShared>) -> ReleaseOpenedOnDrop {
+        ReleaseOpenedOnDrop {
+            pool: pool.clone(),
+            opened: OpenedByCall::default(),
+        }
+    }
+}
+
+impl Drop for ReleaseOpenedOnDrop {
+    fn drop(&mut self) { self.pool.release_opened(&self.opened); }
+}
 
 /// The failures of a call, one per server tried (CRD ch.38 R38.6.4i), and which of those servers answered with a
 /// JSON-RPC error answer instead of failing by transport (D38.6.4Q.2 status note).
@@ -3402,6 +3440,7 @@ impl PoolShared {
         match session.request(request, timeout).await {
             Ok(response) => {
                 self.record_sample(slot, session.id(), (now_float() - started) * 1000.);
+                slot.state().last_answer = Some(now_float());
                 if served_contract_event_history(request, &response) {
                     let mut state = slot.state();
                     state.contract_history.served = true;
@@ -3679,6 +3718,62 @@ impl PoolShared {
         if let Err(e) = self.route_ping(&request).await {
             debug!("{}", e);
         }
+    }
+
+    /// What the readiness check before a swap starts needs of each usable server, in priority order (maintainer
+    /// decision of 2026-11-25/26 under CRD ch.51 R100): its address, whether it is answering at `now`, and whether it
+    /// has served the contract-event history. A server is answering when it answered a request within
+    /// [`READY_WINDOW_SECS`], or when it holds a maintained connection that has answered before: the ping goes over
+    /// every maintained connection every 30 s and a connection whose ping fails is closed.
+    pub(super) fn readiness_view(&self, now: f64) -> Vec<ServerReadiness> {
+        self.usable_slots()
+            .into_iter()
+            .map(|slot| {
+                let maintained_answering = slot.is_maintained() && slot.live_session().is_some();
+                let state = slot.state();
+                let answering = match state.last_answer {
+                    Some(at) => now - at < READY_WINDOW_SECS || maintained_answering,
+                    None => false,
+                };
+                ServerReadiness {
+                    addr: slot.addr.clone(),
+                    answering,
+                    serves_contract_history: state.contract_history.served,
+                }
+            })
+            .collect()
+    }
+
+    /// Forgets every server's last answer, as if none had answered within the readiness window.
+    #[cfg(test)]
+    pub(super) fn forget_answers(&self) {
+        for slot in self.slots() {
+            slot.state().last_answer = None;
+        }
+    }
+
+    /// One readiness probe of the server `addr`: a `server.ping` addressed to it (R38.6.4g), which opens its
+    /// connection if it is closed and releases it afterwards when the server is not maintained, all within `bound`.
+    /// `true` when the server answered; an answer is recorded as the server's last answer. The release runs also when
+    /// the probe is dropped before it returns (a shorter bound around it), and then covers a connection established
+    /// later.
+    pub(super) async fn probe_server(self: &Arc<Self>, addr: &str, bound: Duration) -> bool {
+        let Some(slot) = self.slot_by_addr(addr) else {
+            return false;
+        };
+        if slot.is_removed() {
+            return false;
+        }
+        let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: self.fresh_request_id(),
+            method: "server.ping".into(),
+            params: vec![],
+        });
+        let opened = ReleaseOpenedOnDrop::new(self);
+        let result = self.attempt_with_connect(&slot, &request, bound, &opened.opened).await;
+        drop(opened);
+        result.is_ok()
     }
 
     /// Routes a request addressed to one named server (R38.6.4g). The version negotiation request never

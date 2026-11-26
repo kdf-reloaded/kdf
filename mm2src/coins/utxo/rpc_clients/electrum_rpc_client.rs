@@ -2,6 +2,8 @@ use super::electrum_client_registry::ReleaseNote;
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
 use super::electrum_pool::{call_budget_of_caller, ElectrumPoolOptions, ElectrumServersView, PoolShared};
 use super::*;
+use crate::swap_evidence::{evidence_ready, node_name, HostReadiness, ReadinessProbes, SwapEvidencePolicy,
+                           READY_PROBE_TIMEOUT_SECS};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::header_time_only::read_window_times;
 #[cfg(not(target_arch = "wasm32"))]
@@ -521,6 +523,9 @@ pub struct ElectrumClientImpl {
     retired_owners: StdMutex<HashSet<ElectrumOwner>>,
     /// Set once for a client of the registry of shared clients: logs the client's release when it is dropped.
     release_note: std::sync::OnceLock<ReleaseNote>,
+    /// The readiness probes of the client's servers (maintainer decision of 2026-11-25/26 under CRD ch.51 R100),
+    /// shared by every coin over the client.
+    readiness_probes: ReadinessProbes,
 }
 
 /// A subscription a client remembers: the instances that remember it, and whether it is placed in the current session.
@@ -848,6 +853,70 @@ impl ElectrumClient {
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-headers
     pub fn blockchain_block_headers(&self, start_height: u64, count: NonZeroU64) -> RpcRes<ElectrumBlockHeadersRes> {
         rpc_func!(self, "blockchain.block.headers", start_height, count)
+    }
+}
+
+/// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) over the
+/// servers of an Electrum client.
+impl ElectrumClient {
+    /// Whether the coin `ticker` may start a swap under `policy` over this client's usable servers. A server counts
+    /// as answering when the pool saw it answer within the window or it keeps a maintained connection that answers
+    /// its pings; otherwise, and only while the answering hosts are not enough, it gets one directed `server.ping`
+    /// bounded by [`READY_PROBE_TIMEOUT_SECS`], at most once per window per host. With `contract_history` only the
+    /// servers that have served the contract-event history count (a QRC20 token). The probe carries that bound itself
+    /// and the shared check bounds it again by the same figure; whichever ends it first, the connection the probe
+    /// opened is released.
+    ///
+    /// # Errors
+    ///
+    /// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
+    pub(crate) async fn swap_evidence_ready(
+        &self,
+        ticker: &str,
+        policy: &SwapEvidencePolicy,
+        contract_history: bool,
+    ) -> Result<(), String> {
+        let servers: Vec<ServerReadiness> = self
+            .pool
+            .readiness_view(now_float())
+            .into_iter()
+            .filter(|server| !contract_history || server.serves_contract_history)
+            .collect();
+        evidence_ready(
+            ticker,
+            policy,
+            &servers,
+            |server| node_name(&server.addr),
+            |server| match server.answering {
+                true => HostReadiness::Answering,
+                false => HostReadiness::Unknown,
+            },
+            &self.readiness_probes,
+            "",
+            |server| {
+                let pool = self.pool.clone();
+                let addr = server.addr.clone();
+                async move {
+                    pool.probe_server(&addr, Duration::from_secs_f64(READY_PROBE_TIMEOUT_SECS))
+                        .await
+                }
+            },
+        )
+        .await
+    }
+
+    /// Forgets every server's last answer (a test of the readiness probes).
+    #[cfg(test)]
+    pub(crate) fn forget_readiness_answers(&self) { self.pool.forget_answers() }
+
+    /// How many usable servers count as answering now.
+    #[cfg(test)]
+    pub(crate) fn answering_servers(&self) -> usize {
+        self.pool
+            .readiness_view(now_float())
+            .iter()
+            .filter(|server| server.answering)
+            .count()
     }
 }
 
@@ -2206,6 +2275,7 @@ impl ElectrumClientImpl {
             watched_contract_events: StdMutex::new(Vec::new()),
             retired_owners: StdMutex::new(HashSet::new()),
             release_note: std::sync::OnceLock::new(),
+            readiness_probes: ReadinessProbes::default(),
         }
     }
 

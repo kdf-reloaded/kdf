@@ -205,6 +205,25 @@ impl AlloyTransport {
         }
     }
 
+    /// A transport over the same nodes, from this transport's current order, whose every exchange is bounded by
+    /// `cutoff_s` instead (a short probe of a node that must not wait for the lower-layer bound); the exchange of a
+    /// transport with one node ends at that cutoff, spawned work included.
+    pub(crate) fn with_cutoff(&self, cutoff_s: f64) -> Self {
+        let nodes = self.inner.nodes.clone();
+        let order = Mutex::new(self.inner.current_order());
+        let exchange_bound_s = exchange_bound(cutoff_s, nodes.len());
+        Self {
+            inner: Arc::new(Inner {
+                nodes,
+                order,
+                event_handlers: self.inner.event_handlers.clone(),
+                sender: self.inner.sender.clone(),
+                cutoff_s,
+                exchange_bound_s,
+            }),
+        }
+    }
+
     /// `[<ticker>] <before><host> (node <i> of <n>)<after>` for the first node of this transport; the line of a
     /// provider that talks to one node on its own (CRD ch.35 R35.1.12, R35.1.16). `None` for a transport without
     /// nodes.
@@ -470,7 +489,30 @@ async fn attempt(inner: &Inner, node: &Node, is_batch: bool, body: &[u8]) -> Res
         Some(Ok(bytes)) => bytes,
     };
     inner.event_handlers.on_incoming_response(&response_bytes);
-    decode_answer(&response_bytes, is_batch)
+    let answer = decode_answer(&response_bytes, is_batch);
+    if answer.is_ok() {
+        note_node_answer(&node.configured);
+    }
+    answer
+}
+
+/// When each configured node last answered a request with a successful result (seconds since the epoch), keyed by
+/// the configured URL, which never leaves this map. The readiness check before a swap starts reads it (maintainer
+/// decision of 2026-11-25/26 under CRD ch.51 R100). One entry per configured URL.
+static NODE_ANSWERS: Mutex<Option<std::collections::HashMap<String, f64>>> = Mutex::new(None);
+
+/// Records that the node `url` answered now.
+pub(crate) fn note_node_answer(url: &str) {
+    let mut answers = NODE_ANSWERS.lock().unwrap_or_else(PoisonError::into_inner);
+    answers
+        .get_or_insert_with(Default::default)
+        .insert(url.to_owned(), common::now_float());
+}
+
+/// When the node `url` last answered a request with a successful result, `None` when it has not since the start.
+pub(crate) fn node_last_answer(url: &str) -> Option<f64> {
+    let answers = NODE_ANSWERS.lock().unwrap_or_else(PoisonError::into_inner);
+    answers.as_ref().and_then(|answers| answers.get(url).copied())
 }
 
 /// Decodes the body of a 2xx answer. A JSON-RPC error object, an undecodable body and a framing that does not

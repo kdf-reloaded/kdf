@@ -729,6 +729,11 @@ pub(crate) async fn broadcast_keep_alive_for_pub(
 
     let timestamp = now_ms() / 1000;
     for (alb_pair, root) in trie_roots {
+        // A pair of an own order whose coin has no swap evidence now is paused: no keep-alive, so peers drop its
+        // orders (maintainer decision of 2026-11-25/26 under CRD ch.51 R100).
+        if ordermatch_ctx.evidence_pause.lock().is_pair_paused(&alb_pair) {
+            continue;
+        }
         let topic = orderbook_topic_from_ordered_pair(&alb_pair);
         let message = new_protocol::PubkeyKeepAlive {
             trie_roots: HashMap::from([(alb_pair, root)]),
@@ -762,6 +767,8 @@ pub(crate) async fn broadcast_keep_alives_for_own_pubkeys(
     ordermatch_ctx: &OrdermatchContext,
     persistent_pubsecp: &str,
 ) {
+    // The swap-evidence readiness of the coins of the own maker orders: paused pairs and re-announcements.
+    refresh_maker_evidence_pause(ctx, ordermatch_ctx).await;
     let my_orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
     for (_, order_mutex) in my_orders {
         let order = order_mutex.lock().await;
@@ -1392,6 +1399,14 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
         if ordermatch_ctx.order_is_untradable(ctx, "Maker", &uuid, &base, &rel) {
             continue;
         }
+        // A paused order is announced by the keep-alive loop once its coins are ready (maintainer decision of
+        // 2026-11-25/26 under CRD ch.51 R100).
+        {
+            let pause = ordermatch_ctx.evidence_pause.lock();
+            if pause.is_paused(base.ticker()) || pause.is_paused(rel.ticker()) {
+                continue;
+            }
+        }
         if !max_vols.contains_key(&base_ticker) {
             let max_vol = match base.my_spendable_balance().compat().await {
                 Ok(current_balance) => {
@@ -1582,6 +1597,12 @@ pub(crate) async fn handle_timed_out_taker_orders_with(
         // notify other peers, unless the pair cannot trade (CRD ch.60 R60.6.5)
         if let Ok(Some((base, rel))) = find_pair(&ctx, &maker_order.base, &maker_order.rel).await {
             if ordermatch_ctx.order_is_untradable(&ctx, "Maker", &maker_order.uuid, &base, &rel) {
+                continue;
+            }
+            // A coin whose swap evidence is not available now: the order starts paused (maintainer decision of
+            // 2026-11-25/26 under CRD ch.51 R100). Judged by the paused coins without a probe, since the taker orders
+            // stay locked here; the next keep-alive refresh judges the coins with one.
+            if converted_maker_order_starts_paused(ordermatch_ctx, &maker_order) {
                 continue;
             }
             maker_order_created_p2p_notify(
@@ -2104,7 +2125,21 @@ pub(crate) async fn process_taker_request(ctx: MmArc, from_pubkey: H256Json, tak
                         );
                         false
                     },
-                    None => true,
+                    // A coin whose swap-evidence reads cannot be agreed now starts no swap: the request is declined
+                    // without an answer, as by a maker that did not answer (maintainer decision of 2026-11-25/26
+                    // under CRD ch.51 R100).
+                    None => match pair_not_ready(&base_coin, &rel_coin).await {
+                        Some(not_ready) => {
+                            log::debug!(
+                                "Declined request {} for maker order {}: {}",
+                                taker_request.uuid,
+                                uuid,
+                                not_ready
+                            );
+                            false
+                        },
+                        None => true,
+                    },
                 }
             };
             if accepted {
@@ -2649,6 +2684,11 @@ async fn place_taker_order(
     // CRD ch.51 R100 item 4.
     if let Some(error) = swap_evidence_admission(base_coin, rel_coin) {
         return MmError::err(TakerOrderError::SwapEvidenceInsufficient(error));
+    }
+    // A coin whose swap-evidence reads cannot be agreed now starts no swap: the request is not sent (maintainer
+    // decision of 2026-11-25/26 under CRD ch.51 R100).
+    if let Some(not_ready) = pair_not_ready(base_coin, rel_coin).await {
+        return MmError::err(TakerOrderError::SwapEvidenceNotReady(taker_refusal_text(&not_ready)));
     }
     // CRD ch.45 R45.6C.8: no new order while the computer's clock is off by more than the limit, before any
     // balance check.
@@ -3216,6 +3256,11 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         .build()
         .map_to_mm(|e| SetPriceError::from_maker_order_build_error(e, &req.base, &req.rel))?;
 
+    // An order of a coin whose swap evidence is not available now is accepted and saved, and starts paused: it is
+    // announced once the coin is ready (maintainer decision of 2026-11-25/26 under CRD ch.51 R100). Judged before the
+    // previous orders may be cancelled below, so nothing but the local insert and the publication follows that.
+    let starts_paused = new_maker_order_starts_paused(&ordermatch_ctx, &new_order, &base_coin, &rel_coin).await;
+
     let request_orderbook = false;
     subscribe_to_orderbook_topic(
         ctx,
@@ -3234,12 +3279,14 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     if replace_after_checks {
         cancel_previous_maker_orders(ctx, &ordermatch_ctx, &req.base, &req.rel).await;
     }
-    maker_order_created_p2p_notify(
-        ctx.clone(),
-        &new_order,
-        base_coin.coin_protocol_info(),
-        rel_coin.coin_protocol_info(),
-    );
+    if !starts_paused {
+        maker_order_created_p2p_notify(
+            ctx.clone(),
+            &new_order,
+            base_coin.coin_protocol_info(),
+            rel_coin.coin_protocol_info(),
+        );
+    }
 
     {
         let order_arc = Arc::new(AsyncMutex::new(new_order.clone()));

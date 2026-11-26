@@ -1269,6 +1269,58 @@ fn a_connection_made_after_the_call_ended_is_released() {
     });
 }
 
+/// The readiness probe before a swap starts (CRD ch.51 R100) releases the connection it opened to a server outside
+/// the maintained set also when a shorter bound around it drops it first: while its ping goes unanswered, and when
+/// the connection is established only after that bound.
+#[test]
+fn a_readiness_probe_dropped_by_an_outer_bound_releases_its_connection() {
+    use common::custom_futures::FutureTimerExt;
+
+    fn open_sessions(client: &ElectrumClientImpl) -> usize {
+        client.pool_snapshot().iter().filter(|server| server.connected).count()
+    }
+
+    block_on(async {
+        let (a, b) = (
+            StubServer::start(StubBehavior::Answer).await,
+            StubServer::start(StubBehavior::Answer).await,
+        );
+        let client = pool_client(&[&a, &b], 1, Some(1), test_timings());
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client), vec![0]);
+        assert_eq!((open_sessions(&client), b.open_connections()), (1, 0));
+        let b_addr = b.addr();
+
+        // The connection is made and the ping is not answered before the bound around the probe ends it.
+        b.set_reply_delay("server.ping", ms(10_000));
+        let probe = Box::pin(client.pool.probe_server(&b_addr, Duration::from_secs(3)));
+        assert!(probe.timeout_secs(0.3).await.is_err(), "the outer bound ends the probe");
+        assert_eq!(b.accepted(), 1);
+        wait_until("the connection of the dropped probe to be released", || {
+            open_sessions(&client) == 1 && !snap(&client, 1).connected && b.open_connections() == 0
+        })
+        .await;
+
+        // The connection is established only after the bound around the probe has ended it.
+        b.set_reply_delay("server.ping", ms(0));
+        b.set_accept_delay(ms(250));
+        let probe = Box::pin(client.pool.probe_server(&b_addr, Duration::from_secs(3)));
+        assert!(
+            probe.timeout_secs(0.05).await.is_err(),
+            "the outer bound ends the probe"
+        );
+        wait_until("the late connection of the dropped probe to be released", || {
+            b.requests("server.version") >= 2 && !snap(&client, 1).connected && b.open_connections() == 0
+        })
+        .await;
+        Timer::sleep(0.2).await;
+        assert_eq!(b.accepted(), 2);
+        assert_eq!((open_sessions(&client), b.open_connections()), (1, 0));
+        assert!(!snap(&client, 1).maintained);
+        assert_eq!(maintained(&client), vec![0]);
+    });
+}
+
 #[test]
 fn a_down_stub_keeps_its_port_reserved_and_refuses_connections() {
     block_on(async {

@@ -8403,6 +8403,264 @@ mod tendermint_saved_orders {
         block_on(node.octx().my_taker_orders.lock()).insert(order.request.uuid, order.clone());
     }
 
+    /// The readiness check before a swap starts on the order-matching side (maintainer decision of 2026-11-25/26
+    /// under CRD ch.51 R100).
+    mod r100_readiness_engine {
+        use super::*;
+        use coins::swap_evidence::{not_ready_text, NotReadyKind};
+
+        /// The coins the test makes not ready; every other test coin is ready.
+        type Unready = Arc<Mutex<HashSet<String>>>;
+
+        fn mock_readiness(unready: &[&str]) -> Unready {
+            let set: Unready = Arc::new(Mutex::new(unready.iter().map(|t| (*t).to_owned()).collect()));
+            let shared = set.clone();
+            TestCoin::swap_evidence_ready.mock_safe(move |coin| {
+                let ticker = coins::MarketCoinOps::ticker(coin).to_owned();
+                let result = match shared.lock().unwrap().contains(&ticker) {
+                    true => Err(not_ready_text(&ticker, NotReadyKind::TooFewHostsAnswering)),
+                    false => Ok(()),
+                };
+                MockResult::Return(Box::pin(async move { result }))
+            });
+            set
+        }
+
+        fn pubkey(node: &Restart) -> String { hex::encode(node.ctx.secp256k1_key_pair().public_slice()) }
+
+        fn keep_alive_pairs(published: &[new_protocol::OrdermatchMessage]) -> Vec<String> {
+            let mut pairs: Vec<String> = published
+                .iter()
+                .filter_map(|message| match message {
+                    new_protocol::OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
+                        Some(keep_alive.trie_roots.keys().cloned().collect::<Vec<_>>())
+                    },
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            pairs.sort();
+            pairs
+        }
+
+        fn pause_lines(node: &Restart) -> Vec<String> { node.octx().evidence_pause.lock().lines() }
+
+        /// The maker declines a request for an order of a coin that is not ready: nothing is sent and no match is
+        /// kept, so it looks like a maker that did not answer. A request for an order of ready coins is reserved.
+        #[test]
+        fn a_request_for_an_order_of_an_unready_coin_gets_no_answer() {
+            let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+            node.activate(&TEST_COINS);
+            let _unready = mock_readiness(&["REL"]);
+            lp_connect_start_bob.mock_safe(|_, _, _| panic!("no swap starts from a request alone"));
+            let unready = announceable("BASE", "REL");
+            let healthy = announceable("BASE", "OTHER");
+            add_maker(&node, &unready);
+            add_maker(&node, &healthy);
+
+            block_on(process_taker_request(
+                node.ctx.clone(),
+                H256Json::default(),
+                request_for(&unready),
+            ));
+            assert_eq!(node.published().len(), 0, "nothing is sent for the declined request");
+            let order_mutex = node.octx().maker_orders_ctx.lock().get_order(&unready.uuid).unwrap();
+            assert!(block_on(order_mutex.lock()).matches.is_empty());
+
+            block_on(process_taker_request(
+                node.ctx.clone(),
+                H256Json::default(),
+                request_for(&healthy),
+            ));
+            assert_eq!(
+                count_of(&node.published(), is_reserved),
+                1,
+                "a healthy pair is unaffected"
+            );
+            assert_eq!(node.maker_uuids().len(), 2, "no order is cancelled");
+        }
+
+        /// The keep-alive skips the pair of an order whose coin is not ready, with one INFO line for the change; on
+        /// recovery the order is announced again in full and its keep-alive resumes, with one INFO line.
+        #[test]
+        fn an_unready_coin_pauses_its_orders_and_recovery_announces_them_again() {
+            let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+            node.activate(&TEST_COINS);
+            let unready = mock_readiness(&[]);
+            let paused = announceable("BASE", "REL");
+            let other = announceable("BASE", "OTHER");
+            for order in [&paused, &other] {
+                add_maker(&node, order);
+                maker_order_created_p2p_notify(node.ctx.clone(), order, vec![], vec![]);
+            }
+            node.octx().wait_trie_ops_flushed();
+            node.published();
+            let octx = node.octx();
+            let pubkey = pubkey(&node);
+
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert_eq!(keep_alive_pairs(&node.published()), vec!["BASE:OTHER", "BASE:REL"]);
+            assert!(pause_lines(&node).is_empty());
+
+            unready.lock().unwrap().insert("REL".to_owned());
+            for _ in 0..2 {
+                block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+                let published = node.published();
+                assert_eq!(
+                    keep_alive_pairs(&published),
+                    vec!["BASE:OTHER"],
+                    "the paused pair is skipped"
+                );
+                assert!(announced(&published).is_empty());
+            }
+            assert_eq!(pause_lines(&node), vec![
+                "REL: swap evidence not available (fewer than two hosts answering); its orders are paused".to_owned()
+            ]);
+            assert_eq!(node.maker_uuids().len(), 2, "a paused order stays");
+
+            unready.lock().unwrap().clear();
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            node.octx().wait_trie_ops_flushed();
+            let published = node.published();
+            assert_eq!(
+                announced(&published),
+                vec![paused.uuid],
+                "the paused order is announced again"
+            );
+            assert_eq!(pause_lines(&node).len(), 2);
+            assert_eq!(
+                pause_lines(&node)[1],
+                "REL: swap evidence available again; its orders are resumed"
+            );
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert_eq!(keep_alive_pairs(&node.published()), vec!["BASE:OTHER", "BASE:REL"]);
+            for line in pause_lines(&node) {
+                assert!(!line.contains("://"), "{line}");
+            }
+        }
+
+        /// Two tickers sharing one order-book ticker (a coin and its alias) share the order-book pair: pausing one
+        /// skips the keep-alives of the orders of both, and on recovery both orders are announced again in full,
+        /// the one whose own coins never paused included.
+        #[test]
+        fn orders_sharing_a_paused_pair_through_an_alias_are_all_announced_again() {
+            let mut node = Restart::new(json::json!([
+                { "coin": "BASE" }, { "coin": "REL" }, { "coin": "OTHER" },
+                { "coin": "BASE-segwit", "orderbook_ticker": "BASE" }
+            ]));
+            node.activate(&["BASE", "REL", "OTHER", "BASE-segwit"]);
+            let unready = mock_readiness(&[]);
+            let plain = announceable("BASE", "REL");
+            let alias = MakerOrder {
+                base_orderbook_ticker: Some("BASE".to_owned()),
+                ..announceable("BASE-segwit", "REL")
+            };
+            let other = announceable("BASE", "OTHER");
+            for order in [&plain, &alias, &other] {
+                add_maker(&node, order);
+                maker_order_created_p2p_notify(node.ctx.clone(), order, vec![], vec![]);
+            }
+            node.octx().wait_trie_ops_flushed();
+            node.published();
+            let octx = node.octx();
+            let pubkey = pubkey(&node);
+
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert_eq!(keep_alive_pairs(&node.published()), vec!["BASE:OTHER", "BASE:REL"]);
+
+            // The alias is not ready: the pair it shares with the plain order is skipped for both orders.
+            unready.lock().unwrap().insert("BASE-segwit".to_owned());
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            let published = node.published();
+            assert_eq!(
+                keep_alive_pairs(&published),
+                vec!["BASE:OTHER"],
+                "the shared pair is skipped"
+            );
+            assert!(announced(&published).is_empty());
+            assert!(octx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+
+            // Recovery: both orders of the pair are announced again, the other pair's order is not.
+            unready.lock().unwrap().clear();
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            node.octx().wait_trie_ops_flushed();
+            let announced_again: HashSet<Uuid> = announced(&node.published()).into_iter().collect();
+            assert_eq!(announced_again, HashSet::from([plain.uuid, alias.uuid]));
+            assert!(!octx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert_eq!(keep_alive_pairs(&node.published()), vec!["BASE:OTHER", "BASE:REL"]);
+        }
+
+        /// A timed-out taker order that becomes a maker order is judged by the paused coins under the taker-orders
+        /// lock, never by a probe: the order of a paused coin starts paused, the other is announced, and no
+        /// readiness check runs.
+        #[test]
+        fn a_timed_out_taker_order_becomes_a_maker_order_without_a_probe() {
+            let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+            node.activate(&TEST_COINS);
+            delete_my_taker_order.mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+            let checks = Arc::new(Mutex::new(0usize));
+            let counted = checks.clone();
+            TestCoin::swap_evidence_ready.mock_safe(move |_| {
+                *counted.lock().unwrap() += 1;
+                MockResult::Return(Box::pin(async { Ok(()) }))
+            });
+            let octx = node.octx();
+            octx.evidence_pause
+                .lock()
+                .note_not_ready("REL", &not_ready_text("REL", NotReadyKind::TooFewHostsAnswering));
+            let timed_out = |base: &str, rel: &str| {
+                let mut order = taker(base, rel);
+                order.request.conf_settings = Some(OrderConfirmationsSettings::default());
+                order.created_at = now_ms() - 60_000;
+                order
+            };
+            let paused = timed_out("BASE", "REL");
+            let plain = timed_out("BASE", "OTHER");
+            add_taker(&node, &paused);
+            add_taker(&node, &plain);
+
+            block_on(handle_timed_out_taker_orders(node.ctx.clone(), &octx));
+
+            assert_eq!(*checks.lock().unwrap(), 0, "no readiness check runs under the lock");
+            assert_eq!(
+                node.maker_uuids(),
+                HashSet::from([paused.request.uuid, plain.request.uuid])
+            );
+            assert!(node.taker_uuids().is_empty());
+            assert_eq!(announced(&node.published()), vec![plain.request.uuid]);
+            assert!(octx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+            assert!(!octx.evidence_pause.lock().is_pair_paused("BASE:OTHER"));
+        }
+
+        /// A taker's `buy` with a coin that is not ready is refused before the request is sent, with the text.
+        #[test]
+        fn buy_with_an_unready_coin_is_refused_with_the_text() {
+            let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+            node.activate(&TEST_COINS);
+            let _unready = mock_readiness(&["REL"]);
+            let base = MmCoinEnum::Test(TestCoin::new("BASE"));
+            let rel = MmCoinEnum::Test(TestCoin::new("REL"));
+            let input: AutoBuyInput = json::from_value(json::json!({
+                "base": "BASE", "rel": "REL", "price": "1", "volume": "1", "method": "buy"
+            }))
+            .unwrap();
+            let error = block_on(lp_auto_buy(&node.ctx, &base, &rel, input)).expect_err("refused");
+            assert!(
+                error.contains(
+                    "REL: swap evidence not available (fewer than two hosts answering); try again when the coin's \
+                     servers answer"
+                ),
+                "{error}"
+            );
+            assert_eq!(node.published().len(), 0, "no request is sent");
+            assert!(node.taker_uuids().is_empty());
+
+            let typed = TakerOrderError::SwapEvidenceNotReady("x".to_owned());
+            assert_eq!(typed.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
     /// Never announced, the check on the active coins: the periodic maintenance runs the check of order creation
     /// on the coins of an own order that is absent from the order book. An order with a wallet-only coin on either
     /// side is not announced, costs no balance read, is not cancelled, and is logged once however many passes run;
@@ -8976,6 +9234,7 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
         maker_outbox: Default::default(),
         untradable_orders: Default::default(),
         saved_floor_pending: Default::default(),
+        evidence_pause: Default::default(),
         orderbook_tickers: Default::default(),
         original_tickers: Default::default(),
     };
@@ -12237,6 +12496,69 @@ mod t60_7_maker_balance_watch_tests {
             assert_eq!(probe.count("read BASE"), 1);
             probe.log.lock().unwrap().clear();
         }
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+
+    /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): a
+    /// `setprice` with a coin whose swap evidence is not available now is accepted and saved, starts paused (not
+    /// announced, its pair's keep-alive skipped) and logs the pause line once.
+    #[test]
+    fn setprice_with_an_unready_coin_is_accepted_and_starts_paused() {
+        use coins::swap_evidence::{not_ready_text, NotReadyKind};
+
+        let dbdir = std::env::temp_dir().join(format!("kdf-setprice-unready-{}", Uuid::new_v4()));
+        let _probe = Probe::install("42");
+        TestCoin::swap_evidence_ready.mock_safe(|coin| {
+            let ticker = coin.ticker().to_owned();
+            let result = match ticker.as_str() {
+                "REL" => Err(not_ready_text(&ticker, NotReadyKind::TrustedNodeSilent)),
+                _ => Ok(()),
+            };
+            MockResult::Return(Box::pin(async move { result }))
+        });
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({
+                "coins": [{ "coin": "BASE" }, { "coin": "REL" }],
+                "dbdir": dbdir.to_str().unwrap()
+            }))
+            .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+            .into_mm_arc();
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in ["BASE", "REL"] {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+
+        for _ in 0..2 {
+            let req: SetPriceReq = json::from_value(json!({
+                "base": "BASE", "rel": "REL", "price": 1, "volume": 3, "cancel_previous": false,
+                "save_in_history": false
+            }))
+            .unwrap();
+            let order = block_on(create_maker_order(&ctx, req)).expect("accepted");
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            assert!(ordermatch_ctx.maker_orders_ctx.lock().contains_key(&order.uuid), "kept");
+            let stored = block_on(MyOrdersStorage::new(ctx.clone()).load_active_maker_orders()).unwrap();
+            assert!(stored.iter().any(|saved| saved.uuid == order.uuid), "saved");
+            assert!(ordermatch_ctx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+        }
+        let mut created = 0;
+        while let Ok(cmd) = p2p_rx.try_recv() {
+            if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                if let Ok((new_protocol::OrdermatchMessage::MakerOrderCreated(_), ..)) =
+                    decode_signed::<new_protocol::OrdermatchMessage>(&msg)
+                {
+                    created += 1;
+                }
+            }
+        }
+        assert_eq!(created, 0, "a paused order is not announced");
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert_eq!(ordermatch_ctx.evidence_pause.lock().lines(), vec![
+            "REL: swap evidence not available (the trusted node is not answering); its orders are paused".to_owned()
+        ]);
         std::fs::remove_dir_all(&dbdir).ok();
     }
 

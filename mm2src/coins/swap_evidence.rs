@@ -11,6 +11,8 @@
 //! - [`SwapEvidenceNodeNotInList`] — the one error of a `swap_evidence_node` outside the coin's node list.
 //! - [`agree`] with [`Agreement`], [`Undetermined`], [`UndeterminedReason`] — the agreement helper the families
 //!   wire into their swap reads.
+//! - [`evidence_ready`] with [`HostReadiness`], [`NotReadyKind`], [`ReadinessProbes`] — the readiness check before a
+//!   swap starts (maintainer decision of 2026-11-25/26), see the `readiness` submodule.
 //!
 //! # Invariants
 //!
@@ -20,6 +22,10 @@
 
 use crate::node_url::electrum_host_port;
 use futures::stream::{FuturesUnordered, StreamExt};
+
+mod readiness;
+pub use readiness::{evidence_ready, not_ready_text, shared_readiness_probes, HostReadiness, NotReadyKind,
+                    ReadinessProbes, NOT_READY_MARKER, READY_PROBE_TIMEOUT_SECS, READY_WINDOW_SECS};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::future::Future;

@@ -95,6 +95,8 @@ impl MmCoin for EthCoin {
         }
     }
 
+    async fn swap_evidence_ready(&self) -> Result<(), String> { self.evidence_ready().await }
+
     /// CRD R47.5.12 / R47.5.13a -- an EVM coin activated under the MetaMask
     /// signing policy is a non-swap (balance / address / `withdraw`) account: it
     /// holds no local secret, so it cannot derive a per-swap HTLC key-pair or

@@ -14,7 +14,7 @@ use mm2_err_handle::prelude::*;
 use prost::DecodeError;
 
 cfg_native! {
-    use crate::transport::slurp_req;
+    use crate::transport::{slurp_req, slurp_req_bounded};
     use http::header::{ACCEPT, CONTENT_TYPE};
 }
 
@@ -131,6 +131,21 @@ impl From<SlurpError> for PostGrpcWebErr {
     }
 }
 
+/// The gRPC-WEB POST request of `req` to `url`.
+#[cfg(not(target_arch = "wasm32"))]
+fn grpc_web_request<Req>(url: &str, req: &Req) -> Result<http::Request<Vec<u8>>, MmError<PostGrpcWebErr>>
+where
+    Req: prost::Message,
+{
+    Ok(http::Request::builder()
+        .version(http::Version::HTTP_11)
+        .method(http::Method::POST)
+        .uri(url)
+        .header(CONTENT_TYPE, "application/grpc-web")
+        .header(ACCEPT, "application/grpc-web")
+        .body(encode_body(req).mm_err(Into::into)?)?)
+}
+
 /// Send POST gRPC WEB HTTPS request and parse response
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn post_grpc_web<Req, Res>(url: &str, req: &Req) -> Result<Res, MmError<PostGrpcWebErr>>
@@ -138,15 +153,35 @@ where
     Req: prost::Message + Send + 'static,
     Res: prost::Message + Default + Send + 'static,
 {
-    let request = http::Request::builder()
-        .version(http::Version::HTTP_11)
-        .method(http::Method::POST)
-        .uri(url)
-        .header(CONTENT_TYPE, "application/grpc-web")
-        .header(ACCEPT, "application/grpc-web")
-        .body(encode_body(req).mm_err(Into::into)?)?;
+    let request = grpc_web_request(url, req)?;
 
     let response = slurp_req(request).await.mm_err(Into::into)?;
+
+    let reply = decode_body(response.2.into()).mm_err(Into::into)?;
+
+    Ok(reply)
+}
+
+/// [`post_grpc_web`] with the whole exchange bounded by `timeout_s` seconds inside the task that runs it
+/// ([`slurp_req_bounded`]): a server that accepts the connection and never answers keeps no task and no socket past
+/// the bound, whatever the caller does with the returned future.
+///
+/// # Errors
+///
+/// As [`post_grpc_web`]; at the bound a [`PostGrpcWebErr::Transport`].
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn post_grpc_web_bounded<Req, Res>(
+    url: &str,
+    req: &Req,
+    timeout_s: f64,
+) -> Result<Res, MmError<PostGrpcWebErr>>
+where
+    Req: prost::Message + Send + 'static,
+    Res: prost::Message + Default + Send + 'static,
+{
+    let request = grpc_web_request(url, req)?;
+
+    let response = slurp_req_bounded(request, timeout_s).await.mm_err(Into::into)?;
 
     let reply = decode_body(response.2.into()).mm_err(Into::into)?;
 

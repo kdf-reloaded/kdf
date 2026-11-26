@@ -3868,6 +3868,20 @@ impl MmCoin for ZCoin {
         crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Zcoin, &self.utxo_arc.swap_evidence)
     }
 
+    /// Light mode judges the lightwalletd endpoints, native mode the operator's own daemon (maintainer decision of
+    /// 2026-11-25/26 under CRD ch.51 R100).
+    async fn swap_evidence_ready(&self) -> Result<(), String> {
+        let policy = self.swap_evidence_policy();
+        if policy == crate::SwapEvidencePolicy::NotAdopted {
+            return Ok(());
+        }
+        match &self.utxo_arc.rpc_client {
+            #[cfg(not(target_arch = "wasm32"))]
+            UtxoRpcClientEnum::LightWalletD(client) => client.0.swap_evidence_ready(self.ticker(), &policy).await,
+            _ => crate::utxo::utxo_common::swap_evidence_ready(&self.utxo_arc, &policy).await,
+        }
+    }
+
     /// Reports the coin as non-tradeable while the Ironwood swap freeze is in
     /// force, which rejects it at order placement (`buy`, `sell`, `setprice` all
     /// gate on this) with a clean error instead of letting a swap start that this

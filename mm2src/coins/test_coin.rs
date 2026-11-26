@@ -326,6 +326,10 @@ impl MmCoin for TestCoin {
         }
     }
 
+    /// A test double is ready for a swap (maintainer decision of 2026-11-25/26 under CRD ch.51 R100); a test that needs
+    /// another answer mocks this.
+    async fn swap_evidence_ready(&self) -> Result<(), String> { Ok(()) }
+
     fn get_raw_transaction(&self, _req: RawTransactionRequest) -> RawTransactionFut { unimplemented!() }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut { unimplemented!() }

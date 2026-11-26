@@ -846,6 +846,10 @@ impl MmCoin for QtumCoin {
         crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Qtum, &self.utxo_arc.swap_evidence)
     }
 
+    async fn swap_evidence_ready(&self) -> Result<(), String> {
+        utxo_common::swap_evidence_ready(&self.utxo_arc, &self.swap_evidence_policy()).await
+    }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(utxo_common::get_raw_transaction(&self.utxo_arc, req).boxed().compat())
     }

@@ -2011,6 +2011,32 @@ changes no sentence above.
    `swap_evidence_single_bchd_host` with the value `true`, and the node logs one
    warning that names the platform and no host.
 
+*Status note (2026-11-26, clean side; Reloaded-original; maintainer decision of
+2026-11-25). A readiness check before a swap starts.* It changes no sentence
+above and adds no condition to R100: what R100 requires of a step is unchanged.
+The check only keeps a swap from starting whose reads could not be agreed at
+that moment.
+
+1. *Ready.* A coin is ready when its reads can be agreed now: under items 1 and
+   7, at least two distinct hosts of its list have answered a request within the
+   last 60 seconds; with a trusted node (item 2, or a coin listed with one host
+   by the status note of 2026-11-24), that node has; a coin read through the
+   operator's own daemon (item 6) is ready while the daemon answers. A host not
+   heard from within that time is asked once, with a 3-second limit and at most
+   once a minute, and only when the hosts heard from are not enough. A family
+   that has not adopted R100 is always ready.
+2. *Maker.* A maker answers a taker's request only when both coins of the pair
+   are ready; otherwise it sends nothing, so no message changes. While a coin is
+   not ready, the maker's orders with it stay saved but are not announced, and
+   they are announced again when it is ready. A new order on such a coin is
+   accepted and starts paused. One log line names each change of a coin, with
+   the ticker and the kind, and no host.
+3. *Taker.* A taker refuses `buy` and `sell` when a coin of the pair is not
+   ready, and a taker swap checks both coins again before it pays the taker fee;
+   when either is not ready, the swap ends before the fee is sent.
+4. *After the start.* A host that stops answering after the start is handled by
+   items 3 and 9 as before.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -3844,3 +3870,7 @@ reference rows alike.
   Reloaded-original; it records the maintainer's decision of 2026-11-24,
   takes no reference input and no forbidden-class input, and changes no
   sentence of the chapter.
+- *Clean-side addition of 2026-11-26 (PR #547):* the status note before §51.7
+  on a readiness check before a swap starts. Reloaded-original; it records the
+  maintainer's decision of 2026-11-25, takes no reference input and no
+  forbidden-class input, and changes no sentence of the chapter.

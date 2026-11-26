@@ -154,6 +154,10 @@ pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, Alt
 mod ordermatch_trading;
 pub use ordermatch_trading::*;
 
+#[path = "lp_ordermatch/evidence_pause.rs"] mod evidence_pause;
+pub(crate) use evidence_pause::{converted_maker_order_starts_paused, new_maker_order_starts_paused, pair_not_ready,
+                                refresh_maker_evidence_pause, taker_refusal_text, EvidencePause};
+
 pub const ORDERBOOK_PREFIX: TopicPrefix = "orbk";
 #[cfg(not(test))]
 pub const MIN_ORDER_KEEP_ALIVE_INTERVAL: u64 = 30;
@@ -457,6 +461,9 @@ pub(crate) struct OrdermatchContext {
     /// The saved maker orders restored at startup whose coins' minimum trading volume has not been applied to them
     /// yet; the check waits until both coins of the order are active (the coins are not active at the restore).
     pub(crate) saved_floor_pending: PaMutex<HashSet<Uuid>>,
+    /// The coins whose swap evidence is not available now and the pairs of the own maker orders that are paused for
+    /// them (maintainer decision of 2026-11-25/26 under CRD ch.51 R100).
+    pub(crate) evidence_pause: PaMutex<EvidencePause>,
     #[cfg(target_arch = "wasm32")]
     ordermatch_db: ConstructibleDb<OrdermatchDb>,
 }
@@ -494,6 +501,7 @@ impl Default for OrdermatchContext {
             maker_outbox: Default::default(),
             untradable_orders: Default::default(),
             saved_floor_pending: Default::default(),
+            evidence_pause: Default::default(),
             orderbook_tickers: Default::default(),
             original_tickers: Default::default(),
         }
@@ -546,6 +554,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         maker_outbox: Default::default(),
         untradable_orders: Default::default(),
         saved_floor_pending: Default::default(),
+        evidence_pause: Default::default(),
         orderbook_tickers,
         original_tickers,
         #[cfg(target_arch = "wasm32")]
@@ -584,6 +593,7 @@ impl OrdermatchContext {
                 maker_outbox: Default::default(),
                 untradable_orders: Default::default(),
                 saved_floor_pending: Default::default(),
+                evidence_pause: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
             })
@@ -615,6 +625,7 @@ impl OrdermatchContext {
                 maker_outbox: Default::default(),
                 untradable_orders: Default::default(),
                 saved_floor_pending: Default::default(),
+                evidence_pause: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
                 ordermatch_db: ConstructibleDb::new(&ctx2),

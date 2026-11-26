@@ -945,6 +945,13 @@ fn one_capable_host_refuses_with_the_text_naming_the_hosts() {
             )
         );
         assert!(!refusal.contains("://"), "the refusal holds no URL");
+        // The readiness check names the capability rule, not a short node list.
+        assert_eq!(
+            coin.swap_evidence_ready().await,
+            Err(
+                "QRC20: swap evidence not available (fewer than two hosts serve the contract-event history)".to_owned()
+            )
+        );
 
         // A running swap of such a coin waits: its reads are undetermined.
         let payment = payment_tx(&coin, me(&coin));
@@ -1354,4 +1361,46 @@ fn the_qrc20_family_has_adopted_the_rule() {
     assert!(crate::swap_evidence::family_adopted(
         crate::swap_evidence::SwapFamily::Qrc20
     ));
+}
+
+/// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under R100): only the hosts that
+/// have served the contract-event history count. With one capable host down, the token is not ready although a host
+/// that never served the history answers; with both capable hosts answering it is ready.
+#[test]
+fn readiness_counts_only_the_hosts_that_serve_the_contract_history() {
+    block_on(async {
+        let hosts = Hosts::start(3).await;
+        hosts.servers[2].set_error(GET_HISTORY, "unknown method");
+        let ctx = new_ctx();
+        let coin = token_on(&ctx, "QRC20R", &hosts.urls(), None).await;
+        wait_for("two hosts that served the event history", || {
+            coin.swap_evidence_refusal().is_none()
+        })
+        .await;
+        assert_eq!(coin.swap_evidence_ready().await, Ok(()));
+
+        hosts.b().set_behavior(StubBehavior::Down).await;
+        client_of(&coin).forget_readiness_answers();
+        let error = coin.swap_evidence_ready().await.expect_err("one capable host answers");
+        assert_eq!(
+            error,
+            "QRC20R: swap evidence not available (fewer than two hosts answering)"
+        );
+        assert!(!error.contains(".test"), "the text names no host: {error}");
+    });
+}
+
+/// A trusted server: the token is ready while it answers, and not while it does not.
+#[test]
+fn readiness_of_a_trusting_token() {
+    block_on(async {
+        let (hosts, _ctx, coin) = trusting_token().await;
+        assert_eq!(coin.swap_evidence_ready().await, Ok(()));
+        hosts.a().set_behavior(StubBehavior::Down).await;
+        client_of(&coin).forget_readiness_answers();
+        assert_eq!(
+            coin.swap_evidence_ready().await,
+            Err("QRC20: swap evidence not available (the trusted node is not answering)".to_owned())
+        );
+    });
 }

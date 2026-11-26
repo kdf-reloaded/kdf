@@ -32,6 +32,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 ### Added in KDF Reloaded
 
+- A readiness check before a swap starts (CRD ch.51 §51.6G, status note of 2026-11-26): a maker answers a taker's request only while both coins' swap reads can be agreed, and pauses the announcement of its orders with a coin that cannot; a taker refuses `buy`/`sell` and stops before the taker fee in that case. This is a Reloaded addition.
 - Top-level `MM2.json` boolean `swap_evidence_allow_single_host` (default `true`): a coin whose configured node list names exactly one host trusts that host for its swap reads, as if `swap_evidence_node` named it; `false` requires two hosts or `swap_evidence_node` (CRD ch.51 §51.6G). The activation answer of such a coin, including the legacy `enable` and `electrum` answers, carries the added member `"swap_evidence_single_host": true`, and the activation answer of a BCH platform whose `bchd_urls` name exactly one host, which its SLP tokens then trust, carries `"swap_evidence_single_bchd_host": true`; every other answer keeps its members.
 - Optional activation field `swap_evidence_node` for every coin family that can swap, with the activation error `SwapEvidenceNodeNotInList` for a value outside the coin's node list (CRD ch.51 §51.6G R100).
 - Compatibility convention and central admin chapter for GLEEC-equivalent operation; see [`docs/COMPAT_SWITCHES.md`](docs/COMPAT_SWITCHES.md) and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
