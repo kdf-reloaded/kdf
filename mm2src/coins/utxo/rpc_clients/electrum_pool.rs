@@ -728,6 +728,27 @@ pub(super) struct OpenedConnections {
 
 pub(super) type OpenedByCall = Arc<StdMutex<OpenedConnections>>;
 
+/// The connections a call opened, released when the guard is dropped ([`PoolShared::release_opened`]): the release
+/// runs however the call ends, also when a bound that wraps the call drops it before it returns, and a connection
+/// that is established after that is released at once.
+struct ReleaseOpenedOnDrop {
+    pool: Arc<PoolShared>,
+    opened: OpenedByCall,
+}
+
+impl ReleaseOpenedOnDrop {
+    fn new(pool: &Arc<PoolShared>) -> ReleaseOpenedOnDrop {
+        ReleaseOpenedOnDrop {
+            pool: pool.clone(),
+            opened: OpenedByCall::default(),
+        }
+    }
+}
+
+impl Drop for ReleaseOpenedOnDrop {
+    fn drop(&mut self) { self.pool.release_opened(&self.opened); }
+}
+
 /// The failures of a call, one per server tried (CRD ch.38 R38.6.4i), and which of those servers answered with a
 /// JSON-RPC error answer instead of failing by transport (D38.6.4Q.2 status note).
 #[derive(Default)]
@@ -3733,7 +3754,9 @@ impl PoolShared {
 
     /// One readiness probe of the server `addr`: a `server.ping` addressed to it (R38.6.4g), which opens its
     /// connection if it is closed and releases it afterwards when the server is not maintained, all within `bound`.
-    /// `true` when the server answered; an answer is recorded as the server's last answer.
+    /// `true` when the server answered; an answer is recorded as the server's last answer. The release runs also when
+    /// the probe is dropped before it returns (a shorter bound around it), and then covers a connection established
+    /// later.
     pub(super) async fn probe_server(self: &Arc<Self>, addr: &str, bound: Duration) -> bool {
         let Some(slot) = self.slot_by_addr(addr) else {
             return false;
@@ -3747,9 +3770,9 @@ impl PoolShared {
             method: "server.ping".into(),
             params: vec![],
         });
-        let opened = OpenedByCall::default();
-        let result = self.attempt_with_connect(&slot, &request, bound, &opened).await;
-        self.release_opened(&opened);
+        let opened = ReleaseOpenedOnDrop::new(self);
+        let result = self.attempt_with_connect(&slot, &request, bound, &opened.opened).await;
+        drop(opened);
         result.is_ok()
     }
 

@@ -61,6 +61,10 @@ pub enum NotReadyKind {
     TrustedNodeSilent,
     /// The operator's own daemon does not answer.
     OwnDaemonSilent,
+    /// A QRC20 token over two or more hosts: fewer than two distinct hosts have served the contract-event history.
+    TooFewContractHistoryHosts,
+    /// A QRC20 token with a trusted node: that node has not served the contract-event history.
+    TrustedNodeNoContractHistory,
 }
 
 impl NotReadyKind {
@@ -71,6 +75,8 @@ impl NotReadyKind {
             NotReadyKind::TooFewHostsAnswering => "fewer than two hosts answering",
             NotReadyKind::TrustedNodeSilent => "the trusted node is not answering",
             NotReadyKind::OwnDaemonSilent => "the own daemon is not answering",
+            NotReadyKind::TooFewContractHistoryHosts => "fewer than two hosts serve the contract-event history",
+            NotReadyKind::TrustedNodeNoContractHistory => "the trusted node does not serve the contract-event history",
         }
     }
 }
@@ -580,6 +586,8 @@ mod tests {
             NotReadyKind::TooFewHostsAnswering,
             NotReadyKind::TrustedNodeSilent,
             NotReadyKind::OwnDaemonSilent,
+            NotReadyKind::TooFewContractHistoryHosts,
+            NotReadyKind::TrustedNodeNoContractHistory,
         ] {
             let text = not_ready_text("KMD", kind);
             assert!(text.starts_with("KMD: swap evidence not available ("));

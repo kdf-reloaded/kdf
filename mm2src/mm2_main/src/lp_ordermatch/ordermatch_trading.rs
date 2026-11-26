@@ -1600,8 +1600,9 @@ pub(crate) async fn handle_timed_out_taker_orders_with(
                 continue;
             }
             // A coin whose swap evidence is not available now: the order starts paused (maintainer decision of
-            // 2026-11-25/26 under CRD ch.51 R100).
-            if new_maker_order_starts_paused(ordermatch_ctx, &maker_order, &base, &rel).await {
+            // 2026-11-25/26 under CRD ch.51 R100). Judged by the paused coins without a probe, since the taker orders
+            // stay locked here; the next keep-alive refresh judges the coins with one.
+            if converted_maker_order_starts_paused(ordermatch_ctx, &maker_order) {
                 continue;
             }
             maker_order_created_p2p_notify(

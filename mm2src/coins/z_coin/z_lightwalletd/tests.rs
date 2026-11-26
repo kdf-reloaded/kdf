@@ -2745,8 +2745,8 @@ mod r100 {
 }
 
 /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100): two
-/// endpoints on distinct hosts must answer. An endpoint that answered within the window counts with no probe; an
-/// unknown one is asked for its latest block once, and not again within the window; a trusted endpoint must answer.
+/// admitted endpoints on distinct hosts must answer. An endpoint that answered within the window counts with no probe;
+/// an unknown one is asked for its latest block once, and not again within the window; a trusted endpoint must answer.
 #[tokio::test]
 async fn swap_evidence_readiness_of_the_endpoints() {
     let transport = Arc::new(FakeTransport::default());
@@ -2757,14 +2757,17 @@ async fn swap_evidence_readiness_of_the_endpoints() {
     );
     transport.serve(a, Script {
         tip_floor: Some(100),
-        ..Script::default()
+        ..healthy(&[])
     });
-    transport.serve(b, Script::default());
-    transport.serve(c, Script::default());
+    transport.serve(b, healthy(&[]));
+    transport.serve(c, healthy(&[]));
     let backend = backend_over(&transport, &[a, b, c]);
     let two_nodes = SwapEvidencePolicy::TwoNodes {
         hosts: vec!["a".into(), "b".into()],
     };
+    // Every endpoint is admitted; the answers of the admission are forgotten, as if they were older than the window.
+    assert_eq!(backend.admitted().await.unwrap().len(), 3);
+    backend.forget_readiness_answers();
 
     // `a` answered a read just now; `b` and `c` fail their probe: one host answering is too few.
     backend.reset_suspension(a);
@@ -2799,4 +2802,49 @@ async fn swap_evidence_readiness_of_the_endpoints() {
     );
     let trusted_a = SwapEvidencePolicy::Trusted { node: a.to_owned() };
     assert_eq!(backend.swap_evidence_ready("ARRRRDY", &trusted_a).await, Ok(()));
+}
+
+/// The readiness check judges the admitted endpoints only, the ones the swap reads ask: an endpoint excluded by
+/// admission (here one on a stale branch) never counts as answering, although it answered the admission and would
+/// answer its latest block, and an excluded trusted endpoint is not ready.
+#[tokio::test]
+async fn swap_evidence_readiness_ignores_an_excluded_endpoint() {
+    struct Bound;
+    impl WalletBranchStore for Bound {
+        fn state(&self) -> Result<WalletBranchState, String> { Ok(scanned_wallet(IRONWOOD_BRANCH)) }
+
+        fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+    }
+
+    let transport = Arc::new(FakeTransport::default());
+    let (fork, a) = ("https://rdy-lwd-fork.example:9067", "https://rdy-lwd-ok.example:9067");
+    transport.serve(fork, Script {
+        tip_floor: Some(ARRR_TIP + 5_000),
+        ..stale_fork()
+    });
+    transport.serve(a, Script {
+        tip_floor: Some(ARRR_TIP),
+        ..healthy(&[])
+    });
+    let backend = backend_over(&transport, &[fork, a]);
+    backend.bind_wallet(Arc::new(Bound));
+    let two_nodes = SwapEvidencePolicy::TwoNodes {
+        hosts: vec!["a".into(), "b".into()],
+    };
+
+    assert_eq!(
+        backend.swap_evidence_ready("ARRRXCL", &two_nodes).await,
+        Err("ARRRXCL: swap evidence not available (fewer than two hosts answering)".to_owned())
+    );
+    assert_eq!(backend.excluded_endpoints().len(), 1, "the stale endpoint is excluded");
+    assert_eq!(transport.called(fork, "tip"), 0, "an excluded endpoint is not probed");
+
+    let trusted_fork = SwapEvidencePolicy::Trusted { node: fork.to_owned() };
+    assert_eq!(
+        backend.swap_evidence_ready("ARRRXCL", &trusted_fork).await,
+        Err("ARRRXCL: swap evidence not available (the trusted node is not answering)".to_owned())
+    );
+    assert_eq!(transport.called(fork, "tip"), 0);
+    let trusted_a = SwapEvidencePolicy::Trusted { node: a.to_owned() };
+    assert_eq!(backend.swap_evidence_ready("ARRRXCL", &trusted_a).await, Ok(()));
 }

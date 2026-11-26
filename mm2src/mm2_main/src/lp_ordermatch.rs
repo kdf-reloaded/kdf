@@ -155,8 +155,8 @@ mod ordermatch_trading;
 pub use ordermatch_trading::*;
 
 #[path = "lp_ordermatch/evidence_pause.rs"] mod evidence_pause;
-pub(crate) use evidence_pause::{new_maker_order_starts_paused, pair_not_ready, refresh_maker_evidence_pause,
-                                taker_refusal_text, EvidencePause};
+pub(crate) use evidence_pause::{converted_maker_order_starts_paused, new_maker_order_starts_paused, pair_not_ready,
+                                refresh_maker_evidence_pause, taker_refusal_text, EvidencePause};
 
 pub const ORDERBOOK_PREFIX: TopicPrefix = "orbk";
 #[cfg(not(test))]

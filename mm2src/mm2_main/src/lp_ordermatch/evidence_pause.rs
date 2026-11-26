@@ -114,7 +114,8 @@ async fn judge(ordermatch_ctx: &OrdermatchContext, coin: &MmCoinEnum) -> (Result
     (readiness, change)
 }
 
-/// Judges the coins of a new maker order (`setprice`, or a taker order that becomes a maker order): `true` when the
+/// Judges the coins of a new maker order (`setprice`; a taker order that becomes a maker order is judged by
+/// [`converted_maker_order_starts_paused`]): `true` when the
 /// order starts paused, which records the paused coin (with its INFO line at a change) and the order's pair. A coin
 /// that is ready is left to the keep-alive loop, which re-announces the other orders of a coin that recovered.
 pub(crate) async fn new_maker_order_starts_paused(
@@ -141,10 +142,27 @@ pub(crate) async fn new_maker_order_starts_paused(
     paused
 }
 
+/// Judges, without asking any node, whether the maker order a timed-out taker order becomes starts paused: `true`
+/// when one of its coins is paused now, which records the order's pair. It runs while the taker orders are locked, so
+/// it never waits on a probe; a coin that is not ready but not paused yet is judged by the next keep-alive refresh,
+/// which pauses the order's pair then, and a request for the order meanwhile is still declined by [`pair_not_ready`].
+pub(crate) fn converted_maker_order_starts_paused(ordermatch_ctx: &OrdermatchContext, order: &MakerOrder) -> bool {
+    let mut pause = ordermatch_ctx.evidence_pause.lock();
+    if !pause.is_paused(&order.base) && !pause.is_paused(&order.rel) {
+        return false;
+    }
+    pause.pause_pair(alb_ordered_pair(
+        order.base_orderbook_ticker(),
+        order.rel_orderbook_ticker(),
+    ));
+    true
+}
+
 /// The step of the keep-alive loop before the keep-alives (maintainer decision of 2026-11-25/26): judges every coin
 /// of the own maker orders (a check that, in the healthy case, sends nothing), logs one INFO line per change, sets the
 /// order-book pairs whose keep-alives are skipped, and announces again in full the orders of a coin that is ready
-/// again whose other coin is not paused. Orders whose coins are not active are left alone.
+/// again and every order of a pair that is no longer paused, unless the order's pair is still paused. Orders whose
+/// coins are not active are left alone.
 pub(crate) async fn refresh_maker_evidence_pause(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext) {
     // What each order needs, copied under its lock, which is released at once.
     let orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
@@ -176,14 +194,24 @@ pub(crate) async fn refresh_maker_evidence_pause(ctx: &MmArc, ordermatch_ctx: &O
         coins.insert(ticker, coin);
     }
 
+    // An order is announced again when one of its coins resumed, and every order of a pair whose keep-alives were
+    // skipped and no longer are: the pair is shared by the orders of every ticker with the same order-book ticker (a
+    // coin and its alias), so an order whose own coins never paused lost its keep-alives too.
     let mut to_announce = Vec::new();
     {
         let mut pause = ordermatch_ctx.evidence_pause.lock();
         let mut paused_pairs = HashSet::new();
-        for (uuid, order_mutex, base, rel, alb_pair) in shapes.iter() {
+        for (_, _, base, rel, alb_pair) in shapes.iter() {
             if pause.is_paused(base) || pause.is_paused(rel) {
                 paused_pairs.insert(alb_pair.clone());
-            } else if resumed.contains(base) || resumed.contains(rel) {
+            }
+        }
+        let left: HashSet<AlbOrderedOrderbookPair> = pause.paused_pairs.difference(&paused_pairs).cloned().collect();
+        for (uuid, order_mutex, base, rel, alb_pair) in shapes.iter() {
+            if paused_pairs.contains(alb_pair) {
+                continue;
+            }
+            if resumed.contains(base) || resumed.contains(rel) || left.contains(alb_pair) {
                 to_announce.push((*uuid, order_mutex.clone(), base.clone(), rel.clone()));
             }
         }

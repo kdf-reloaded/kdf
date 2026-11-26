@@ -78,6 +78,17 @@ pub fn provider_with_own_node_order(provider: &KdfProvider) -> Option<KdfProvide
     Some(provider_from_transport(transport.with_own_order()))
 }
 
+/// A provider over the same nodes as `provider` whose every exchange is bounded by `cutoff_s` (see
+/// [`AlloyTransport::with_cutoff`]). `None` when the provider is not backed by an [`AlloyTransport`].
+pub(crate) fn provider_with_cutoff(provider: &KdfProvider, cutoff_s: f64) -> Option<KdfProvider> {
+    let transport = provider
+        .client()
+        .transport()
+        .as_any()
+        .downcast_ref::<AlloyTransport>()?;
+    Some(provider_from_transport(transport.with_cutoff(cutoff_s)))
+}
+
 /// A log line that names the node of a provider that talks to one node on its own, in the form of CRD ch.35
 /// R35.1.16: `[<ticker>] <before><host> (node <i> of <n>)<after>`. `None` when the provider is not backed by an
 /// [`AlloyTransport`] or has no node.

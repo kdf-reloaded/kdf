@@ -2040,10 +2040,12 @@ impl LightwalletdBackend {
     }
 
     /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of the
-    /// coin `ticker` under its effective `policy`, over the configured endpoints. An endpoint counts as answering
-    /// when it answered within [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise, and only while the answering
-    /// hosts are not enough, it is asked for its latest block, bounded by
-    /// [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per window per host.
+    /// coin `ticker` under its effective `policy`, over the admitted endpoints only, the ones the swap reads ask
+    /// ([`LightwalletdBackend::admitted`]): an excluded endpoint never counts, a trusted one included, and when no
+    /// endpoint is admitted none answers. An endpoint counts as answering when it answered within
+    /// [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise, and only while the answering hosts are not enough, it
+    /// is asked for its latest block, bounded by [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per
+    /// window per host.
     ///
     /// # Errors
     ///
@@ -2051,12 +2053,18 @@ impl LightwalletdBackend {
     pub(crate) async fn swap_evidence_ready(&self, ticker: &str, policy: &SwapEvidencePolicy) -> Result<(), String> {
         use crate::swap_evidence::{evidence_ready, shared_readiness_probes, HostReadiness, READY_WINDOW_SECS};
 
+        let admitted = match policy {
+            // Decided without any endpoint.
+            SwapEvidencePolicy::NotAdopted | SwapEvidencePolicy::Insufficient { .. } => Vec::new(),
+            // A failed admission admits no endpoint: then no endpoint answers for the check.
+            _ => self.admitted().await.unwrap_or_default(),
+        };
         let now = common::now_float();
         let scope = format!("zhtlc:{ticker}");
         evidence_ready(
             ticker,
             policy,
-            &self.servers,
+            &admitted,
             |server| node_name(server),
             |server| match self.last_answers.lock().get(server) {
                 Some(at) if now - at < READY_WINDOW_SECS => HostReadiness::Answering,
@@ -2075,6 +2083,10 @@ impl LightwalletdBackend {
         )
         .await
     }
+
+    /// Forgets every endpoint's last answer, as if none had answered within the readiness window.
+    #[cfg(test)]
+    pub(crate) fn forget_readiness_answers(&self) { self.last_answers.lock().clear(); }
 
     /// `endpoints` with the suspended ones moved behind the others: the unsuspended ones first, in configured
     /// order, then the suspended ones, in configured order (R39.11.31(c), (d)).

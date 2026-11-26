@@ -162,6 +162,7 @@ impl SlpToken {
             slp_amount: slp_satoshis,
         };
         validate_slp_utxos_under(
+            self.platform_coin.ticker(),
             &self.swap_evidence_policy(),
             self.platform_coin.bchd_urls(),
             self.platform_coin.allow_single_host(),

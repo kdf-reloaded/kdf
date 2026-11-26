@@ -863,7 +863,9 @@ impl ElectrumClient {
     /// as answering when the pool saw it answer within the window or it keeps a maintained connection that answers
     /// its pings; otherwise, and only while the answering hosts are not enough, it gets one directed `server.ping`
     /// bounded by [`READY_PROBE_TIMEOUT_SECS`], at most once per window per host. With `contract_history` only the
-    /// servers that have served the contract-event history count (a QRC20 token).
+    /// servers that have served the contract-event history count (a QRC20 token). The probe carries that bound itself
+    /// and the shared check bounds it again by the same figure; whichever ends it first, the connection the probe
+    /// opened is released.
     ///
     /// # Errors
     ///

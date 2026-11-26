@@ -24,6 +24,7 @@ impl MmCoin for SlpToken {
         utxo_common::swap_evidence_ready_as(ticker, self.platform_coin.as_ref(), &policy).await?;
         crate::utxo::bchd_grpc::bchd_ready(
             ticker,
+            self.platform_coin.ticker(),
             &policy,
             self.platform_coin.bchd_urls(),
             self.platform_coin.allow_single_host(),

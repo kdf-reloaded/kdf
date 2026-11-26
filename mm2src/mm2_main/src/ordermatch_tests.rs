@@ -8539,6 +8539,100 @@ mod tendermint_saved_orders {
             }
         }
 
+        /// Two tickers sharing one order-book ticker (a coin and its alias) share the order-book pair: pausing one
+        /// skips the keep-alives of the orders of both, and on recovery both orders are announced again in full,
+        /// the one whose own coins never paused included.
+        #[test]
+        fn orders_sharing_a_paused_pair_through_an_alias_are_all_announced_again() {
+            let mut node = Restart::new(json::json!([
+                { "coin": "BASE" }, { "coin": "REL" }, { "coin": "OTHER" },
+                { "coin": "BASE-segwit", "orderbook_ticker": "BASE" }
+            ]));
+            node.activate(&["BASE", "REL", "OTHER", "BASE-segwit"]);
+            let unready = mock_readiness(&[]);
+            let plain = announceable("BASE", "REL");
+            let alias = MakerOrder {
+                base_orderbook_ticker: Some("BASE".to_owned()),
+                ..announceable("BASE-segwit", "REL")
+            };
+            let other = announceable("BASE", "OTHER");
+            for order in [&plain, &alias, &other] {
+                add_maker(&node, order);
+                maker_order_created_p2p_notify(node.ctx.clone(), order, vec![], vec![]);
+            }
+            node.octx().wait_trie_ops_flushed();
+            node.published();
+            let octx = node.octx();
+            let pubkey = pubkey(&node);
+
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert_eq!(keep_alive_pairs(&node.published()), vec!["BASE:OTHER", "BASE:REL"]);
+
+            // The alias is not ready: the pair it shares with the plain order is skipped for both orders.
+            unready.lock().unwrap().insert("BASE-segwit".to_owned());
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            let published = node.published();
+            assert_eq!(
+                keep_alive_pairs(&published),
+                vec!["BASE:OTHER"],
+                "the shared pair is skipped"
+            );
+            assert!(announced(&published).is_empty());
+            assert!(octx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+
+            // Recovery: both orders of the pair are announced again, the other pair's order is not.
+            unready.lock().unwrap().clear();
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            node.octx().wait_trie_ops_flushed();
+            let announced_again: HashSet<Uuid> = announced(&node.published()).into_iter().collect();
+            assert_eq!(announced_again, HashSet::from([plain.uuid, alias.uuid]));
+            assert!(!octx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert_eq!(keep_alive_pairs(&node.published()), vec!["BASE:OTHER", "BASE:REL"]);
+        }
+
+        /// A timed-out taker order that becomes a maker order is judged by the paused coins under the taker-orders
+        /// lock, never by a probe: the order of a paused coin starts paused, the other is announced, and no
+        /// readiness check runs.
+        #[test]
+        fn a_timed_out_taker_order_becomes_a_maker_order_without_a_probe() {
+            let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+            node.activate(&TEST_COINS);
+            delete_my_taker_order.mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+            let checks = Arc::new(Mutex::new(0usize));
+            let counted = checks.clone();
+            TestCoin::swap_evidence_ready.mock_safe(move |_| {
+                *counted.lock().unwrap() += 1;
+                MockResult::Return(Box::pin(async { Ok(()) }))
+            });
+            let octx = node.octx();
+            octx.evidence_pause
+                .lock()
+                .note_not_ready("REL", &not_ready_text("REL", NotReadyKind::TooFewHostsAnswering));
+            let timed_out = |base: &str, rel: &str| {
+                let mut order = taker(base, rel);
+                order.request.conf_settings = Some(OrderConfirmationsSettings::default());
+                order.created_at = now_ms() - 60_000;
+                order
+            };
+            let paused = timed_out("BASE", "REL");
+            let plain = timed_out("BASE", "OTHER");
+            add_taker(&node, &paused);
+            add_taker(&node, &plain);
+
+            block_on(handle_timed_out_taker_orders(node.ctx.clone(), &octx));
+
+            assert_eq!(*checks.lock().unwrap(), 0, "no readiness check runs under the lock");
+            assert_eq!(
+                node.maker_uuids(),
+                HashSet::from([paused.request.uuid, plain.request.uuid])
+            );
+            assert!(node.taker_uuids().is_empty());
+            assert_eq!(announced(&node.published()), vec![plain.request.uuid]);
+            assert!(octx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+            assert!(!octx.evidence_pause.lock().is_pair_paused("BASE:OTHER"));
+        }
+
         /// A taker's `buy` with a coin that is not ready is refused before the request is sent, with the text.
         #[test]
         fn buy_with_an_unready_coin_is_refused_with_the_text() {

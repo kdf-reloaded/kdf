@@ -945,6 +945,13 @@ fn one_capable_host_refuses_with_the_text_naming_the_hosts() {
             )
         );
         assert!(!refusal.contains("://"), "the refusal holds no URL");
+        // The readiness check names the capability rule, not a short node list.
+        assert_eq!(
+            coin.swap_evidence_ready().await,
+            Err(
+                "QRC20: swap evidence not available (fewer than two hosts serve the contract-event history)".to_owned()
+            )
+        );
 
         // A running swap of such a coin waits: its reads are undetermined.
         let payment = payment_tx(&coin, me(&coin));

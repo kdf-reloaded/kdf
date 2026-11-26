@@ -205,6 +205,25 @@ impl AlloyTransport {
         }
     }
 
+    /// A transport over the same nodes, from this transport's current order, whose every exchange is bounded by
+    /// `cutoff_s` instead (a short probe of a node that must not wait for the lower-layer bound); the exchange of a
+    /// transport with one node ends at that cutoff, spawned work included.
+    pub(crate) fn with_cutoff(&self, cutoff_s: f64) -> Self {
+        let nodes = self.inner.nodes.clone();
+        let order = Mutex::new(self.inner.current_order());
+        let exchange_bound_s = exchange_bound(cutoff_s, nodes.len());
+        Self {
+            inner: Arc::new(Inner {
+                nodes,
+                order,
+                event_handlers: self.inner.event_handlers.clone(),
+                sender: self.inner.sender.clone(),
+                cutoff_s,
+                exchange_bound_s,
+            }),
+        }
+    }
+
     /// `[<ticker>] <before><host> (node <i> of <n>)<after>` for the first node of this transport; the line of a
     /// provider that talks to one node on its own (CRD ch.35 R35.1.12, R35.1.16). `None` for a transport without
     /// nodes.

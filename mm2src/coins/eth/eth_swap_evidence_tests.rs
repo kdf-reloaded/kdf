@@ -1157,3 +1157,20 @@ fn readiness_of_a_trusted_node() {
     set_down(&fx, UA, true);
     assert_eq!(block_on(fx.coin.swap_evidence_ready()), Ok(()));
 }
+
+/// The readiness probe bounds its own exchange by the probe bound of 3 s, not by the 30 s of the node's direct
+/// provider, so a node that accepts and never answers keeps nothing running past the probe.
+#[test]
+fn the_readiness_probe_bounds_its_own_exchange() {
+    const PA: &str = "http://rdy-pa.example:8545";
+    let (web3, sender) = stub_provider(&[PA], 30., |call| {
+        Reply::Body(result_body(&call.request, &json!("0x64").to_string()))
+    });
+    let instance = Web3Instance {
+        url: PA.to_owned(),
+        web3,
+        is_parity: false,
+    };
+    assert!(block_on(instance.readiness_probe()));
+    assert_eq!(sender.bounds(), vec![crate::swap_evidence::READY_PROBE_TIMEOUT_SECS]);
+}
