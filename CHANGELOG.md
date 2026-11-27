@@ -1026,7 +1026,7 @@ the previous version used. The safe way:
   call whose time limit has not passed asks its nodes at least once, and ends as "timed out" only after a read that
   was determined. A coin with no agreed-reads policy keeps its one node, and a read that failed is an error and not
   "timed out". A spend of the taker payment that does not spend it at its first input is reported as undetermined.
-  - Detail: PR #N; CRD ch.52 R18 status note of 2026-11-27, ch.51 §51.6G R100.
+  - Detail: PR #549; CRD ch.52 R18 status note of 2026-11-27, ch.51 §51.6G R100.
 
 #### Legacy swaps and orders
 
