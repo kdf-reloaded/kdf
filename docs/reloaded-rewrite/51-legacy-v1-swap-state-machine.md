@@ -1317,12 +1317,17 @@ rule.
 >    taker payment is found, when the funding is already refunded, when the
 >    refund gate asks to wait (with the seconds), when a read gives no answer
 >    the refund may rest on (naming the read, the coin and, for a read
->    undetermined under R100, the fix), or when the saved events lack what a
->    read needs;
+>    undetermined under R100, the fix), when the saved events lack what a
+>    read needs, or when the look finds the taker payment already spent
+>    and no maker secret in the spend (the answer says so);
 > 5. for every other ending of a version-two swap, the error that the swap is
 >    not recoverable.
 >
-> A recovery records no event with the swap. The answers for a legacy swap are
+> The recovery of one version-two swap runs once at a time: a second call
+> for the same swap while one is running gets an error answer at once. The
+> maker's recovery does not look for its own earlier refund; a repeated call
+> after a refund is refused by the chain. A recovery records no event with
+> the swap. The answers for a legacy swap are
 > unchanged.
 
 ## 51.6E Reference Behavior of the Coin Families: Spend Search, Secret Extraction, Refund Eligibility

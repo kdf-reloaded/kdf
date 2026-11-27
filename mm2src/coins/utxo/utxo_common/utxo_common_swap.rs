@@ -3261,6 +3261,10 @@ where
 /// §15.5.14 — Poll the chain from `from_block` for any transaction spending
 /// the taker-payment output. Polls every 10 seconds until `wait_until`
 /// (unix seconds); returns the spending tx or `FindPaymentSpendError::Timeout`.
+///
+/// "Timed out" is answered only when the last read of the call was answered, with no spend found. A read that
+/// failed ends the call at once with an undetermined error (see [`crate::swap_evidence::undetermined`]); it is
+/// never repeated into "timed out". The text of the node error goes to the debug log only.
 pub async fn find_taker_payment_spend_tx<T>(
     coin: &T,
     taker_payment: &UtxoTx,
@@ -3278,33 +3282,72 @@ where
     let tx_hash = taker_payment.hash();
     let script_pubkey = output.script_pubkey.clone();
     let from_block_i64 = from_block as i64;
+    let tx_hash_algo = coin.as_ref().tx_hash_algo;
 
-    loop {
-        let now = now_ms() / 1000;
-        if now > wait_until {
-            return MmError::err(FindPaymentSpendError::Timeout { wait_until, now });
-        }
-        match coin
-            .as_ref()
-            .rpc_client
-            .find_output_spend(
-                tx_hash,
-                &script_pubkey,
-                DEFAULT_SWAP_VOUT,
-                BlockHashOrHeight::Height(from_block_i64),
-            )
-            .compat()
-            .await
-        {
-            Ok(Some(spent)) => {
+    poll_for_spend(
+        wait_until,
+        10.,
+        || now_ms() / 1000,
+        || async {
+            let spent = coin
+                .as_ref()
+                .rpc_client
+                .find_output_spend(
+                    tx_hash,
+                    &script_pubkey,
+                    DEFAULT_SWAP_VOUT,
+                    BlockHashOrHeight::Height(from_block_i64),
+                )
+                .compat()
+                .await?;
+            Ok(spent.map(|spent| {
                 let mut spend_tx = spent.spending_tx;
-                spend_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
-                return Ok(spend_tx);
-            },
-            Ok(None) => {},
-            Err(e) => warn!("find_output_spend error: {}; retrying", e),
+                spend_tx.tx_hash_algo = tx_hash_algo;
+                spend_tx
+            }))
+        },
+    )
+    .await
+}
+
+/// The fixed reason of a spend search whose read failed.
+const SPEND_READ_FAILED: &str = "the read for the spend of the payment failed";
+
+/// The polling of [`find_taker_payment_spend_tx`]: `read` answers `Ok(None)` when it asked its nodes and found
+/// no spend. `now` is the clock in seconds.
+async fn poll_for_spend<F, Fut>(
+    wait_until: u64,
+    poll_secs: f64,
+    now: impl Fn() -> u64,
+    mut read: F,
+) -> MmResult<UtxoTx, FindPaymentSpendError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<UtxoTx>, String>>,
+{
+    loop {
+        let now_secs = now();
+        if now_secs > wait_until {
+            return MmError::err(FindPaymentSpendError::Timeout {
+                wait_until,
+                now: now_secs,
+            });
         }
-        Timer::sleep(10.).await;
+        match read().await {
+            Ok(Some(spend_tx)) => return Ok(spend_tx),
+            Ok(None) => {},
+            Err(e) => {
+                debug!("find_output_spend error: {}", e);
+                // An error that is already undetermined keeps its text; any other gets the fixed text.
+                let text = if crate::swap_evidence::is_undetermined(&e) {
+                    e
+                } else {
+                    crate::swap_evidence::undetermined(SPEND_READ_FAILED, &[])
+                };
+                return MmError::err(FindPaymentSpendError::Transport(text));
+            },
+        }
+        Timer::sleep(poll_secs).await;
     }
 }
 
@@ -3413,6 +3456,77 @@ mod refund_wait_tests {
             "ticker and kind are expected"
         );
         assert!(!text.contains("srv.example"), "no server name may be in the line");
+    }
+
+    fn empty_tx() -> UtxoTx { UtxoTx::default() }
+
+    #[test]
+    fn spend_search_with_every_read_failing_is_an_error_and_not_a_timeout() {
+        let reads = std::cell::Cell::new(0u32);
+        let err = common::block_on(poll_for_spend(
+            u64::MAX,
+            0.01,
+            || 100,
+            || {
+                reads.set(reads.get() + 1);
+                async { Err("node secret-host.example refused".to_owned()) }
+            },
+        ))
+        .unwrap_err();
+        match err.get_inner() {
+            FindPaymentSpendError::Transport(text) => {
+                assert!(crate::swap_evidence::is_undetermined(text));
+                assert!(
+                    !text.contains("secret-host.example"),
+                    "no node text may be in the error"
+                );
+            },
+            _ => panic!("a failed read is expected to be a transport error"),
+        }
+        assert_eq!(reads.get(), 1, "a failed read ends the call at once");
+    }
+
+    #[test]
+    fn spend_search_keeps_the_undetermined_text_of_a_read() {
+        let text = crate::swap_evidence::undetermined("the nodes disagree", &[]);
+        let err = common::block_on(poll_for_spend(
+            u64::MAX,
+            0.01,
+            || 100,
+            || {
+                let text = text.clone();
+                async move { Err(text) }
+            },
+        ))
+        .unwrap_err();
+        assert!(matches!(err.get_inner(), FindPaymentSpendError::Transport(t) if t == &text));
+    }
+
+    #[test]
+    fn spend_search_with_determined_nothing_found_times_out() {
+        let clock = std::cell::Cell::new(100u64);
+        let err = common::block_on(poll_for_spend(
+            102,
+            0.01,
+            || {
+                clock.set(clock.get() + 1);
+                clock.get()
+            },
+            || async { Ok(None) },
+        ))
+        .unwrap_err();
+        assert!(matches!(err.get_inner(), FindPaymentSpendError::Timeout { .. }));
+    }
+
+    #[test]
+    fn spend_search_returns_a_found_spend() {
+        let spend = common::block_on(poll_for_spend(
+            u64::MAX,
+            0.01,
+            || 100,
+            || async { Ok(Some(empty_tx())) },
+        ));
+        assert!(spend.is_ok());
     }
 
     const NOW: u64 = 1_700_000_000;

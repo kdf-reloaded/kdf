@@ -2580,11 +2580,8 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> MakerPaymen
                     .await
                 {
                     Ok(spend) => {
-                        let own_claim = matches!(
-                            sm.taker_coin.extract_secret_v2(&sm.secret_hash(), &spend).await,
-                            Ok(secret) if secret.as_slice() == sm.secret.as_slice()
-                        );
-                        Ok(Some((own_claim, BytesJson::from(spend.tx_hex()))))
+                        let extracted = sm.taker_coin.extract_secret_v2(&sm.secret_hash(), &spend).await;
+                        maker_look_found(extracted, sm.secret.as_slice(), BytesJson::from(spend.tx_hex()))
                     },
                     Err(e) => spend_search_error(&e),
                 };

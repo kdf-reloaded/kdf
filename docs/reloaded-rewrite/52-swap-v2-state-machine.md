@@ -489,10 +489,12 @@ to `MakerPaymentRefundRequired`.
 > 2026-11-23 and 2026-11-26).* In `TakerPaymentSpent` the wait for the
 > confirmation of the maker's own claim tells a claim that is not
 > confirmed yet from a claim that was mined but failed. A claim that was
-> mined but failed is sent again: the same spend of the taker payment,
-> built and broadcast anew, before the bound of the note of 2026-11-23
-> above; the wait then reads the claim sent again. A claim that is not
-> confirmed yet is only read again. Neither leads to a refund. The coin
+> mined but failed is sent again, a limited number of times: the same
+> spend of the taker payment, built and broadcast anew, before the bound
+> of the note of 2026-11-23 above; the wait then reads the claim sent
+> again, and after the last resend it only reads until the bound. A claim
+> that is not confirmed yet is only read again. Neither leads to a
+> refund. The coin
 > tells a claim that was mined but failed by one fixed marker in the
 > error text of its confirmation read; only a coin whose mined
 > transactions can fail gives it, and a UTXO coin never does. The claim
@@ -562,7 +564,12 @@ this path reaches it with the maker payment on chain and unrefunded.
 > 2. a spend without that secret (the taker's refund), or a search that
 >    asked the nodes and found no spend, lets the refund go on;
 > 3. a search that fails or is undetermined under chapter 51 §51.6G R100
->    builds no refund; the state reads again after thirty seconds.
+>    builds no refund; the state reads again after thirty seconds. A
+>    spend from which no secret can be extracted builds no refund either.
+>
+> The "no spend found" of item 2 rests on coin searches that answer
+> "timed out" only after a read that was determined; a read that failed
+> is an error and is never "timed out".
 >
 > A swap that did not reach the claim makes no search. The taker payment
 > and whether the claim was reached are read from the swap's saved
@@ -886,7 +893,10 @@ is the whole purpose of the two-stage taker flow.
 >    is added. A search that asked the nodes and found no spend is a
 >    determined "not spent", and the refund is built. A search that
 >    fails or is undetermined, and a spend whose secret does not match,
->    build no refund; the state reads again after thirty seconds.
+>    build no refund; the state reads again after thirty seconds. The
+>    "not spent" rests on coin searches that answer "timed out" only
+>    after a read that was determined; a read that failed is an error
+>    and is never "timed out".
 > 2. *`TakerFundingRefundRequired`.* Each attempt first searches for
 >    the spend of the funding. Only a determined "not spent" lets the
 >    refund be built. Before the taker funding locktime the refund is
@@ -914,7 +924,11 @@ is the whole purpose of the two-stage taker flow.
 >    refund failure (`TakerPaymentRefundFailed` or
 >    `TakerFundingRefundFailed`), whose text names the read, the coin
 >    and what is not refunded, says when the saved events lack what the
->    read needs, and carries no error text of a node read.
+>    read needs, and carries no error text of a node read. A refund gate
+>    that fails with a plain error, not an undetermined read, is read
+>    again without a bound, which is safe because nothing is built. The
+>    bound starts at the first unanswered read at or after the locktime,
+>    which is the later, and so the safe, side.
 >
 > No state, event field or discriminant is added. No sentence of R34 or
 > R35 is changed.

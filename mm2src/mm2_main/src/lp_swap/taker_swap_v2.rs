@@ -2846,6 +2846,9 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                     return Self::change_state(Aborted::new(reason), sm).await;
                 },
                 TakerRefundAttempt::Unanswered(read, text) => (read, text, false),
+                TakerRefundAttempt::SpentWithoutSecret => {
+                    (CappedRead::TakerRefundLook, SPEND_NOT_ACTED_ON.to_owned(), false)
+                },
                 TakerRefundAttempt::HistoryLacksInputs => {
                     (CappedRead::TakerRefundLook, HISTORY_LACKS_INPUTS.to_owned(), true)
                 },
@@ -3016,11 +3019,19 @@ where
                 recovery_unanswered_text(&ticker, read.read_kind(), &e, "taker payment")
             )
         },
+        TakerRefundAttempt::SpentWithoutSecret => ERR!("{}", taker_payment_already_refunded_text(&ticker)),
         TakerRefundAttempt::HistoryLacksInputs => {
             ERR!("{}", history_lacks_inputs_reason(CappedRead::TakerRefundLook, &ticker))
         },
         TakerRefundAttempt::RefundFailed(reason) => ERR!("{}", reason),
     }
+}
+
+/// The answer of the recovery when the taker payment on `ticker` is already refunded on chain; nothing is built.
+fn taker_payment_already_refunded_text(ticker: &str) -> String {
+    format!(
+        "The taker payment on {ticker} is already spent and no maker secret was found in the spend; nothing is built"
+    )
 }
 
 /// Sends the taker's claim of the maker payment again, after the coin reported the claim mined but failed. The
@@ -3160,6 +3171,9 @@ pub(super) enum TakerRefundAttempt<Tx> {
     GateFailed(String),
     /// A read the refund rests on gave no answer the step may act on (the text is for the log only).
     Unanswered(CappedRead, String),
+    /// The taker payment is spent and no maker secret was found in the spend: the step builds nothing. The
+    /// state treats it as an unanswered look.
+    SpentWithoutSecret,
     /// The look cannot run, because the saved events do not hold the maker payment or the start blocks.
     HistoryLacksInputs,
     /// The refund could not be built or broadcast.
@@ -3217,6 +3231,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TakerPaymen
             },
             Err(e) => spend_search_error(&e),
         };
+        let spent_without_secret = matches!(found, Ok(Some((false, _))));
         match judge_look(found, false) {
             Look::RefundGoesOn => (),
             Look::Claimed(taker_payment_spend) => {
@@ -3225,6 +3240,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TakerPaymen
                     taker_payment_spend,
                 }
             },
+            Look::Unanswered(_) if spent_without_secret => return TakerRefundAttempt::SpentWithoutSecret,
             Look::Unanswered(text) => return TakerRefundAttempt::Unanswered(CappedRead::TakerRefundLook, text),
         }
 
@@ -3429,5 +3445,20 @@ mod tests {
         assert_eq!(source.matches(".find_taker_payment_spend_tx(").count(), 2);
         assert_eq!(source.matches(".can_refund_htlc(").count(), 2);
         assert_eq!(source.matches("await_taker_payment_spend(sm,").count(), 2);
+    }
+
+    /// A taker payment found spent without a maker secret is answered as already spent by the recovery, which
+    /// builds nothing; the refund state keeps it as an unanswered look.
+    #[test]
+    fn a_spend_without_the_secret_is_answered_as_refunded_and_builds_nothing() {
+        let text = taker_payment_already_refunded_text("BTC");
+        assert!(
+            text.contains("BTC") && text.contains("already spent") && !text.contains("refunded"),
+            "{text}"
+        );
+        let whole_file = include_str!("taker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source = &whole_file[..mod_tests_pos];
+        assert_eq!(source.matches("TakerRefundAttempt::SpentWithoutSecret").count(), 3);
     }
 }

@@ -136,6 +136,9 @@ pub(super) const CONFIRMATION_POLL_SECS: u64 = 10;
 /// first could act (CRD ch.51 §51.6G R100 item 9).
 pub(super) const OWN_CLAIM_CONFIRMATION_WAIT_SECS: u64 = 3700;
 
+/// How many times one wait for the confirmation of the node's own claim sends the claim again.
+pub(super) const MAX_CLAIM_RESENDS: u32 = 3;
+
 /// Until when the confirmation of the node's own claim is read (CRD ch.52 R19, R33; ch.51 §51.6G R100
 /// item 9): the later of `lock_time` plus 3700 seconds and 3700 seconds after `entered_at`, the moment the
 /// state was entered in its current run. `entered_at` is not stored, so a restart starts a new wait.
@@ -168,7 +171,9 @@ pub(super) fn log_own_claim_line(level: Level, line: String) { common::log::log_
 /// `sent` is the claim as it was broadcast, and `read` reads the confirmation of the claim it is given. A claim
 /// that was mined but failed (the coin marks it, see [`coins::swap_evidence::is_mined_and_failed`]) is sent
 /// again by `resend`, before the deadline, and the wait reads the claim `resend` answers from then on. A claim
-/// that is not confirmed yet is only read again. Neither leads to a refund.
+/// that is not confirmed yet is only read again. Neither leads to a refund. A wait sends the claim again at most
+/// [`MAX_CLAIM_RESENDS`] times (counted in memory, so a restart starts a new count); after that it only reads
+/// until the deadline.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn await_own_claim_confirmation<C, F, Fut, R, RFut>(
     claim: &str,
@@ -188,6 +193,7 @@ where
     RFut: std::future::Future<Output = Result<C, String>>,
 {
     let mut warned = false;
+    let mut resends = 0u32;
     let mut current = sent;
     loop {
         let error = match read(current.clone(), deadline).await {
@@ -201,7 +207,8 @@ where
         if now() >= deadline {
             return false;
         }
-        if is_mined_and_failed(&error) {
+        if is_mined_and_failed(&error) && resends < MAX_CLAIM_RESENDS {
+            resends += 1;
             match resend().await {
                 Ok(again) => {
                     current = again;
@@ -520,6 +527,23 @@ pub(super) fn judge_look<S>(found: Result<Option<(bool, S)>, String>, other_spen
         Ok(Some((false, _))) if other_spend_refunds => Look::RefundGoesOn,
         Ok(Some((false, _))) => Look::Unanswered(SPEND_NOT_ACTED_ON.to_owned()),
         Err(error) => Look::Unanswered(error),
+    }
+}
+
+/// The text a maker's look logs when it found a spend from which no secret could be extracted.
+pub(super) const SPEND_SECRET_NOT_EXTRACTED: &str = "a spend was found whose secret could not be extracted";
+
+/// What the maker's look makes of a spend of the taker payment it found, in the form [`judge_look`] takes. Only the
+/// extraction decides: the maker's own secret is its own claim (`true`); another secret is positively the taker's
+/// refund (`false`); a failed extraction answers nothing the step may act on, so it is an `Err` with a fixed text.
+pub(super) fn maker_look_found<S, E>(
+    extracted: Result<[u8; 32], E>,
+    own_secret: &[u8],
+    spend: S,
+) -> Result<Option<(bool, S)>, String> {
+    match extracted {
+        Ok(secret) => Ok(Some((secret.as_slice() == own_secret, spend))),
+        Err(_) => Err(SPEND_SECRET_NOT_EXTRACTED.to_owned()),
     }
 }
 
@@ -1659,6 +1683,33 @@ async fn recovery_coins<T: GetSwapCoins>(ctx: &MmArc, swap_repr: &T) -> Result<(
     Ok((maker_coin, taker_coin))
 }
 
+/// The answer of `recover_funds_of_swap` for a version-two swap whose recovery is already running.
+pub(super) const RECOVERY_IN_FLIGHT: &str = "A recovery of this swap is already running; wait for its answer";
+
+static RECOVERIES_IN_FLIGHT: std::sync::Mutex<Vec<Uuid>> = std::sync::Mutex::new(Vec::new());
+
+/// Holds the right to run the recovery of one swap: a second call for the same uuid gets an error answer at
+/// once. The right is given back when the guard is dropped.
+pub(super) struct RecoveryInFlight(Uuid);
+
+impl RecoveryInFlight {
+    pub(super) fn enter(uuid: Uuid) -> Result<RecoveryInFlight, String> {
+        let mut running = RECOVERIES_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        if running.contains(&uuid) {
+            return Err(RECOVERY_IN_FLIGHT.to_owned());
+        }
+        running.push(uuid);
+        Ok(RecoveryInFlight(uuid))
+    }
+}
+
+impl Drop for RecoveryInFlight {
+    fn drop(&mut self) {
+        let mut running = RECOVERIES_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        running.retain(|u| *u != self.0);
+    }
+}
+
 /// `recover_funds_of_swap` for a swap of version two (CRD ch.51 §51.6D, status note of 2026-11-24): a swap that
 /// ended at the bound of its refund step runs that step once more with fresh reads; any other ending gets the
 /// RPC's "not recoverable" answer.
@@ -1670,6 +1721,7 @@ pub(super) async fn recover_funds_of_swap_v2(
     use super::maker_swap_v2::recover_maker_swap_v2;
     use super::taker_swap_v2::recover_taker_swap_v2;
 
+    let _in_flight = RecoveryInFlight::enter(uuid)?;
     if swap_type == super::MAKER_SWAP_V2_TYPE {
         let storage = MakerSwapStorage::new(ctx.clone());
         let repr = try_s!(storage.get_repr(uuid).await);
@@ -2010,6 +2062,34 @@ mod tests {
         assert_eq!(sent_again, 0, "nothing is sent again");
     }
 
+    /// A second recovery of the same swap is answered at once, and the right is given back when the first ends.
+    #[test]
+    fn a_second_recovery_of_the_same_swap_is_refused_at_once() {
+        let uuid = Uuid::new_v4();
+        let first = RecoveryInFlight::enter(uuid).expect("the first recovery runs");
+        assert_eq!(RecoveryInFlight::enter(uuid).err().as_deref(), Some(RECOVERY_IN_FLIGHT));
+        let other = RecoveryInFlight::enter(Uuid::new_v4()).expect("another swap is not held");
+        drop(other);
+        drop(first);
+        drop(RecoveryInFlight::enter(uuid).expect("the right is given back"));
+    }
+
+    /// A wait sends a failed claim again at most three times; after that it only reads until the deadline.
+    #[test]
+    fn own_claim_resends_are_capped_per_wait() {
+        let answers = vec![Err(mined_and_failed_error()); 9];
+        let (confirmed, attempts, _, sent_again) = run_own_claim_confirmation_sending_again(1000, 100, 100, answers);
+        assert!(!confirmed, "the wait ends unconfirmed at the deadline");
+        assert_eq!(sent_again, 3, "the claim is sent again three times only");
+        assert!(attempts > 4, "the wait goes on reading after the cap");
+
+        let mut answers = vec![Err(mined_and_failed_error()); 4];
+        answers.push(Ok(()));
+        let (confirmed, _, _, sent_again) = run_own_claim_confirmation_sending_again(100_000, 100, 10, answers);
+        assert!(confirmed, "the last claim sent is read until it is confirmed");
+        assert_eq!(sent_again, 3);
+    }
+
     /// A claim that was mined but failed at the deadline is not sent again, and the wait ends unconfirmed.
     #[test]
     fn own_claim_mined_and_failed_at_the_deadline_ends_the_wait() {
@@ -2085,6 +2165,40 @@ mod tests {
                 Look::Claimed("spend"),
                 "a proven spend leads to the claim"
             );
+        }
+    }
+
+    /// The maker's look decides on the extraction: its own secret is its own claim, another secret is the
+    /// taker's refund, and a failed extraction is no answer: the refund does not go on.
+    #[test]
+    fn the_maker_look_waits_on_a_failed_extraction() {
+        let own = [7u8; 32];
+        assert_eq!(
+            judge_look(maker_look_found(Ok::<_, String>(own), &own, "spend"), true),
+            Look::Claimed("spend")
+        );
+        assert_eq!(
+            judge_look(maker_look_found(Ok::<_, String>([8u8; 32]), &own, "spend"), true),
+            Look::RefundGoesOn
+        );
+        assert_eq!(
+            judge_look(
+                maker_look_found(Err::<[u8; 32], _>("node text".to_owned()), &own, "spend"),
+                true
+            ),
+            Look::Unanswered(SPEND_SECRET_NOT_EXTRACTED.to_owned())
+        );
+    }
+
+    /// A failed read of a spend search is no "not spent": the look stays unanswered, for both sides.
+    #[test]
+    fn a_failed_spend_read_leaves_the_look_unanswered() {
+        let failed = MmError::new(coins::FindPaymentSpendError::Transport(undetermined_error()));
+        for other_spend_refunds in [false, true] {
+            assert!(matches!(
+                judge_look::<&str>(spend_search_error(&failed), other_spend_refunds),
+                Look::Unanswered(_)
+            ));
         }
     }
 
