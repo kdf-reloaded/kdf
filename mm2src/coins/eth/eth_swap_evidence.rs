@@ -34,9 +34,10 @@ use super::alloy_compat::transport::NODE_CUTOFF_S;
 use super::eth_logs_window::{LogsQuerier, PaymentKey, REORG_MARGIN_BLOCKS};
 use super::eth_swap_ops::{evm_refund_eligibility, secret_of_claim_call, secret_of_spent_logs};
 use super::*;
+use crate::eth::abi::Contract;
 use crate::node_url::{host_only, scrub_node_url, UNNAMED_NODE};
 use crate::swap_evidence::{agree, agree_with_tips, node_name, Agreement, Undetermined, UndeterminedReason};
-use crate::{CanRefundHtlc, SwapEvidencePolicy};
+use crate::{CanRefundHtlc, FindPaymentSpendError, SwapEvidencePolicy};
 use common::log::{debug, warn};
 use std::future::Future as StdFuture;
 
@@ -207,6 +208,62 @@ impl Web3Instance {
         }
     }
 
+    /// The state of the payment `id` in the version 2 swap contract at `contract`, as this node reports it at
+    /// `block`: the `state_index`-th value of the contract's `getter` (`makerPayments`, `takerPayments`).
+    pub(crate) async fn payment_state_v2_at(
+        &self,
+        from: Address,
+        contract: Address,
+        spec: &V2PaymentSpec,
+        id: &[u8],
+        block: u64,
+    ) -> Result<U256, String> {
+        use alloy::providers::Provider;
+
+        let function = spec.abi.function(spec.getter).map_err(|e| e.to_string())?;
+        let data = function
+            .encode_input(&[Token::FixedBytes(id.to_vec())])
+            .map_err(|e| e.to_string())?;
+        let request = CallRequest {
+            from: Some(from),
+            to: contract,
+            gas: None,
+            gas_price: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            value: None,
+            data: Some(data.into()),
+        };
+        let call = self
+            .web3
+            .client()
+            .request::<_, Bytes>("eth_call", (request, BlockNumber::Number(block)));
+        let bytes = within_node_cutoff(&self.url, "eth_call", call).await?;
+        let decoded = function.decode_output(&bytes.0).map_err(|e| e.to_string())?;
+        match decoded.get(spec.state_index) {
+            Some(Token::Uint(state)) => Ok(*state),
+            other => Err(format!("the payment state must be a uint, got {:?}", other)),
+        }
+    }
+
+    /// What this node shows of the receipt of transaction `hash` (`eth_getTransactionReceipt`), `None` while it has
+    /// no receipt of it.
+    pub(crate) async fn receipt_facts(&self, hash: H256) -> Result<Option<ReceiptFacts>, String> {
+        use alloy::providers::Provider;
+
+        let hash = alloy::primitives::B256::from_slice(&hash.0);
+        let receipt = within_node_cutoff(
+            &self.url,
+            "eth_getTransactionReceipt",
+            self.web3.get_transaction_receipt(hash),
+        )
+        .await?;
+        Ok(receipt.map(|receipt| ReceiptFacts {
+            block: receipt.block_number,
+            succeeded: receipt.inner.status(),
+        }))
+    }
+
     /// `eth_getTransactionByHash` of this node.
     pub(crate) async fn transaction_by_hash(&self, hash: H256) -> Result<Option<NodeTransaction>, String> {
         use alloy::providers::Provider;
@@ -261,6 +318,131 @@ impl Web3Instance {
             None => Err("the node returned no block".to_owned()),
         }
     }
+}
+
+/// What a node shows of a transaction's receipt.
+pub(crate) struct ReceiptFacts {
+    /// The block the transaction was mined in.
+    pub(crate) block: Option<u64>,
+    /// Whether the transaction succeeded.
+    pub(crate) succeeded: bool,
+}
+
+/// Where a payment of a version 2 swap contract is read: the contract's ABI, the getter of its payments and the
+/// position of the state in what the getter returns, the state of a payment that was spent, and the event the
+/// spend emits.
+#[derive(Clone, Copy)]
+pub(crate) struct V2PaymentSpec {
+    pub(crate) contract: Address,
+    pub(crate) abi: &'static Contract,
+    pub(crate) getter: &'static str,
+    pub(crate) state_index: usize,
+    /// The state of a payment its receiver spent.
+    pub(crate) spent_state: u8,
+    /// The event the spend of a payment emits; its first 32 data bytes are the payment's id.
+    pub(crate) spent_event: &'static str,
+}
+
+/// What one node shows of the spend of a version 2 payment at one block.
+#[derive(Debug)]
+pub(crate) enum V2SpendRead {
+    /// The contract does not show the payment as spent.
+    NotSpent,
+    /// The contract shows the payment as spent, by the transaction `tx`.
+    SpentBy { tx: Box<SignedEthTx> },
+}
+
+/// What two version 2 spend reads are compared on: the id of the spending transaction, or none.
+fn v2_spend_decision(read: &V2SpendRead) -> Option<H256> {
+    match read {
+        V2SpendRead::NotSpent => None,
+        V2SpendRead::SpentBy { tx } => Some(tx.tx_hash()),
+    }
+}
+
+/// What two confirmation reads are compared on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ConfirmationDecision {
+    NotConfirmed,
+    Confirmed,
+    /// Mined, and the transaction failed.
+    Failed,
+}
+
+/// The confirmation read of one node at its own tip `at`: whether the transaction `hash` is mined with at least
+/// `required` confirmations, mined and failed, or not confirmed.
+async fn confirmation_read_on(
+    node: Web3Instance,
+    hash: H256,
+    required: u64,
+    at: u64,
+) -> Result<ConfirmationDecision, String> {
+    Ok(match node.receipt_facts(hash).await? {
+        None => ConfirmationDecision::NotConfirmed,
+        Some(facts) if !facts.succeeded => ConfirmationDecision::Failed,
+        Some(ReceiptFacts { block: Some(block), .. }) if block <= at && at - block + 1 >= required => {
+            ConfirmationDecision::Confirmed
+        },
+        Some(_) => ConfirmationDecision::NotConfirmed,
+    })
+}
+
+/// The spend read of one node at block `upto` for the version 2 payment `id`: the contract's state at `upto`
+/// decides; for a spent payment the node's own logs, searched from `upto` down to `from_block`, name the
+/// transaction.
+async fn v2_spend_read_on(
+    coin: EthCoin,
+    node: Web3Instance,
+    spec: V2PaymentSpec,
+    id: Vec<u8>,
+    from_block: u64,
+    upto: u64,
+) -> Result<V2SpendRead, String> {
+    let state = node
+        .payment_state_v2_at(coin.my_address, spec.contract, &spec, &id, upto)
+        .await?;
+    if state != U256::from(spec.spent_state) {
+        return Ok(V2SpendRead::NotSpent);
+    }
+    let topic = spec.abi.event(spec.spent_event).map_err(|e| e.to_string())?.signature();
+    let mut top = upto;
+    let found = loop {
+        if top < from_block {
+            break None;
+        }
+        let from = from_block.max(top.saturating_add(1).saturating_sub(coin.logs_window()));
+        let querier = coin.logs_querier_on(node.web3.clone());
+        let logs = node.swap_logs(querier, topic, spec.contract, from, top).await?;
+        if let Some(log) = logs.into_iter().find(|log| log.data.0.get(..32) == Some(id.as_slice())) {
+            break Some(log);
+        }
+        match from.checked_sub(1) {
+            Some(below) => top = below,
+            None => break None,
+        }
+    };
+    let Some(log) = found else {
+        return Err(format!(
+            "the swap contract reports the payment as spent at block {upto}, but no {} log of it is in blocks \
+             {from_block} to {upto}",
+            spec.spent_event
+        ));
+    };
+    let Some(spend_hash) = log.transaction_hash else {
+        return Err(format!(
+            "the {} log of the payment has no transaction hash",
+            spec.spent_event
+        ));
+    };
+    let Some(transaction) = node.transaction_by_hash(spend_hash).await? else {
+        return Err(format!(
+            "the {} transaction {:02x} is missing",
+            spec.spent_event, spend_hash
+        ));
+    };
+    Ok(V2SpendRead::SpentBy {
+        tx: Box::new(signed_tx_from_alloy_tx(transaction)?),
+    })
 }
 
 /// The counterparty's payment as one node shows it: the contract's state of the payment and the payment
@@ -831,6 +1013,211 @@ impl EthCoin {
                 let subject = format!("lock time {locktime}");
                 Err(self.report_undetermined("chain time of the refund gate", &subject, &undetermined))
             },
+        }
+    }
+}
+
+impl EthCoin {
+    /// An attempt that no node can decide, for a policy that has too few nodes: no node is asked.
+    fn too_few_nodes<T, D>() -> Agreement<T, D> {
+        Agreement::Undetermined(Undetermined {
+            reason: UndeterminedReason::TooFewAnswers,
+            per_node: Vec::new(),
+        })
+    }
+
+    /// Whether the version 2 payment `id` is in the state `wanted` of its contract (`spec.getter`), under `policy`
+    /// (CRD ch.51 R100): the state is read from two nodes at their own latest blocks, and the answer is whether
+    /// it is `wanted`, as two nodes agree on it, or as the trusted node shows it.
+    ///
+    /// # Errors
+    ///
+    /// The read is undetermined: the nodes disagree, too few of them answer, or their tips are too far apart. The
+    /// text carries the marker of [`crate::swap_evidence::undetermined`]. A read of the state is never answered
+    /// as "not in that state" without a determined answer.
+    pub(crate) async fn agreed_v2_payment_is(
+        &self,
+        policy: &SwapEvidencePolicy,
+        spec: &V2PaymentSpec,
+        id: &[u8],
+        wanted: u8,
+    ) -> Result<bool, String> {
+        let spec = *spec;
+        let outcome = if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
+            Self::too_few_nodes()
+        } else {
+            let (from, id) = (self.my_address, id.to_vec());
+            assert_send_future(self.agree_at_own_tips(
+                policy,
+                false,
+                move |node: Web3Instance, at: u64| {
+                    let id = id.clone();
+                    assert_send_future(
+                        async move { node.payment_state_v2_at(from, spec.contract, &spec, &id, at).await },
+                    )
+                },
+                |state: &U256| *state == U256::from(wanted),
+                |_| false,
+            ))
+            .await
+        };
+        match outcome {
+            Agreement::Agreed { decision, .. } => Ok(decision.decision),
+            Agreement::Undetermined(undetermined) => {
+                let subject = format!("payment {}", hex::encode(id));
+                Err(self.report_undetermined("payment state", &subject, &undetermined))
+            },
+        }
+    }
+
+    /// One attempt of the spend read of the version 2 payment `id`: each node's contract state at its own latest
+    /// block, and for a spent payment the spending transaction. No spend proves itself here, so two nodes must
+    /// agree on it, or the trusted node answers alone.
+    ///
+    /// # Errors
+    ///
+    /// The read is undetermined, with the marker of [`crate::swap_evidence::undetermined`] in the text.
+    async fn agreed_v2_spend_once(
+        &self,
+        policy: &SwapEvidencePolicy,
+        spec: &V2PaymentSpec,
+        id: &[u8],
+        from_block: u64,
+    ) -> Result<Option<SignedEthTx>, String> {
+        let spec = *spec;
+        let outcome = if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
+            Self::too_few_nodes()
+        } else {
+            let coin = self.clone();
+            let id = id.to_vec();
+            assert_send_future(self.agree_at_own_tips(
+                policy,
+                false,
+                move |node: Web3Instance, at: u64| {
+                    assert_send_future(v2_spend_read_on(coin.clone(), node, spec, id.clone(), from_block, at))
+                },
+                v2_spend_decision,
+                |_| false,
+            ))
+            .await
+        };
+        match outcome {
+            Agreement::Agreed { answer, .. } => Ok(match answer.read {
+                V2SpendRead::NotSpent => None,
+                V2SpendRead::SpentBy { tx } => Some(*tx),
+            }),
+            Agreement::Undetermined(undetermined) => {
+                let subject = format!("payment {}", hex::encode(id));
+                Err(self.report_undetermined("spend state", &subject, &undetermined))
+            },
+        }
+    }
+
+    /// Waits for the spend of the version 2 payment `id` to be shown by two nodes (or the trusted node), polling
+    /// every `check_every` seconds until `wait_until` (UNIX seconds), under `policy` (CRD ch.51 R100).
+    ///
+    /// A call whose `wait_until` has not passed asks its nodes at least once. "Timed out" is answered only after a
+    /// determined read that showed no spend. An undetermined read ends the call at once with a `Transport` error
+    /// whose text carries the marker of [`crate::swap_evidence::undetermined`], and a read that failed is
+    /// undetermined; neither is taken for "no spend".
+    pub(crate) async fn wait_for_agreed_v2_spend(
+        &self,
+        policy: &SwapEvidencePolicy,
+        spec: &V2PaymentSpec,
+        id: &[u8],
+        from_block: u64,
+        wait_until: u64,
+        check_every: f64,
+    ) -> MmResult<SignedEthTx, FindPaymentSpendError> {
+        loop {
+            let now_secs = now_ms() / 1000;
+            if now_secs > wait_until {
+                return MmError::err(FindPaymentSpendError::Timeout {
+                    wait_until,
+                    now: now_secs,
+                });
+            }
+            match assert_send_future(self.agreed_v2_spend_once(policy, spec, id, from_block)).await {
+                Ok(Some(spend)) => return Ok(spend),
+                Ok(None) => (),
+                Err(text) => return MmError::err(FindPaymentSpendError::Transport(text)),
+            }
+            Timer::sleep(check_every).await;
+        }
+    }
+
+    /// Waits until the transaction `tx` has `required` confirmations as two nodes (or the trusted node) agree, each
+    /// read at its own latest block, polling every `check_every` seconds until `wait_until` (UNIX seconds), under
+    /// `policy` (CRD ch.51 R100).
+    ///
+    /// The call asks its nodes at least once. "Waited too long" says that the last read was determined and
+    /// showed the transaction as not confirmed; when the last read was undetermined the text carries the marker of
+    /// [`crate::swap_evidence::undetermined`] as well. A transaction that is mined and failed is answered with
+    /// [`crate::swap_evidence::mined_and_failed`].
+    ///
+    /// # Errors
+    ///
+    /// The transaction failed, or the confirmations were not shown in time.
+    pub(crate) async fn wait_for_agreed_confirmations(
+        &self,
+        policy: &SwapEvidencePolicy,
+        tx: &SignedEthTx,
+        required: u64,
+        wait_until: u64,
+        check_every: f64,
+    ) -> Result<(), String> {
+        let hash = tx.tx_hash();
+        loop {
+            let outcome = if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
+                Self::too_few_nodes()
+            } else {
+                assert_send_future(self.agree_at_own_tips(
+                    policy,
+                    false,
+                    move |node: Web3Instance, at: u64| {
+                        assert_send_future(confirmation_read_on(node, hash, required, at))
+                    },
+                    |decision: &ConfirmationDecision| *decision,
+                    |_| false,
+                ))
+                .await
+            };
+            let mut undetermined_text = None;
+            match outcome {
+                Agreement::Agreed { answer, .. } => match answer.read {
+                    ConfirmationDecision::Confirmed => return Ok(()),
+                    ConfirmationDecision::Failed => {
+                        // The marker tells a swap step that the transaction is mined and failed, apart from one
+                        // that is not confirmed yet.
+                        return ERR!(
+                            "{} ({} receipt status failed)",
+                            crate::swap_evidence::mined_and_failed(&format!("{:02x}", hash)),
+                            self.ticker()
+                        );
+                    },
+                    ConfirmationDecision::NotConfirmed => (),
+                },
+                Agreement::Undetermined(undetermined) => {
+                    let subject = format!("transaction {:02x}", hash);
+                    undetermined_text = Some(self.report_undetermined("confirmation count", &subject, &undetermined));
+                },
+            }
+            if now_ms() / 1000 > wait_until {
+                return match undetermined_text {
+                    Some(text) => ERR!(
+                        "Waited too long until {} for transaction {:?} confirmation ; {}",
+                        wait_until,
+                        tx,
+                        text
+                    ),
+                    None => ERR!(
+                        "Waited too long until {} for transaction {:?} confirmation ",
+                        wait_until,
+                        tx
+                    ),
+                };
+            }
+            Timer::sleep(check_every).await;
         }
     }
 }

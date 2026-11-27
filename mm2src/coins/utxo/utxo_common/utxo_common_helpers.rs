@@ -292,7 +292,21 @@ pub fn wait_for_confirmations(
     };
     let policy = policy.clone();
     let fut = async move {
-        single_server_wait.compat().await?;
+        if let Err(single) = single_server_wait.compat().await {
+            // The polled server did not show the confirmations by the end of its wait, or failed: the servers are
+            // asked once, and the call ends as they say. "Not confirmed" is said only on their agreement, and a read
+            // that is not determined is answered with its marker, never as the polled server's timeout.
+            return match agreed_confirmed(&policy, &servers, &txid, confirmations as u32, requires_nota).await {
+                Ok(true) => Ok(()),
+                Ok(false) if crate::swap_evidence::is_undetermined(&single) => Err(ERRL!(
+                    "the servers agree that {:?} is not confirmed {} times",
+                    txid,
+                    confirmations
+                )),
+                Ok(false) => Err(single),
+                Err(e) => Err(e),
+            };
+        }
         loop {
             let last = match agreed_confirmed(&policy, &servers, &txid, confirmations as u32, requires_nota).await {
                 Ok(true) => return Ok(()),

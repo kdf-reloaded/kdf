@@ -58,6 +58,9 @@ struct Node {
     spend: Option<Spend>,
     /// Whether the node returns the payment transaction.
     knows_payment: bool,
+    /// The block and the success of the receipt the node returns for the transaction whose receipt is asked, when
+    /// it has one.
+    receipt: Option<(u64, bool)>,
 }
 
 #[derive(Default)]
@@ -68,7 +71,34 @@ struct World {
     seen: Mutex<Vec<(String, String, Json)>>,
 }
 
-fn event_topic(event: &str) -> String { format!("{:#x}", SWAP_CONTRACT.event(event).unwrap().signature()) }
+fn event_topic(event: &str) -> String {
+    let signature = match SWAP_CONTRACT.event(event) {
+        Ok(event) => event.signature(),
+        // An event of the version 2 taker contract.
+        Err(_) => TAKER_SWAP_V2.event(event).unwrap().signature(),
+    };
+    format!("{:#x}", signature)
+}
+
+/// The `eth_getTransactionReceipt` result of the transaction `tx`, mined in `block`.
+fn rpc_receipt(tx: &SignedEthTx, block: u64, succeeded: bool) -> Json {
+    json!({
+        "type": "0x0",
+        "status": if succeeded { "0x1" } else { "0x0" },
+        "cumulativeGasUsed": "0x5208",
+        "logs": [],
+        "logsBloom": format!("0x{}", "00".repeat(256)),
+        "transactionHash": format!("{:#x}", tx.tx_hash()),
+        "transactionIndex": "0x0",
+        "blockHash": format!("0x{}", "22".repeat(32)),
+        "blockNumber": format!("{:#x}", block),
+        "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00",
+        "from": format!("{:#x}", tx.sender()),
+        "to": format!("{:#x}", tx.sender()),
+        "contractAddress": Json::Null,
+    })
+}
 
 /// The `eth_getTransactionByHash` result a node reports for a legacy transaction.
 fn rpc_tx(tx: &SignedEthTx) -> Json {
@@ -149,8 +179,19 @@ fn answer(world: &World, call: &Call) -> Reply {
                 .rev()
                 .find(|(from, _)| *from <= block)
                 .map_or(0, |(_, state)| *state);
-            // `payments(id)` returns (bytes20 paymentHash, uint64 lockTime, uint8 state): three words.
-            json!(format!("0x{}{:02x}", "00".repeat(95), state))
+            // `payments(id)` returns (bytes20 paymentHash, uint64 lockTime, uint8 state): three words. The version 2
+            // taker contract's `takerPayments(id)` returns four, the state last.
+            let requested = params[0]["data"]
+                .as_str()
+                .or_else(|| params[0]["input"].as_str())
+                .unwrap_or("");
+            let taker_getter = hex::encode(TAKER_SWAP_V2.function("takerPayments").unwrap().short_signature());
+            let words = if requested.trim_start_matches("0x").starts_with(&taker_getter) {
+                4
+            } else {
+                3
+            };
+            json!(format!("0x{}{:02x}", "00".repeat(32 * words - 1), state))
         },
         "eth_getTransactionByHash" => {
             let asked = params[0].as_str().unwrap();
@@ -160,8 +201,12 @@ fn answer(world: &World, call: &Call) -> Reply {
                 _ => Json::Null,
             }
         },
-        // The node has no receipt of the payment: the log search then starts at the caller's start block.
-        "eth_getTransactionReceipt" => Json::Null,
+        // The node has no receipt of the payment unless a test gives it one: the log search then starts at the
+        // caller's start block.
+        "eth_getTransactionReceipt" => match node.receipt {
+            Some((block, succeeded)) => rpc_receipt(&payment, block, succeeded),
+            None => Json::Null,
+        },
         "eth_getLogs" => {
             let filter = &params[0];
             let (from, to) = (block_of(&filter["fromBlock"]), block_of(&filter["toBlock"]));
@@ -267,6 +312,7 @@ impl Fixture {
                 states: vec![(90, SENT)],
                 spend: None,
                 knows_payment: true,
+                receipt: None,
             });
         }
         let (web3, failover) = stub_provider(&[FAILOVER], 10., |_| {
@@ -1173,4 +1219,330 @@ fn the_readiness_probe_bounds_its_own_exchange() {
     };
     assert!(block_on(instance.readiness_probe()));
     assert_eq!(sender.bounds(), vec![crate::swap_evidence::READY_PROBE_TIMEOUT_SECS]);
+}
+
+// ---- The reads of the version 2 coin methods (CRD ch.51 R100, ch.52 R18) ----
+
+mod swap_v2_reads {
+    use super::*;
+    use crate::{FindPaymentSpendError, FundingTxSpend, SearchForFundingSpendErr, TakerCoinSwapOpsV2};
+
+    /// The id of the version 2 payment of every test.
+    const V2_ID: [u8; 32] = [0x71; 32];
+    /// The states of the version 2 taker contract.
+    const V2_TAKER_APPROVED: u8 = 2;
+    const V2_MAKER_SPENT: u8 = 3;
+
+    fn v2_fixture(urls: &[&str], policy: SwapEvidencePolicy) -> Fixture {
+        let mut fx = Fixture::eth(urls, policy);
+        Arc::get_mut(&mut fx.coin.0)
+            .expect("the coin is not shared yet")
+            .swap_v2_contracts = Some(SwapV2Contracts {
+            maker_swap_v2_contract: Address::from_low_u64_be(0x21),
+            taker_swap_v2_contract: Address::from_low_u64_be(0x22),
+        });
+        fx
+    }
+
+    /// The `ethTakerPayment` transaction that funds the swap (its first argument is the payment id).
+    fn funding_tx(fx: &Fixture) -> SignedEthTx {
+        let data = TAKER_SWAP_V2
+            .function("ethTakerPayment")
+            .unwrap()
+            .encode_input(&[
+                Token::FixedBytes(V2_ID.to_vec()),
+                Token::Uint(U256::from(1)),
+                Token::Address(Address::from_low_u64_be(0x33)),
+                Token::FixedBytes(vec![0x44; 20]),
+                Token::FixedBytes(vec![0x55; 20]),
+                Token::Uint(U256::from(TIME_LOCK)),
+                Token::Uint(U256::from(TIME_LOCK + 100)),
+            ])
+            .unwrap();
+        sign(&fx.coin, paid_wei(), data)
+    }
+
+    /// The `takerPaymentApprove` transaction of the taker payment (its first argument is the payment id).
+    fn taker_payment_tx(fx: &Fixture) -> SignedEthTx {
+        let data = TAKER_SWAP_V2
+            .function("takerPaymentApprove")
+            .unwrap()
+            .encode_input(&[
+                Token::FixedBytes(V2_ID.to_vec()),
+                Token::Uint(paid_wei()),
+                Token::Uint(U256::from(1)),
+                Token::Address(Address::from_low_u64_be(0x33)),
+                Token::FixedBytes(vec![0x44; 20]),
+                Token::FixedBytes(vec![0x55; 20]),
+                Token::Address(Address::zero()),
+            ])
+            .unwrap();
+        sign(&fx.coin, 0.into(), data)
+    }
+
+    /// The `TakerPaymentSpent` log of the payment in `block`, with the transaction that spends it.
+    fn spend_of_taker_payment(fx: &Fixture, block: u64) -> Spend {
+        Spend {
+            event: "TakerPaymentSpent",
+            block,
+            tx: sign(&fx.coin, 0.into(), vec![1, 2, 3, 4]),
+            data: [V2_ID.as_slice(), &[0x66; 32][..]].concat(),
+        }
+    }
+
+    fn search_funding(fx: &Fixture) -> Result<Option<FundingTxSpend<EthCoin>>, SearchForFundingSpendErr> {
+        block_on(fx.coin.search_for_taker_funding_spend(&funding_tx(fx), 80, &[0x55; 20]))
+    }
+
+    fn rpc_text(error: &SearchForFundingSpendErr) -> &str {
+        match error {
+            SearchForFundingSpendErr::Rpc(text) => text,
+            other => panic!("not a transient read error: {other:?}"),
+        }
+    }
+
+    fn find_spend(fx: &Fixture, wait_secs: i64) -> Result<SignedEthTx, FindPaymentSpendError> {
+        let wait_until = ((now_ms() / 1000) as i64 + wait_secs) as u64;
+        block_on(
+            fx.coin
+                .find_taker_payment_spend_tx(&taker_payment_tx(fx), 80, wait_until),
+        )
+        .map_err(|e| e.into_inner())
+    }
+
+    fn transport_text(error: &FindPaymentSpendError) -> &str {
+        match error {
+            FindPaymentSpendError::Transport(text) => text,
+            other => panic!("not an undetermined read: {other:?}"),
+        }
+    }
+
+    /// The search for the funding spend: two nodes that show the payment as approved decide "spent into the taker
+    /// payment", two that show it as not approved decide "not spent". Each node is read at its own tip.
+    #[test]
+    fn funding_spend_two_agreeing_nodes_decide() {
+        let fx = v2_fixture(&[A, B, C], listed(&[A, B, C]));
+        assert!(matches!(search_funding(&fx), Ok(None)));
+        fx.set(A, |node| node.states.push((95, V2_TAKER_APPROVED)));
+        fx.set(B, |node| node.states.push((95, V2_TAKER_APPROVED)));
+        assert!(matches!(
+            search_funding(&fx),
+            Ok(Some(FundingTxSpend::TransferredToTakerPayment(_)))
+        ));
+        assert_eq!(fx.call_blocks(A).last(), Some(&100));
+        assert!(fx.asked(C).is_empty(), "a third node was asked: {:?}", fx.asked(C));
+        fx.assert_failover_unused();
+    }
+
+    /// Nodes that differ, a failing node, and tips too far apart leave the search undetermined: a transient read
+    /// error with the marker, never "not spent".
+    #[test]
+    fn funding_spend_differing_or_failing_nodes_are_undetermined() {
+        let fx = v2_fixture(&[A, B, C], listed(&[A, B, C]));
+        fx.set(A, |node| node.states.push((95, V2_TAKER_APPROVED)));
+        let error = search_funding(&fx).expect_err("the nodes differ");
+        assert!(is_undetermined(rpc_text(&error)), "{error}");
+        assert_undetermined(rpc_text(&error), "the nodes disagree");
+        assert!(fx.asked(C).is_empty(), "a third node was asked");
+
+        fx.set(B, |node| node.down = true);
+        fx.set(C, |node| node.down = true);
+        assert_undetermined(
+            rpc_text(&search_funding(&fx).expect_err("one answer")),
+            "fewer than two nodes answered",
+        );
+
+        let fx = v2_fixture(&[A, B], listed(&[A, B]));
+        fx.set(B, |node| node.timestamp = TIP_TIME - 61);
+        assert_undetermined(
+            rpc_text(&search_funding(&fx).expect_err("the tips differ")),
+            "the tips of the nodes differ too much",
+        );
+        fx.assert_failover_unused();
+    }
+
+    /// The trusted node's answer alone decides; a silent trusted node is undetermined; a coin with one host asks no
+    /// node.
+    #[test]
+    fn funding_spend_of_the_trusted_node_is_taken_alone() {
+        let fx = v2_fixture(&[A, B], trusting("b.example:8545", &[A, B]));
+        fx.set(B, |node| node.states.push((95, V2_TAKER_APPROVED)));
+        assert!(matches!(
+            search_funding(&fx),
+            Ok(Some(FundingTxSpend::TransferredToTakerPayment(_)))
+        ));
+        assert!(fx.asked(A).is_empty(), "{:?}", fx.asked(A));
+        fx.set(B, |node| node.down = true);
+        assert_undetermined(
+            rpc_text(&search_funding(&fx).expect_err("the trusted node is silent")),
+            "the trusted node did not answer",
+        );
+
+        let fx = v2_fixture(&[A, A2], listed(&[A, A2]));
+        assert_undetermined(
+            rpc_text(&search_funding(&fx).expect_err("too few nodes")),
+            "fewer than two nodes answered",
+        );
+        assert!(fx.world.seen.lock().unwrap().is_empty(), "a node was asked");
+    }
+
+    /// A coin with no agreed-reads policy asks its one provider, and a failed read is an error, never "not spent".
+    #[test]
+    fn funding_spend_without_a_policy_reports_a_failed_read_as_an_error() {
+        let fx = v2_fixture(&[A, B], SwapEvidencePolicy::NotAdopted);
+        assert!(matches!(search_funding(&fx), Err(SearchForFundingSpendErr::Rpc(_))));
+    }
+
+    /// The search for the spend of the taker payment: two nodes that show it spent by the same transaction decide it.
+    #[test]
+    fn payment_spend_two_agreeing_nodes_decide() {
+        let fx = v2_fixture(&[A, B, C], listed(&[A, B, C]));
+        let spend = spend_of_taker_payment(&fx, 95);
+        fx.spent_on(A, V2_MAKER_SPENT, &spend);
+        fx.spent_on(B, V2_MAKER_SPENT, &spend);
+        let found = find_spend(&fx, 60).expect("the spend is found");
+        assert_eq!(found.tx_hash(), spend.tx.tx_hash());
+        assert!(fx.asked(C).is_empty(), "a third node was asked: {:?}", fx.asked(C));
+        assert_eq!(fx.call_blocks(A), [100]);
+        fx.assert_failover_unused();
+    }
+
+    /// Nodes that differ, one answering, and a silent trusted node end the call at once with the marker; the
+    /// trusted node alone decides.
+    #[test]
+    fn payment_spend_differing_or_failing_nodes_are_undetermined() {
+        let fx = v2_fixture(&[A, B], listed(&[A, B]));
+        let spend = spend_of_taker_payment(&fx, 95);
+        fx.spent_on(A, V2_MAKER_SPENT, &spend);
+        let error = find_spend(&fx, 60).expect_err("the nodes differ");
+        assert!(is_undetermined(transport_text(&error)), "{error}");
+        assert_undetermined(transport_text(&error), "the nodes disagree");
+
+        // Two different spends are no agreement either.
+        let other = spend_of_taker_payment(&fx, 96);
+        fx.spent_on(B, V2_MAKER_SPENT, &other);
+        assert_undetermined(
+            transport_text(&find_spend(&fx, 60).expect_err("two spends")),
+            "the nodes disagree",
+        );
+
+        fx.set(B, |node| node.down = true);
+        assert_undetermined(
+            transport_text(&find_spend(&fx, 60).expect_err("one answer")),
+            "fewer than two nodes answered",
+        );
+
+        let fx = v2_fixture(&[A, B], trusting("b.example:8545", &[A, B]));
+        let spend = spend_of_taker_payment(&fx, 95);
+        fx.spent_on(B, V2_MAKER_SPENT, &spend);
+        assert_eq!(
+            find_spend(&fx, 60).expect("the trusted node").tx_hash(),
+            spend.tx.tx_hash()
+        );
+        assert!(fx.asked(A).is_empty(), "{:?}", fx.asked(A));
+        fx.set(B, |node| node.down = true);
+        assert_undetermined(
+            transport_text(&find_spend(&fx, 60).expect_err("the trusted node is silent")),
+            "the trusted node did not answer",
+        );
+    }
+
+    /// The time limit: a call whose limit has not passed asks its nodes before it answers "timed out", and answers
+    /// it after a determined read that showed no spend; a limit that has passed answers it at once. A failed read of
+    /// a coin with no policy is the marker, never "timed out".
+    #[test]
+    fn payment_spend_asks_before_it_times_out() {
+        let fx = v2_fixture(&[A, B], listed(&[A, B]));
+        let error = find_spend(&fx, 1).expect_err("no spend in time");
+        assert!(matches!(error, FindPaymentSpendError::Timeout { .. }), "{error}");
+        assert!(fx.asked(A).contains(&"eth_call".to_owned()), "{:?}", fx.asked(A));
+        fx.forget_requests();
+        let error = find_spend(&fx, -5).expect_err("the limit has passed");
+        assert!(matches!(error, FindPaymentSpendError::Timeout { .. }), "{error}");
+
+        let fx = v2_fixture(&[A, B], SwapEvidencePolicy::NotAdopted);
+        let error = find_spend(&fx, 60).expect_err("the read failed");
+        assert!(is_undetermined(transport_text(&error)), "{error}");
+    }
+
+    /// The confirmations of a transaction the steps wait for, from `required` of them, until `wait_secs` from now.
+    fn wait_confirmations(fx: &Fixture, required: u64, wait_secs: u64) -> Result<(), String> {
+        let wait_until = now_ms() / 1000 + wait_secs;
+        block_on(
+            fx.coin
+                .wait_for_confirmations(&rlp::encode(&fx.payment), required, false, wait_until, 1)
+                .compat(),
+        )
+    }
+
+    /// Two nodes that both show enough confirmations take the wait; each is read at its own tip.
+    #[test]
+    fn confirmations_two_agreeing_nodes_decide() {
+        let fx = v2_fixture(&[A, B, C], listed(&[A, B, C]));
+        fx.set(A, |node| node.receipt = Some((98, true)));
+        fx.set(B, |node| node.receipt = Some((97, true)));
+        wait_confirmations(&fx, 3, 5).expect("confirmed");
+        assert_eq!(fx.asked(A), ["eth_getBlockByNumber", "eth_getTransactionReceipt"]);
+        assert!(fx.asked(C).is_empty(), "a third node was asked: {:?}", fx.asked(C));
+        fx.assert_failover_unused();
+    }
+
+    /// Two nodes that agree on too few confirmations leave a determined timeout, without the marker; a transaction
+    /// that is mined and failed on both is answered with its own marker.
+    #[test]
+    fn confirmations_agreeing_on_too_few_or_a_failure_are_determined() {
+        let fx = v2_fixture(&[A, B], listed(&[A, B]));
+        fx.set(A, |node| node.receipt = Some((99, true)));
+        fx.set(B, |node| node.receipt = Some((99, true)));
+        let error = wait_confirmations(&fx, 5, 2).expect_err("not confirmed in time");
+        assert!(error.contains("Waited too long"), "{error}");
+        assert!(!is_undetermined(&error), "{error}");
+
+        fx.set(A, |node| node.receipt = Some((99, false)));
+        fx.set(B, |node| node.receipt = Some((99, false)));
+        let error = wait_confirmations(&fx, 1, 5).expect_err("mined and failed");
+        assert!(crate::swap_evidence::is_mined_and_failed(&error), "{error}");
+    }
+
+    /// Nodes that differ, one that fails, a silent trusted node and a coin with too few nodes leave the
+    /// confirmation undetermined: the wait ends with the marker, never as "not confirmed". The trusted node alone
+    /// decides.
+    #[test]
+    fn confirmations_differing_or_failing_nodes_are_undetermined() {
+        let fx = v2_fixture(&[A, B], listed(&[A, B]));
+        fx.set(A, |node| node.receipt = Some((98, true)));
+        let error = wait_confirmations(&fx, 3, 2).expect_err("the nodes differ");
+        assert!(is_undetermined(&error), "{error}");
+        assert!(error.contains("Waited too long"), "{error}");
+
+        fx.set(B, |node| node.down = true);
+        let error = wait_confirmations(&fx, 3, 2).expect_err("one answer");
+        assert!(
+            is_undetermined(&error) && error.contains("fewer than two nodes answered"),
+            "{error}"
+        );
+
+        let fx = v2_fixture(&[A, B], trusting("b.example:8545", &[A, B]));
+        fx.set(B, |node| node.receipt = Some((98, true)));
+        wait_confirmations(&fx, 3, 5).expect("the trusted node alone decides");
+        assert!(fx.asked(A).is_empty(), "{:?}", fx.asked(A));
+        fx.set(B, |node| node.down = true);
+        let error = wait_confirmations(&fx, 3, 2).expect_err("the trusted node is silent");
+        assert!(is_undetermined(&error), "{error}");
+
+        let fx = v2_fixture(&[A, A2], listed(&[A, A2]));
+        let error = wait_confirmations(&fx, 3, 2).expect_err("too few nodes");
+        assert!(is_undetermined(&error), "{error}");
+        assert!(fx.world.seen.lock().unwrap().is_empty(), "a node was asked");
+    }
+
+    /// A coin with no agreed-reads policy keeps its single provider; a wait whose last read failed ends with the
+    /// marker, not as "not confirmed".
+    #[test]
+    fn confirmations_without_a_policy_say_undetermined_when_the_last_read_failed() {
+        let fx = v2_fixture(&[A, B], SwapEvidencePolicy::NotAdopted);
+        let error = wait_confirmations(&fx, 3, 2).expect_err("the provider fails");
+        assert!(error.contains("Waited too long"), "{error}");
+        assert!(is_undetermined(&error), "{error}");
+    }
 }

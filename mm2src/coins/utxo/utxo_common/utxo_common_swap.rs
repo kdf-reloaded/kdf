@@ -2286,12 +2286,42 @@ where
     build_and_broadcast_maker_v2_spend(coin, &prev_bytes, redeem, script_data, SEQUENCE_FINAL, 0, &htlc_kp).await
 }
 
+/// The fixed reason of a search for the funding spend whose read failed.
+const FUNDING_SPEND_READ_FAILED: &str = "the read for the spend of the funding failed";
+
+/// Whether a spend of the taker funding output proves itself (CRD ch.51 R100): it takes the secret branch and the
+/// secret it carries hashes to the funding's secret hash.
+fn funding_spend_proves_itself(spend: &Option<SpentOutputInfo>, secret_hash: &[u8]) -> bool {
+    let Some(input) = spend
+        .as_ref()
+        .and_then(|info| info.spending_tx.inputs.get(info.input_index))
+    else {
+        return false;
+    };
+    match classify_funding_spend_script_sig(&input.script_sig) {
+        FundingSpendBranchTag::Secret(secret) => {
+            matches!(
+                crypto::secret_hash_algo::secret_matches_hash(&secret, secret_hash),
+                Ok(true)
+            )
+        },
+        FundingSpendBranchTag::Timelock | FundingSpendBranchTag::Cooperative => false,
+    }
+}
+
 /// §15.5.5 — Locate and classify the spend of a taker funding output.
+///
+/// Under an adopted swap-evidence `policy` the spend is agreed on two servers, or taken from the trusted node (CRD
+/// ch.51 R100); an undetermined read is an `Rpc` error whose text carries the marker of
+/// [`crate::swap_evidence::undetermined`], never "not spent". A secret refund whose secret hashes to `secret_hash`
+/// proves itself and is taken from any one server. Without such a policy one node is asked, and a failed read is an
+/// `Rpc` error whose text carries the marker, with the text of the node in the debug log only.
 pub async fn search_for_taker_funding_spend<T>(
     coin: &T,
     tx: &UtxoTx,
     from_block: u64,
-    _secret_hash: &[u8],
+    secret_hash: &[u8],
+    policy: &SwapEvidencePolicy,
 ) -> Result<Option<FundingTxSpend<crate::utxo::utxo_standard::UtxoStandardCoin>>, SearchForFundingSpendErr>
 where
     T: UtxoCommonOps,
@@ -2300,18 +2330,40 @@ where
         .outputs
         .get(DEFAULT_SWAP_VOUT)
         .ok_or_else(|| SearchForFundingSpendErr::InvalidInputTx("missing funding output 0".to_string()))?;
-    let spent = coin
-        .as_ref()
-        .rpc_client
-        .find_output_spend(
-            tx.hash(),
-            &output.script_pubkey,
-            DEFAULT_SWAP_VOUT,
-            BlockHashOrHeight::Height(from_block as i64),
-        )
-        .compat()
-        .await
-        .map_err(SearchForFundingSpendErr::Rpc)?;
+    let spent = match evidence_nodes(coin.as_ref(), policy) {
+        Some(servers) => {
+            let funding = PaymentOutputs {
+                tx_hash: tx.hash(),
+                spent_script_pubkey: output.script_pubkey.clone(),
+            };
+            agreed_output_spend(
+                coin.as_ref().tx_hash_algo,
+                policy,
+                &servers,
+                &funding,
+                DEFAULT_SWAP_VOUT,
+                |spend| funding_spend_proves_itself(spend, secret_hash),
+            )
+            .await
+            .map_err(SearchForFundingSpendErr::Rpc)?
+        },
+        None => coin
+            .as_ref()
+            .rpc_client
+            .find_output_spend(
+                tx.hash(),
+                &output.script_pubkey,
+                DEFAULT_SWAP_VOUT,
+                BlockHashOrHeight::Height(from_block as i64),
+            )
+            .compat()
+            .await
+            .map_err(|e| {
+                // The text of the node goes to the debug log only; the error is undetermined, never "not spent".
+                debug!("find_output_spend of the funding failed: {}", e);
+                SearchForFundingSpendErr::Rpc(crate::swap_evidence::undetermined(FUNDING_SPEND_READ_FAILED, &[]))
+            })?,
+    };
     let spent = match spent {
         Some(s) => s,
         None => return Ok(None),
@@ -3294,11 +3346,17 @@ where
 /// "Timed out" is answered only when the last read of the call was answered, with no spend found. A read that
 /// failed ends the call at once with an undetermined error (see [`crate::swap_evidence::undetermined`]); it is
 /// never repeated into "timed out". The text of the node error goes to the debug log only.
+///
+/// Under an adopted swap-evidence `policy` every read asks two servers, or the trusted node (CRD ch.51 R100): a
+/// spend is answered only as two servers agree on it, and an undetermined read ends the call with the marker. A
+/// spend that does not spend the payment at its first input is not a spend the steps can tell the kind of: the call
+/// answers it as undetermined.
 pub async fn find_taker_payment_spend_tx<T>(
     coin: &T,
     taker_payment: &UtxoTx,
     from_block: u64,
     wait_until: u64,
+    policy: &SwapEvidencePolicy,
 ) -> MmResult<UtxoTx, FindPaymentSpendError>
 where
     T: UtxoCommonOps,
@@ -3312,31 +3370,54 @@ where
     let script_pubkey = output.script_pubkey.clone();
     let from_block_i64 = from_block as i64;
     let tx_hash_algo = coin.as_ref().tx_hash_algo;
+    let servers = evidence_nodes(coin.as_ref(), policy);
+    let payment = PaymentOutputs {
+        tx_hash,
+        spent_script_pubkey: script_pubkey.clone(),
+    };
 
     poll_for_spend(
         wait_until,
         10.,
         || now_ms() / 1000,
         || async {
-            let spent = coin
-                .as_ref()
-                .rpc_client
-                .find_output_spend(
-                    tx_hash,
-                    &script_pubkey,
-                    DEFAULT_SWAP_VOUT,
-                    BlockHashOrHeight::Height(from_block_i64),
-                )
-                .compat()
-                .await?;
-            Ok(spent.map(|spent| {
-                let mut spend_tx = spent.spending_tx;
-                spend_tx.tx_hash_algo = tx_hash_algo;
-                spend_tx
-            }))
+            let spent = match &servers {
+                // No secret hash is known here, so no spend proves itself: the servers must agree.
+                Some(servers) => {
+                    agreed_output_spend(tx_hash_algo, policy, servers, &payment, DEFAULT_SWAP_VOUT, |_| false).await?
+                },
+                None => coin
+                    .as_ref()
+                    .rpc_client
+                    .find_output_spend(
+                        tx_hash,
+                        &script_pubkey,
+                        DEFAULT_SWAP_VOUT,
+                        BlockHashOrHeight::Height(from_block_i64),
+                    )
+                    .compat()
+                    .await
+                    .map_err(|e| e.to_string())?,
+            };
+            spent.map(|spent| spend_at_first_input(spent, tx_hash_algo)).transpose()
         },
     )
     .await
+}
+
+/// The fixed reason of a spend of the payment that does not spend it at its first input.
+const SPEND_NOT_AT_FIRST_INPUT: &str = "the spend of the payment does not spend it at its first input";
+
+/// The transaction of a found spend, for the steps that read its first input (the refund shape of
+/// [`is_taker_payment_refund_v2`] and the secret of [`extract_secret_v2`]). A spend that spends the payment at
+/// another input is answered as undetermined, as the steps cannot tell its kind from the first input.
+fn spend_at_first_input(spent: SpentOutputInfo, tx_hash_algo: TxHashAlgo) -> Result<UtxoTx, String> {
+    if spent.input_index != 0 {
+        return Err(crate::swap_evidence::undetermined(SPEND_NOT_AT_FIRST_INPUT, &[]));
+    }
+    let mut spend_tx = spent.spending_tx;
+    spend_tx.tx_hash_algo = tx_hash_algo;
+    Ok(spend_tx)
 }
 
 /// The fixed reason of a spend search whose read failed.

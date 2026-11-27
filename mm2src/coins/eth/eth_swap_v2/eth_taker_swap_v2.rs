@@ -27,6 +27,7 @@
 use super::{check_decoded_length, extract_id_from_tx_data, validate_amount, validate_from_to_addresses,
             EthPaymentType, PaymentMethod, PrepareTxDataError, SpendTxSearchParams, ZERO_VALUE};
 use crate::eth::abi::{Contract, Function, Token};
+use crate::eth::eth_swap_evidence::V2PaymentSpec;
 use crate::eth::legacy_tx::Action;
 use crate::eth::{decode_contract_call, get_function_input_data, u256_from_big_decimal, EthCoin, EthCoinType,
                  ParseCoinAssocTypes, RefundFundingSecretArgs, RefundTakerPaymentArgs, SendTakerFundingArgs,
@@ -34,6 +35,7 @@ use crate::eth::{decode_contract_call, get_function_input_data, u256_from_big_de
                  ValidateSwapV2TxResult, ValidateTakerFundingArgs, TAKER_SWAP_V2};
 use crate::{FindPaymentSpendError, FundingTxSpend, GenTakerFundingSpendArgs, GenTakerPaymentSpendArgs,
             SearchForFundingSpendErr};
+use common::log::debug;
 use derive_more::Display;
 use ethereum_types::{Address, Public, U256};
 use futures::compat::Future01CompatExt;
@@ -456,6 +458,22 @@ impl EthCoin {
             .await
             .map_err(|e| SearchForFundingSpendErr::Internal(ERRL!("{}", e)))?;
 
+        // CRD ch.51 R100: under an adopted policy the state is read from two nodes (or the trusted node), each at its
+        // own latest block; an undetermined read is a transient `Rpc` error with the marker, never "not spent".
+        if let Some(policy) = self.agreed_swap_reads() {
+            let Some(Token::FixedBytes(id)) = decoded.first() else {
+                return Err(SearchForFundingSpendErr::Internal(
+                    "the funding call has no payment id".to_owned(),
+                ));
+            };
+            let spec = self.taker_payment_spec(taker_swap_v2_contract);
+            let approved = self
+                .agreed_v2_payment_is(&policy, &spec, id, TakerPaymentStateV2::TakerApproved as u8)
+                .await
+                .map_err(SearchForFundingSpendErr::Rpc)?;
+            return Ok(approved.then(|| FundingTxSpend::TransferredToTakerPayment(tx.clone())));
+        }
+
         let taker_status = self
             .payment_status_v2(
                 taker_swap_v2_contract,
@@ -532,8 +550,27 @@ impl EthCoin {
             wait_until,
             check_every,
         };
+        // CRD ch.51 R100: under an adopted policy the spend is shown by two nodes (or the trusted node).
+        if let Some(policy) = self.agreed_swap_reads() {
+            let spec = self.taker_payment_spec(taker_swap_v2_contract);
+            return self
+                .wait_for_agreed_v2_spend(&policy, &spec, &id_array, from_block, wait_until, check_every)
+                .await;
+        }
         let tx_hash = self.find_transaction_hash_by_event(params).await?;
         self.wait_for_transaction(tx_hash, wait_until, check_every).await
+    }
+
+    /// Where the payments of the taker swap contract at `contract` are read (see [`V2PaymentSpec`]).
+    fn taker_payment_spec(&self, contract: Address) -> V2PaymentSpec {
+        V2PaymentSpec {
+            contract,
+            abi: &TAKER_SWAP_V2,
+            getter: EthPaymentType::TakerPayments.as_str(),
+            state_index: TAKER_PAYMENT_STATE_INDEX,
+            spent_state: TakerPaymentStateV2::MakerSpent as u8,
+            spent_event: EVT_TAKER_PAYMENT_SPENT,
+        }
     }
 
     /// Pulls the maker's secret out of the calldata of a
@@ -814,13 +851,18 @@ impl From<crate::eth::abi::AbiError> for PaymentStatusErr {
     fn from(err: crate::eth::abi::AbiError) -> Self { PaymentStatusErr::ABIError(err.to_string()) }
 }
 
+/// The fixed reason of a search for the funding spend whose read failed.
+const FUNDING_STATE_READ_FAILED: &str = "the read of the funding payment state failed";
+
 /// How a failed read of the payment state is reported by the search for the funding spend (CRD ch.52 R18).
 /// A failure to reach the node, and an answer of the node that does not decode, are the transient `Rpc`
 /// kind, after which the search is repeated. Every other failure is not a node error.
 fn funding_spend_search_err(err: PaymentStatusErr) -> SearchForFundingSpendErr {
     match err {
         PaymentStatusErr::Transport(_) | PaymentStatusErr::NodeAnswer(_) => {
-            SearchForFundingSpendErr::Rpc(err.to_string())
+            // The text of the node goes to the debug log only; the read is undetermined, never "not spent".
+            debug!("the read of the funding payment state failed: {}", err);
+            SearchForFundingSpendErr::Rpc(crate::swap_evidence::undetermined(FUNDING_STATE_READ_FAILED, &[]))
         },
         PaymentStatusErr::ABIError(_) | PaymentStatusErr::Internal(_) | PaymentStatusErr::InvalidData(_) => {
             SearchForFundingSpendErr::Internal(err.to_string())
@@ -1046,6 +1088,22 @@ mod funding_spend_search_and_secret_tests {
         ] {
             let mapped = funding_spend_search_err(err);
             assert!(matches!(mapped, SearchForFundingSpendErr::Rpc(_)), "{mapped}");
+        }
+    }
+
+    /// CRD ch.51 R100, ch.52 R18: a failed read of the payment state is undetermined and carries no text of the
+    /// node.
+    #[test]
+    fn a_failed_payment_state_read_is_marked_and_carries_no_node_text() {
+        for err in [
+            PaymentStatusErr::Transport("connection to node.example refused".into()),
+            PaymentStatusErr::NodeAnswer("empty answer from node.example".into()),
+        ] {
+            let SearchForFundingSpendErr::Rpc(text) = funding_spend_search_err(err) else {
+                panic!("a transient search error");
+            };
+            assert!(crate::swap_evidence::is_undetermined(&text), "{text}");
+            assert!(!text.contains("node.example"), "{text}");
         }
     }
 
