@@ -407,6 +407,23 @@ for the token's reads, its activation answer carries `"swap_evidence_single_bchd
 one warning names the platform. This is a Reloaded addition; the row in
 [GLEEC_COMPATIBILITY](GLEEC_COMPATIBILITY.md) describes it.
 
+### Swap evidence readiness
+
+Before a swap starts, the node checks that both coins can give the agreed chain reads the swap will need (see
+"Swap evidence from one host" above). A host that has not answered within the last minute is asked again, up to a
+number of attempts in a row, each with a time limit. A maker's orders with a coin are paused only once a host the coin
+needs has failed every attempt, and stay paused until that host answers again; a swap start is declined while further attempts are pending. The node logs one line
+per silent host, naming only `host[:port]` and the platform, with the number of coins affected, and one line when it
+answers again. Three top-level `MM2.json` keys tune this; absent or `null` means the default:
+
+| Key | Value | Default |
+|---|---|---|
+| `swap_evidence_probe_attempts` | whole number, at least 1 | `3` |
+| `swap_evidence_probe_timeout_s` | number of seconds above 0, the limit of one attempt | `5` |
+| `swap_evidence_host_log_interval_s` | whole number of seconds, at least 0: how often a silent host's line repeats while nothing changes | `3600` |
+
+An invalid value stops the start with an error naming the key. This is a Reloaded addition.
+
 ### Electrum Servers over TLS
 
 An Electrum server entry with `"protocol": "SSL"` is reached over TLS. The entry sits in the

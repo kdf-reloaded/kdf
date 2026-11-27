@@ -1217,7 +1217,9 @@ fn the_readiness_probe_bounds_its_own_exchange() {
         web3,
         is_parity: false,
     };
-    assert!(block_on(instance.readiness_probe()));
+    assert!(block_on(
+        instance.readiness_probe(crate::swap_evidence::READY_PROBE_TIMEOUT_SECS)
+    ));
     assert_eq!(sender.bounds(), vec![crate::swap_evidence::READY_PROBE_TIMEOUT_SECS]);
 }
 

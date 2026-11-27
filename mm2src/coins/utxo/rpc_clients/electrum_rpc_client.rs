@@ -2,8 +2,8 @@ use super::electrum_client_registry::ReleaseNote;
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
 use super::electrum_pool::{call_budget_of_caller, ElectrumPoolOptions, ElectrumServersView, PoolShared};
 use super::*;
-use crate::swap_evidence::{evidence_ready, node_name, HostReadiness, ReadinessProbes, SwapEvidencePolicy,
-                           READY_PROBE_TIMEOUT_SECS};
+use crate::swap_evidence::{evidence_ready, node_name, HostReadiness, ReadinessProbes, ReadyMode, ReadyScope,
+                           SwapEvidencePolicy};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::header_time_only::read_window_times;
 #[cfg(not(target_arch = "wasm32"))]
@@ -862,10 +862,11 @@ impl ElectrumClient {
     /// Whether the coin `ticker` may start a swap under `policy` over this client's usable servers. A server counts
     /// as answering when the pool saw it answer within the window or it keeps a maintained connection that answers
     /// its pings; otherwise, and only while the answering hosts are not enough, it gets one directed `server.ping`
-    /// bounded by [`READY_PROBE_TIMEOUT_SECS`], at most once per window per host. With `contract_history` only the
-    /// servers that have served the contract-event history count (a QRC20 token). The probe carries that bound itself
-    /// and the shared check bounds it again by the same figure; whichever ends it first, the connection the probe
-    /// opened is released.
+    /// bounded by the probe timeout, in a series of attempts, at most once per window per host. With
+    /// `contract_history` only the servers that have served the contract-event history count (a QRC20 token). The
+    /// probe carries that bound itself and the series bounds it again by the same figure; whichever ends it first,
+    /// the connection the probe opened is released. `platform` names the coin whose servers these are, in the host
+    /// lines; `mode` is who asks ([`ReadyMode`]).
     ///
     /// # Errors
     ///
@@ -873,8 +874,10 @@ impl ElectrumClient {
     pub(crate) async fn swap_evidence_ready(
         &self,
         ticker: &str,
+        platform: &str,
         policy: &SwapEvidencePolicy,
         contract_history: bool,
+        mode: ReadyMode,
     ) -> Result<(), String> {
         let servers: Vec<ServerReadiness> = self
             .pool
@@ -892,13 +895,15 @@ impl ElectrumClient {
                 false => HostReadiness::Unknown,
             },
             &self.readiness_probes,
-            "",
+            ReadyScope { key: "", platform },
+            mode,
             |server| {
                 let pool = self.pool.clone();
                 let addr = server.addr.clone();
-                async move {
-                    pool.probe_server(&addr, Duration::from_secs_f64(READY_PROBE_TIMEOUT_SECS))
-                        .await
+                move |bound| {
+                    let pool = pool.clone();
+                    let addr = addr.clone();
+                    async move { pool.probe_server(&addr, Duration::from_secs_f64(bound)).await }
                 }
             },
         )

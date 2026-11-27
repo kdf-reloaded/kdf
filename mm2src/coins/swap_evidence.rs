@@ -24,8 +24,12 @@ use crate::node_url::electrum_host_port;
 use futures::stream::{FuturesUnordered, StreamExt};
 
 mod readiness;
-pub use readiness::{evidence_ready, not_ready_text, shared_readiness_probes, HostReadiness, NotReadyKind,
-                    ReadinessProbes, NOT_READY_MARKER, READY_PROBE_TIMEOUT_SECS, READY_WINDOW_SECS};
+pub(crate) use readiness::evidence_ready_at;
+pub use readiness::{evidence_ready, not_ready_text, readiness_settings, readiness_settings_from_conf,
+                    set_readiness_settings, shared_readiness_probes, HostReadiness, NotReadyKind, ProbeBound,
+                    ReadinessProbes, ReadinessSettings, ReadyMode, ReadyRun, ReadyScope, HOST_LOG_INTERVAL_KEY,
+                    NOT_READY_MARKER, OWN_DAEMON_LABEL, PROBE_ATTEMPTS_KEY, PROBE_TIMEOUT_KEY, READY_PROBE_ATTEMPTS,
+                    READY_PROBE_TIMEOUT_SECS, READY_WINDOW_SECS};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::future::Future;

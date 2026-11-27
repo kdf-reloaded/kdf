@@ -1,6 +1,31 @@
 use super::*;
 
 impl SlpToken {
+    /// The readiness check of [`MmCoin::swap_evidence_ready`] for `mode`: the BCH platform's servers under the
+    /// token's policy, then the platform's bchd nodes (maintainer decision of 2026-11-25/26 under CRD ch.51 R100).
+    /// The text names the token.
+    pub(super) async fn swap_evidence_ready_in(&self, mode: crate::swap_evidence::ReadyMode) -> Result<(), String> {
+        let policy = self.swap_evidence_policy();
+        let ticker = self.ticker();
+        utxo_common::swap_evidence_ready_as(
+            ticker,
+            self.platform_coin.ticker(),
+            self.platform_coin.as_ref(),
+            &policy,
+            mode,
+        )
+        .await?;
+        crate::utxo::bchd_grpc::bchd_ready(
+            ticker,
+            self.platform_coin.ticker(),
+            &policy,
+            self.platform_coin.bchd_urls(),
+            self.platform_coin.allow_single_host(),
+            mode,
+        )
+        .await
+    }
+
     pub fn new(
         decimals: u8,
         ticker: String,

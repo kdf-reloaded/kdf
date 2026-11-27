@@ -2776,7 +2776,10 @@ async fn swap_evidence_readiness_of_the_endpoints() {
 
     // `a` answered a read just now; `b` and `c` fail their probe: one host answering is too few.
     backend.reset_suspension(a);
-    let error = backend.swap_evidence_ready("ARRRRDY", &two_nodes).await.unwrap_err();
+    let error = backend
+        .swap_evidence_ready("ARRRRDY", &two_nodes, crate::swap_evidence::ReadyMode::Strict)
+        .await
+        .unwrap_err();
     assert_eq!(
         error,
         "ARRRRDY: swap evidence not available (fewer than two hosts answering)"
@@ -2791,22 +2794,37 @@ async fn swap_evidence_readiness_of_the_endpoints() {
         tip_floor: Some(100),
         ..Script::default()
     });
-    assert!(backend.swap_evidence_ready("ARRRRDY", &two_nodes).await.is_err());
+    assert!(backend
+        .swap_evidence_ready("ARRRRDY", &two_nodes, crate::swap_evidence::ReadyMode::Strict)
+        .await
+        .is_err());
     assert_eq!(transport.called(b, "tip"), 1);
 
     // Two endpoints that answered: ready, nothing sent.
     backend.reset_suspension(b);
-    assert_eq!(backend.swap_evidence_ready("ARRRRDY", &two_nodes).await, Ok(()));
+    assert_eq!(
+        backend
+            .swap_evidence_ready("ARRRRDY", &two_nodes, crate::swap_evidence::ReadyMode::Strict)
+            .await,
+        Ok(())
+    );
     assert_eq!(transport.called(a, "tip") + transport.called(b, "tip"), 1);
 
     // A trusted endpoint that does not answer is not stood in for.
     let trusted = SwapEvidencePolicy::Trusted { node: c.to_owned() };
     assert_eq!(
-        backend.swap_evidence_ready("ARRRRDY", &trusted).await,
+        backend
+            .swap_evidence_ready("ARRRRDY", &trusted, crate::swap_evidence::ReadyMode::Strict)
+            .await,
         Err("ARRRRDY: swap evidence not available (the trusted node is not answering)".to_owned())
     );
     let trusted_a = SwapEvidencePolicy::Trusted { node: a.to_owned() };
-    assert_eq!(backend.swap_evidence_ready("ARRRRDY", &trusted_a).await, Ok(()));
+    assert_eq!(
+        backend
+            .swap_evidence_ready("ARRRRDY", &trusted_a, crate::swap_evidence::ReadyMode::Strict)
+            .await,
+        Ok(())
+    );
 }
 
 /// The readiness check judges the admitted endpoints only, the ones the swap reads ask: an endpoint excluded by
@@ -2840,7 +2858,9 @@ async fn swap_evidence_readiness_ignores_an_excluded_endpoint() {
     backend.admitted().await.unwrap();
 
     assert_eq!(
-        backend.swap_evidence_ready("ARRRXCL", &two_nodes).await,
+        backend
+            .swap_evidence_ready("ARRRXCL", &two_nodes, crate::swap_evidence::ReadyMode::Strict)
+            .await,
         Err("ARRRXCL: swap evidence not available (fewer than two hosts answering)".to_owned())
     );
     assert_eq!(backend.excluded_endpoints().len(), 1, "the stale endpoint is excluded");
@@ -2848,12 +2868,19 @@ async fn swap_evidence_readiness_ignores_an_excluded_endpoint() {
 
     let trusted_fork = SwapEvidencePolicy::Trusted { node: fork.to_owned() };
     assert_eq!(
-        backend.swap_evidence_ready("ARRRXCL", &trusted_fork).await,
+        backend
+            .swap_evidence_ready("ARRRXCL", &trusted_fork, crate::swap_evidence::ReadyMode::Strict)
+            .await,
         Err("ARRRXCL: swap evidence not available (the trusted node is not answering)".to_owned())
     );
     assert_eq!(transport.called(fork, "tip"), 0);
     let trusted_a = SwapEvidencePolicy::Trusted { node: a.to_owned() };
-    assert_eq!(backend.swap_evidence_ready("ARRRXCL", &trusted_a).await, Ok(()));
+    assert_eq!(
+        backend
+            .swap_evidence_ready("ARRRXCL", &trusted_a, crate::swap_evidence::ReadyMode::Strict)
+            .await,
+        Ok(())
+    );
 }
 
 /// The readiness check never starts an admission round: a stale admission is read as it is, and a backend with no
@@ -2871,7 +2898,9 @@ async fn swap_evidence_readiness_never_starts_an_admission() {
 
     // No admission yet: nothing answers, nothing is asked.
     assert_eq!(
-        backend.swap_evidence_ready("ARRRSTL", &two_nodes).await,
+        backend
+            .swap_evidence_ready("ARRRSTL", &two_nodes, crate::swap_evidence::ReadyMode::Strict)
+            .await,
         Err("ARRRSTL: swap evidence not available (fewer than two hosts answering)".to_owned())
     );
     for server in [a, b] {
@@ -2895,7 +2924,7 @@ async fn swap_evidence_readiness_never_starts_an_admission() {
     }
     let result = tokio::time::timeout(
         Duration::from_secs_f64(crate::swap_evidence::READY_PROBE_TIMEOUT_SECS + 1.0),
-        backend.swap_evidence_ready("ARRRSTL", &two_nodes),
+        backend.swap_evidence_ready("ARRRSTL", &two_nodes, crate::swap_evidence::ReadyMode::Strict),
     )
     .await
     .expect("the readiness check is bounded by the probe timeout");

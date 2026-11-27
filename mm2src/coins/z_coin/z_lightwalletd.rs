@@ -2045,14 +2045,20 @@ impl LightwalletdBackend {
     /// no admission round ever runs here): an excluded endpoint never counts, a trusted one included, and when no
     /// endpoint is admitted, or no admission has run yet, none answers. An endpoint counts as answering when it answered within
     /// [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise, and only while the answering hosts are not enough, it
-    /// is asked for its latest block, bounded by [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per
-    /// window per host.
+    /// is asked for its latest block, bounded by the probe timeout, in a series of attempts, at most once per
+    /// window per host (`mode`: who asks, [`crate::swap_evidence::ReadyMode`]).
     ///
     /// # Errors
     ///
     /// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
-    pub(crate) async fn swap_evidence_ready(&self, ticker: &str, policy: &SwapEvidencePolicy) -> Result<(), String> {
-        use crate::swap_evidence::{evidence_ready, shared_readiness_probes, HostReadiness, READY_WINDOW_SECS};
+    pub(crate) async fn swap_evidence_ready(
+        &self,
+        ticker: &str,
+        policy: &SwapEvidencePolicy,
+        mode: crate::swap_evidence::ReadyMode,
+    ) -> Result<(), String> {
+        use crate::swap_evidence::{evidence_ready, shared_readiness_probes, HostReadiness, ReadyScope,
+                                   READY_WINDOW_SECS};
 
         let admitted = match policy {
             // Decided without any endpoint.
@@ -2073,13 +2079,21 @@ impl LightwalletdBackend {
                 _ => HostReadiness::Unknown,
             },
             shared_readiness_probes(),
-            &scope,
+            ReadyScope {
+                key: &scope,
+                platform: ticker,
+            },
+            mode,
             |server| {
                 let transport = self.transport.clone();
                 let server = server.clone();
-                async move {
-                    let answered = transport.latest_block(&server).await.is_ok();
-                    answered
+                move |_bound| {
+                    let transport = transport.clone();
+                    let server = server.clone();
+                    async move {
+                        let answered = transport.latest_block(&server).await.is_ok();
+                        answered
+                    }
                 }
             },
         )

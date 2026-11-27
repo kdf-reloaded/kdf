@@ -105,7 +105,8 @@ pub(crate) async fn pair_not_ready(first: &MmCoinEnum, second: &MmCoinEnum) -> O
 
 /// Judges one coin and records its state: `Ok` or the coin's text, and the change.
 async fn judge(ordermatch_ctx: &OrdermatchContext, coin: &MmCoinEnum) -> (Result<(), String>, PauseChange) {
-    let readiness = coin.swap_evidence_ready().await;
+    // The maker's pause: a host whose retries are pending still counts (CRD ch.51 R100, readiness retries).
+    let readiness = coin.swap_evidence_ready_for_pause().await;
     let mut pause = ordermatch_ctx.evidence_pause.lock();
     let change = match &readiness {
         Ok(()) => pause.note_ready(coin.ticker()),
@@ -124,7 +125,10 @@ pub(crate) async fn new_maker_order_starts_paused(
     base: &MmCoinEnum,
     rel: &MmCoinEnum,
 ) -> bool {
-    let (base_ready, rel_ready) = futures::join!(base.swap_evidence_ready(), rel.swap_evidence_ready());
+    let (base_ready, rel_ready) = futures::join!(
+        base.swap_evidence_ready_for_pause(),
+        rel.swap_evidence_ready_for_pause()
+    );
     let mut pause = ordermatch_ctx.evidence_pause.lock();
     let mut paused = false;
     for (coin, readiness) in [(base, base_ready), (rel, rel_ready)] {

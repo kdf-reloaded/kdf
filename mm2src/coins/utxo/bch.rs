@@ -1002,7 +1002,21 @@ impl MmCoin for BchCoin {
     }
 
     async fn swap_evidence_ready(&self) -> Result<(), String> {
-        utxo_common::swap_evidence_ready(&self.utxo_arc, &self.swap_evidence_policy()).await
+        utxo_common::swap_evidence_ready(
+            &self.utxo_arc,
+            &self.swap_evidence_policy(),
+            crate::swap_evidence::ReadyMode::Strict,
+        )
+        .await
+    }
+
+    async fn swap_evidence_ready_for_pause(&self) -> Result<(), String> {
+        utxo_common::swap_evidence_ready(
+            &self.utxo_arc,
+            &self.swap_evidence_policy(),
+            crate::swap_evidence::ReadyMode::Pause,
+        )
+        .await
     }
 
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {

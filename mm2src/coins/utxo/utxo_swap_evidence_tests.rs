@@ -2,7 +2,7 @@
 //! judged on two servers. Offline, over scripted Electrum servers on distinct loopback addresses (distinct hosts).
 
 use super::*;
-use crate::swap_evidence::{is_undetermined, swap_evidence_policy_from, SwapEvidencePolicy};
+use crate::swap_evidence::{is_undetermined, swap_evidence_policy_from, ReadyMode, SwapEvidencePolicy};
 use crate::utxo::bch::bch_coin_over_fields_for_test;
 use crate::utxo::qtum::QtumCoin;
 use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
@@ -913,7 +913,7 @@ mod readiness {
         });
     }
 
-    /// The probe of a host that accepts the connection and never answers ends at the 3 s bound.
+    /// The probe of a host that accepts the connection and never answers ends at the 5 s bound.
     #[test]
     fn a_silent_host_is_given_up_at_the_probe_bound() {
         block_on(async {
@@ -927,7 +927,7 @@ mod readiness {
             assert!(coin.swap_evidence_ready().await.is_err());
             let elapsed = started.elapsed();
             assert!(
-                elapsed.as_secs_f64() < 5.,
+                elapsed.as_secs_f64() >= 4.9 && elapsed.as_secs_f64() < 7.,
                 "the probe bound was not honored: {elapsed:?}"
             );
         });
@@ -991,7 +991,7 @@ mod readiness {
             NativeClientImpl::get_block_count
                 .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(800u64))));
             assert_eq!(
-                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::OwnDaemon).await,
+                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::OwnDaemon, ReadyMode::Strict).await,
                 Ok(())
             );
             let mut fields = native();
@@ -1012,15 +1012,20 @@ mod readiness {
                 MockResult::Return(Box::new(futures01::future::err(error)))
             });
             assert_eq!(
-                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::OwnDaemon).await,
+                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::OwnDaemon, ReadyMode::Strict).await,
                 Err("OWNDOWN: swap evidence not available (the own daemon is not answering)".to_owned())
             );
             assert_eq!(
-                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::Insufficient { hosts: 1 }).await,
+                utxo_common::swap_evidence_ready(
+                    &fields,
+                    &SwapEvidencePolicy::Insufficient { hosts: 1 },
+                    ReadyMode::Strict
+                )
+                .await,
                 Err("OWNDOWN: swap evidence not available (fewer than two nodes listed)".to_owned())
             );
             assert_eq!(
-                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::NotAdopted).await,
+                utxo_common::swap_evidence_ready(&fields, &SwapEvidencePolicy::NotAdopted, ReadyMode::Strict).await,
                 Ok(())
             );
         });

@@ -2087,6 +2087,39 @@ that moment.
 4. *After the start.* A host that stops answering after the start is handled by
    items 3 and 9 as before.
 
+*Status note (2026-11-27, clean side; Reloaded-original; maintainer decision of
+2026-11-27). Retries of the readiness check.* It changes no sentence above and
+adds no condition to R100. It replaces only the single question of item 1 of the
+status note of 2026-11-26 with the following.
+
+1. *Attempts.* A host not heard from is asked up to three times in a row, each
+   attempt with a 5-second limit and about 2 seconds apart; an answer ends the
+   series. A host counts as not answering only after the last attempt has
+   failed, and from then on until it answers again: it is asked again a minute
+   after the end of each series, and a new series does not count it as
+   answering while its attempts are pending.
+2. *A question still open.* A check that finds a question to a host still open
+   waits for its answer, up to its limit, and does not count the host as not
+   answering meanwhile.
+3. *Swap start.* For a swap start (a maker answering a taker's request, a
+   taker's `buy` or `sell`, the check before the taker fee) a host whose last
+   attempt failed does not count as answering while further attempts are
+   pending, so such a start is still declined at once.
+4. *Maker's orders.* A maker's orders with a coin are paused only once a host
+   the coin needs has failed every attempt; one failed attempt followed by an
+   answer pauses nothing.
+5. *Host lines.* The node logs one line per host that does not answer, naming
+   the host as `host[:port]` only (no scheme, path or query) and the platform,
+   with the number of coins affected, for example one line for an EVM node that
+   serves several tokens. It logs the line when the host first fails, again when
+   the set of silent hosts of the platform changes, and otherwise at most once
+   an hour per host; one line marks a host that answers again. The operator's
+   own daemon is named as such. The lines of each coin's pause and resume are
+   unchanged.
+6. *Settings.* The number of attempts, the limit of one attempt and the
+   interval of the host lines are top-level settings of the node, with the
+   defaults 3, 5 seconds and one hour.
+
 > **Status note (2026-11-27, Reloaded-original, clean side; maintainer
 > decision of 2026-11-27).** The confirmation wait of an EVM coin under
 > the agreed-reads policy is agreed by two nodes for every caller. The
@@ -3938,3 +3971,8 @@ reference rows alike.
   is agreed by two nodes for the legacy swap path as well. Reloaded-original;
   it records the maintainer's decision of 2026-11-27, takes no reference input
   and no forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-27 (readiness retries):* the status note
+  before §51.7 on the retries of the readiness check and the host lines.
+  Reloaded-original; it records the maintainer's decision of 2026-11-27, takes
+  no reference input and no forbidden-class input, and changes no sentence of
+  the chapter.

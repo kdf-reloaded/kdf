@@ -292,10 +292,14 @@ fn maybe_warn_unsafe_rpc_wire_dump_enabled() {
 ///
 /// `fee_estimate_cache_secs` is an integer from 0 to 30 (CRD ch.38 R38.6.6j item 2).
 /// `swap_evidence_allow_single_host` is a bool; absent or `null` is `true` (CRD ch.51 R100, single-host switch).
+/// `swap_evidence_probe_attempts` is a whole number of 1 or more (default 3), `swap_evidence_probe_timeout_s` a number
+/// above 0 (default 5), `swap_evidence_host_log_interval_s` a whole number of 0 or more (default 3600); absent or
+/// `null` is the default (Reloaded-only, the readiness probes of CRD ch.51 R100).
 /// `reactivation_registered_token` is `"refuse"` or `"keep"`; absent or `null` is `"refuse"` (CRD ch.43 D43.1F.1).
 fn validate_node_settings(conf: &Json) -> Result<(), String> {
     coins::request_fee_scope::explicit_fee_estimate_cache_secs(conf)?;
     coins::swap_evidence::allow_single_host_from_conf(conf)?;
+    coins::swap_evidence::readiness_settings_from_conf(conf)?;
     coins::RegisteredTokenPolicy::from_conf(conf).map(|_| ())
 }
 
@@ -320,6 +324,34 @@ mod node_settings_tests {
             let params = LpMainParams::with_conf(json!({ "fee_estimate_cache_secs": bad }));
             let err = block_on(lp_main(params, &|_| ())).unwrap_err();
             assert!(err.contains("fee_estimate_cache_secs"), "{bad}: {err}");
+        }
+    }
+
+    /// The readiness probe settings (CRD ch.51 R100, readiness retries): optional, with their defaults; a value out of
+    /// range or of the wrong kind refuses the start and names the key.
+    #[test]
+    fn the_readiness_probe_settings_are_validated() {
+        validate_node_settings(&json!({})).unwrap();
+        validate_node_settings(&json!({
+            "swap_evidence_probe_attempts": 1,
+            "swap_evidence_probe_timeout_s": 0.5,
+            "swap_evidence_host_log_interval_s": 0,
+        }))
+        .unwrap();
+        validate_node_settings(&json!({ "swap_evidence_probe_attempts": null })).unwrap();
+        for (key, bad) in [
+            ("swap_evidence_probe_attempts", json!(0)),
+            ("swap_evidence_probe_attempts", json!("3")),
+            ("swap_evidence_probe_timeout_s", json!(0)),
+            ("swap_evidence_probe_timeout_s", json!(-2)),
+            ("swap_evidence_host_log_interval_s", json!(-1)),
+            ("swap_evidence_host_log_interval_s", json!(2.5)),
+        ] {
+            let err = validate_node_settings(&json!({ key: bad })).unwrap_err();
+            assert!(err.contains(key), "{key} {bad}: {err}");
+            let params = LpMainParams::with_conf(json!({ key: bad }));
+            let err = block_on(lp_main(params, &|_| ())).unwrap_err();
+            assert!(err.contains(key), "the start itself fails for {key} {bad}: {err}");
         }
     }
 
@@ -380,6 +412,7 @@ pub async fn lp_main(params: LpMainParams, ctx_cb: &dyn Fn(u32)) -> Result<(), S
     }
 
     try_s!(validate_node_settings(&conf));
+    coins::swap_evidence::set_readiness_settings(try_s!(coins::swap_evidence::readiness_settings_from_conf(&conf)));
 
     #[cfg(feature = "custom-swap-locktime")]
     initialize_payment_locktime(&conf);

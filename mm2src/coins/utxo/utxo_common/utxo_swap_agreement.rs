@@ -3,7 +3,7 @@
 // R100, read as before (one node).
 
 use super::*;
-use crate::swap_evidence::{agree, agree_with_tips, node_name, Agreement, SwapEvidencePolicy};
+use crate::swap_evidence::{agree, agree_with_tips, node_name, Agreement, ReadyMode, SwapEvidencePolicy};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::{ElectrumClient, SpentOutputInfo};
 
@@ -35,37 +35,46 @@ pub(crate) fn evidence_nodes(coin: &UtxoCoinFields, policy: &SwapEvidencePolicy)
 /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of an
 /// Electrum-backed or daemon-backed UTXO, QTUM or BCH coin under its effective `policy`. Over Electrum the servers are
 /// judged by [`ElectrumClient::swap_evidence_ready`]; a coin read through the operator's own daemon is ready while the
-/// daemon answers `getblockcount` within [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`] (asked at most once per
-/// window). A coin whose family has not adopted R100 is ready.
+/// daemon answers `getblockcount` within the probe timeout (asked in a series of attempts, at most once per window).
+/// A coin whose family has not adopted R100 is ready. `mode` is who asks ([`ReadyMode`]).
 ///
 /// # Errors
 ///
 /// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
-pub(crate) async fn swap_evidence_ready(coin: &UtxoCoinFields, policy: &SwapEvidencePolicy) -> Result<(), String> {
-    swap_evidence_ready_as(&coin.conf.ticker, coin, policy).await
+pub(crate) async fn swap_evidence_ready(
+    coin: &UtxoCoinFields,
+    policy: &SwapEvidencePolicy,
+    mode: ReadyMode,
+) -> Result<(), String> {
+    swap_evidence_ready_as(&coin.conf.ticker, &coin.conf.ticker, coin, policy, mode).await
 }
 
 /// [`swap_evidence_ready`] of the nodes of `coin`, named in the text as `ticker` (an SLP token names itself while
-/// its platform's servers are judged).
+/// its platform's servers are judged; `platform` is the platform coin's ticker, which scopes the probes and names the
+/// host lines, so a platform and its tokens probe each host once).
 pub(crate) async fn swap_evidence_ready_as(
     ticker: &str,
+    platform: &str,
     coin: &UtxoCoinFields,
     policy: &SwapEvidencePolicy,
+    mode: ReadyMode,
 ) -> Result<(), String> {
     if matches!(policy, SwapEvidencePolicy::NotAdopted) {
         return Ok(());
     }
     match &coin.rpc_client {
-        UtxoRpcClientEnum::Electrum(client) => client.swap_evidence_ready(ticker, policy, false).await,
+        UtxoRpcClientEnum::Electrum(client) => client.swap_evidence_ready(ticker, platform, policy, false, mode).await,
         UtxoRpcClientEnum::Native(native) => {
             // The daemon is the node the operator trusts (R100 item 6), whatever form the stored policy takes.
             let policy = match policy {
                 SwapEvidencePolicy::Insufficient { .. } => policy.clone(),
                 _ => SwapEvidencePolicy::OwnDaemon,
             };
-            own_daemon_ready(ticker, &policy, || {
-                let native = native.clone();
-                async move { native.get_block_count().compat().await.is_ok() }
+            let native = native.clone();
+            own_daemon_ready(ticker, platform, &policy, mode, move |_bound| {
+                // The request is built here, not inside the future: the first attempt is built by the check itself.
+                let request = native.get_block_count().compat();
+                async move { request.await.is_ok() }
             })
             .await
         },
@@ -76,22 +85,33 @@ pub(crate) async fn swap_evidence_ready_as(
     }
 }
 
-/// The readiness of a coin read through the operator's own daemon: `probe` asks the daemon a cheap call; its outcome
-/// is kept for the window in the shared probe record under the coin's ticker.
-pub(crate) async fn own_daemon_ready<F, Fut>(ticker: &str, policy: &SwapEvidencePolicy, probe: F) -> Result<(), String>
+/// The readiness of a coin read through the operator's own daemon: `probe` asks the daemon a cheap call (with the
+/// attempt's bound); its outcome is kept for the window in the shared probe record under the PLATFORM's ticker, so
+/// the tokens of one daemon share one probe.
+pub(crate) async fn own_daemon_ready<F, Fut>(
+    ticker: &str,
+    platform: &str,
+    policy: &SwapEvidencePolicy,
+    mode: ReadyMode,
+    probe: F,
+) -> Result<(), String>
 where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = bool>,
+    F: Fn(f64) -> Fut + Clone + crate::swap_evidence::ProbeBound,
+    Fut: std::future::Future<Output = bool> + crate::swap_evidence::ProbeBound,
 {
     crate::swap_evidence::evidence_ready(
         ticker,
         policy,
-        &["own daemon"],
+        &[crate::swap_evidence::OWN_DAEMON_LABEL],
         |label| (*label).to_owned(),
         |_| crate::swap_evidence::HostReadiness::Unknown,
         crate::swap_evidence::shared_readiness_probes(),
-        ticker,
-        |_| probe(),
+        crate::swap_evidence::ReadyScope {
+            key: platform,
+            platform,
+        },
+        mode,
+        |_| probe.clone(),
     )
     .await
 }
