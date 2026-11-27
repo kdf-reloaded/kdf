@@ -1018,6 +1018,15 @@ the previous version used. The safe way:
   events. A claim that was mined but failed is sent again. `recover_funds_of_swap` makes one attempt of the refund
   step of a v2 swap that ended at its deadline, with fresh reads, and answers in its existing shapes.
   - Detail: PR #548; CRD ch.52 R19, R21, R33, R34 and their status notes of 2026-11-26, ch.51 §51.6D, §51.6G R100.
+- **The chain reads of a v2 swap on UTXO and EVM coins ask two nodes.** The search for the spend of the taker
+  funding, the search for the spend of the taker payment, the refundability check and the confirmation reads of the
+  maker payment, the taker payment and the node's own claim are agreed by two nodes of the coin that agree, or taken
+  from the node named by `swap_evidence_node`, under the coin's evidence policy. A read that cannot be agreed is
+  reported as undetermined and is never taken as "timed out", "nothing found", "not spent" or "not confirmed". A
+  call whose time limit has not passed asks its nodes at least once, and ends as "timed out" only after a read that
+  was determined. A coin with no agreed-reads policy keeps its one node, and a read that failed is an error and not
+  "timed out". A spend of the taker payment that does not spend it at its first input is reported as undetermined.
+  - Detail: PR #N; CRD ch.52 R18 status note of 2026-11-27, ch.51 §51.6G R100.
 
 #### Legacy swaps and orders
 

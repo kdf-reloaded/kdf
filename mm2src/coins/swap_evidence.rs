@@ -433,6 +433,20 @@ pub struct Undetermined {
 /// [`is_undetermined`]).
 pub const UNDETERMINED_PREFIX: &str = "swap evidence undetermined: ";
 
+/// The fixed reason of a confirmation wait whose last read did not reach a node.
+const CONFIRMATION_READ_FAILED: &str = "the read of the confirmations failed";
+
+/// The text a confirmation wait appends to its "waited too long" error when the last read of the wait did not reach
+/// a node (`last_read_failed`): a read that failed is undetermined, never "not confirmed". Empty when the last read
+/// was answered. It carries no text of a node.
+pub fn read_failed_suffix(last_read_failed: bool) -> String {
+    if last_read_failed {
+        format!("; {}", undetermined(CONFIRMATION_READ_FAILED, &[]))
+    } else {
+        String::new()
+    }
+}
+
 /// The only constructor of the error text of an undetermined read: [`UNDETERMINED_PREFIX`], the `reason` and the
 /// node labels (`host[:port]` forms, see [`node_name`], never URLs).
 pub fn undetermined(reason: &str, nodes: &[&str]) -> String {

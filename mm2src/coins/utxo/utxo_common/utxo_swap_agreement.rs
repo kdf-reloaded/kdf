@@ -237,6 +237,49 @@ pub(crate) async fn agreed_spend(
     }
 }
 
+/// The spend of the output `output_index` of `payment`, agreed on the servers under `policy`, for a swap output
+/// that is not an HTLC of the legacy shape (the version 2 funding and the version 2 taker payment). The decision of a
+/// node is the id of the spending transaction, or none; two nodes agree when both show no spend or both show the same
+/// spending transaction. `proves_itself` is `true` for a spend a server cannot be wrong about (a claim whose secret
+/// hashes to the swap's secret hash); it is taken alone, at once.
+pub(crate) async fn agreed_output_spend(
+    tx_hash_algo: TxHashAlgo,
+    policy: &SwapEvidencePolicy,
+    servers: &EvidenceNodes,
+    payment: &PaymentOutputs,
+    output_index: usize,
+    proves_itself: impl Fn(&Option<SpentOutputInfo>) -> bool,
+) -> Result<Option<SpentOutputInfo>, String> {
+    let client = &servers.client;
+    let agreement = agree(
+        policy,
+        &servers.nodes,
+        |addr| node_name(addr),
+        |addr| {
+            let addr = addr.clone();
+            async move {
+                client
+                    .find_output_spend_from(&addr, payment.tx_hash, &payment.spent_script_pubkey, output_index)
+                    .await
+                    .map_err(|e| ask_error("the search for a spend", &node_name(&addr), e))
+            }
+        },
+        |spend: &Option<SpentOutputInfo>| {
+            spend.as_ref().map(|info| {
+                let mut tx = info.spending_tx.clone();
+                tx.tx_hash_algo = tx_hash_algo;
+                tx.hash()
+            })
+        },
+        proves_itself,
+    )
+    .await;
+    match agreement {
+        Agreement::Agreed { answer, .. } => Ok(answer),
+        Agreement::Undetermined(undetermined) => Err(undetermined.to_err_string()),
+    }
+}
+
 /// The look on every usable server (CRD ch.51 R31a with R100): the agreed pair search of [`agreed_spend`], and then
 /// every server of the list is asked for a PROOF ONLY, a claim whose secret hashes to the swap's secret hash. A
 /// proof found on any server is returned; every other answer of the sweep is ignored. Without a proof the result of

@@ -425,6 +425,25 @@ arrives as a message (chapter 51 R42).
 > R31 and R34 use the same wait, text and log rules. No sentence of R18
 > is changed.
 
+> *Status note (2026-11-27, Reloaded-original; maintainer decisions of
+> 2026-11-23).* The version-two coin reads of the UTXO and EVM families
+> now meet the coin-side rule of the note of 2026-11-24 and ask two
+> nodes under the coin's evidence policy of chapter 51 §51.6G R100. This
+> holds for the search for the funding spend, the search for the spend
+> of the taker payment, the refund gate and the confirmation reads of
+> the maker payment, the taker payment and the node's own claim. An
+> agreed answer is the answer; with a trusted node its answer alone is
+> taken; an undetermined read is answered with the marker of the swap
+> evidence text and is never "timed out", "nothing found" or "not
+> confirmed". A call whose limit has not passed asks its nodes at least
+> once, and answers "timed out" only after a determined read that
+> showed no spend or too few confirmations. A coin with no agreed-reads
+> policy keeps its one node, and a failed read is an error that carries
+> the marker. A spend of the taker payment that does not spend it at
+> its first input is answered as undetermined. The family switch that
+> lets a fresh version-two swap start is a later step. No sentence of
+> R18 is changed.
+
 **R19.** *Spend the taker payment.* `TakerPaymentReceived` MUST wait for
 the taker payment to reach the order's configured taker-coin
 confirmation and notarisation settings, with the ⅔ deadline of R11 as
@@ -2066,3 +2085,7 @@ divergence rather than resolving it.
   after R21: the maker's look tells the taker's refund of the taker
   payment by the structure of the spend. Reloaded-original; no
   forbidden-class input.
+- *Clean-side addition of 2026-11-27, a second one:* the status note of
+  that date after R18: the version-two coin reads of the UTXO and EVM
+  families ask two nodes under the coin's evidence policy.
+  Reloaded-original; no forbidden-class input.

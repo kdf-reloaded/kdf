@@ -1134,16 +1134,21 @@ impl ElectrumClient {
         // The error answers of the polled server to the transaction request, in a row.
         let mut error_answers = 0u32;
         let tx_text = format!("{:?}", tx_hash);
+        // Whether the last read of the wait failed to reach a server, so that a timeout is not taken for "not
+        // confirmed".
+        let mut last_read_failed = false;
         loop {
             if now_ms() / 1000 > wait_until {
                 return ERR!(
-                    "Waited too long until {} for transaction {:?} to be confirmed {} times",
+                    "Waited too long until {} for transaction {:?} to be confirmed {} times{}",
                     wait_until,
                     tx_hash,
-                    confirmations
+                    confirmations,
+                    crate::swap_evidence::read_failed_suffix(last_read_failed)
                 );
             }
             let Some(addr) = server.clone() else {
+                last_read_failed = true;
                 error!("No Electrum server to poll for the transaction {:?}, retrying", tx_hash);
                 Timer::sleep(check_every as f64).await;
                 server = self.pool.choose_wait_server(&failed);
@@ -1157,6 +1162,7 @@ impl ElectrumClient {
             match self.transaction_get_verbose_from(&addr, &tx_hash).compat().await {
                 Ok(t) => {
                     error_answers = 0;
+                    last_read_failed = false;
                     let tx_confirmations = if requires_notarization {
                         t.confirmations
                     } else {
@@ -1172,6 +1178,7 @@ impl ElectrumClient {
                     }
                 },
                 Err(e) => {
+                    last_read_failed = e.error.is_transport();
                     let failure = if e.error.is_transport() {
                         Some("request failed")
                     } else if self.pool.tip_checks_on() {

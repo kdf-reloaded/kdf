@@ -185,6 +185,22 @@ impl MarketCoinOps for EthCoin {
 
         let required_confirms = U256::from(confirmations);
         let selfi = self.clone();
+        // CRD ch.51 R100: under an adopted policy the confirmations are shown by two nodes (or the trusted node), each
+        // read at its own latest block.
+        if let Some(policy) = self.agreed_swap_reads() {
+            let fut = async move {
+                let result = selfi
+                    .wait_for_agreed_confirmations(&policy, &tx, confirmations, wait_until, check_every as f64)
+                    .await;
+                match &result {
+                    Ok(()) => status.append(" Confirmed."),
+                    Err(e) if crate::swap_evidence::is_mined_and_failed(e) => status.append(" Failed."),
+                    Err(_) => status.append(" Timed out."),
+                }
+                result
+            };
+            return Box::new(fut.boxed().compat());
+        }
         let fut = async move {
             // LP-17: alloy `Provider::get_transaction_receipt` /
             // `get_block_number` replace `web3.eth().transaction_receipt`
@@ -197,13 +213,16 @@ impl MarketCoinOps for EthCoin {
             use alloy::providers::Provider;
 
             let provider = selfi.alloy_provider();
+            // Whether the last read of the wait failed, so that a timeout is not taken for "not confirmed".
+            let mut last_read_failed = false;
             loop {
                 if status.ms2deadline().unwrap() < 0 {
                     status.append(" Timed out.");
                     return ERR!(
-                        "Waited too long until {} for transaction {:?} confirmation ",
+                        "Waited too long until {} for transaction {:?} confirmation {}",
                         wait_until,
-                        tx
+                        tx,
+                        crate::swap_evidence::read_failed_suffix(last_read_failed)
                     );
                 }
 
@@ -214,11 +233,13 @@ impl MarketCoinOps for EthCoin {
                 {
                     Ok(r) => r,
                     Err(e) => {
+                        last_read_failed = true;
                         log!("Error " [e] " getting the " (selfi.ticker()) " transaction " [tx.tx_hash()] ", retrying in 15 seconds");
                         Timer::sleep(check_every as f64).await;
                         continue;
                     },
                 };
+                last_read_failed = false;
                 if let Some(receipt) = web3_receipt {
                     if !receipt.inner.status() {
                         status.append(" Failed.");
@@ -236,6 +257,7 @@ impl MarketCoinOps for EthCoin {
                         let current_block = match assert_send_future(provider.get_block_number()).await {
                             Ok(b) => U256::from(b),
                             Err(e) => {
+                                last_read_failed = true;
                                 log!("Error " [e] " getting the " (selfi.ticker()) " block number retrying in 15 seconds");
                                 Timer::sleep(check_every as f64).await;
                                 continue;

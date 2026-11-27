@@ -347,7 +347,8 @@ impl TakerCoinSwapOpsV2 for UtxoStandardCoin {
         from_block: u64,
         secret_hash: &[u8],
     ) -> Result<Option<FundingTxSpend<Self>>, SearchForFundingSpendErr> {
-        utxo_common::search_for_taker_funding_spend(self, tx, from_block, secret_hash).await
+        let policy = crate::MmCoin::swap_evidence_policy(self);
+        utxo_common::search_for_taker_funding_spend(self, tx, from_block, secret_hash, &policy).await
     }
 
     async fn gen_taker_funding_spend_preimage(
@@ -411,7 +412,8 @@ impl TakerCoinSwapOpsV2 for UtxoStandardCoin {
         from_block: u64,
         wait_until: u64,
     ) -> MmResult<UtxoTx, FindPaymentSpendError> {
-        utxo_common::find_taker_payment_spend_tx(self, taker_payment, from_block, wait_until).await
+        let policy = crate::MmCoin::swap_evidence_policy(self);
+        utxo_common::find_taker_payment_spend_tx(self, taker_payment, from_block, wait_until, &policy).await
     }
 
     async fn extract_secret_v2(&self, secret_hash: &[u8], spend_tx: &UtxoTx) -> Result<[u8; 32], String> {

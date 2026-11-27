@@ -330,18 +330,23 @@ impl UtxoRpcClientEnum {
         }
         let selfi = self.clone();
         let fut = async move {
+            // Whether the last read of the wait failed to reach the daemon, so that a timeout is not taken for
+            // "not confirmed".
+            let mut last_read_failed = false;
             loop {
                 if now_ms() / 1000 > wait_until {
                     return ERR!(
-                        "Waited too long until {} for transaction {:?} to be confirmed {} times",
+                        "Waited too long until {} for transaction {:?} to be confirmed {} times{}",
                         wait_until,
                         tx_hash,
-                        confirmations
+                        confirmations,
+                        crate::swap_evidence::read_failed_suffix(last_read_failed)
                     );
                 }
 
                 match selfi.get_verbose_transaction(&tx_hash).compat().await {
                     Ok(t) => {
+                        last_read_failed = false;
                         let tx_confirmations = if requires_notarization {
                             t.confirmations
                         } else {
@@ -357,6 +362,7 @@ impl UtxoRpcClientEnum {
                         }
                     },
                     Err(e) => {
+                        last_read_failed = matches!(e.get_inner(), UtxoRpcError::Transport(_));
                         if expiry_height > 0 {
                             let block = match selfi.get_block_count().compat().await {
                                 Ok(b) => b,

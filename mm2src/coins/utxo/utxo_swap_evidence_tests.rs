@@ -1026,3 +1026,413 @@ mod readiness {
         });
     }
 }
+
+// ---- The reads of the version 2 coin methods (CRD ch.51 R100, ch.52 R18) ----
+
+mod swap_v2_reads {
+    use super::*;
+    use crate::{FindPaymentSpendError, FundingTxSpend, SearchForFundingSpendErr, TakerCoinSwapOpsV2};
+
+    /// A spend of the output the swap's payment has at its HTLC position, in the shape of the funding's cooperative
+    /// branch (neither the timelock selector nor a 32-byte secret after the signature).
+    fn cooperative_spend(swap: &Swap) -> UtxoTx {
+        let mut spend = swap.spend(None);
+        spend.inputs[0].script_sig = Builder::default()
+            .push_bytes(&[1; 9])
+            .push_bytes(&[2; 9])
+            .push_bytes(&[3; 9])
+            .into_bytes();
+        spend
+    }
+
+    /// A spend of the payment at its second input: the first input spends another output.
+    fn spend_at_second_input(swap: &Swap) -> UtxoTx {
+        let mut spend = swap.spend(None);
+        let first = TransactionInput {
+            previous_output: OutPoint {
+                hash: [9u8; 32].into(),
+                index: 0,
+            },
+            script_sig: vec![1, 2, 3].into(),
+            sequence: 0,
+            script_witness: vec![],
+        };
+        spend.inputs.insert(0, first);
+        spend
+    }
+
+    async fn search_funding(
+        coin: &UtxoStandardCoin,
+        swap: &Swap,
+    ) -> Result<Option<FundingTxSpend<UtxoStandardCoin>>, SearchForFundingSpendErr> {
+        coin.search_for_taker_funding_spend(&swap.payment, 0, &swap.secret_hash)
+            .await
+    }
+
+    async fn find_payment_spend(
+        coin: &UtxoStandardCoin,
+        swap: &Swap,
+        wait_secs: i64,
+    ) -> Result<UtxoTx, FindPaymentSpendError> {
+        let wait_until = (common::now_ms() / 1000) as i64 + wait_secs;
+        coin.find_taker_payment_spend_tx(&swap.payment, 0, wait_until as u64)
+            .await
+            .map_err(|e| e.into_inner())
+    }
+
+    fn marker_of_rpc(error: &SearchForFundingSpendErr) -> &str {
+        match error {
+            SearchForFundingSpendErr::Rpc(text) => text,
+            other => panic!("not a transient read error: {other:?}"),
+        }
+    }
+
+    fn marker_of_transport(error: &FindPaymentSpendError) -> &str {
+        match error {
+            FindPaymentSpendError::Transport(text) => text,
+            other => panic!("not an undetermined read: {other:?}"),
+        }
+    }
+
+    /// The search for the funding spend: two servers that show the same spend decide it, in each of its three
+    /// kinds, and two that show nothing decide "not spent".
+    #[test]
+    fn funding_spend_two_servers_agree_on_each_kind() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            for server in &servers {
+                show_history(server, &swap, None);
+            }
+            assert!(matches!(search_funding(&coin, &swap).await, Ok(None)));
+
+            let cooperative = cooperative_spend(&swap);
+            for server in &servers {
+                show_history(server, &swap, Some(&cooperative));
+            }
+            assert!(matches!(
+                search_funding(&coin, &swap).await,
+                Ok(Some(FundingTxSpend::TransferredToTakerPayment(_)))
+            ));
+
+            let timelock = swap.spend(None);
+            for server in &servers {
+                show_history(server, &swap, Some(&timelock));
+            }
+            assert!(matches!(
+                search_funding(&coin, &swap).await,
+                Ok(Some(FundingTxSpend::RefundedTimelock(_)))
+            ));
+
+            let secret_refund = swap.spend(Some(SECRET));
+            for server in &servers {
+                show_history(server, &swap, Some(&secret_refund));
+            }
+            assert!(matches!(
+                search_funding(&coin, &swap).await,
+                Ok(Some(FundingTxSpend::RefundedSecret { secret, .. })) if secret == SECRET
+            ));
+        });
+    }
+
+    /// Servers that differ, or fewer than two that answer, leave the search undetermined: a transient read error
+    /// with the marker, never "not spent".
+    #[test]
+    fn funding_spend_differing_or_failing_servers_are_undetermined() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            show_history(&servers[0], &swap, Some(&cooperative_spend(&swap)));
+            show_history(&servers[1], &swap, None);
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let error = search_funding(&coin, &swap).await.expect_err("the servers differ");
+            assert!(is_undetermined(marker_of_rpc(&error)), "{error}");
+            assert!(marker_of_rpc(&error).contains("disagree"), "{error}");
+            assert!(!marker_of_rpc(&error).contains("://"), "{error}");
+
+            // One server answers, the other fails.
+            show_history(&servers[1], &swap, Some(&cooperative_spend(&swap)));
+            servers[1].set_behavior(StubBehavior::Down).await;
+            let error = search_funding(&coin, &swap).await.expect_err("one answer");
+            assert!(is_undetermined(marker_of_rpc(&error)), "{error}");
+            assert!(marker_of_rpc(&error).contains("fewer than two"), "{error}");
+        });
+    }
+
+    /// The trusted node's answer alone decides, and a silent trusted node is undetermined.
+    #[test]
+    fn funding_spend_of_the_trusted_node_is_taken_alone() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            show_history(&servers[0], &swap, Some(&cooperative_spend(&swap)));
+            show_history(&servers[1], &swap, None);
+            let trusted = servers[0].addr();
+            let coin = utxo_coin(&[&servers[0], &servers[1]], Some(&trusted));
+            assert!(matches!(
+                search_funding(&coin, &swap).await,
+                Ok(Some(FundingTxSpend::TransferredToTakerPayment(_)))
+            ));
+            assert_eq!(servers[1].requests("blockchain.scripthash.get_history"), 0);
+
+            servers[0].set_behavior(StubBehavior::Down).await;
+            let error = search_funding(&coin, &swap)
+                .await
+                .expect_err("the trusted node is silent");
+            assert!(is_undetermined(marker_of_rpc(&error)), "{error}");
+            assert!(marker_of_rpc(&error).contains("trusted node did not answer"), "{error}");
+        });
+    }
+
+    /// A secret refund whose secret hashes to the funding's secret hash proves itself and is taken from one
+    /// server; one with another secret proves nothing.
+    #[test]
+    fn funding_spend_by_a_matching_secret_is_taken_on_one_server() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            show_history(&servers[0], &swap, Some(&swap.spend(Some(SECRET))));
+            show_history(&servers[1], &swap, None);
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            assert!(matches!(
+                search_funding(&coin, &swap).await,
+                Ok(Some(FundingTxSpend::RefundedSecret { .. }))
+            ));
+
+            show_history(&servers[0], &swap, Some(&swap.spend(Some([9; 32]))));
+            let error = search_funding(&coin, &swap).await.expect_err("no proof");
+            assert!(is_undetermined(marker_of_rpc(&error)), "{error}");
+        });
+    }
+
+    /// A coin with no agreed-reads policy asks one node, and a failed read is an error, never "not spent".
+    #[test]
+    fn funding_spend_without_a_policy_reads_one_node_and_a_failure_is_an_error() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            show_history(&servers[0], &swap, None);
+            show_history(&servers[1], &swap, None);
+            let mut fields = adopted_fields(&[&servers[0], &servers[1]], None);
+            fields.swap_evidence = SwapEvidencePolicy::NotAdopted;
+            let coin = utxo_coin_from_fields(fields);
+            assert!(matches!(search_funding(&coin, &swap).await, Ok(None)));
+            servers[0].set_behavior(StubBehavior::Down).await;
+            servers[1].set_behavior(StubBehavior::Down).await;
+            assert!(matches!(
+                search_funding(&coin, &swap).await,
+                Err(SearchForFundingSpendErr::Rpc(_))
+            ));
+        });
+    }
+
+    /// The search for the spend of the taker payment: two servers that show the same spend decide it.
+    #[test]
+    fn payment_spend_two_servers_agree() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            let claim = swap.spend(Some(SECRET));
+            for server in &servers {
+                show_history(server, &swap, Some(&claim));
+            }
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let found = find_payment_spend(&coin, &swap, 60).await.expect("the spend is found");
+            assert_eq!(txid_hex(&found), txid_hex(&claim));
+        });
+    }
+
+    /// Servers that differ, one answering, and a silent trusted node end the call at once with the marker; no claim
+    /// proves itself here, so one server's claim is not taken.
+    #[test]
+    fn payment_spend_differing_or_failing_servers_are_undetermined() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            show_history(&servers[0], &swap, Some(&swap.spend(Some(SECRET))));
+            show_history(&servers[1], &swap, None);
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let error = find_payment_spend(&coin, &swap, 60)
+                .await
+                .expect_err("the servers differ");
+            assert!(is_undetermined(marker_of_transport(&error)), "{error}");
+            assert!(marker_of_transport(&error).contains("disagree"), "{error}");
+
+            servers[1].set_behavior(StubBehavior::Down).await;
+            let error = find_payment_spend(&coin, &swap, 60).await.expect_err("one answer");
+            assert!(is_undetermined(marker_of_transport(&error)), "{error}");
+            assert!(marker_of_transport(&error).contains("fewer than two"), "{error}");
+
+            let trusted = servers[0].addr();
+            let coin = utxo_coin(&[&servers[0], &servers[1]], Some(&trusted));
+            let found = find_payment_spend(&coin, &swap, 60)
+                .await
+                .expect("the trusted node answers");
+            assert_eq!(found.inputs.len(), 1);
+            servers[0].set_behavior(StubBehavior::Down).await;
+            let error = find_payment_spend(&coin, &swap, 60)
+                .await
+                .expect_err("the trusted node is silent");
+            assert!(
+                marker_of_transport(&error).contains("trusted node did not answer"),
+                "{error}"
+            );
+        });
+    }
+
+    /// A spend that spends the payment at another input than the first is not a spend the steps can tell the kind
+    /// of: the call answers it as undetermined, in the agreed read and in the single-node read.
+    #[test]
+    fn a_spend_at_another_input_than_the_first_is_undetermined() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            let spend = spend_at_second_input(&swap);
+            for server in &servers {
+                show_history(server, &swap, Some(&spend));
+            }
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let error = find_payment_spend(&coin, &swap, 60)
+                .await
+                .expect_err("not at the first input");
+            assert!(is_undetermined(marker_of_transport(&error)), "{error}");
+
+            let mut fields = adopted_fields(&[&servers[0], &servers[1]], None);
+            fields.swap_evidence = SwapEvidencePolicy::NotAdopted;
+            let coin = utxo_coin_from_fields(fields);
+            let error = find_payment_spend(&coin, &swap, 60)
+                .await
+                .expect_err("not at the first input");
+            assert!(is_undetermined(marker_of_transport(&error)), "{error}");
+        });
+    }
+
+    /// The time limit: a call whose limit has not passed asks its servers before it can answer "timed out", and
+    /// answers "timed out" after a determined read that showed no spend; a limit that has passed answers it at once.
+    #[test]
+    fn payment_spend_asks_before_it_times_out() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            for server in &servers {
+                show_history(server, &swap, None);
+            }
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let error = find_payment_spend(&coin, &swap, 1).await.expect_err("no spend in time");
+            assert!(matches!(error, FindPaymentSpendError::Timeout { .. }), "{error}");
+            let asked: usize = servers
+                .iter()
+                .map(|server| server.requests("blockchain.scripthash.get_history"))
+                .sum();
+            assert!(asked >= 2, "the servers were not asked before the timeout: {asked}");
+
+            let error = find_payment_spend(&coin, &swap, -5)
+                .await
+                .expect_err("the limit has passed");
+            assert!(matches!(error, FindPaymentSpendError::Timeout { .. }), "{error}");
+        });
+    }
+
+    /// A transaction as a server shows it with `confirmations` confirmations.
+    fn shown(confirmations: u32) -> Json {
+        json!({"hex": "00", "txid": "00".repeat(32), "version": 1, "locktime": 0, "vin": [], "vout": [],
+               "confirmations": confirmations})
+    }
+
+    async fn wait_for_confirmations(
+        coin: &UtxoStandardCoin,
+        swap: &Swap,
+        required: u64,
+        wait_secs: u64,
+    ) -> Result<(), String> {
+        let wait_until = common::now_ms() / 1000 + wait_secs;
+        coin.wait_for_confirmations(&serialize(&swap.payment).take(), required, false, wait_until, 1)
+            .compat()
+            .await
+    }
+
+    /// The confirmations: two servers that both show enough take the wait; two that agree on too few leave "not
+    /// confirmed" as a determined timeout, without the marker.
+    #[test]
+    fn confirmations_two_servers_agree() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            for server in &servers {
+                server.set_result("blockchain.transaction.get", shown(3));
+            }
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            wait_for_confirmations(&coin, &swap, 2, 5).await.expect("confirmed");
+
+            let error = wait_for_confirmations(&coin, &swap, 4, 2)
+                .await
+                .expect_err("not confirmed in time");
+            assert!(error.contains("Waited too long"), "{error}");
+            assert!(!is_undetermined(&error), "{error}");
+        });
+    }
+
+    /// Servers that differ, one that fails, and a silent trusted node leave the confirmation undetermined: the wait
+    /// ends with the marker at its limit, never as "not confirmed". The trusted node's answer alone decides.
+    #[test]
+    fn confirmations_differing_or_failing_servers_are_undetermined() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            servers[0].set_result("blockchain.transaction.get", shown(3));
+            servers[1].set_result("blockchain.transaction.get", shown(1));
+            let coin = utxo_coin(&[&servers[0], &servers[1]], None);
+            let error = wait_for_confirmations(&coin, &swap, 2, 2)
+                .await
+                .expect_err("the servers differ");
+            assert!(is_undetermined(&error), "{error}");
+
+            let trusted = servers[0].addr();
+            let trusting_coin = utxo_coin(&[&servers[0], &servers[1]], Some(&trusted));
+            wait_for_confirmations(&trusting_coin, &swap, 2, 5)
+                .await
+                .expect("the trusted node alone decides");
+
+            servers[0].set_behavior(StubBehavior::Down).await;
+            servers[1].set_result("blockchain.transaction.get", shown(3));
+            let error = wait_for_confirmations(&coin, &swap, 2, 2)
+                .await
+                .expect_err("one answer");
+            assert!(is_undetermined(&error), "{error}");
+            let error = wait_for_confirmations(&trusting_coin, &swap, 2, 2)
+                .await
+                .expect_err("the trusted node is silent");
+            assert!(is_undetermined(&error), "{error}");
+        });
+    }
+
+    /// A coin with no agreed-reads policy keeps its single-node wait, and a wait whose last read failed to reach
+    /// a server ends with the marker, not as "not confirmed".
+    #[test]
+    fn confirmations_without_a_policy_say_undetermined_when_the_last_read_failed() {
+        block_on(async {
+            let servers = start_servers(2).await;
+            let swap = Swap::new();
+            for server in &servers {
+                server.set_result("blockchain.transaction.get", shown(3));
+            }
+            let mut fields = adopted_fields(&[&servers[0], &servers[1]], None);
+            fields.swap_evidence = SwapEvidencePolicy::NotAdopted;
+            let coin = utxo_coin_from_fields(fields);
+            wait_for_confirmations(&coin, &swap, 2, 5).await.expect("confirmed");
+
+            let error = wait_for_confirmations(&coin, &swap, 4, 2).await.expect_err("too few");
+            assert!(error.contains("Waited too long"), "{error}");
+            assert!(!is_undetermined(&error), "{error}");
+
+            servers[0].set_behavior(StubBehavior::Down).await;
+            servers[1].set_behavior(StubBehavior::Down).await;
+            let error = wait_for_confirmations(&coin, &swap, 2, 2)
+                .await
+                .expect_err("no server answers");
+            assert!(error.contains("Waited too long"), "{error}");
+            assert!(is_undetermined(&error), "{error}");
+        });
+    }
+}
