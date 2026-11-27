@@ -195,7 +195,7 @@ impl MarketCoinOps for EthCoin {
                 match &result {
                     Ok(()) => status.append(" Confirmed."),
                     Err(e) if crate::swap_evidence::is_mined_and_failed(e) => status.append(" Failed."),
-                    Err(_) => status.append(" Timed out."),
+                    Err(e) => status.append(agreed_wait_end_status(e)),
                 }
                 result
             };
@@ -387,5 +387,36 @@ impl MarketCoinOps for EthCoin {
         let coin = self.clone();
         let args = args.clone();
         Box::new(sign_raw_eth_tx_impl(coin, args).boxed().compat())
+    }
+}
+
+/// The status text that ends a confirmation wait under the agreed-reads policy with an error that is neither a
+/// confirmation nor a mined-and-failed transaction: an undetermined read is not a timeout.
+fn agreed_wait_end_status(err: &str) -> &'static str {
+    if crate::swap_evidence::is_undetermined(err) {
+        " Undetermined."
+    } else {
+        " Timed out."
+    }
+}
+
+#[cfg(test)]
+mod agreed_wait_status_tests {
+    use super::agreed_wait_end_status;
+
+    #[test]
+    fn undetermined_read_is_not_reported_as_timed_out() {
+        let undetermined = crate::swap_evidence::undetermined("the nodes do not agree", &[]);
+        assert_eq!(agreed_wait_end_status(&undetermined), " Undetermined.");
+        // The marker is found behind the position prefix that `ERR!` adds.
+        assert_eq!(
+            agreed_wait_end_status(&format!("file.rs:1] {undetermined}")),
+            " Undetermined."
+        );
+    }
+
+    #[test]
+    fn determined_timeout_is_reported_as_timed_out() {
+        assert_eq!(agreed_wait_end_status("Waited too long"), " Timed out.");
     }
 }

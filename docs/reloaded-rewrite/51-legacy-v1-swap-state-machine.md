@@ -2087,6 +2087,15 @@ that moment.
 4. *After the start.* A host that stops answering after the start is handled by
    items 3 and 9 as before.
 
+> **Status note (2026-11-27, Reloaded-original, clean side; maintainer
+> decision of 2026-11-27).** The confirmation wait of an EVM coin under
+> the agreed-reads policy is agreed by two nodes for every caller. The
+> confirmation waits of the legacy swap path (the maker and taker payment
+> confirmations and the confirmation of a found spend) are therefore
+> agreed as well, as the confirmation wait of a UTXO coin already is. The
+> confirmation read is shared by the legacy and the v2 swap path. No
+> sentence of R100 is changed.
+
 ## 51.7 Bound Message Contract
 
 **R41.** *Six message kinds, one envelope.* The legacy swap message
@@ -3924,3 +3933,8 @@ reference rows alike.
   on a readiness check before a swap starts. Reloaded-original; it records the
   maintainer's decision of 2026-11-25, takes no reference input and no
   forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-27 (PR #549):* the status note before §51.7
+  on the confirmation wait of an EVM coin under the agreed-reads policy, which
+  is agreed by two nodes for the legacy swap path as well. Reloaded-original;
+  it records the maintainer's decision of 2026-11-27, takes no reference input
+  and no forbidden-class input, and changes no sentence of the chapter.

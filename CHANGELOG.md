@@ -1022,10 +1022,12 @@ the previous version used. The safe way:
   funding, the search for the spend of the taker payment, the refundability check and the confirmation reads of the
   maker payment, the taker payment and the node's own claim are agreed by two nodes of the coin that agree, or taken
   from the node named by `swap_evidence_node`, under the coin's evidence policy. A read that cannot be agreed is
-  reported as undetermined and is never taken as "timed out", "nothing found", "not spent" or "not confirmed". A
-  call whose time limit has not passed asks its nodes at least once, and ends as "timed out" only after a read that
-  was determined. A coin with no agreed-reads policy keeps its one node, and a read that failed is an error and not
-  "timed out". A spend of the taker payment that does not spend it at its first input is reported as undetermined.
+  reported as undetermined and is never taken as "timed out", "nothing found", "not spent" or "not confirmed". The
+  confirmation wait of an EVM coin under the agreed-reads policy is agreed by two nodes for legacy swaps as well, as
+  the UTXO confirmation wait already is. A call whose time limit has not passed asks its nodes at least once, and
+  ends as "timed out" only after a read that was determined. A coin with no agreed-reads policy keeps its one node,
+  and a read that failed is an error and not "timed out". A spend of the taker payment that does not spend it at its
+  first input is reported as undetermined.
   - Detail: PR #549; CRD ch.52 R18 status note of 2026-11-27, ch.51 §51.6G R100.
 
 #### Legacy swaps and orders
