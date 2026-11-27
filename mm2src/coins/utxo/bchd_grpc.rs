@@ -1,8 +1,9 @@
 /// https://bchd.cash/
 /// https://bchd.fountainhead.cash/
 use super::bchd_pb::*;
-use crate::swap_evidence::{agree, distinct_hosts, evidence_ready, node_name, relax_single_host,
-                           shared_readiness_probes, Agreement, HostReadiness};
+use crate::swap_evidence::{agree, distinct_hosts, evidence_ready_at, node_name, relax_single_host,
+                           shared_readiness_probes, Agreement, HostReadiness, ProbeBound, ReadyMode, ReadyRun,
+                           ReadyScope};
 use crate::utxo::slp::SlpUnspent;
 use crate::SwapEvidencePolicy;
 use chain::OutPoint;
@@ -308,27 +309,22 @@ where
 /// whose bchd nodes share a host keep apart records.
 pub(crate) fn bchd_readiness_scope(platform: &str) -> String { format!("bchd:{platform}") }
 
-/// One readiness probe of the bchd node `url`: a `GetBlockchainInfo` whose whole exchange is bounded by
-/// [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`] inside the task that runs it, so a node that accepts and never
-/// answers keeps no task and no socket past the bound. `true` when the node answered.
+/// One readiness probe of the bchd node `url`: a `GetBlockchainInfo` whose whole exchange is bounded by `bound`
+/// seconds inside the task that runs it, so a node that accepts and never answers keeps no task and no socket past
+/// the bound. `true` when the node answered.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) async fn bchd_readiness_probe(url: &str) -> bool {
-    use crate::swap_evidence::READY_PROBE_TIMEOUT_SECS;
+pub(crate) async fn bchd_readiness_probe(url: &str, bound: f64) -> bool {
     use mm2_net::grpc_web::post_grpc_web_bounded;
 
     let endpoint = url.to_owned() + "/pb.bchrpc/GetBlockchainInfo";
-    post_grpc_web_bounded::<_, GetBlockchainInfoResponse>(
-        &endpoint,
-        &GetBlockchainInfoRequest {},
-        READY_PROBE_TIMEOUT_SECS,
-    )
-    .await
-    .is_ok()
+    post_grpc_web_bounded::<_, GetBlockchainInfoResponse>(&endpoint, &GetBlockchainInfoRequest {}, bound)
+        .await
+        .is_ok()
 }
 
 /// One readiness probe of the bchd node `url` in the browser: the fetch ends with the check's bound around it.
 #[cfg(target_arch = "wasm32")]
-pub(crate) async fn bchd_readiness_probe(url: &str) -> bool {
+pub(crate) async fn bchd_readiness_probe(url: &str, _bound: f64) -> bool {
     let endpoint = url.to_owned() + "/pb.bchrpc/GetBlockchainInfo";
     post_grpc_web::<_, GetBlockchainInfoResponse>(&endpoint, &GetBlockchainInfoRequest {})
         .await
@@ -340,7 +336,8 @@ pub(crate) async fn bchd_readiness_probe(url: &str) -> bool {
 /// are judged under the policy their reads take ([`validate_slp_utxos_with`]): two distinct hosts answering, or the
 /// one configured host the single-host switch trusts. A node counts as answering when it served a validation within
 /// the window; otherwise, and only while the answering hosts are not enough, it gets one probe
-/// ([`bchd_readiness_probe`]), at most once per window per host of the platform.
+/// ([`bchd_readiness_probe`], in a series of attempts), at most once per window per host of the platform. `mode` is
+/// who asks ([`ReadyMode`]).
 ///
 /// # Errors
 ///
@@ -351,6 +348,7 @@ pub(crate) async fn bchd_ready(
     policy: &SwapEvidencePolicy,
     bchd_urls: &[String],
     allow_single_host: bool,
+    mode: ReadyMode,
 ) -> Result<(), String> {
     bchd_ready_with(
         ticker,
@@ -358,26 +356,32 @@ pub(crate) async fn bchd_ready(
         policy,
         bchd_urls,
         allow_single_host,
+        ReadyRun::of_node(mode),
         |url: &String| {
             let url = url.clone();
-            async move { bchd_readiness_probe(&url).await }
+            move |bound| {
+                let url = url.clone();
+                async move { bchd_readiness_probe(&url, bound).await }
+            }
         },
     )
     .await
 }
 
 /// [`bchd_ready`] with the probe of one node given by the caller (a scripted node in tests).
-pub(crate) async fn bchd_ready_with<F, Fut>(
+pub(crate) async fn bchd_ready_with<F, G, Fut>(
     ticker: &str,
     platform: &str,
     policy: &SwapEvidencePolicy,
     bchd_urls: &[String],
     allow_single_host: bool,
+    run: ReadyRun,
     probe: F,
 ) -> Result<(), String>
 where
-    F: Fn(&String) -> Fut,
-    Fut: std::future::Future<Output = bool>,
+    F: Fn(&String) -> G,
+    G: Fn(f64) -> Fut + ProbeBound,
+    Fut: std::future::Future<Output = bool> + ProbeBound,
 {
     let bchd_policy = match (policy, single_bchd_host_policy(bchd_urls, allow_single_host)) {
         (SwapEvidencePolicy::NotAdopted, _) => return Ok(()),
@@ -387,15 +391,20 @@ where
             hosts: distinct_hosts(bchd_urls),
         },
     };
-    evidence_ready(
+    evidence_ready_at(
         ticker,
         &bchd_policy,
         bchd_urls,
         |url| bchd_label(url),
         |_| HostReadiness::Unknown,
         shared_readiness_probes(),
-        &bchd_readiness_scope(platform),
+        ReadyScope {
+            key: &bchd_readiness_scope(platform),
+            platform,
+        },
+        run,
         probe,
+        common::now_float(),
     )
     .await
 }

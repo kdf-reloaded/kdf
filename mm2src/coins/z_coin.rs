@@ -3114,6 +3114,20 @@ impl ShieldedSyncPassSteps for ZCoinShieldedSyncSteps<'_> {
 }
 
 impl ZCoin {
+    /// The readiness check of [`MmCoin::swap_evidence_ready`] for `mode`: Light mode judges the lightwalletd
+    /// endpoints, native mode the operator's own daemon (maintainer decision of 2026-11-25/26 under CRD ch.51 R100).
+    async fn swap_evidence_ready_in(&self, mode: crate::swap_evidence::ReadyMode) -> Result<(), String> {
+        let policy = self.swap_evidence_policy();
+        if policy == crate::SwapEvidencePolicy::NotAdopted {
+            return Ok(());
+        }
+        match &self.utxo_arc.rpc_client {
+            #[cfg(not(target_arch = "wasm32"))]
+            UtxoRpcClientEnum::LightWalletD(client) => client.0.swap_evidence_ready(self.ticker(), &policy, mode).await,
+            _ => crate::utxo::utxo_common::swap_evidence_ready(&self.utxo_arc, &policy, mode).await,
+        }
+    }
+
     /// Whether this coin must refuse to enter new swaps right now, because its
     /// Ironwood activation is near enough that a payment made today could still be
     /// awaiting a spend or refund when the upgrade lands.
@@ -3871,15 +3885,13 @@ impl MmCoin for ZCoin {
     /// Light mode judges the lightwalletd endpoints, native mode the operator's own daemon (maintainer decision of
     /// 2026-11-25/26 under CRD ch.51 R100).
     async fn swap_evidence_ready(&self) -> Result<(), String> {
-        let policy = self.swap_evidence_policy();
-        if policy == crate::SwapEvidencePolicy::NotAdopted {
-            return Ok(());
-        }
-        match &self.utxo_arc.rpc_client {
-            #[cfg(not(target_arch = "wasm32"))]
-            UtxoRpcClientEnum::LightWalletD(client) => client.0.swap_evidence_ready(self.ticker(), &policy).await,
-            _ => crate::utxo::utxo_common::swap_evidence_ready(&self.utxo_arc, &policy).await,
-        }
+        self.swap_evidence_ready_in(crate::swap_evidence::ReadyMode::Strict)
+            .await
+    }
+
+    async fn swap_evidence_ready_for_pause(&self) -> Result<(), String> {
+        self.swap_evidence_ready_in(crate::swap_evidence::ReadyMode::Pause)
+            .await
     }
 
     /// Reports the coin as non-tradeable while the Ironwood swap freeze is in

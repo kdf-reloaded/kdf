@@ -419,7 +419,7 @@ impl Qrc20Coin {
     /// # Errors
     ///
     /// The text of [`crate::swap_evidence::not_ready_text`], which names the token and the kind only.
-    pub(super) async fn evidence_ready(&self) -> Result<(), String> {
+    pub(super) async fn evidence_ready(&self, mode: crate::swap_evidence::ReadyMode) -> Result<(), String> {
         let policy = self.evidence_policy();
         // A token refused by the capability rule is told so, not that its nodes are too few in the list.
         if let (SwapEvidencePolicy::Insufficient { .. }, Some((_, scope))) = (&policy, self.capability_scope()) {
@@ -433,10 +433,13 @@ impl Qrc20Coin {
             UtxoRpcClientEnum::Electrum(client) if policy != SwapEvidencePolicy::NotAdopted => {
                 let contract_history = self.capability_scope().is_some();
                 client
-                    .swap_evidence_ready(&self.utxo.conf.ticker, &policy, contract_history)
+                    .swap_evidence_ready(&self.utxo.conf.ticker, &self.platform, &policy, contract_history, mode)
                     .await
             },
-            _ => utxo_common::swap_evidence_ready(&self.utxo, &policy).await,
+            _ => {
+                utxo_common::swap_evidence_ready_as(&self.utxo.conf.ticker, &self.platform, &self.utxo, &policy, mode)
+                    .await
+            },
         }
     }
 

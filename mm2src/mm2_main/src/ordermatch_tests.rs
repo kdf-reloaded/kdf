@@ -8480,6 +8480,58 @@ mod tendermint_saved_orders {
             assert_eq!(node.maker_uuids().len(), 2, "no order is cancelled");
         }
 
+        /// The maker's pause judges a host whose probe retries are pending as answering, a swap start does not
+        /// (readiness retries): while the pause view is ready, the orders of the coin keep their keep-alives and
+        /// no pause line is logged, yet a request for such an order is still declined.
+        #[test]
+        fn the_pause_view_counts_a_host_with_pending_retries_but_a_request_is_declined() {
+            let mut node = Restart::new(conf_with_a_wallet_only_test_coin());
+            node.activate(&TEST_COINS);
+            let _strict_unready = mock_readiness(&["REL"]);
+            let pause_ready = Arc::new(Mutex::new(true));
+            let shared = pause_ready.clone();
+            TestCoin::swap_evidence_ready_for_pause.mock_safe(move |coin| {
+                let ticker = coins::MarketCoinOps::ticker(coin).to_owned();
+                let result = match (ticker.as_str(), *shared.lock().unwrap()) {
+                    ("REL", false) => Err(not_ready_text(&ticker, NotReadyKind::TooFewHostsAnswering)),
+                    _ => Ok(()),
+                };
+                MockResult::Return(Box::pin(async move { result }))
+            });
+            lp_connect_start_bob.mock_safe(|_, _, _| panic!("no swap starts from a request alone"));
+            let order = announceable("BASE", "REL");
+            add_maker(&node, &order);
+            maker_order_created_p2p_notify(node.ctx.clone(), &order, vec![], vec![]);
+            node.octx().wait_trie_ops_flushed();
+            node.published();
+            let octx = node.octx();
+            let pubkey = pubkey(&node);
+
+            // The pause view: the host still counts, so no pause.
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert_eq!(keep_alive_pairs(&node.published()), vec!["BASE:REL"]);
+            assert!(
+                pause_lines(&node).is_empty(),
+                "no pause line while the retries are pending"
+            );
+
+            // The swap start: refused at once, no answer to the request.
+            block_on(process_taker_request(
+                node.ctx.clone(),
+                H256Json::default(),
+                request_for(&order),
+            ));
+            assert_eq!(node.published().len(), 0, "the request is declined");
+
+            // After the last failed attempt the pause view follows.
+            *pause_ready.lock().unwrap() = false;
+            block_on(broadcast_keep_alives_for_own_pubkeys(&node.ctx, &octx, &pubkey));
+            assert!(keep_alive_pairs(&node.published()).is_empty());
+            assert_eq!(pause_lines(&node), vec![
+                "REL: swap evidence not available (fewer than two hosts answering); its orders are paused".to_owned()
+            ]);
+        }
+
         /// The keep-alive skips the pair of an order whose coin is not ready, with one INFO line for the change; on
         /// recovery the order is announced again in full and its keep-alive resumes, with one INFO line.
         #[test]

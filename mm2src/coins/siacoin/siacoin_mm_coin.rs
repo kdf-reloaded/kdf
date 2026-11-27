@@ -360,7 +360,13 @@ impl MmCoin for SiaCoin {
         crate::swap_evidence::effective_policy(crate::swap_evidence::SwapFamily::Sia, &self.swap_evidence)
     }
 
-    async fn swap_evidence_ready(&self) -> Result<(), String> { self.evidence_ready().await }
+    async fn swap_evidence_ready(&self) -> Result<(), String> {
+        self.evidence_ready(crate::swap_evidence::ReadyMode::Strict).await
+    }
+
+    async fn swap_evidence_ready_for_pause(&self) -> Result<(), String> {
+        self.evidence_ready(crate::swap_evidence::ReadyMode::Pause).await
+    }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         let coin = self.clone();

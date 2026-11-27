@@ -330,6 +330,8 @@ impl MmCoin for TestCoin {
     /// another answer mocks this.
     async fn swap_evidence_ready(&self) -> Result<(), String> { Ok(()) }
 
+    async fn swap_evidence_ready_for_pause(&self) -> Result<(), String> { self.swap_evidence_ready().await }
+
     fn get_raw_transaction(&self, _req: RawTransactionRequest) -> RawTransactionFut { unimplemented!() }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut { unimplemented!() }

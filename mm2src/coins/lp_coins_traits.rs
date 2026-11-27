@@ -735,6 +735,12 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
     /// The text `"{ticker}: swap evidence not available ({kind})"`, which names the coin and the kind only.
     async fn swap_evidence_ready(&self) -> Result<(), String> { Ok(()) }
 
+    /// [`MmCoin::swap_evidence_ready`] for the maker's keep-alive pause: a host whose probe series has failed
+    /// attempts but still has retries pending counts as answering, so the orders of the coin pause only after the
+    /// last failed attempt. The swap-start refusals keep [`MmCoin::swap_evidence_ready`]. The default is the strict
+    /// check, for a family without such retries.
+    async fn swap_evidence_ready_for_pause(&self) -> Result<(), String> { self.swap_evidence_ready().await }
+
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut;
 
     /// Maximum number of digits after decimal point used to denominate integer coin units (satoshis, wei, etc.)

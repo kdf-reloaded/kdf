@@ -196,12 +196,12 @@ impl SiaCoin {
     /// The readiness check before a swap starts (maintainer decision of 2026-11-25/26 under CRD ch.51 R100) of the
     /// coin's one walletd node under its effective policy. The node counts as answering when a swap read was
     /// answered within [`crate::swap_evidence::READY_WINDOW_SECS`]; otherwise it is asked for the current height,
-    /// bounded by [`crate::swap_evidence::READY_PROBE_TIMEOUT_SECS`], at most once per window.
+    /// bounded by the probe timeout, in a series of attempts, at most once per window. `mode` is who asks.
     ///
     /// # Errors
     ///
     /// The text of [`crate::swap_evidence::not_ready_text`], which names the coin and the kind only.
-    pub(super) async fn evidence_ready(&self) -> Result<(), String> {
+    pub(super) async fn evidence_ready(&self, mode: crate::swap_evidence::ReadyMode) -> Result<(), String> {
         let policy = MmCoin::swap_evidence_policy(self);
         let nodes = [self.swap_evidence_node_name.clone()];
         let client = self.client.clone();
@@ -212,10 +212,17 @@ impl SiaCoin {
             |node| node.clone(),
             |_| crate::swap_evidence::HostReadiness::Unknown,
             crate::swap_evidence::shared_readiness_probes(),
-            &self.readiness_scope(),
+            crate::swap_evidence::ReadyScope {
+                key: &self.readiness_scope(),
+                platform: &self.conf.ticker,
+            },
+            mode,
             |_| {
                 let client = client.clone();
-                async move { client.current_height().await.is_ok() }
+                move |_bound| {
+                    let client = client.clone();
+                    async move { client.current_height().await.is_ok() }
+                }
             },
         )
         .await

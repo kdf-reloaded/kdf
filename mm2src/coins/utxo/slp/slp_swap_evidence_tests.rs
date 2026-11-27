@@ -190,13 +190,24 @@ fn slp_bchd_readiness() {
         hosts: vec!["a".into(), "b".into()],
     };
     let urls = |list: &[&str]| list.iter().map(|url| (*url).to_owned()).collect::<Vec<String>>();
-    let probes = AtomicUsize::new(0);
+    let probes = std::sync::Arc::new(AtomicUsize::new(0));
     let probe = |answers: bool| {
-        let probes = &probes;
+        let probes = probes.clone();
         move |_: &String| {
-            probes.fetch_add(1, Ordering::Relaxed);
-            async move { answers }
+            let probes = probes.clone();
+            move |_bound: f64| {
+                probes.fetch_add(1, Ordering::Relaxed);
+                async move { answers }
+            }
         }
+    };
+    // One attempt per series: a failed probe is a failed host at once (the retries have their own tests).
+    let run = crate::swap_evidence::ReadyRun {
+        mode: crate::swap_evidence::ReadyMode::Strict,
+        settings: crate::swap_evidence::ReadinessSettings {
+            attempts: 1,
+            ..Default::default()
+        },
     };
 
     // Both hosts served a validation just now: ready with no probe.
@@ -211,6 +222,7 @@ fn slp_bchd_readiness() {
             &two_nodes,
             &both,
             false,
+            run,
             probe(false)
         )),
         Ok(())
@@ -220,7 +232,16 @@ fn slp_bchd_readiness() {
     // One host answered, the other fails its probe: not ready.
     let one = urls(&["https://rdy-bchd3.example", "https://rdy-bchd4.example"]);
     shared_readiness_probes().note_answer(&scope, &crate::swap_evidence::node_name(&one[0]), common::now_float());
-    let error = block_on(bchd_ready_with("FUSD", PLATFORM, &two_nodes, &one, false, probe(false))).unwrap_err();
+    let error = block_on(bchd_ready_with(
+        "FUSD",
+        PLATFORM,
+        &two_nodes,
+        &one,
+        false,
+        run,
+        probe(false),
+    ))
+    .unwrap_err();
     assert_eq!(
         error,
         "FUSD: swap evidence not available (fewer than two hosts answering)"
@@ -241,6 +262,7 @@ fn slp_bchd_readiness() {
             &two_nodes,
             &single,
             true,
+            run,
             probe(true)
         )),
         Ok(())
@@ -253,6 +275,7 @@ fn slp_bchd_readiness() {
             &two_nodes,
             &silent,
             true,
+            run,
             probe(false)
         )),
         Err("FUSD: swap evidence not available (the trusted node is not answering)".to_owned())
@@ -268,6 +291,7 @@ fn slp_bchd_readiness() {
             &one_host,
             &silent,
             false,
+            run,
             probe(true)
         )),
         Err("FUSD: swap evidence not available (fewer than two nodes listed)".to_owned())
@@ -281,6 +305,7 @@ fn slp_bchd_readiness() {
             &two_nodes,
             &single,
             true,
+            run,
             probe(true)
         )),
         Ok(())
@@ -297,6 +322,7 @@ fn slp_bchd_readiness() {
             &SwapEvidencePolicy::NotAdopted,
             &silent,
             false,
+            run,
             probe(false)
         )),
         Ok(())
@@ -350,9 +376,10 @@ fn slp_bchd_readiness_probe_is_bounded_on_a_silent_node() {
     });
 
     let started = Instant::now();
-    let answered = block_on(crate::utxo::bchd_grpc::bchd_readiness_probe(&format!(
-        "http://127.0.0.1:{port}"
-    )));
+    let answered = block_on(crate::utxo::bchd_grpc::bchd_readiness_probe(
+        &format!("http://127.0.0.1:{port}"),
+        crate::swap_evidence::READY_PROBE_TIMEOUT_SECS,
+    ));
     let elapsed = started.elapsed();
     assert!(!answered);
     assert!(
