@@ -683,6 +683,11 @@ pub trait TakerCoinSwapOpsV2: ParseCoinAssocTypes + CommonSwapOpsV2 + Send + Syn
 
     /// Extract the maker secret from the taker payment spend transaction.
     async fn extract_secret_v2(&self, secret_hash: &[u8], spend_tx: &Self::Tx) -> Result<[u8; 32], String>;
+
+    /// Whether `spend_tx`, a found spend of the taker payment, is by its structure the taker's own refund of that
+    /// payment (the refund path, which carries no secret). `true` only when the structure shows it; a family that
+    /// cannot tell the kind keeps the default `false`, which the maker's look treats as "undetermined".
+    fn is_taker_payment_refund_v2(&self, _spend_tx: &Self::Tx) -> bool { false }
 }
 /// NB: Implementations are expected to follow the pImpl idiom, providing cheap reference-counted cloning and garbage collection.
 #[async_trait]

@@ -2124,6 +2124,42 @@ mod search_for_swap_tx_spend_scripted {
                 (200, 250)
             ]);
         }
+
+        /// A V2 search whose every read fails answers an undetermined transport error with a fixed text, at once,
+        /// and never "timed out".
+        #[test]
+        fn the_v2_search_with_every_read_failing_is_an_error_and_not_a_timeout() {
+            let fx = fixture("GLW14", 100, 250, None, None, 1, |_, _| {
+                Some((-32000, "node host.example refused"))
+            });
+            let swap_id = [9u8; 32];
+            let err = block_on(fx.coin.find_transaction_hash_by_event(SpendTxSearchParams {
+                swap_contract_address: swap_addr(),
+                event_name: "ReceiverSpent",
+                abi_contract: &SWAP_CONTRACT,
+                swap_id: &swap_id,
+                from_block: 0,
+                wait_until: now_ms() / 1000 + 30,
+                check_every: 0.05,
+            }))
+            .unwrap_err();
+            match err.get_inner() {
+                FindPaymentSpendError::Transport(text) => {
+                    assert!(coins_is_undetermined(text), "{text}");
+                    assert!(!text.contains("host.example"), "{text}");
+                },
+                other => panic!("a failed read is expected to be a transport error, got {other:?}"),
+            }
+            let asked: Vec<Req> = fx
+                .requests()
+                .into_iter()
+                .filter(|r| r.event == "ReceiverSpent")
+                .collect();
+            assert_eq!(asked.len(), 1, "a failed read ends the call");
+            assert!(asked[0].refused);
+        }
+
+        fn coins_is_undetermined(text: &str) -> bool { crate::swap_evidence::is_undetermined(text) }
     }
 }
 

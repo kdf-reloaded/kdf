@@ -26,15 +26,16 @@
 //!   `TakerPaymentRefundRequired → TakerPaymentRefunded`.
 //! - Abort path: any pre-funding state → `Aborted`.
 
-use coins::{CanRefundHtlc, FeeApproxStage, FindPaymentSpendError, GenTakerFundingSpendArgs, GenTakerPaymentSpendArgs,
-            MakerCoinSwapOpsV2, MmCoin, RefundFundingSecretArgs, RefundTakerPaymentArgs, SendTakerFundingArgs,
-            SpendMakerPaymentArgs, SwapTxTypeWithSecretHash, TakerCoinSwapOpsV2, ToBytes, TradePreimageValue,
-            Transaction, TxPreimageWithSig, ValidateMakerPaymentArgs};
+use coins::swap_evidence::is_undetermined;
+use coins::{CanRefundHtlc, FeeApproxStage, FindPaymentSpendError, FundingTxSpend, GenTakerFundingSpendArgs,
+            GenTakerPaymentSpendArgs, MakerCoinSwapOpsV2, MmCoin, RefundFundingSecretArgs, RefundTakerPaymentArgs,
+            SendTakerFundingArgs, SpendMakerPaymentArgs, SwapTxTypeWithSecretHash, TakerCoinSwapOpsV2, ToBytes,
+            TradePreimageValue, Transaction, TxPreimageWithSig, ValidateMakerPaymentArgs};
 use common::executor::Timer;
 use common::log::{debug, error, info, warn};
 use common::mm_number::MmNumber;
 use common::now_ms;
-use crypto::secret_hash_algo::SecretHashAlgo;
+use crypto::secret_hash_algo::{secret_matches_hash, SecretHashAlgo};
 use futures::compat::Future01CompatExt;
 use keys::KeyPair;
 use mm2_core::mm_ctx::MmArc;
@@ -46,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use uuid::Uuid;
 
+use super::evidence_wait::{recovery_unanswered_text, Read};
 use super::swap_lock::SwapLock;
 use super::swap_v2_common::*;
 use super::swap_v2_pb::*;
@@ -862,6 +864,11 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionF
     for Aborted<M, T>
 {
 }
+// The search before the funding refund found the funding spent into the taker payment.
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<TakerFundingRefundRequired<M, T>>
+    for TakerPaymentRefundRequired<M, T>
+{
+}
 
 // TakerPaymentRefundRequired →
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<TakerPaymentRefundRequired<M, T>>
@@ -870,6 +877,12 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionF
 }
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<TakerPaymentRefundRequired<M, T>>
     for Aborted<M, T>
+{
+}
+// The look before the refund found the maker's spend of the taker payment, proven by the secret hash: the taker
+// claims the maker payment instead of refunding (CRD ch.51 R31a).
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TransitionFrom<TakerPaymentRefundRequired<M, T>>
+    for TakerPaymentSpent<M, T>
 {
 }
 
@@ -2534,23 +2547,20 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
                 Err(_) => Err(hex::encode(&self.maker_payment_spend.0)),
             };
             let claim = own_claim_name(sm.maker_coin.ticker(), claim_tx_hash);
+            let machine: &TakerSwapStateMachine<M, T> = sm;
             let confirmed = await_own_claim_confirmation(
                 &claim,
-                own_claim_confirmation_deadline(sm.taker_payment_locktime(), now_ms() / 1000),
+                own_claim_confirmation_deadline(machine.taker_payment_locktime(), now_ms() / 1000),
                 CONFIRMATION_POLL_SECS,
                 || now_ms() / 1000,
                 log_own_claim_line,
-                |wait_until| {
+                self.maker_payment_spend.clone(),
+                |claim_tx: BytesJson, wait_until| {
                     maker_coin
-                        .wait_for_confirmations(
-                            &self.maker_payment_spend,
-                            confs,
-                            nota,
-                            wait_until,
-                            CONFIRMATION_POLL_SECS,
-                        )
+                        .wait_for_confirmations(&claim_tx, confs, nota, wait_until, CONFIRMATION_POLL_SECS)
                         .compat()
                 },
+                || send_claim_of_maker_payment_again(machine, &self.negotiation_data),
             )
             .await;
             if !confirmed {
@@ -2571,6 +2581,88 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for TakerFundingRefundRequired<M, T> {
     type StateMachine = TakerSwapStateMachine<M, T>;
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> StateResult<Self::StateMachine> {
+        // The refund is broadcast only after the search for the spend of the funding answered "not spent"; it
+        // takes the timelock branch once the funding locktime has passed (CRD ch.52 R34; ch.51 §51.6G R100).
+        let mut undetermined_wait = UndeterminedWait::new(sm.taker_funding_locktime());
+        loop {
+            let (read, text) = match self.refund_attempt(sm).await {
+                FundingRefundAttempt::Refunded(refund_tx) => {
+                    log_refund_step(&sm.uuid, &format!("funding refunded: {:?}", refund_tx.tx_hash()));
+                    let next = TakerFundingRefunded::new(
+                        self.taker_funding.clone(),
+                        refund_tx.tx_hex().into(),
+                        self.reason.clone(),
+                    );
+                    return Self::change_state(next, sm).await;
+                },
+                FundingRefundAttempt::FoundRefund(refund_tx) => {
+                    log_refund_step(&sm.uuid, "the refund of the funding is on chain");
+                    let next = TakerFundingRefunded::new(self.taker_funding.clone(), refund_tx, self.reason.clone());
+                    return Self::change_state(next, sm).await;
+                },
+                FundingRefundAttempt::BecamePayment(taker_payment) => {
+                    log_refund_step(
+                        &sm.uuid,
+                        "the funding was spent into the taker payment, which is refunded instead",
+                    );
+                    let next = TakerPaymentRefundRequired::new(
+                        taker_payment,
+                        self.negotiation_data.clone(),
+                        self.reason.clone(),
+                    );
+                    return Self::change_state(next, sm).await;
+                },
+                FundingRefundAttempt::Wait(secs) => {
+                    log_refund_step(
+                        &sm.uuid,
+                        &format!("waiting {} seconds for taker funding refund window", secs),
+                    );
+                    Timer::sleep(secs as f64).await;
+                    continue;
+                },
+                FundingRefundAttempt::GateFailed(e) => {
+                    log_refund_gate_failed(&sm.uuid, &e, REFUND_RETRY_SECS);
+                    Timer::sleep(REFUND_RETRY_SECS as f64).await;
+                    continue;
+                },
+                FundingRefundAttempt::RefundFailed(reason) => {
+                    return Self::change_state(Aborted::new(reason), sm).await;
+                },
+                FundingRefundAttempt::Unanswered(read, text) => (read, text),
+            };
+            let ticker = sm.taker_coin.ticker();
+            if let Some(reason) =
+                wait_after_unanswered(&mut undetermined_wait, &sm.uuid, ticker, read, &text, false).await
+            {
+                return Self::change_state(Aborted::new(reason), sm).await;
+            }
+        }
+    }
+}
+
+/// What one attempt of the taker's funding refund ended with.
+pub(super) enum FundingRefundAttempt<Tx> {
+    /// The refund was broadcast.
+    Refunded(Tx),
+    /// A refund of the funding is already on chain (its bytes).
+    FoundRefund(BytesJson),
+    /// The funding was spent into the taker payment (its bytes); that payment is refunded instead.
+    BecamePayment(BytesJson),
+    /// The refund gate asks to wait this many seconds.
+    Wait(u64),
+    /// The refund gate failed with an error that is not an undetermined read; it is retried.
+    GateFailed(String),
+    /// A read the refund rests on gave no answer the step may act on (the text is for the log only).
+    Unanswered(CappedRead, String),
+    /// The refund could not be built or broadcast.
+    RefundFailed(AbortReason),
+}
+
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TakerFundingRefundRequired<M, T> {
+    /// One attempt of the funding refund: the search for the spend of the funding, then, before the funding
+    /// locktime, the refund that reveals the taker's own secret, and after it the refund gate and the timelock
+    /// refund (CRD ch.52 R34; ch.51 §51.6G R100). The state repeats it; the manual recovery makes it once.
+    pub(super) async fn refund_attempt(&self, sm: &TakerSwapStateMachine<M, T>) -> FundingRefundAttempt<T::Tx> {
         let unique_data = sm.unique_data();
         let taker_secret_hash = sm.taker_secret_hash();
 
@@ -2578,28 +2670,61 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             Ok(tx) => tx,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse own funding tx for refund: {:?}", e));
-                return Self::change_state(Aborted::new(reason), sm).await;
+                return FundingRefundAttempt::RefundFailed(reason);
             },
         };
+        match sm
+            .taker_coin
+            .search_for_taker_funding_spend(&funding_tx, self.taker_coin_start_block, &taker_secret_hash)
+            .await
+        {
+            Ok(None) => (),
+            Ok(Some(FundingTxSpend::RefundedTimelock(tx))) | Ok(Some(FundingTxSpend::RefundedSecret { tx, .. })) => {
+                return FundingRefundAttempt::FoundRefund(tx.tx_hex().into())
+            },
+            Ok(Some(FundingTxSpend::TransferredToTakerPayment(tx))) => {
+                return FundingRefundAttempt::BecamePayment(tx.tx_hex().into())
+            },
+            Err(e) => return FundingRefundAttempt::Unanswered(CappedRead::FundingRefundSearch, e.to_string()),
+        }
+
+        let branch = funding_refund_branch(now_ms() / 1000, sm.taker_funding_locktime());
+        let after_locktime = branch == FundingRefundBranch::Timelock;
+        if after_locktime {
+            match sm
+                .taker_coin
+                .can_refund_htlc(sm.taker_funding_locktime())
+                .compat()
+                .await
+            {
+                Ok(CanRefundHtlc::CanRefundNow) => (),
+                Ok(CanRefundHtlc::HaveToWait(secs)) => return FundingRefundAttempt::Wait(secs),
+                Err(e) if is_undetermined(&e) => {
+                    return FundingRefundAttempt::Unanswered(CappedRead::FundingRefundGate, e)
+                },
+                Err(e) => return FundingRefundAttempt::GateFailed(e),
+            }
+        }
+
         let maker_taker_coin_pub = match sm.taker_coin.parse_pubkey(&self.negotiation_data.taker_coin_htlc_pub) {
             Ok(p) => p,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse maker's taker-coin pubkey: {:?}", e));
-                return Self::change_state(Aborted::new(reason), sm).await;
+                return FundingRefundAttempt::RefundFailed(reason);
             },
         };
         let taker_coin_htlc_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
             Ok(pubkey) => pubkey,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
-                return Self::change_state(Aborted::new(reason), sm).await;
+                return FundingRefundAttempt::RefundFailed(reason);
             },
         };
         let net_config = match mm2_net_config::net_config_for(sm.ctx.netid()) {
             Some(cfg) => cfg,
             None => {
                 let reason = AbortReason::InternalError(format!("No net config for netid {}", sm.ctx.netid()));
-                return Self::change_state(Aborted::new(reason), sm).await;
+                return FundingRefundAttempt::RefundFailed(reason);
             },
         };
         let dex_fee = super::compute_dex_fee_v2_with_taker_pubkey_from_coin(
@@ -2610,35 +2735,44 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             &taker_coin_htlc_pub,
         );
 
-        let refund_args = RefundFundingSecretArgs {
-            funding_tx: &funding_tx,
-            funding_time_lock: sm.taker_funding_locktime(),
-            payment_time_lock: sm.taker_payment_locktime(),
-            maker_pubkey: &maker_taker_coin_pub,
-            taker_secret: &sm.taker_secret,
-            taker_secret_hash: &taker_secret_hash,
-            maker_secret_hash: &self.negotiation_data.maker_secret_hash,
-            dex_fee: &dex_fee,
-            premium_amount: sm.taker_premium.to_decimal(),
-            trading_amount: sm.taker_volume.to_decimal(),
-            swap_unique_data: &unique_data,
-            watcher_reward: false,
+        let refunded = if after_locktime {
+            let refund_args = RefundTakerPaymentArgs {
+                payment_tx: &self.taker_funding,
+                time_lock: sm.taker_funding_locktime(),
+                maker_pub: &self.negotiation_data.taker_coin_htlc_pub,
+                tx_type_with_secret_hash: SwapTxTypeWithSecretHash::TakerFunding {
+                    taker_secret_hash: &taker_secret_hash,
+                },
+                swap_unique_data: &unique_data,
+                watcher_reward: false,
+                dex_fee: &dex_fee,
+                premium_amount: sm.taker_premium.to_decimal(),
+                trading_amount: sm.taker_volume.to_decimal(),
+            };
+            sm.taker_coin.refund_taker_funding_timelock(refund_args).await
+        } else {
+            let refund_args = RefundFundingSecretArgs {
+                funding_tx: &funding_tx,
+                funding_time_lock: sm.taker_funding_locktime(),
+                payment_time_lock: sm.taker_payment_locktime(),
+                maker_pubkey: &maker_taker_coin_pub,
+                taker_secret: &sm.taker_secret,
+                taker_secret_hash: &taker_secret_hash,
+                maker_secret_hash: &self.negotiation_data.maker_secret_hash,
+                dex_fee: &dex_fee,
+                premium_amount: sm.taker_premium.to_decimal(),
+                trading_amount: sm.taker_volume.to_decimal(),
+                swap_unique_data: &unique_data,
+                watcher_reward: false,
+            };
+            sm.taker_coin.refund_taker_funding_secret(refund_args).await
         };
 
-        match sm.taker_coin.refund_taker_funding_secret(refund_args).await {
-            Ok(refund_tx) => {
-                let refund_tx_bytes: BytesJson = refund_tx.tx_hex().into();
-                info!("Taker swap {}: funding refunded: {:?}", sm.uuid, refund_tx.tx_hash());
-                Self::change_state(
-                    TakerFundingRefunded::new(self.taker_funding.clone(), refund_tx_bytes, self.reason.clone()),
-                    sm,
-                )
-                .await
-            },
+        match refunded {
+            Ok(refund_tx) => FundingRefundAttempt::Refunded(refund_tx),
             Err(e) => {
                 error!("Swap {}: failed to refund taker funding: {:?}", sm.uuid, e);
-                let reason = AbortReason::TakerFundingRefundFailed(format!("{:?}", e));
-                Self::change_state(Aborted::new(reason), sm).await
+                FundingRefundAttempt::RefundFailed(AbortReason::TakerFundingRefundFailed(format!("{:?}", e)))
             },
         }
     }
@@ -2652,55 +2786,472 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for TakerPaymentRefundRequired<M, T> {
     type StateMachine = TakerSwapStateMachine<M, T>;
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> StateResult<Self::StateMachine> {
+        // The look before the refund reads the maker payment and the start blocks from the swap's saved events
+        // (CRD ch.51 R31a); this state's own event does not hold them.
+        let claim_inputs = match sm.storage.get_repr(sm.uuid).await {
+            Ok(repr) => claim_inputs_from_history(&repr.events),
+            Err(_) => None,
+        };
+
+        // Neither the gate nor the look is ever read as "refundable" while it gives no answer the step may act
+        // on: the attempt is repeated up to the bound of the wait (CRD ch.51 R100 items 3 and 9).
+        let mut undetermined_wait = UndeterminedWait::new(sm.taker_payment_locktime());
+        loop {
+            let (read, text, history_lacks_inputs) = match self.refund_attempt(sm, claim_inputs.as_ref()).await {
+                TakerRefundAttempt::Refunded(refund_tx) => {
+                    log_refund_step(&sm.uuid, &format!("taker payment refunded: {:?}", refund_tx.tx_hash()));
+                    let next = TakerPaymentRefunded::new(
+                        self.taker_payment.clone(),
+                        refund_tx.tx_hex().into(),
+                        self.reason.clone(),
+                    );
+                    return Self::change_state(next, sm).await;
+                },
+                TakerRefundAttempt::Claimed {
+                    inputs,
+                    taker_payment_spend,
+                } => {
+                    log_refund_step(
+                        &sm.uuid,
+                        "the maker spent the taker payment, the maker payment is claimed instead of a refund",
+                    );
+                    let next = TakerPaymentSpent::new(
+                        inputs.maker_coin_start_block,
+                        inputs.taker_coin_start_block,
+                        taker_payment_spend,
+                        inputs.maker_payment,
+                        self.negotiation_data.clone(),
+                        self.taker_payment.clone(),
+                    );
+                    return Self::change_state(next, sm).await;
+                },
+                TakerRefundAttempt::Wait(secs) => {
+                    log_refund_step(
+                        &sm.uuid,
+                        &format!("waiting {} seconds for taker payment refund window", secs),
+                    );
+                    Timer::sleep(secs as f64).await;
+                    continue;
+                },
+                TakerRefundAttempt::GateFailed(e) => {
+                    log_refund_gate_failed(&sm.uuid, &e, REFUND_RETRY_SECS);
+                    Timer::sleep(REFUND_RETRY_SECS as f64).await;
+                    continue;
+                },
+                TakerRefundAttempt::RefundFailed(reason) => {
+                    return Self::change_state(Aborted::new(reason), sm).await;
+                },
+                TakerRefundAttempt::Unanswered(read, text) => (read, text, false),
+                TakerRefundAttempt::SpentWithoutSecret => {
+                    (CappedRead::TakerRefundLook, SPEND_NOT_ACTED_ON.to_owned(), false)
+                },
+                TakerRefundAttempt::HistoryLacksInputs => {
+                    (CappedRead::TakerRefundLook, HISTORY_LACKS_INPUTS.to_owned(), true)
+                },
+            };
+            let ticker = sm.taker_coin.ticker();
+            if let Some(reason) = wait_after_unanswered(
+                &mut undetermined_wait,
+                &sm.uuid,
+                ticker,
+                read,
+                &text,
+                history_lacks_inputs,
+            )
+            .await
+            {
+                return Self::change_state(Aborted::new(reason), sm).await;
+            }
+        }
+    }
+}
+
+/// The refund step a taker swap's manual recovery runs again (CRD ch.51 §51.6D, status note of 2026-11-24).
+pub(super) enum RecoverableTakerRefund<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> {
+    /// The refund of the taker payment.
+    Payment(TakerPaymentRefundRequired<M, T>),
+    /// The refund of the taker funding.
+    Funding(TakerFundingRefundRequired<M, T>),
+}
+
+/// The refund step of a taker swap whose last event is `Aborted` with the reason variant its refund step ends
+/// with at the bound of its reads, right after the refund-required event of that step. `None` for every other
+/// ending.
+pub(super) fn recoverable_taker_refund<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>(
+    events: &[TakerSwapEvent],
+) -> Option<RecoverableTakerRefund<M, T>> {
+    match events {
+        [.., TakerSwapEvent::TakerPaymentRefundRequired {
+            taker_payment,
+            negotiation_data,
+            reason,
+        }, TakerSwapEvent::Aborted {
+            reason: AbortReason::TakerPaymentRefundFailed(_),
+        }] => Some(RecoverableTakerRefund::Payment(TakerPaymentRefundRequired::new(
+            taker_payment.clone(),
+            negotiation_data.clone(),
+            reason.clone(),
+        ))),
+        [.., TakerSwapEvent::TakerFundingRefundRequired {
+            maker_coin_start_block,
+            taker_coin_start_block,
+            negotiation_data,
+            taker_funding,
+            reason,
+        }, TakerSwapEvent::Aborted {
+            reason: AbortReason::TakerFundingRefundFailed(_),
+        }] => Some(RecoverableTakerRefund::Funding(TakerFundingRefundRequired::new(
+            *maker_coin_start_block,
+            *taker_coin_start_block,
+            negotiation_data.clone(),
+            taker_funding.clone(),
+            reason.clone(),
+        ))),
+        _ => None,
+    }
+}
+
+/// `recover_funds_of_swap` for a taker swap of version two. A swap that ended at the bound of its refund step
+/// runs one attempt of that step with fresh reads; it refunds only when every read gave an answer the refund may
+/// rest on. A funding found spent into the taker payment goes on with one attempt of the refund of that payment.
+/// The answer is the RPC's existing one; a swap with any other ending gets the RPC's existing "not recoverable"
+/// answer.
+pub(super) async fn recover_taker_swap_v2<M, T>(
+    uuid: Uuid,
+    repr: TakerSwapDbRepr,
+    storage: TakerSwapStorage,
+    maker_coin: M,
+    taker_coin: T,
+) -> Result<super::RecoveredSwap, String>
+where
+    M: MmCoin + MakerCoinSwapOpsV2,
+    T: MmCoin + TakerCoinSwapOpsV2,
+    M::Tx: Into<coins::TransactionEnum>,
+    T::Tx: Into<coins::TransactionEnum>,
+{
+    let step: RecoverableTakerRefund<M, T> = match recoverable_taker_refund(&repr.events) {
+        Some(step) => step,
+        None => return ERR!("{}", NOT_RECOVERABLE_V2),
+    };
+    let claim_inputs = claim_inputs_from_history(&repr.events);
+    let mut repr = repr;
+    repr.events.pop();
+    let recreate_ctx = SwapRecreateCtx { maker_coin, taker_coin };
+    let sm = match TakerSwapStateMachine::recreate_machine(uuid, storage, repr, recreate_ctx).await {
+        Ok((machine, _)) => machine.into_inner(),
+        Err(e) => return ERR!("{}", e),
+    };
+    let ticker = sm.taker_coin.ticker().to_owned();
+    let refunded = |refund_tx: T::Tx| super::RecoveredSwap {
+        action: super::RecoveredSwapAction::RefundedMyPayment,
+        coin: ticker.clone(),
+        transaction: refund_tx.into(),
+    };
+    let payment_state = match step {
+        RecoverableTakerRefund::Payment(state) => state,
+        RecoverableTakerRefund::Funding(state) => match state.refund_attempt(&sm).await {
+            FundingRefundAttempt::Refunded(refund_tx) => return Ok(refunded(refund_tx)),
+            FundingRefundAttempt::FoundRefund(_) => return ERR!("The taker funding on {} is already refunded", ticker),
+            FundingRefundAttempt::BecamePayment(taker_payment) => {
+                TakerPaymentRefundRequired::new(taker_payment, state.negotiation_data.clone(), state.reason.clone())
+            },
+            FundingRefundAttempt::Wait(secs) => {
+                return ERR!(
+                    "Too early to refund the taker funding on {}, wait {} seconds",
+                    ticker,
+                    secs
+                )
+            },
+            FundingRefundAttempt::GateFailed(e) => {
+                return ERR!("{}", recovery_unanswered_text(&ticker, Read::Gate, &e, "taker funding"))
+            },
+            FundingRefundAttempt::Unanswered(read, e) => {
+                return ERR!(
+                    "{}",
+                    recovery_unanswered_text(&ticker, read.read_kind(), &e, "taker funding")
+                )
+            },
+            FundingRefundAttempt::RefundFailed(reason) => return ERR!("{}", reason),
+        },
+    };
+    match payment_state.refund_attempt(&sm, claim_inputs.as_ref()).await {
+        TakerRefundAttempt::Refunded(refund_tx) => Ok(refunded(refund_tx)),
+        TakerRefundAttempt::Claimed {
+            inputs,
+            taker_payment_spend,
+        } => {
+            let claim = claim_maker_payment(
+                &sm,
+                &payment_state.negotiation_data,
+                &inputs.maker_payment,
+                &taker_payment_spend,
+            )
+            .await;
+            match claim {
+                Ok(claim_tx) => Ok(super::RecoveredSwap {
+                    action: super::RecoveredSwapAction::SpentOtherPayment,
+                    coin: sm.maker_coin.ticker().to_owned(),
+                    transaction: claim_tx.into(),
+                }),
+                Err(e) => ERR!(
+                    "The maker spent the taker payment on {}; the claim of the maker payment on {} failed: {}",
+                    ticker,
+                    sm.maker_coin.ticker(),
+                    e
+                ),
+            }
+        },
+        TakerRefundAttempt::Wait(secs) => ERR!(
+            "Too early to refund the taker payment on {}, wait {} seconds",
+            ticker,
+            secs
+        ),
+        TakerRefundAttempt::GateFailed(e) => {
+            ERR!("{}", recovery_unanswered_text(&ticker, Read::Gate, &e, "taker payment"))
+        },
+        TakerRefundAttempt::Unanswered(read, e) => {
+            ERR!(
+                "{}",
+                recovery_unanswered_text(&ticker, read.read_kind(), &e, "taker payment")
+            )
+        },
+        TakerRefundAttempt::SpentWithoutSecret => ERR!("{}", taker_payment_already_refunded_text(&ticker)),
+        TakerRefundAttempt::HistoryLacksInputs => {
+            ERR!("{}", history_lacks_inputs_reason(CappedRead::TakerRefundLook, &ticker))
+        },
+        TakerRefundAttempt::RefundFailed(reason) => ERR!("{}", reason),
+    }
+}
+
+/// The answer of the recovery when the taker payment on `ticker` is already refunded on chain; nothing is built.
+fn taker_payment_already_refunded_text(ticker: &str) -> String {
+    format!(
+        "The taker payment on {ticker} is already spent and no maker secret was found in the spend; nothing is built"
+    )
+}
+
+/// Sends the taker's claim of the maker payment again, after the coin reported the claim mined but failed. The
+/// maker payment and the maker's spend of the taker payment come from the swap's saved events, and the secret is
+/// taken from that spend only when its hash matches. Errors are for the debug log only.
+async fn send_claim_of_maker_payment_again<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>(
+    sm: &TakerSwapStateMachine<M, T>,
+    negotiation_data: &StoredTakerNegotiationData,
+) -> Result<BytesJson, String> {
+    let repr = sm.storage.get_repr(sm.uuid).await.map_err(|e| e.to_string())?;
+    let (maker_payment, taker_payment_spend) = repr
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            TakerSwapEvent::TakerPaymentSpent {
+                maker_payment,
+                taker_payment_spend,
+                ..
+            } => Some((maker_payment.clone(), taker_payment_spend.clone())),
+            _ => None,
+        })
+        .ok_or(HISTORY_LACKS_INPUTS)?;
+    let claim = claim_maker_payment(sm, negotiation_data, &maker_payment, &taker_payment_spend).await?;
+    Ok(claim.tx_hex().into())
+}
+
+/// Claims the maker payment with the secret of the maker's spend of the taker payment, taken only when its hash
+/// matches (CRD ch.52 R32). Errors are for the debug log or the recovery's answer.
+async fn claim_maker_payment<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2>(
+    sm: &TakerSwapStateMachine<M, T>,
+    negotiation_data: &StoredTakerNegotiationData,
+    maker_payment: &BytesJson,
+    taker_payment_spend: &BytesJson,
+) -> Result<M::Tx, String> {
+    let spend_tx = sm
+        .taker_coin
+        .parse_tx(taker_payment_spend)
+        .map_err(|e| format!("{:?}", e))?;
+    let maker_secret = sm
+        .taker_coin
+        .extract_secret_v2(&negotiation_data.maker_secret_hash, &spend_tx)
+        .await?;
+    if secret_matches_hash(&maker_secret, &negotiation_data.maker_secret_hash) != Ok(true) {
+        return Err(SPEND_NOT_ACTED_ON.to_owned());
+    }
+    let maker_payment_tx = sm.maker_coin.parse_tx(maker_payment).map_err(|e| format!("{:?}", e))?;
+    let maker_pub = sm
+        .maker_coin
+        .parse_pubkey(&negotiation_data.maker_coin_htlc_pub)
+        .map_err(|e| format!("{:?}", e))?;
+    let unique_data = sm.unique_data();
+    let taker_secret_hash = sm.taker_secret_hash();
+    let spend_args = SpendMakerPaymentArgs {
+        maker_payment_tx: &maker_payment_tx,
+        time_lock: negotiation_data.maker_payment_locktime,
+        taker_secret_hash: &taker_secret_hash,
+        maker_secret_hash: &negotiation_data.maker_secret_hash,
+        maker_secret,
+        maker_pub: &maker_pub,
+        swap_unique_data: &unique_data,
+        amount: sm.maker_volume.to_decimal(),
+    };
+    sm.maker_coin
+        .spend_maker_payment_v2(spend_args)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
+/// The values the taker's refund step reads from the swap's saved events, because the event of
+/// `TakerPaymentRefundRequired` does not hold them: what the claim of the maker payment needs.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ClaimInputs {
+    pub(super) maker_coin_start_block: u64,
+    pub(super) taker_coin_start_block: u64,
+    pub(super) maker_payment: BytesJson,
+}
+
+/// Reads [`ClaimInputs`] from the latest saved event that holds them; `None` when no event does.
+pub(super) fn claim_inputs_from_history(events: &[TakerSwapEvent]) -> Option<ClaimInputs> {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            TakerSwapEvent::MakerPaymentAndFundingSpendPreimgReceived {
+                maker_coin_start_block,
+                taker_coin_start_block,
+                maker_payment,
+                ..
+            }
+            | TakerSwapEvent::MakerPaymentConfirmed {
+                maker_coin_start_block,
+                taker_coin_start_block,
+                maker_payment,
+                ..
+            }
+            | TakerSwapEvent::TakerPaymentSent {
+                maker_coin_start_block,
+                taker_coin_start_block,
+                maker_payment,
+                ..
+            }
+            | TakerSwapEvent::TakerPaymentSentPreimageSendingSkipped {
+                maker_coin_start_block,
+                taker_coin_start_block,
+                maker_payment,
+                ..
+            }
+            | TakerSwapEvent::TakerPaymentSpent {
+                maker_coin_start_block,
+                taker_coin_start_block,
+                maker_payment,
+                ..
+            } => Some(ClaimInputs {
+                maker_coin_start_block: *maker_coin_start_block,
+                taker_coin_start_block: *taker_coin_start_block,
+                maker_payment: maker_payment.clone(),
+            }),
+            _ => None,
+        })
+        .filter(|inputs| !inputs.maker_payment.0.is_empty())
+}
+
+/// What one attempt of the taker's refund of the taker payment ended with.
+pub(super) enum TakerRefundAttempt<Tx> {
+    /// The refund was broadcast.
+    Refunded(Tx),
+    /// The maker's spend of the taker payment, proven by the secret hash, is on chain; the maker payment is
+    /// claimed instead.
+    Claimed {
+        inputs: ClaimInputs,
+        taker_payment_spend: BytesJson,
+    },
+    /// The refund gate asks to wait this many seconds.
+    Wait(u64),
+    /// The refund gate failed with an error that is not an undetermined read; it is retried as before.
+    GateFailed(String),
+    /// A read the refund rests on gave no answer the step may act on (the text is for the log only).
+    Unanswered(CappedRead, String),
+    /// The taker payment is spent and no maker secret was found in the spend: the step builds nothing. The
+    /// state treats it as an unanswered look.
+    SpentWithoutSecret,
+    /// The look cannot run, because the saved events do not hold the maker payment or the start blocks.
+    HistoryLacksInputs,
+    /// The refund could not be built or broadcast.
+    RefundFailed(AbortReason),
+}
+
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TakerPaymentRefundRequired<M, T> {
+    /// One attempt of the refund step: the refund gate, the look at the taker payment for the maker's spend, and
+    /// the refund only after a determined "not spent" (CRD ch.52 R34; ch.51 R31a, §51.6G R100). The state
+    /// repeats it; the manual recovery makes it once.
+    pub(super) async fn refund_attempt(
+        &self,
+        sm: &TakerSwapStateMachine<M, T>,
+        claim_inputs: Option<&ClaimInputs>,
+    ) -> TakerRefundAttempt<T::Tx> {
         let unique_data = sm.unique_data();
         let taker_secret_hash = sm.taker_secret_hash();
 
-        // Wait until we can refund. An undetermined answer of the gate is never read as "refundable": it is
-        // repeated inside `read` up to the bound of the wait (CRD ch.51 R100 items 3 and 9).
-        let mut undetermined_wait = UndeterminedWait::new(sm.taker_payment_locktime());
-        loop {
-            let gate_end = undetermined_wait
-                .read(
-                    &sm.uuid,
-                    sm.taker_coin.ticker(),
-                    CappedRead::TakerRefundGate,
-                    30,
-                    || now_ms() / 1000,
-                    |_| sm.taker_coin.can_refund_htlc(sm.taker_payment_locktime()).compat(),
-                )
-                .await;
-            match gate_end {
-                ReadEnd::Answer(CanRefundHtlc::CanRefundNow) => break,
-                ReadEnd::Answer(CanRefundHtlc::HaveToWait(secs)) => {
-                    info!(
-                        "Swap {}: waiting {} seconds for taker payment refund window",
-                        sm.uuid, secs
-                    );
-                    Timer::sleep(secs as f64).await;
-                },
-                ReadEnd::Failed(e) => {
-                    error!("Swap {}: can_refund_htlc error: {}, retrying in 30s", sm.uuid, e);
-                    Timer::sleep(30.).await;
-                },
-                ReadEnd::BoundPassed(e) => {
-                    let reason = undetermined_cap_reason(CappedRead::TakerRefundGate, sm.taker_coin.ticker(), &e);
-                    return Self::change_state(Aborted::new(reason), sm).await;
-                },
-            }
+        match sm
+            .taker_coin
+            .can_refund_htlc(sm.taker_payment_locktime())
+            .compat()
+            .await
+        {
+            Ok(CanRefundHtlc::CanRefundNow) => (),
+            Ok(CanRefundHtlc::HaveToWait(secs)) => return TakerRefundAttempt::Wait(secs),
+            Err(e) if is_undetermined(&e) => return TakerRefundAttempt::Unanswered(CappedRead::TakerRefundGate, e),
+            Err(e) => return TakerRefundAttempt::GateFailed(e),
+        }
+
+        let inputs = match claim_inputs {
+            Some(inputs) => inputs,
+            None => return TakerRefundAttempt::HistoryLacksInputs,
+        };
+        let taker_payment_tx = match sm.taker_coin.parse_tx(&self.taker_payment) {
+            Ok(tx) => tx,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to parse own payment tx: {:?}", e));
+                return TakerRefundAttempt::RefundFailed(reason);
+            },
+        };
+        let maker_secret_hash = &self.negotiation_data.maker_secret_hash;
+        let wait_until = now_ms() / 1000 + REFUND_LOOK_WINDOW_SECS;
+        let found = match sm
+            .taker_coin
+            .find_taker_payment_spend_tx(&taker_payment_tx, inputs.taker_coin_start_block, wait_until)
+            .await
+        {
+            Ok(spend) => {
+                let proven = match sm.taker_coin.extract_secret_v2(maker_secret_hash, &spend).await {
+                    Ok(secret) => secret_matches_hash(&secret, maker_secret_hash) == Ok(true),
+                    Err(_) => false,
+                };
+                Ok(Some((proven, BytesJson::from(spend.tx_hex()))))
+            },
+            Err(e) => spend_search_error(&e),
+        };
+        let spent_without_secret = matches!(found, Ok(Some((false, _))));
+        match judge_look(found, false) {
+            Look::RefundGoesOn => (),
+            Look::Claimed(taker_payment_spend) => {
+                return TakerRefundAttempt::Claimed {
+                    inputs: inputs.clone(),
+                    taker_payment_spend,
+                }
+            },
+            Look::Unanswered(_) if spent_without_secret => return TakerRefundAttempt::SpentWithoutSecret,
+            Look::Unanswered(text) => return TakerRefundAttempt::Unanswered(CappedRead::TakerRefundLook, text),
         }
 
         let taker_coin_htlc_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
             Ok(pubkey) => pubkey,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
-                return Self::change_state(Aborted::new(reason), sm).await;
+                return TakerRefundAttempt::RefundFailed(reason);
             },
         };
         let net_config = match mm2_net_config::net_config_for(sm.ctx.netid()) {
             Some(cfg) => cfg,
             None => {
                 let reason = AbortReason::InternalError(format!("No net config for netid {}", sm.ctx.netid()));
-                return Self::change_state(Aborted::new(reason), sm).await;
+                return TakerRefundAttempt::RefundFailed(reason);
             },
         };
         let dex_fee = super::compute_dex_fee_v2_with_taker_pubkey_from_coin(
@@ -2726,23 +3277,10 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
         };
 
         match sm.taker_coin.refund_combined_taker_payment(refund_args).await {
-            Ok(refund_tx) => {
-                let refund_tx_bytes: BytesJson = refund_tx.tx_hex().into();
-                info!(
-                    "Taker swap {}: taker payment refunded: {:?}",
-                    sm.uuid,
-                    refund_tx.tx_hash()
-                );
-                Self::change_state(
-                    TakerPaymentRefunded::new(self.taker_payment.clone(), refund_tx_bytes, self.reason.clone()),
-                    sm,
-                )
-                .await
-            },
+            Ok(refund_tx) => TakerRefundAttempt::Refunded(refund_tx),
             Err(e) => {
                 error!("Swap {}: failed to refund taker payment: {:?}", sm.uuid, e);
-                let reason = AbortReason::TakerPaymentRefundFailed(format!("{:?}", e));
-                Self::change_state(Aborted::new(reason), sm).await
+                TakerRefundAttempt::RefundFailed(AbortReason::TakerPaymentRefundFailed(format!("{:?}", e)))
             },
         }
     }
@@ -2892,15 +3430,31 @@ mod tests {
         accepts::<PaymentRefund, TakerPaymentSentPreimageSendingSkipped<EthCoin, EthCoin>>();
     }
 
-    /// The search for the spend of the taker payment and the refund gate are each read at one place, the one
-    /// inside the wait on undetermined reads; both states of the search use it.
+    /// The search for the spend of the taker payment is made at two places: the wait for the maker's spend, and
+    /// the look of the refund attempt. The refund gate is read at two places: the refund attempts of the taker
+    /// payment and of the funding. Both states of the search use the one wait.
     #[test]
-    fn the_reads_before_a_refund_are_made_at_one_place_each() {
+    fn the_reads_before_a_refund_are_made_at_their_known_places() {
         let whole_file = include_str!("taker_swap_v2.rs");
         let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
         let source = &whole_file[..mod_tests_pos];
-        assert_eq!(source.matches(".find_taker_payment_spend_tx(").count(), 1);
-        assert_eq!(source.matches(".can_refund_htlc(").count(), 1);
+        assert_eq!(source.matches(".find_taker_payment_spend_tx(").count(), 2);
+        assert_eq!(source.matches(".can_refund_htlc(").count(), 2);
         assert_eq!(source.matches("await_taker_payment_spend(sm,").count(), 2);
+    }
+
+    /// A taker payment found spent without a maker secret is answered as already spent by the recovery, which
+    /// builds nothing; the refund state keeps it as an unanswered look.
+    #[test]
+    fn a_spend_without_the_secret_is_answered_as_refunded_and_builds_nothing() {
+        let text = taker_payment_already_refunded_text("BTC");
+        assert!(
+            text.contains("BTC") && text.contains("already spent") && !text.contains("refunded"),
+            "{text}"
+        );
+        let whole_file = include_str!("taker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source = &whole_file[..mod_tests_pos];
+        assert_eq!(source.matches("TakerRefundAttempt::SpentWithoutSecret").count(), 3);
     }
 }

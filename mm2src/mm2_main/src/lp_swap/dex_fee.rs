@@ -447,8 +447,8 @@ mod tests {
             maker_swap_v2
                 .matches("mm2_net_config::net_config_for(sm.ctx.netid())")
                 .count(),
-            3,
-            "maker_swap_v2.rs should have exactly 3 net_config_for call sites (P2.1)"
+            4,
+            "maker_swap_v2.rs should have exactly 4 net_config_for call sites (P2.1)"
         );
         assert_eq!(
             taker_swap_v2

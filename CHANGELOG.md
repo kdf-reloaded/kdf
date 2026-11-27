@@ -1005,6 +1005,19 @@ the previous version used. The safe way:
   `recover_funds_of_swap`. The log has one warning per wait. A read that fails
   in another way is handled as the step's own rule says.
   - Detail: PR #533; CRD ch.52 R18, R19, R21, R30, R31, R34 and their status notes of 2026-11-24, ch.51 §51.6G R100.
+- **A v2 refund is built only after the chain shows the counterparty's payment state, and `recover_funds_of_swap`
+  accepts a v2 swap that ended at a refund step's deadline.** Before the maker refunds, it looks for its own claim of
+  the taker payment and goes to that claim when it finds it; a spend of the taker payment that is the taker's own
+  refund, told by the structure of the spend, lets the maker refund, and a claim whose secret cannot be read does
+  not. Before the taker refunds its payment, it looks for the
+  maker's spend of it and claims the maker payment with the secret when the secret matches the hash. The taker
+  refunds its funding only after the search for the funding's spend answers "not spent": with its own secret before
+  the funding's lock time, and by the timelock after it; a funding that became the taker payment is refunded as the
+  taker payment. A read that is undetermined, or that fails, refunds nothing; the step waits until the same deadline
+  as the other v2 waits. Values a refund step needs and its own record does not hold are read from the swap's saved
+  events. A claim that was mined but failed is sent again. `recover_funds_of_swap` makes one attempt of the refund
+  step of a v2 swap that ended at its deadline, with fresh reads, and answers in its existing shapes.
+  - Detail: PR #548; CRD ch.52 R19, R21, R33, R34 and their status notes of 2026-11-26, ch.51 §51.6D, §51.6G R100.
 
 #### Legacy swaps and orders
 

@@ -222,11 +222,12 @@ impl MarketCoinOps for EthCoin {
                 if let Some(receipt) = web3_receipt {
                     if !receipt.inner.status() {
                         status.append(" Failed.");
+                        // The marker tells a swap step that the transaction is mined and failed, apart from one
+                        // that is not confirmed yet.
                         return ERR!(
-                            "Tx receipt {:?} status of {} tx {:?} is failed",
-                            receipt,
-                            selfi.ticker(),
-                            tx.tx_hash()
+                            "{} ({} receipt status failed)",
+                            crate::swap_evidence::mined_and_failed(&format!("{:02x}", tx.tx_hash())),
+                            selfi.ticker()
                         );
                     }
 

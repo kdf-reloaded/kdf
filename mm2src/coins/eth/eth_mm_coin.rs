@@ -613,7 +613,7 @@ impl TakerCoinSwapOpsV2 for EthCoin {
         &self,
         args: RefundTakerPaymentArgs<'_>,
     ) -> Result<SignedEthTx, TransactionErr> {
-        self.refund_taker_payment_with_timelock_impl(args).await
+        self.refund_taker_funding_timelock_impl(args).await
     }
 
     async fn refund_taker_funding_secret(
@@ -720,5 +720,9 @@ impl TakerCoinSwapOpsV2 for EthCoin {
         self.extract_secret_v2_impl(secret_hash, spend_tx)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    fn is_taker_payment_refund_v2(&self, spend_tx: &SignedEthTx) -> bool {
+        crate::eth::eth_swap_v2::eth_taker_swap_v2::is_taker_payment_refund_call(&spend_tx.data)
     }
 }

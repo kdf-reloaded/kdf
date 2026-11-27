@@ -448,6 +448,19 @@ pub fn undetermined(reason: &str, nodes: &[&str]) -> String {
 /// that quotes it counts as undetermined; that errs toward waiting, the safe side.
 pub fn is_undetermined(err: &str) -> bool { err.contains(UNDETERMINED_PREFIX) }
 
+/// The start of the error text of a confirmation wait whose transaction was mined but failed (an EVM receipt with
+/// a failed status), the one marker the engine matches on (see [`is_mined_and_failed`]). Only a coin whose mined
+/// transactions can fail writes it; a UTXO coin never does.
+pub const MINED_AND_FAILED_PREFIX: &str = "transaction mined but failed: ";
+
+/// The only constructor of the error text of a mined transaction that failed: [`MINED_AND_FAILED_PREFIX`] and the
+/// transaction hash.
+pub fn mined_and_failed(tx_hash: &str) -> String { format!("{MINED_AND_FAILED_PREFIX}{tx_hash}") }
+
+/// The only test of an error text for a mined transaction that failed. Like [`is_undetermined`] it looks for the
+/// prefix anywhere in the text, because `ERR!` puts a `file:line]` in front of it.
+pub fn is_mined_and_failed(err: &str) -> bool { err.contains(MINED_AND_FAILED_PREFIX) }
+
 impl UndeterminedReason {
     /// Every reason. A new variant fails to compile in [`Self::phrase`] and in the match of the test
     /// `every_reason_is_listed_in_all` until it is handled there; that test then fails until it is listed here.

@@ -296,7 +296,62 @@ impl EthCoin {
 
 // Refund taker payment (timelock + secret) ---------------------------------
 
+/// The positions of the maker's secret hash and of the payment lock time in the decoded funding call, for an ETH
+/// and for an ERC20 funding (the rows of [`verify_eth_taker_calldata`] and [`verify_erc20_taker_calldata`]).
+fn funding_call_positions(coin_type: &EthCoinType) -> (usize, usize) {
+    match coin_type {
+        EthCoinType::Eth => (4, 6),
+        _ => (6, 8),
+    }
+}
+
+/// Reads the maker's secret hash and the payment lock time from the decoded funding call.
+fn maker_secret_hash_and_payment_lock(decoded: &[Token], positions: (usize, usize)) -> Result<(Vec<u8>, u64), String> {
+    let maker_secret_hash = match decoded.get(positions.0) {
+        Some(Token::FixedBytes(hash)) => hash.clone(),
+        _ => return Err("the funding call holds no maker secret hash".to_owned()),
+    };
+    let payment_time_lock = match decoded.get(positions.1) {
+        Some(Token::Uint(lock)) if *lock <= U256::from(u64::MAX) => lock.low_u64(),
+        _ => return Err("the funding call holds no payment lock time".to_owned()),
+    };
+    Ok((maker_secret_hash, payment_time_lock))
+}
+
 impl EthCoin {
+    /// Refunds the taker funding by its timelock. The caller passes the funding, its own lock time and
+    /// `TakerFunding`, as for any coin. The contract keys the funding and the taker payment by the payment lock
+    /// time and the maker's secret hash, so both are read from the funding call and the contract's timelock
+    /// refund is called with them.
+    pub(crate) async fn refund_taker_funding_timelock_impl(
+        &self,
+        args: RefundTakerPaymentArgs<'_>,
+    ) -> Result<SignedEthTx, TransactionErr> {
+        let taker_secret_hash = match args.tx_type_with_secret_hash {
+            SwapTxTypeWithSecretHash::TakerFunding { taker_secret_hash } => taker_secret_hash,
+            _ => {
+                return Err(TransactionErr::Plain(ERRL!(
+                    "Unsupported swap tx type for funding timelock refund"
+                )))
+            },
+        };
+        let funding_tx = try_tx_s!(self.parse_tx(args.payment_tx));
+        let (decoded, _) = try_tx_s!(self.get_funding_decoded_and_swap_contract(&funding_tx).await);
+        let (maker_secret_hash, payment_time_lock) = try_tx_s!(maker_secret_hash_and_payment_lock(
+            &decoded,
+            funding_call_positions(&self.coin_type)
+        ));
+        let payment_args = RefundTakerPaymentArgs {
+            time_lock: payment_time_lock,
+            tx_type_with_secret_hash: SwapTxTypeWithSecretHash::TakerPaymentV2 {
+                maker_secret_hash: &maker_secret_hash,
+                taker_secret_hash,
+            },
+            ..args
+        };
+        self.refund_taker_payment_with_timelock_impl(payment_args).await
+    }
+
     pub(crate) async fn refund_taker_payment_with_timelock_impl(
         &self,
         args: RefundTakerPaymentArgs<'_>,
@@ -834,6 +889,18 @@ fn secret_of_taker_payment_spend(call_input: &[u8], secret_hash: &[u8]) -> Resul
         .map_err(|_| ExtractSecretV2Err::InvalidSpendTx(format!("The secret is {} bytes long", secret.len())))
 }
 
+/// Whether a call input is a call of one of the contract's taker payment refund functions (by the function
+/// selector), that is, the taker's refund of the taker payment. Any other input, a claim among them, is not.
+pub(crate) fn is_taker_payment_refund_call(call_input: &[u8]) -> bool {
+    let Some(selector) = call_input.get(..4) else {
+        return false;
+    };
+    [FN_REFUND_TAKER_PAYMENT_TIMELOCK, FN_REFUND_TAKER_PAYMENT_SECRET]
+        .iter()
+        .filter_map(|name| TAKER_SWAP_V2.function(name).ok())
+        .any(|function| function.short_signature().as_slice() == selector)
+}
+
 // Calldata verifiers -------------------------------------------------------
 
 /// One row of the `(decoded_index, expected_token, field_name)`
@@ -956,6 +1023,20 @@ mod funding_spend_search_and_secret_tests {
             .unwrap()
     }
 
+    /// The taker's refund calls are recognized by their selector; a claim and unreadable input are not refunds.
+    #[test]
+    fn a_refund_call_of_the_taker_payment_is_recognized_by_its_selector() {
+        for name in [FN_REFUND_TAKER_PAYMENT_TIMELOCK, FN_REFUND_TAKER_PAYMENT_SECRET] {
+            let selector = TAKER_SWAP_V2.function(name).unwrap().short_signature();
+            let mut input = selector.to_vec();
+            input.extend_from_slice(&[0u8; 64]);
+            assert!(is_taker_payment_refund_call(&input), "{name}");
+        }
+        assert!(!is_taker_payment_refund_call(&spend_call_input(&SECRET)));
+        assert!(!is_taker_payment_refund_call(&[0x01, 0x02]));
+        assert!(!is_taker_payment_refund_call(&[]));
+    }
+
     /// CRD ch.52 R18: a failure to reach the node is the transient kind of search error.
     #[test]
     fn node_error_of_the_payment_state_read_is_a_transient_search_error() {
@@ -993,6 +1074,49 @@ mod funding_spend_search_and_secret_tests {
         assert!(
             secret_of_taker_payment_spend(&spend_call_input(&SECRET), &short_hash) == Ok(SECRET),
             "the secret of a 20-byte hash is returned"
+        );
+    }
+
+    /// The timelock refund of the funding reads the maker's secret hash and the payment lock time from the
+    /// funding call, for an ETH and for an ERC20 funding, and refuses a call that does not hold them.
+    #[test]
+    fn the_funding_timelock_refund_reads_its_keys_from_the_funding_call() {
+        let hash = vec![0x42u8; 32];
+        let eth_call = vec![
+            Token::FixedBytes(vec![0; 32]),
+            Token::Uint(U256::from(1)),
+            Token::Address(Address::zero()),
+            Token::FixedBytes(vec![0x41; 32]),
+            Token::FixedBytes(hash.clone()),
+            Token::Uint(U256::from(1_000)),
+            Token::Uint(U256::from(2_000)),
+        ];
+        let read = maker_secret_hash_and_payment_lock(&eth_call, funding_call_positions(&EthCoinType::Eth));
+        assert!(read == Ok((hash.clone(), 2_000)), "the ETH funding call gives its keys");
+
+        let erc20_call = vec![
+            Token::FixedBytes(vec![0; 32]),
+            Token::Uint(U256::from(5)),
+            Token::Uint(U256::from(1)),
+            Token::Address(Address::zero()),
+            Token::Address(Address::zero()),
+            Token::FixedBytes(vec![0x41; 32]),
+            Token::FixedBytes(hash.clone()),
+            Token::Uint(U256::from(1_000)),
+            Token::Uint(U256::from(2_000)),
+        ];
+        let erc20 = EthCoinType::Erc20 {
+            platform: "ETH".into(),
+            token_addr: Address::zero(),
+        };
+        let read = maker_secret_hash_and_payment_lock(&erc20_call, funding_call_positions(&erc20));
+        assert!(read == Ok((hash, 2_000)), "the ERC20 funding call gives its keys");
+
+        let mut too_large = eth_call.clone();
+        too_large[6] = Token::Uint(U256::max_value());
+        assert!(
+            maker_secret_hash_and_payment_lock(&too_large, funding_call_positions(&EthCoinType::Eth)).is_err(),
+            "a call without the keys is refused"
         );
     }
 

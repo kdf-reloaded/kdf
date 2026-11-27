@@ -25,7 +25,7 @@ use crate::eth::{decode_contract_call, signed_tx_from_alloy_tx, EthCoin, EthCoin
 use crate::{FindPaymentSpendError, MarketCoinOps};
 use bigdecimal::BigDecimal;
 use common::executor::Timer;
-use common::log::{error, info, warn};
+use common::log::{debug, info, warn};
 use common::now_ms;
 use derive_more::Display;
 use ethereum_types::{Address, H256, U256};
@@ -117,6 +117,14 @@ pub(crate) struct SpendTxSearchParams<'a> {
     pub(crate) check_every: f64,
 }
 
+/// The fixed reason of a spend search whose read failed.
+const SPEND_READ_FAILED: &str = "the read for the spend of the payment failed";
+
+/// The error of a spend search whose read failed: an undetermined `Transport` error with a fixed text.
+pub(crate) fn spend_read_failed() -> FindPaymentSpendError {
+    FindPaymentSpendError::Transport(crate::swap_evidence::undetermined(SPEND_READ_FAILED, &[]))
+}
+
 /// Predicate matching an event whose first 32 bytes equal the given
 /// `swap_id`. Pulled out so the scanning loop reads as one
 /// declarative check instead of an inline closure.
@@ -131,9 +139,12 @@ impl EthCoin {
     ///
     /// Honours `wait_until` (UNIX seconds) as a hard deadline. Each
     /// iteration sleeps `check_every` seconds before re-polling.
-    /// Block-fetch and event-fetch failures are logged and retried
-    /// rather than propagated, because transient RPC errors are
-    /// expected during a long swap.
+    /// A block-fetch or event-fetch failure ends the call at once with
+    /// an undetermined `Transport` error (see
+    /// [`crate::swap_evidence::undetermined`]); the node's error text
+    /// goes to the debug log only. `Timeout` is answered only when the
+    /// last read of the call was answered, so a window in which reads
+    /// failed is never taken for "no spend".
     ///
     /// The 32-byte `swap_id` is assumed to be the first 32 bytes of
     /// the event data — this matches the V2 swap contract's emitted
@@ -162,9 +173,8 @@ impl EthCoin {
             let current_block = match self.current_block().compat().await {
                 Ok(block) => block,
                 Err(e) => {
-                    error!("Error getting block number: {}", e);
-                    Timer::sleep(params.check_every).await;
-                    continue;
+                    debug!("Error getting block number: {}", e);
+                    return MmError::err(spend_read_failed());
                 },
             };
 
@@ -185,21 +195,11 @@ impl EthCoin {
                 {
                     Ok(events) => events,
                     Err(e) => {
-                        error!(
+                        debug!(
                             "Error getting {} events from {} to {} block: {}",
                             params.event_name, window_start, window_end, e
                         );
-                        // The deadline is checked after a failed query as well, so that persistent failures
-                        // still end the search (CRD ch.17 R17.8.3 applies the same rule to V1).
-                        let now_secs = now_ms() / 1000;
-                        if now_secs > params.wait_until {
-                            return MmError::err(FindPaymentSpendError::Timeout {
-                                wait_until: params.wait_until,
-                                now: now_secs,
-                            });
-                        }
-                        Timer::sleep(params.check_every).await;
-                        continue;
+                        return MmError::err(spend_read_failed());
                     },
                 };
 
@@ -270,7 +270,10 @@ impl EthCoin {
                     return Ok(signed);
                 },
                 Ok(None) => info!("Transaction {} not found yet", tx_hash),
-                Err(e) => error!("Get transaction {} error: {}", tx_hash, e),
+                Err(e) => {
+                    debug!("Get transaction {} error: {}", tx_hash, e);
+                    return MmError::err(spend_read_failed());
+                },
             };
 
             Timer::sleep(check_every).await;
