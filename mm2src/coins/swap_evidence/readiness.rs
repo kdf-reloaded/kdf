@@ -34,7 +34,7 @@ use common::executor::Timer;
 use futures::channel::oneshot;
 use futures::future::join_all;
 use serde_json::Value as Json;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -336,6 +336,9 @@ struct ScopeLog {
 struct ProbesInner {
     records: Mutex<HashMap<String, ProbeRecord>>,
     logs: Mutex<HashMap<String, ScopeLog>>,
+    /// The keys whose last series failed whole and that have not answered since: such a host does not count as
+    /// answering, in any view, while a new series of it is pending. It survives the expiry of the failed record.
+    failed_since_answer: Mutex<HashSet<String>>,
     /// The INFO host lines logged, in order (tests).
     #[cfg(test)]
     lines: Mutex<Vec<String>>,
@@ -356,6 +359,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl ReadinessProbes {
     /// How a check in `mode` sees `key` at `now`; `None` when nothing recent is known of it.
     fn view(&self, key: &str, now: f64, mode: ReadyMode) -> Option<HostView> {
+        let sticky = lock(&self.inner.failed_since_answer).contains(key);
         let records = lock(&self.inner.records);
         let record = records.get(key)?;
         if record.expired(now) {
@@ -363,7 +367,7 @@ impl ReadinessProbes {
         }
         // What a failed attempt leaves: the host fails after the last one, and until then only a swap start doubts it.
         let after_failure = |failures: u32| {
-            if failures >= record.limit || mode == ReadyMode::Strict {
+            if sticky || failures >= record.limit || mode == ReadyMode::Strict {
                 HostView::No
             } else {
                 HostView::Yes
@@ -434,6 +438,15 @@ impl ReadinessProbes {
             }
             (record.phase, std::mem::take(&mut record.waiters))
         };
+        match phase {
+            Phase::Failed => {
+                lock(&self.inner.failed_since_answer).insert(key.to_owned());
+            },
+            Phase::Answered => {
+                lock(&self.inner.failed_since_answer).remove(key);
+            },
+            _ => {},
+        }
         for waiter in waiters {
             let _ = waiter.send(());
         }
@@ -517,6 +530,7 @@ impl ReadinessProbes {
     /// `host` of the scope answers at `at`: when it was logged as silent, logs that it answers again (then the lines
     /// of the hosts still silent, the set having changed).
     fn host_answers(&self, scope_key: &str, host: &str, at: f64) {
+        lock(&self.inner.failed_since_answer).remove(&probe_key(scope_key, host));
         let mut logs = lock(&self.inner.logs);
         let Some(log) = logs.get_mut(scope_key) else {
             return;
@@ -1610,6 +1624,64 @@ mod tests {
         );
         assert_eq!(probes.view("T|b.example", 1005., ReadyMode::Strict), None, "lost");
         assert!(probes.claim("T|b.example", 1005., settings), "claimed again");
+    }
+
+    /// The lab sequence: a host that failed a whole series stays not answering, in both views, across later windows
+    /// and their new series; an answer clears it, with one resume and one "answers again" line. A host that never
+    /// failed still counts in its first series (`a_host_fails_after_three_attempts`).
+    #[test]
+    fn a_failed_host_stays_failed_until_it_answers() {
+        let probes = ReadinessProbes::default();
+        let policy = two_nodes();
+        let calls: Calls = Arc::default();
+        let a = node("a.example:1", Answering, None);
+        let down = [a.clone(), scripted("b.example:1", &[Answer(false)])];
+        let pause = run_of(ReadyMode::Pause, 3);
+        let strict = run_of(ReadyMode::Strict, 3);
+        // The first series fails whole.
+        assert!(block_on(check_async("T", &policy, &down, &probes, 1000., strict, &calls)).is_err());
+        block_on(settle(&probes, &down, 1000.));
+        assert_eq!(probes.series_state("T|b.example"), Some((3, Phase::Failed)));
+        // Four later windows: at the start of each, a new series is claimed. Both views refuse, never accept.
+        let mut now = 1000.;
+        for _ in 0..4 {
+            now += READY_WINDOW_SECS + 2.;
+            assert!(
+                block_on(check_async("T", &policy, &down, &probes, now, pause, &calls)).is_err(),
+                "the pause holds at {now}"
+            );
+            // While the new series has retries pending, both views still refuse.
+            assert!(block_on(check_async("T", &policy, &down, &probes, now + 0.01, pause, &calls)).is_err());
+            assert!(block_on(check_async("T", &policy, &down, &probes, now + 0.01, strict, &calls)).is_err());
+            block_on(settle(&probes, &down, now));
+        }
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            15,
+            "five series of three attempts, no extra probe"
+        );
+        assert_eq!(
+            probes.lines().len(),
+            1,
+            "no repeated line within the interval: {:?}",
+            probes.lines()
+        );
+        // An answer in a later series clears the mark: one "answers again" line, and the host counts again.
+        now += READY_WINDOW_SECS + 2.;
+        let up = [a, scripted("b.example:1", &[Answer(true)])];
+        assert_eq!(
+            block_on(check_async("T", &policy, &up, &probes, now, pause, &calls)),
+            Ok(())
+        );
+        block_on(settle(&probes, &up, now));
+        assert_eq!(probes.lines().len(), 2);
+        assert!(probes.lines()[1].ends_with("host b.example:1 of T answers again"));
+        for run in [pause, strict] {
+            assert_eq!(
+                block_on(check_async("T", &policy, &up, &probes, now + 1., run, &calls)),
+                Ok(())
+            );
+        }
     }
 
     /// The own daemon has no host: its lines name the daemon and the platform.

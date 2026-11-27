@@ -412,7 +412,7 @@ one warning names the platform. This is a Reloaded addition; the row in
 Before a swap starts, the node checks that both coins can give the agreed chain reads the swap will need (see
 "Swap evidence from one host" above). A host that has not answered within the last minute is asked again, up to a
 number of attempts in a row, each with a time limit. A maker's orders with a coin are paused only once a host the coin
-needs has failed every attempt; a swap start is declined while further attempts are pending. The node logs one line
+needs has failed every attempt, and stay paused until that host answers again; a swap start is declined while further attempts are pending. The node logs one line
 per silent host, naming only `host[:port]` and the platform, with the number of coins affected, and one line when it
 answers again. Three top-level `MM2.json` keys tune this; absent or `null` means the default:
 

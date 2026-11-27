@@ -1049,7 +1049,7 @@ the previous version used. The safe way:
 - **The readiness check before a swap asks a silent host three times and names it.** A host not heard from is now
   asked up to three times in a row, each time with a 5-second limit (was one question with 3 seconds), and a question
   still open is waited for instead of being taken as a failure. A maker's orders with a coin are paused only after a
-  host the coin needs has failed every attempt, so one lost answer no longer pauses them and a restart no longer
+  host the coin needs has failed every attempt, and they stay paused until that host answers again, so one lost answer no longer pauses them and a restart no longer
   pauses and resumes them in the same second. A swap start is still declined at once while further attempts are
   pending. The node now logs one line per silent host, as `host[:port]` with no path or query, with its platform and
   the number of coins affected, at the first failure, when the set of silent hosts changes, and otherwise at most once

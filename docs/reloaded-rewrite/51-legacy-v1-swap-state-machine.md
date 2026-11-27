@@ -2094,8 +2094,10 @@ status note of 2026-11-26 with the following.
 
 1. *Attempts.* A host not heard from is asked up to three times in a row, each
    attempt with a 5-second limit and about 2 seconds apart; an answer ends the
-   series. A host counts as not answering for a minute only after the last
-   attempt has failed.
+   series. A host counts as not answering only after the last attempt has
+   failed, and from then on until it answers again: it is asked again a minute
+   after the end of each series, and a new series does not count it as
+   answering while its attempts are pending.
 2. *A question still open.* A check that finds a question to a host still open
    waits for its answer, up to its limit, and does not count the host as not
    answering meanwhile.
