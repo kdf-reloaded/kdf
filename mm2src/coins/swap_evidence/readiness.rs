@@ -282,8 +282,12 @@ impl Phase {
 /// What a probe series of one key left.
 #[derive(Debug)]
 struct ProbeRecord {
-    /// When the series was claimed.
+    /// When the series was claimed: its identity.
     at: f64,
+    /// When the series became final (answered or failed): the anchor of the window of a final record.
+    ended_at: f64,
+    /// How long a series that has not ended may run before it counts as lost.
+    max_age: f64,
     phase: Phase,
     /// Failed attempts so far.
     failures: u32,
@@ -293,6 +297,18 @@ struct ProbeRecord {
     limit: u32,
     /// The checks that wait for the end of the current attempt.
     waiters: Vec<oneshot::Sender<()>>,
+}
+
+impl ProbeRecord {
+    /// Whether the record no longer counts at `now`: a final one [`READY_WINDOW_SECS`] after the series ended, one
+    /// that has not ended (a lost task) once it is older than the longest a series can take.
+    fn expired(&self, now: f64) -> bool {
+        if self.phase.is_final() {
+            now - self.ended_at >= READY_WINDOW_SECS
+        } else {
+            now - self.at >= self.max_age
+        }
+    }
 }
 
 /// How one host stands for one check.
@@ -342,7 +358,7 @@ impl ReadinessProbes {
     fn view(&self, key: &str, now: f64, mode: ReadyMode) -> Option<HostView> {
         let records = lock(&self.inner.records);
         let record = records.get(key)?;
-        if record.phase.is_final() && now - record.at >= READY_WINDOW_SECS {
+        if record.expired(now) {
             return None;
         }
         // What a failed attempt leaves: the host fails after the last one, and until then only a swap start doubts it.
@@ -369,18 +385,22 @@ impl ReadinessProbes {
 
     /// Claims a series of `key` at `now`: `true` when none was claimed within the window (and none still runs), which
     /// marks the key as being probed. Final records older than the window are dropped here.
-    fn claim(&self, key: &str, now: f64, limit: u32) -> bool {
+    fn claim(&self, key: &str, now: f64, settings: ReadinessSettings) -> bool {
         let mut records = lock(&self.inner.records);
-        records.retain(|_, record| !record.phase.is_final() || now - record.at < READY_WINDOW_SECS);
+        records.retain(|_, record| !record.expired(now));
         if records.contains_key(key) {
             return false;
         }
         records.insert(key.to_owned(), ProbeRecord {
             at: now,
+            ended_at: now,
+            // Every attempt and every gap, and one more bound as a margin.
+            max_age: f64::from(settings.attempts) * (settings.probe_timeout_s + settings.retry_gap_s)
+                + settings.probe_timeout_s,
             phase: Phase::Attempting,
             failures: 0,
             attempts_done: 0,
-            limit,
+            limit: settings.attempts,
             waiters: Vec::new(),
         });
         true
@@ -394,7 +414,7 @@ impl ReadinessProbes {
 
     /// Records the end of an attempt of the series of `key` claimed at `claimed_at` and wakes the checks that wait
     /// for it. Returns the phase it left.
-    fn end_attempt(&self, key: &str, claimed_at: f64, answered: bool) -> Option<Phase> {
+    fn end_attempt(&self, key: &str, claimed_at: f64, ended_at: f64, answered: bool) -> Option<Phase> {
         let (phase, waiters) = {
             let mut records = lock(&self.inner.records);
             let record = records.get_mut(key).filter(|r| r.at == claimed_at)?;
@@ -408,6 +428,9 @@ impl ReadinessProbes {
                 } else {
                     Phase::Waiting
                 };
+            }
+            if record.phase.is_final() {
+                record.ended_at = ended_at;
             }
             (record.phase, std::mem::take(&mut record.waiters))
         };
@@ -446,6 +469,8 @@ impl ReadinessProbes {
             if !records.get(&key).is_some_and(|record| !record.phase.is_final()) {
                 records.insert(key, ProbeRecord {
                     at: now,
+                    ended_at: now,
+                    max_age: 0.,
                     phase: Phase::Answered,
                     failures: 0,
                     attempts_done: 1,
@@ -524,6 +549,15 @@ impl ReadinessProbes {
     #[cfg(test)]
     pub(crate) fn lines(&self) -> Vec<String> { lock(&self.inner.lines).clone() }
 
+    /// When the series of `key` ended, if it has (tests).
+    #[cfg(test)]
+    fn records_ended_at(&self, key: &str) -> Option<f64> {
+        lock(&self.inner.records)
+            .get(key)
+            .filter(|r| r.phase.is_final())
+            .map(|r| r.ended_at)
+    }
+
     /// The failed attempts and the phase of the series of `key` (tests).
     #[cfg(test)]
     fn series_state(&self, key: &str) -> Option<(u32, Phase)> {
@@ -578,9 +612,10 @@ where
             });
             let answered = matches!(attempt_future.timeout_secs(bound).await, Ok(true));
             let last = answered || attempt >= self.settings.attempts;
+            // The end of the attempt on the clock of the claim.
+            let at = self.claimed_at + (common::now_float() - started);
             if last {
                 // The line is written before the checks that wait for this attempt are woken.
-                let at = self.claimed_at + (common::now_float() - started);
                 if answered {
                     self.probes.host_answers(&self.scope_key, &self.host, at);
                 } else {
@@ -593,7 +628,7 @@ where
                     );
                 }
             }
-            self.probes.end_attempt(&self.key, self.claimed_at, answered);
+            self.probes.end_attempt(&self.key, self.claimed_at, at, answered);
             if last {
                 return;
             }
@@ -749,7 +784,7 @@ where
     for position in unknown {
         let (host, members) = &hosts[position];
         let key = key_of(host);
-        if !probes.claim(&key, now, settings.attempts) {
+        if !probes.claim(&key, now, settings) {
             continue;
         }
         let member = members
@@ -1039,7 +1074,7 @@ mod tests {
         let (outcome, probed) = check(&two_nodes(), &failing, &probes, 1059., 0.05);
         assert!(outcome.is_err());
         assert!(probed.is_empty(), "no second probe within 60 s");
-        let (_, probed) = check(&two_nodes(), &failing, &probes, 1060., 0.05);
+        let (_, probed) = check(&two_nodes(), &failing, &probes, 1062., 0.05);
         assert_eq!(probed.len(), 1, "probed again once the window has passed");
 
         let probes = ReadinessProbes::default();
@@ -1456,9 +1491,9 @@ mod tests {
         assert!(judge(&b_down, 1000.).is_err());
         assert_eq!(probes.lines(), vec![b_line.clone()], "logged at the first failure");
         assert!(judge(&b_down, 1030.).is_err());
-        assert!(judge(&b_down, 1060.).is_err(), "probed again after the window");
+        assert!(judge(&b_down, 1062.).is_err(), "probed again after the window");
         assert_eq!(probes.lines().len(), 1, "within the interval: no repeat");
-        assert!(judge(&b_down, 1120.).is_err());
+        assert!(judge(&b_down, 1125.).is_err());
         assert_eq!(
             probes.lines(),
             vec![b_line.clone(), b_line.clone()],
@@ -1469,7 +1504,7 @@ mod tests {
             node("a.example:1", Unknown, Some(false)),
             node("b.example:1", Unknown, Some(false)),
         ];
-        assert!(judge(&both_down, 1121.).is_err());
+        assert!(judge(&both_down, 1130.).is_err());
         let lines = probes.lines();
         assert_eq!(lines.len(), 4, "{lines:?}");
         assert!(lines[2..].contains(&b_line));
@@ -1498,12 +1533,12 @@ mod tests {
             node("a.example:1", Answering, None),
             node("b.example:1", Unknown, Some(true)),
         ];
-        assert_eq!(judge(&up, 1060.), Ok(()));
+        assert_eq!(judge(&up, 1062.), Ok(()));
         assert_eq!(probes.lines(), vec![
             "swap evidence: host b.example:1 of T is not answering (1 coin affected)".to_owned(),
             "swap evidence: host b.example:1 of T answers again".to_owned(),
         ]);
-        assert_eq!(judge(&up, 1100.), Ok(()));
+        assert_eq!(judge(&up, 1110.), Ok(()));
         assert_eq!(probes.lines().len(), 2, "once");
 
         // The family seeing an answer (no probe) is a recovery as well.
@@ -1513,6 +1548,68 @@ mod tests {
         probes.note_answer("T", "b.example:1", 1010.);
         assert_eq!(probes.lines().len(), 2);
         assert!(probes.lines()[1].ends_with("answers again"));
+    }
+
+    /// F1: the window of a final record counts from the end of the series. A series longer than the window still
+    /// pauses, and its host is not claimed again until the window after its end has passed.
+    #[test]
+    fn the_window_counts_from_the_end_of_the_series() {
+        let probes = ReadinessProbes::default();
+        // Three attempts of 0.4 s: the series lasts over 1.2 s, so the end is later than the claim.
+        let nodes = [
+            node("a.example:1", Answering, None),
+            scripted("b.example:1", &[After(400, false)]),
+        ];
+        let calls: Calls = Arc::default();
+        let mut settings = fast(3);
+        settings.probe_timeout_s = 1.;
+        let pause = ReadyRun {
+            mode: ReadyMode::Pause,
+            settings,
+        };
+        let policy = two_nodes();
+        assert_eq!(
+            block_on(check_async("T", &policy, &nodes, &probes, 1000., pause, &calls)),
+            Ok(())
+        );
+        block_on(settle(&probes, &nodes, 1000.));
+        let ended_at = probes.records_ended_at("T|b.example").expect("final record");
+        assert!(ended_at >= 1000. + 1.2, "the record is anchored at the end: {ended_at}");
+        // The checks run on the injected clock. More than the window after the claim but less than the window after
+        // the end, the host stays failed and is not claimed again (counted from the claim it would have expired).
+        let at = ended_at + READY_WINDOW_SECS - 0.1;
+        assert!(at - 1000. > READY_WINDOW_SECS);
+        assert!(block_on(check_async("T", &policy, &nodes, &probes, at, pause, &calls)).is_err());
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            3,
+            "no new series within the window after the end"
+        );
+        // After the window after the end, the host is probed again.
+        let at = ended_at + READY_WINDOW_SECS + 1.;
+        let _ = block_on(check_async("T", &policy, &nodes, &probes, at, pause, &calls));
+        block_on(settle(&probes, &nodes, at));
+        assert_eq!(calls.lock().unwrap().len(), 3 + 3, "a new series of three attempts");
+    }
+
+    /// F2: a series that never ended (a lost task) counts as lost once it is older than the longest a series can
+    /// take, and is claimed again.
+    #[test]
+    fn a_lost_series_is_claimed_again() {
+        let probes = ReadinessProbes::default();
+        let settings = fast(3);
+        assert!(probes.claim("T|b.example", 1000., settings));
+        // The longest a series takes: 3 * (1 + 0.01) + 1 s.
+        assert!(
+            !probes.claim("T|b.example", 1004., settings),
+            "still within its longest run"
+        );
+        assert_eq!(
+            probes.view("T|b.example", 1004., ReadyMode::Strict),
+            Some(HostView::InFlight { seen: 0 })
+        );
+        assert_eq!(probes.view("T|b.example", 1005., ReadyMode::Strict), None, "lost");
+        assert!(probes.claim("T|b.example", 1005., settings), "claimed again");
     }
 
     /// The own daemon has no host: its lines name the daemon and the platform.
@@ -1526,8 +1623,8 @@ mod tests {
         assert!(block_on(check_async("T", &policy, &down, &probes, 1000., run, &calls)).is_err());
         block_on(settle(&probes, &down, 1000.));
         let up = [node(OWN_DAEMON_LABEL, Unknown, Some(true))];
-        assert!(block_on(check_async("T", &policy, &up, &probes, 1060., run, &calls)).is_ok());
-        block_on(settle(&probes, &up, 1060.));
+        assert!(block_on(check_async("T", &policy, &up, &probes, 1062., run, &calls)).is_ok());
+        block_on(settle(&probes, &up, 1062.));
         assert_eq!(probes.lines(), vec![
             "swap evidence: the own daemon of T is not answering".to_owned(),
             "swap evidence: the own daemon of T answers again".to_owned(),
