@@ -2279,11 +2279,13 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
         loop {
             let (read, text, history_lacks_inputs) = match self.refund_attempt(sm, &claim_step).await {
                 MakerRefundAttempt::Refunded(refund_tx) => {
-                    info!(
-                        "Refunded maker payment {} tx {:?} during swap {}",
-                        sm.maker_coin.ticker(),
-                        refund_tx.tx_hash(),
-                        sm.uuid
+                    log_refund_step(
+                        &sm.uuid,
+                        &format!(
+                            "refunded maker payment {} tx {:?}",
+                            sm.maker_coin.ticker(),
+                            refund_tx.tx_hash()
+                        ),
                     );
                     let next = MakerPaymentRefunded::new(
                         self.maker_payment.clone(),
@@ -2296,10 +2298,12 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
                     taker_payment,
                     taker_payment_spend,
                 } => {
-                    info!(
-                        "Swap {}: the claim of the {} taker payment is on chain, the maker payment is not refunded",
-                        sm.uuid,
-                        sm.taker_coin.ticker()
+                    log_refund_step(
+                        &sm.uuid,
+                        &format!(
+                            "the claim of the {} taker payment is on chain, the maker payment is not refunded",
+                            sm.taker_coin.ticker()
+                        ),
                     );
                     let next = TakerPaymentSpent::new(
                         self.maker_coin_start_block,
@@ -2580,8 +2584,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> MakerPaymen
                     .await
                 {
                     Ok(spend) => {
+                        let is_refund = sm.taker_coin.is_taker_payment_refund_v2(&spend);
                         let extracted = sm.taker_coin.extract_secret_v2(&sm.secret_hash(), &spend).await;
-                        maker_look_found(extracted, sm.secret.as_slice(), BytesJson::from(spend.tx_hex()))
+                        maker_look_found(
+                            is_refund,
+                            extracted,
+                            sm.secret.as_slice(),
+                            BytesJson::from(spend.tx_hex()),
+                        )
                     },
                     Err(e) => spend_search_error(&e),
                 };
@@ -2719,6 +2729,19 @@ mod tests {
         assert_eq!(source.matches(".search_for_taker_funding_spend(").count(), 1);
         assert_eq!(source.matches(".can_refund_htlc(").count(), 1);
         assert_eq!(source.matches("await_taker_payment_confirmation(sm,").count(), 2);
+    }
+
+    /// The look at the taker payment is made at one place, `refund_attempt`, which the refund state and the manual
+    /// recovery both run; the look asks the coin whether a found spend is the taker's refund.
+    #[test]
+    fn the_state_and_the_recovery_share_the_look_that_tells_a_taker_refund() {
+        let whole_file = include_str!("maker_swap_v2.rs");
+        let mod_tests_pos = whole_file.find("mod tests {").expect("this test module should exist");
+        let source = &whole_file[..mod_tests_pos];
+        assert_eq!(source.matches(".find_taker_payment_spend_tx(").count(), 1);
+        assert_eq!(source.matches(".is_taker_payment_refund_v2(").count(), 1);
+        assert_eq!(source.matches("self.refund_attempt(sm, &claim_step)").count(), 1);
+        assert_eq!(source.matches("state.refund_attempt(&sm, &claim_step)").count(), 1);
     }
 
     /// CRD ch.52 R18: the search for the funding spend judges a found taker payment by its own wait and the ⅔

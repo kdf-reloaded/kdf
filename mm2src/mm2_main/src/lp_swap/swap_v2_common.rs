@@ -533,16 +533,24 @@ pub(super) fn judge_look<S>(found: Result<Option<(bool, S)>, String>, other_spen
 /// The text a maker's look logs when it found a spend from which no secret could be extracted.
 pub(super) const SPEND_SECRET_NOT_EXTRACTED: &str = "a spend was found whose secret could not be extracted";
 
-/// What the maker's look makes of a spend of the taker payment it found, in the form [`judge_look`] takes. Only the
-/// extraction decides: the maker's own secret is its own claim (`true`); another secret is positively the taker's
-/// refund (`false`); a failed extraction answers nothing the step may act on, so it is an `Err` with a fixed text.
+/// What the maker's look makes of a spend of the taker payment it found, in the form [`judge_look`] takes.
+/// `is_refund` is the coin's answer, from the structure of the spend, whether it is the taker's own refund of the
+/// taker payment (the refund path carries no secret). Then:
+/// - a spend told to be the taker's refund is positively that refund (`false`: no secret of the maker is in it);
+/// - any other spend is a claim: the maker's own secret is its own claim (`true`); a failed extraction or another
+///   secret answers nothing the step may act on, so it is an `Err` with a fixed text.
 pub(super) fn maker_look_found<S, E>(
+    is_refund: bool,
     extracted: Result<[u8; 32], E>,
     own_secret: &[u8],
     spend: S,
 ) -> Result<Option<(bool, S)>, String> {
+    if is_refund {
+        return Ok(Some((false, spend)));
+    }
     match extracted {
-        Ok(secret) => Ok(Some((secret.as_slice() == own_secret, spend))),
+        Ok(secret) if secret.as_slice() == own_secret => Ok(Some((true, spend))),
+        Ok(_) => Err(SPEND_NOT_ACTED_ON.to_owned()),
         Err(_) => Err(SPEND_SECRET_NOT_EXTRACTED.to_owned()),
     }
 }
@@ -608,6 +616,20 @@ pub(super) fn history_lacks_inputs_reason(read: CappedRead, ticker: &str) -> Abo
             "the maker payment",
         )),
     }
+}
+
+/// Logs an event of a refund step at info level under the swap's uuid. The uuid is passed on as a value of its
+/// own, as the wait of the undetermined reads does.
+pub(super) fn log_refund_step(swap_uuid: &Uuid, step: &str) {
+    info!("Swap {}: {}", swap_uuid, step);
+}
+
+/// Logs a failed refund gate at error level under the swap's uuid, with the retry in `retry_secs` seconds.
+pub(super) fn log_refund_gate_failed(swap_uuid: &Uuid, error: &str, retry_secs: u64) {
+    error!(
+        "Swap {}: can_refund_htlc error: {}, retrying in {}s",
+        swap_uuid, error, retry_secs
+    );
 }
 
 /// How long a refund step waits before it repeats a read that gave no answer it may act on, in seconds.
@@ -2065,10 +2087,11 @@ mod tests {
     /// A second recovery of the same swap is answered at once, and the right is given back when the first ends.
     #[test]
     fn a_second_recovery_of_the_same_swap_is_refused_at_once() {
-        let uuid = Uuid::new_v4();
+        let uuid = Uuid::from_slice(&[1u8; 16]).expect("sixteen bytes");
         let first = RecoveryInFlight::enter(uuid).expect("the first recovery runs");
         assert_eq!(RecoveryInFlight::enter(uuid).err().as_deref(), Some(RECOVERY_IN_FLIGHT));
-        let other = RecoveryInFlight::enter(Uuid::new_v4()).expect("another swap is not held");
+        let another_uuid = Uuid::from_slice(&[2u8; 16]).expect("sixteen bytes");
+        let other = RecoveryInFlight::enter(another_uuid).expect("another swap is not held");
         drop(other);
         drop(first);
         drop(RecoveryInFlight::enter(uuid).expect("the right is given back"));
@@ -2168,25 +2191,32 @@ mod tests {
         }
     }
 
-    /// The maker's look decides on the extraction: its own secret is its own claim, another secret is the
-    /// taker's refund, and a failed extraction is no answer: the refund does not go on.
+    /// The maker's look: a spend told to be the taker's refund lets the refund go on whatever the extraction says;
+    /// a claim with the maker's own secret is its own claim; a claim whose secret cannot be extracted or does not
+    /// match is no answer: the refund does not go on and the look waits.
     #[test]
-    fn the_maker_look_waits_on_a_failed_extraction() {
+    fn the_maker_look_refunds_after_a_taker_refund_and_waits_on_an_unreadable_claim() {
         let own = [7u8; 32];
+        let no_secret = || Err::<[u8; 32], _>("no secret".to_owned());
         assert_eq!(
-            judge_look(maker_look_found(Ok::<_, String>(own), &own, "spend"), true),
-            Look::Claimed("spend")
+            judge_look(maker_look_found(true, no_secret(), &own, "spend"), true),
+            Look::RefundGoesOn,
+            "the taker's refund of the taker payment"
         );
         assert_eq!(
-            judge_look(maker_look_found(Ok::<_, String>([8u8; 32]), &own, "spend"), true),
-            Look::RefundGoesOn
+            judge_look(maker_look_found(false, Ok::<_, String>(own), &own, "spend"), true),
+            Look::Claimed("spend"),
+            "a claim with the maker's secret"
         );
         assert_eq!(
-            judge_look(
-                maker_look_found(Err::<[u8; 32], _>("node text".to_owned()), &own, "spend"),
-                true
-            ),
-            Look::Unanswered(SPEND_SECRET_NOT_EXTRACTED.to_owned())
+            judge_look(maker_look_found(false, no_secret(), &own, "spend"), true),
+            Look::Unanswered(SPEND_SECRET_NOT_EXTRACTED.to_owned()),
+            "a claim whose secret cannot be extracted, or a spend of an unknown kind"
+        );
+        assert_eq!(
+            judge_look(maker_look_found(false, Ok::<_, String>([8u8; 32]), &own, "spend"), true),
+            Look::Unanswered(SPEND_NOT_ACTED_ON.to_owned()),
+            "a claim with another secret"
         );
     }
 

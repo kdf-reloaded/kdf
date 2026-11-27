@@ -889,6 +889,18 @@ fn secret_of_taker_payment_spend(call_input: &[u8], secret_hash: &[u8]) -> Resul
         .map_err(|_| ExtractSecretV2Err::InvalidSpendTx(format!("The secret is {} bytes long", secret.len())))
 }
 
+/// Whether a call input is a call of one of the contract's taker payment refund functions (by the function
+/// selector), that is, the taker's refund of the taker payment. Any other input, a claim among them, is not.
+pub(crate) fn is_taker_payment_refund_call(call_input: &[u8]) -> bool {
+    let Some(selector) = call_input.get(..4) else {
+        return false;
+    };
+    [FN_REFUND_TAKER_PAYMENT_TIMELOCK, FN_REFUND_TAKER_PAYMENT_SECRET]
+        .iter()
+        .filter_map(|name| TAKER_SWAP_V2.function(name).ok())
+        .any(|function| function.short_signature().as_slice() == selector)
+}
+
 // Calldata verifiers -------------------------------------------------------
 
 /// One row of the `(decoded_index, expected_token, field_name)`
@@ -1009,6 +1021,20 @@ mod funding_spend_search_and_secret_tests {
                 Token::Address(Address::default()),
             ])
             .unwrap()
+    }
+
+    /// The taker's refund calls are recognized by their selector; a claim and unreadable input are not refunds.
+    #[test]
+    fn a_refund_call_of_the_taker_payment_is_recognized_by_its_selector() {
+        for name in [FN_REFUND_TAKER_PAYMENT_TIMELOCK, FN_REFUND_TAKER_PAYMENT_SECRET] {
+            let selector = TAKER_SWAP_V2.function(name).unwrap().short_signature();
+            let mut input = selector.to_vec();
+            input.extend_from_slice(&[0u8; 64]);
+            assert!(is_taker_payment_refund_call(&input), "{name}");
+        }
+        assert!(!is_taker_payment_refund_call(&spend_call_input(&SECRET)));
+        assert!(!is_taker_payment_refund_call(&[0x01, 0x02]));
+        assert!(!is_taker_payment_refund_call(&[]));
     }
 
     /// CRD ch.52 R18: a failure to reach the node is the transient kind of search error.

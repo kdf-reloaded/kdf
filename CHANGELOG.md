@@ -1007,7 +1007,9 @@ the previous version used. The safe way:
   - Detail: PR #533; CRD ch.52 R18, R19, R21, R30, R31, R34 and their status notes of 2026-11-24, ch.51 §51.6G R100.
 - **A v2 refund is built only after the chain shows the counterparty's payment state, and `recover_funds_of_swap`
   accepts a v2 swap that ended at a refund step's deadline.** Before the maker refunds, it looks for its own claim of
-  the taker payment and goes to that claim when it finds it. Before the taker refunds its payment, it looks for the
+  the taker payment and goes to that claim when it finds it; a spend of the taker payment that is the taker's own
+  refund, told by the structure of the spend, lets the maker refund, and a claim whose secret cannot be read does
+  not. Before the taker refunds its payment, it looks for the
   maker's spend of it and claims the maker payment with the secret when the secret matches the hash. The taker
   refunds its funding only after the search for the funding's spend answers "not spent": with its own secret before
   the funding's lock time, and by the timelock after it; a funding that became the taker payment is refunded as the

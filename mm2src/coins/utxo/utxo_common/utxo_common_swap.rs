@@ -2361,6 +2361,35 @@ pub fn extract_secret_v2(secret_hash: &[u8], spend_tx: &UtxoTx) -> Result<[u8; 3
     Err("Secret not found in spend transaction".to_string())
 }
 
+/// Whether a spend of the taker payment is, by its structure, the taker's timelock refund of it. The refund's
+/// input script is exactly `<signature> OP_1 <redeem script>`: the refund branch selector `OP_1` after the one
+/// signature push. A claim carries more pushes (both signatures, the secret) and selects its branch with `OP_0`,
+/// so no claim has this shape. Any other shape, or a script that does not parse, is not told to be a refund.
+pub(crate) fn is_taker_payment_refund_script_sig(script_sig: &Bytes) -> bool {
+    let script: Script = script_sig.clone().into();
+    let mut instructions = Vec::with_capacity(3);
+    for instruction in script.iter() {
+        match instruction {
+            Ok(instruction) => instructions.push(instruction),
+            Err(_) => return false,
+        }
+    }
+    match instructions.as_slice() {
+        [signature, selector, redeem] => {
+            signature.data.is_some() && selector.opcode == Opcode::OP_1 && redeem.data.is_some()
+        },
+        _ => false,
+    }
+}
+
+/// Whether `spend_tx` is, by its structure, the taker's refund of the taker payment it spends (its input 0).
+pub fn is_taker_payment_refund_v2(spend_tx: &UtxoTx) -> bool {
+    spend_tx
+        .inputs
+        .first()
+        .is_some_and(|input| is_taker_payment_refund_script_sig(&input.script_sig))
+}
+
 // ─── V2 cooperative funding-spend helpers (chapter 15 §15.5.6 — §15.5.9) ───
 //
 // The funding-spend converts the taker-funding UTXO into a taker-payment
@@ -3561,5 +3590,53 @@ mod refund_wait_tests {
     fn past_lock_time_is_refundable() {
         let r = refund_eligibility(NOW, NOW - 10, Some((999_999, 1_000_000)));
         assert!(matches!(r, CanRefundHtlc::CanRefundNow));
+    }
+
+    /// The input script of the taker payment's timelock refund: `<signature> OP_1 <redeem script>`.
+    fn refund_script_sig() -> Bytes {
+        Builder::default()
+            .push_data(&[0x42; 72])
+            .push_opcode(Opcode::OP_1)
+            .push_data(&[0xAA; 100])
+            .into_script()
+            .to_bytes()
+    }
+
+    /// The input script of the cooperative claim:
+    /// `<maker signature> <taker signature> <secret> OP_0 <redeem script>`.
+    fn claim_script_sig() -> Bytes {
+        Builder::default()
+            .push_data(&[0x42; 72])
+            .push_data(&[0x43; 72])
+            .push_data(&[0x33; 32])
+            .push_opcode(Opcode::OP_0)
+            .push_data(&[0xAA; 100])
+            .into_script()
+            .to_bytes()
+    }
+
+    fn spend_with(script_sig: Bytes) -> UtxoTx {
+        let mut tx = UtxoTx::default();
+        tx.inputs.push(chain::TransactionInput {
+            script_sig,
+            ..Default::default()
+        });
+        tx
+    }
+
+    /// The taker's refund of the taker payment is told by the structure of its input script.
+    #[test]
+    fn the_refund_path_of_the_taker_payment_is_recognized_by_its_script() {
+        assert!(is_taker_payment_refund_v2(&spend_with(refund_script_sig())));
+    }
+
+    /// A claim, a spend without inputs, an empty or an unparsable input script is never told to be a refund.
+    #[test]
+    fn no_claim_or_unreadable_spend_is_taken_for_a_refund() {
+        assert!(!is_taker_payment_refund_v2(&spend_with(claim_script_sig())));
+        assert!(!is_taker_payment_refund_v2(&UtxoTx::default()));
+        assert!(!is_taker_payment_refund_v2(&spend_with(Bytes::new())));
+        // A push that claims more bytes than the script holds.
+        assert!(!is_taker_payment_refund_v2(&spend_with(vec![0x4b, 0x01].into())));
     }
 }

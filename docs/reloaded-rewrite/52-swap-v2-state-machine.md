@@ -583,6 +583,27 @@ this path reaches it with the maker payment on chain and unrefunded.
 > needs, and carries no error text of a node read. No state, event field
 > or discriminant is added. No sentence of R21 is changed.
 
+> *Status note (2026-11-27, Reloaded-original; maintainer decision of
+> 2026-11-23).* The look of `MakerPaymentRefundRequired` tells the kind of
+> a found spend of the taker payment by the structure of the spend, not
+> by a failed extraction of a secret:
+>
+> 1. a spend that is the refund path of the taker payment (the taker's
+>    own refund, which carries no secret) lets the refund go on; for a
+>    UTXO coin the refund path is the input script that holds one
+>    signature, the branch selector `OP_1` and the redeem script, and for
+>    an EVM coin it is a call of one of the contract's taker payment
+>    refund functions;
+> 2. a claim whose secret matches the maker's own is the maker's claim,
+>    as in item 1 of the note of 2026-11-26;
+> 3. a claim whose secret cannot be extracted or does not match, or a
+>    spend whose kind cannot be told, builds no refund; the look has no
+>    determined answer and waits as for an undetermined read.
+>
+> A coin family that cannot tell the kind answers "undetermined" and
+> builds no refund. The manual recovery of the maker's swap makes the same
+> decision, since it runs the same attempt.
+
 **R22.** *Maker event set, resume map, and reason vocabularies.* The
 maker machine MUST use exactly the eleven event types below with exactly
 these resume states.
@@ -2040,4 +2061,8 @@ divergence rather than resolving it.
   refund inputs read from the saved events, the funding refund with its
   secret and timelock branches, three added transitions, and a claim
   that was mined but failed sent again. Reloaded-original; no
+  forbidden-class input.
+- *Clean-side addition of 2026-11-27:* the status note of that date
+  after R21: the maker's look tells the taker's refund of the taker
+  payment by the structure of the spend. Reloaded-original; no
   forbidden-class input.

@@ -417,6 +417,10 @@ impl TakerCoinSwapOpsV2 for UtxoStandardCoin {
     async fn extract_secret_v2(&self, secret_hash: &[u8], spend_tx: &UtxoTx) -> Result<[u8; 32], String> {
         utxo_common::extract_secret_v2(secret_hash, spend_tx)
     }
+
+    fn is_taker_payment_refund_v2(&self, spend_tx: &UtxoTx) -> bool {
+        utxo_common::is_taker_payment_refund_v2(spend_tx)
+    }
 }
 
 // Silence "unused import" — `utxo_common` is imported for the ch15-phase-2

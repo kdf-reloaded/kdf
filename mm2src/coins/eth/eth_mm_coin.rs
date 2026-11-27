@@ -721,4 +721,8 @@ impl TakerCoinSwapOpsV2 for EthCoin {
             .await
             .map_err(|e| e.to_string())
     }
+
+    fn is_taker_payment_refund_v2(&self, spend_tx: &SignedEthTx) -> bool {
+        crate::eth::eth_swap_v2::eth_taker_swap_v2::is_taker_payment_refund_call(&spend_tx.data)
+    }
 }

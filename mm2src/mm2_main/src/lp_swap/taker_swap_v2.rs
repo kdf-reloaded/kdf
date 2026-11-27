@@ -2587,7 +2587,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
         loop {
             let (read, text) = match self.refund_attempt(sm).await {
                 FundingRefundAttempt::Refunded(refund_tx) => {
-                    info!("Taker swap {}: funding refunded: {:?}", sm.uuid, refund_tx.tx_hash());
+                    log_refund_step(&sm.uuid, &format!("funding refunded: {:?}", refund_tx.tx_hash()));
                     let next = TakerFundingRefunded::new(
                         self.taker_funding.clone(),
                         refund_tx.tx_hex().into(),
@@ -2596,14 +2596,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                     return Self::change_state(next, sm).await;
                 },
                 FundingRefundAttempt::FoundRefund(refund_tx) => {
-                    info!("Taker swap {}: the refund of the funding is on chain", sm.uuid);
+                    log_refund_step(&sm.uuid, "the refund of the funding is on chain");
                     let next = TakerFundingRefunded::new(self.taker_funding.clone(), refund_tx, self.reason.clone());
                     return Self::change_state(next, sm).await;
                 },
                 FundingRefundAttempt::BecamePayment(taker_payment) => {
-                    info!(
-                        "Taker swap {}: the funding was spent into the taker payment, which is refunded instead",
-                        sm.uuid
+                    log_refund_step(
+                        &sm.uuid,
+                        "the funding was spent into the taker payment, which is refunded instead",
                     );
                     let next = TakerPaymentRefundRequired::new(
                         taker_payment,
@@ -2613,15 +2613,15 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                     return Self::change_state(next, sm).await;
                 },
                 FundingRefundAttempt::Wait(secs) => {
-                    info!(
-                        "Swap {}: waiting {} seconds for taker funding refund window",
-                        sm.uuid, secs
+                    log_refund_step(
+                        &sm.uuid,
+                        &format!("waiting {} seconds for taker funding refund window", secs),
                     );
                     Timer::sleep(secs as f64).await;
                     continue;
                 },
                 FundingRefundAttempt::GateFailed(e) => {
-                    error!("Swap {}: can_refund_htlc error: {}, retrying in 30s", sm.uuid, e);
+                    log_refund_gate_failed(&sm.uuid, &e, REFUND_RETRY_SECS);
                     Timer::sleep(REFUND_RETRY_SECS as f64).await;
                     continue;
                 },
@@ -2799,11 +2799,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
         loop {
             let (read, text, history_lacks_inputs) = match self.refund_attempt(sm, claim_inputs.as_ref()).await {
                 TakerRefundAttempt::Refunded(refund_tx) => {
-                    info!(
-                        "Taker swap {}: taker payment refunded: {:?}",
-                        sm.uuid,
-                        refund_tx.tx_hash()
-                    );
+                    log_refund_step(&sm.uuid, &format!("taker payment refunded: {:?}", refund_tx.tx_hash()));
                     let next = TakerPaymentRefunded::new(
                         self.taker_payment.clone(),
                         refund_tx.tx_hex().into(),
@@ -2815,9 +2811,9 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                     inputs,
                     taker_payment_spend,
                 } => {
-                    info!(
-                        "Taker swap {}: the maker spent the taker payment, the maker payment is claimed instead of a refund",
-                        sm.uuid
+                    log_refund_step(
+                        &sm.uuid,
+                        "the maker spent the taker payment, the maker payment is claimed instead of a refund",
                     );
                     let next = TakerPaymentSpent::new(
                         inputs.maker_coin_start_block,
@@ -2830,15 +2826,15 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                     return Self::change_state(next, sm).await;
                 },
                 TakerRefundAttempt::Wait(secs) => {
-                    info!(
-                        "Swap {}: waiting {} seconds for taker payment refund window",
-                        sm.uuid, secs
+                    log_refund_step(
+                        &sm.uuid,
+                        &format!("waiting {} seconds for taker payment refund window", secs),
                     );
                     Timer::sleep(secs as f64).await;
                     continue;
                 },
                 TakerRefundAttempt::GateFailed(e) => {
-                    error!("Swap {}: can_refund_htlc error: {}, retrying in 30s", sm.uuid, e);
+                    log_refund_gate_failed(&sm.uuid, &e, REFUND_RETRY_SECS);
                     Timer::sleep(REFUND_RETRY_SECS as f64).await;
                     continue;
                 },
