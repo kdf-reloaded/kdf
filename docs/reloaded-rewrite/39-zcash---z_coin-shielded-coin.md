@@ -8184,6 +8184,16 @@ coin as the paying coin.
 > `only_a_kick_start_at_the_*_payment_step_marks_the_swap_resumed_there` in
 > the legacy swap modules.
 
+> **Status note (2026-11-28, this repository; not corpus-sourced).** By the
+> maintainer's decision of 2026-11-28, the sentence "Every other swap keeps
+> R39.11.19" of the note above no longer holds for an EVM coin whose answer
+> is marked undetermined: such a swap asks again within the bounds of that
+> note, and it also does not finish at once when the send of its payment
+> ends with an error that kept the signed transaction. The step acts on the
+> mark, whichever coin gives it. An error without the mark still ends the
+> step under R39.11.19. The rule is in the status note of 2026-11-28 after
+> R29 in [chapter 51](51-legacy-v1-swap-state-machine.md).
+
 **T39.11.5A.2** *EVM state decides first (R39.11.5A.3).* With the contract
 state `Uninitialized`, the answer is "not sent" and no block-number or log
 request is made. With a failing state read the answer is an error.
@@ -9664,6 +9674,14 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   R39.11.5A.1 and chapter 51 R7 and R18, takes no forbidden-class input, so
   chapter 01 R38 is not engaged and no gate pass is required. No cleared
   sentence is edited.
+- *Status note added 2026-11-28 -- before T39.11.5A.2.* Reloaded-original,
+  clean side: it records the maintainer's decision of 2026-11-28 on a
+  payment step whose already-sent answer is marked undetermined, or whose
+  send ends with an error that kept the signed transaction, and this
+  repository's code (PR #558), rests only on this repository's own swap code
+  and the cleared text of R39.11.19 and chapter 51 R17 and R29, takes no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required. No cleared sentence is edited.
 - *Reloaded-original addition (2026-11-25) -- the status note of that date under
   R39.8.0ag1.* The spending of internal-scope (change-address) notes, as built.
   It describes this repository's code and ZIP 32's internal key; no

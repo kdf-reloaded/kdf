@@ -5150,6 +5150,8 @@ mod scripted_node_ports {
             tip: u64,
             /// Whether `eth_getLogs` reports the `PaymentSent` event of the payment.
             event: bool,
+            /// Whether the reported event lacks its transaction hash.
+            event_without_hash: bool,
             /// Whether `eth_getTransactionByHash` knows the transaction the event names (otherwise it answers null).
             transaction: bool,
             /// A method that answers with an error response.
@@ -5162,6 +5164,7 @@ mod scripted_node_ports {
                     state,
                     tip: TIP,
                     event: false,
+                    event_without_hash: false,
                     transaction: false,
                     failing: None,
                 }
@@ -5178,6 +5181,18 @@ mod scripted_node_ports {
         }
 
         fn hex_u64(v: &Json) -> u64 { u64::from_str_radix(v.as_str().unwrap().trim_start_matches("0x"), 16).unwrap() }
+
+        /// Asserts that `err` is the error of an answer that cannot decide: it carries the undetermined mark the
+        /// swap machine recognizes and `reason`, and not the node's answer ("boom").
+        fn assert_cannot_decide(err: &str, reason: &str) {
+            assert!(
+                crate::swap_evidence::is_undetermined(err),
+                "the error does not carry the undetermined mark"
+            );
+            assert!(err.contains(UNDETERMINED), "the error does not name the question");
+            assert!(err.contains(reason), "the error does not name its reason");
+            assert!(!err.contains("boom"), "the error carries the node's answer");
+        }
 
         /// Runs the query from `FROM_BLOCK` against a node that follows `script`.
         fn query(script: Script) -> Outcome {
@@ -5211,13 +5226,18 @@ mod scripted_node_ports {
                         if !script_h.event {
                             return json!([]);
                         }
+                        let event_hash = if script_h.event_without_hash {
+                            Json::Null
+                        } else {
+                            json!(payment_hash)
+                        };
                         json!([{
                             "address": params[0]["address"],
                             "topics": [sent_topic],
                             "data": format!("0x{}", hex::encode(&*id_h.lock().unwrap())),
                             "blockHash": format!("0x{}", "22".repeat(32)),
                             "blockNumber": format!("{:#x}", from),
-                            "transactionHash": payment_hash,
+                            "transactionHash": event_hash,
                             "transactionIndex": "0x0",
                             "logIndex": "0x0",
                             "removed": false,
@@ -5267,7 +5287,9 @@ mod scripted_node_ports {
             ]);
         }
 
-        /// T39.11.5A.2: an `Uninitialized` state answers "not sent" at once; a failing state read is an error.
+        /// T39.11.5A.2: an `Uninitialized` state answers "not sent" at once; a failing state read is an error. The
+        /// error carries the undetermined mark and not the node's answer (CRD ch.51, status note of 2026-11-28 after
+        /// R29).
         #[test]
         fn t39_11_5a_2_evm_uninitialized_state_is_not_sent_without_a_block_number_or_log_request() {
             let outcome = query(Script::state(0));
@@ -5279,15 +5301,21 @@ mod scripted_node_ports {
                 ..Script::state(0)
             });
             let err = outcome.answer.unwrap_err();
-            assert!(err.contains("boom"), "{err}");
+            assert_cannot_decide(&err, "the read of the payment state failed");
             assert!(outcome.windows.is_empty());
         }
 
         /// T39.11.5A.3: with the state present, a failing block-number read, a failing log request and a failing
-        /// transaction read each give an error that carries the node's answer.
+        /// transaction read each give an error. The error carries the undetermined mark and the kind of the read,
+        /// and not the node's answer (CRD ch.51, status note of 2026-11-28 after R29).
         #[test]
         fn t39_11_5a_3_evm_failed_reads_are_errors() {
-            for failing in ["eth_blockNumber", "eth_getLogs", "eth_getTransactionByHash"] {
+            let reads = [
+                ("eth_blockNumber", "the read of the block number failed"),
+                ("eth_getLogs", "a payment-events request failed (blocks 100 to 150)"),
+                ("eth_getTransactionByHash", "the read of the payment transaction failed"),
+            ];
+            for (failing, reason) in reads {
                 let outcome = query(Script {
                     event: true,
                     transaction: true,
@@ -5295,9 +5323,29 @@ mod scripted_node_ports {
                     ..Script::state(1)
                 });
                 let err = outcome.answer.expect_err(failing);
-                assert!(err.contains("boom"), "{failing}: {err}");
-                assert!(!err.contains(UNDETERMINED), "{failing}: {err}");
+                assert_cannot_decide(&err, reason);
             }
+        }
+
+        /// CRD ch.51, status note of 2026-11-28 after R29: a payment event without a transaction hash is an answer
+        /// that cannot decide, never "not sent".
+        #[test]
+        fn evm_payment_event_without_a_transaction_hash_cannot_decide() {
+            let outcome = query(Script {
+                event: true,
+                event_without_hash: true,
+                transaction: true,
+                ..Script::state(1)
+            });
+            let err = outcome.answer.unwrap_err();
+            assert_cannot_decide(
+                &err,
+                "the node returned a payment event without a transaction hash (blocks 100 to 150)",
+            );
+            assert!(
+                !outcome.methods.iter().any(|m| m == "eth_getTransactionByHash"),
+                "a transaction was read although the event names none"
+            );
         }
 
         /// T39.11.5A.4: with the node's block number below the start block, the search asks for the start block
@@ -5312,6 +5360,10 @@ mod scripted_node_ports {
             let err = outcome.answer.unwrap_err();
             assert!(err.contains(UNDETERMINED), "{err}");
             assert!(err.contains("in blocks 100 to 100"), "{err}");
+            assert!(
+                crate::swap_evidence::is_undetermined(&err),
+                "the error does not carry the undetermined mark"
+            );
         }
 
         /// T39.11.5A.5 (R39.11.5A.4): every state but `Uninitialized` without an event in the searched range is
@@ -5330,6 +5382,10 @@ mod scripted_node_ports {
                     ),
                     "{err}"
                 );
+                assert!(
+                    crate::swap_evidence::is_undetermined(&err),
+                    "the error does not carry the undetermined mark"
+                );
                 assert_eq!(outcome.windows, [(FROM_BLOCK, TIP)]);
                 assert!(!outcome.methods.iter().any(|m| m == "eth_getTransactionByHash"));
             }
@@ -5346,15 +5402,16 @@ mod scripted_node_ports {
             let err = outcome.answer.unwrap_err();
             assert!(err.contains(UNDETERMINED), "{err}");
             assert!(
-                err.contains("a payment event was found in block range 100 to 150"),
-                "{err}"
-            );
-            assert!(
                 err.contains(&format!(
-                    "the node does not return its transaction {:#x}",
+                    "a payment event was found, but the node does not return its transaction {:#x} (block range 100 \
+                     to 150)",
                     outcome.payment.tx_hash()
                 )),
                 "{err}"
+            );
+            assert!(
+                crate::swap_evidence::is_undetermined(&err),
+                "the error does not carry the undetermined mark"
             );
         }
     }

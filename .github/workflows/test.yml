@@ -880,7 +880,7 @@ jobs:
           geth version
           cargo test -p coins --lib eth::eth_swap_dev_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/evm-geth.log"
           # A filter that matches nothing, or tests that skipped, must not pass.
-          grep -q "test result: ok. 3 passed; 0 failed" "$RUNNER_TEMP/evm-geth.log"
+          grep -q "test result: ok. 5 passed; 0 failed" "$RUNNER_TEMP/evm-geth.log"
           if grep -qi "skipping" "$RUNNER_TEMP/evm-geth.log"; then
             echo "::error::a geth test reported skipping"; exit 1
           fi

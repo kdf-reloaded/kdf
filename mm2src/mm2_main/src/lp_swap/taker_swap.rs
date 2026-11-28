@@ -3,7 +3,8 @@ use super::check_balance::{check_my_coin_balance_for_swap, CheckBalanceError, Ch
 use super::evidence_wait::{clock_secs, non_final_retry_text, refund_cap_text, refund_gate_cap_text,
                            retry_while_undetermined, undetermined_refund_deadline, with_fix_hint, Read, WaitLog};
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
-use super::resumed_payment::{ask_already_sent_resumed, not_sent_after_bound_text, undetermined_at_cap_text,
+use super::resumed_payment::{ask_already_sent_resumed, failed_send_undetermined_at_cap_text,
+                             not_sent_after_bound_text, undetermined_at_cap_text, PaymentQuestion,
                              ResumedPaymentAnswer, ResumedPaymentPacing, RESUMED_PAYMENT_PACING};
 use super::stale_tip_watch::{sleep_observing_tip, StaleTipWatch};
 use super::swap_lock::{hand_over_if_lost, run_while_lock_held, LockOutcome, SwapLock, SwapLockOps};
@@ -1635,6 +1636,63 @@ impl TakerSwap {
         f.compat().await
     }
 
+    /// What follows a taker payment send that ended with the error `err` (CRD ch.51, status note of 2026-11-28
+    /// after R29). Returns the payment the chain holds, which the swap adopts, or the text of the payment-failed
+    /// event.
+    ///
+    /// An error that kept no signed transaction, and a coin without a read for such a send, end the step with the
+    /// send's error at once. Otherwise the payment is possibly sent: nothing is sent again, and the coin's read is
+    /// asked until it finds the payment, answers "not sent" twice in a row, or the refund deadline passes.
+    async fn taker_payment_after_failed_send(
+        &self,
+        err: &coins::TransactionErr,
+        pacing: ResumedPaymentPacing,
+    ) -> Result<coins::TransactionEnum, String> {
+        let send_error = err.get_plain_text_format();
+        let Some(failed_tx) = err.get_tx() else {
+            return Err(send_error);
+        };
+        let lock = self.r().data.taker_payment_lock as u32;
+        let secret_hash = self.r().secret_hash.0.clone();
+        let start_block = self.r().data.taker_coin_start_block;
+        let swap_contract = self.r().data.taker_coin_swap_contract_address.clone();
+        let read = || {
+            self.taker_coin.check_if_my_payment_sent_after_failed_send(
+                &failed_tx,
+                lock,
+                &secret_hash,
+                start_block,
+                &swap_contract,
+            )
+        };
+        let Some(first_read) = read() else {
+            return Err(send_error);
+        };
+        let mut first_read = Some(first_read);
+        let ticker = self.taker_coin.ticker();
+        let cap_until = self.wait_refund_until();
+        let question = PaymentQuestion::FailedSend;
+        let answer = ask_already_sent_resumed(&self.uuid, "taker", ticker, question, pacing, cap_until, || {
+            let asked = first_read.take().or_else(&read);
+            async move {
+                match asked {
+                    Some(asked) => asked.compat().await,
+                    None => ERR!("the coin has no read for a payment whose send ended with an error"),
+                }
+            }
+        })
+        .await;
+        match answer {
+            ResumedPaymentAnswer::Found(tx) => Ok(*tx),
+            ResumedPaymentAnswer::NotSent | ResumedPaymentAnswer::NotSentAfterBound => Err(send_error),
+            // `Failed` is not an answer to this question; were it given, the payment would not be known to be
+            // absent, so it reads as undetermined.
+            ResumedPaymentAnswer::UndeterminedAtCap(e) | ResumedPaymentAnswer::Failed(e) => {
+                Err(failed_send_undetermined_at_cap_text("taker", ticker, &e))
+            },
+        }
+    }
+
     /// [`TakerSwap::send_taker_payment`] with the waits of a swap resumed at this step given, so a test can
     /// shorten them (CRD ch.39 §39.11.5A).
     async fn send_taker_payment_paced(
@@ -1651,15 +1709,21 @@ impl TakerSwap {
         );
         let already_sent = if skip_already_sent {
             Ok(None)
-        } else if self.resumed_at_payment_step.load(Ordering::Relaxed) {
+        } else {
             // CRD ch.39 §39.11.5A: a swap resumed at this step may have sent its payment before the stop, so an
-            // undetermined answer is asked again and never read as "not sent".
+            // undetermined answer is asked again and never read as "not sent". CRD ch.51, status note of
+            // 2026-11-28 after R29: any other swap does the same for an answer the coin marks as undetermined.
+            let question = if self.resumed_at_payment_step.load(Ordering::Relaxed) {
+                PaymentQuestion::Resumed
+            } else {
+                PaymentQuestion::NotResumed
+            };
             let ticker = self.taker_coin.ticker();
-            let answer =
-                ask_already_sent_resumed(&self.uuid, "taker", ticker, pacing, self.wait_refund_until(), || {
-                    self.ask_taker_payment_sent()
-                })
-                .await;
+            let cap_until = self.wait_refund_until();
+            let answer = ask_already_sent_resumed(&self.uuid, "taker", ticker, question, pacing, cap_until, || {
+                self.ask_taker_payment_sent()
+            })
+            .await;
             match answer {
                 ResumedPaymentAnswer::Found(tx) => Ok(Some(*tx)),
                 ResumedPaymentAnswer::NotSent => Ok(None),
@@ -1673,13 +1737,12 @@ impl TakerSwap {
                 ResumedPaymentAnswer::UndeterminedAtCap(e) => {
                     return Ok((Some(TakerSwapCommand::Finish), vec![
                         TakerSwapEvent::TakerPaymentTransactionFailed(
-                            ERRL!("{}", undetermined_at_cap_text("taker", ticker, &e)).into(),
+                            ERRL!("{}", undetermined_at_cap_text("taker", ticker, question, &e)).into(),
                         ),
                     ]))
                 },
+                ResumedPaymentAnswer::Failed(e) => Err(e),
             }
-        } else {
-            self.ask_taker_payment_sent().await
         };
         let transaction = match already_sent {
             Ok(res) => match res {
@@ -1708,12 +1771,13 @@ impl TakerSwap {
 
                     match payment_fut.compat().await {
                         Ok(t) => t,
-                        Err(err) => {
-                            return Ok((Some(TakerSwapCommand::Finish), vec![
-                                TakerSwapEvent::TakerPaymentTransactionFailed(
-                                    ERRL!("{}", err.get_plain_text_format()).into(),
-                                ),
-                            ]));
+                        Err(err) => match self.taker_payment_after_failed_send(&err, pacing).await {
+                            Ok(found) => found,
+                            Err(text) => {
+                                return Ok((Some(TakerSwapCommand::Finish), vec![
+                                    TakerSwapEvent::TakerPaymentTransactionFailed(ERRL!("{}", text).into()),
+                                ]));
+                            },
                         },
                     }
                 },
@@ -3645,6 +3709,8 @@ mod taker_swap_tests {
     thread_local! {
         static ERRORS_FIRST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         static THEN_FOUND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+        /// How many of the first errors of the scripted search carry the coin's undetermined mark.
+        static MARKED_SEARCH_ERRORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     /// The fast phase of the tests below: three attempts, a few milliseconds apart.
@@ -3654,6 +3720,19 @@ mod taker_swap_tests {
         fast_window_secs: 600.,
         slow_interval_secs: 0.01,
     };
+
+    /// The label of a node in the marked error of the scripted search; no stored text may carry it.
+    const MARKED_ERROR_NODE: &str = "node-a.example:8545";
+
+    /// The error of the scripted already-sent search at its `asked`-th run (from 0): the coin's undetermined mark
+    /// with a node label for the first `MARKED_SEARCH_ERRORS` runs, a plain failure afterwards.
+    fn search_error(asked: usize) -> String {
+        if asked < MARKED_SEARCH_ERRORS.with(|c| c.get()) {
+            coins::swap_evidence::undetermined("the nodes disagree", &[MARKED_ERROR_NODE])
+        } else {
+            "search backend down".to_string()
+        }
+    }
 
     /// Runs the taker payment step of a swap inside its send deadline whose already-sent search answers an error
     /// `errors_first` times and then `then`: `Some(true)` a payment, `Some(false)` "not sent", `None` an error for
@@ -3665,10 +3744,23 @@ mod taker_swap_tests {
         then: Option<bool>,
         cap_in_secs: u64,
     ) -> (usize, usize, (Option<TakerSwapCommand>, Vec<TakerSwapEvent>)) {
+        run_asking_taker_payment_step(resumed, 0, errors_first, then, cap_in_secs)
+    }
+
+    /// [`run_resumed_taker_payment_step`] with `marked_errors`: how many of the search's first errors carry the
+    /// coin's undetermined mark.
+    fn run_asking_taker_payment_step(
+        resumed: bool,
+        marked_errors: usize,
+        errors_first: usize,
+        then: Option<bool>,
+        cap_in_secs: u64,
+    ) -> (usize, usize, (Option<TakerSwapCommand>, Vec<TakerSwapEvent>)) {
         SEARCHES.with(|c| c.set(0));
         SENDS.with(|c| c.set(0));
         ERRORS_FIRST.with(|c| c.set(errors_first));
         THEN_FOUND.with(|c| c.set(then));
+        MARKED_SEARCH_ERRORS.with(|c| c.set(marked_errors));
         let swap = taker_swap_for_payment_stage();
         let now = now_ms() / 1000;
         swap.w().data.started_at = now;
@@ -3681,12 +3773,12 @@ mod taker_swap_tests {
         TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
             let asked = SEARCHES.with(|c| c.replace(c.get() + 1));
             let answer = if asked < ERRORS_FIRST.with(|c| c.get()) {
-                Err("search backend down".to_string())
+                Err(search_error(asked))
             } else {
                 match THEN_FOUND.with(|c| c.get()) {
                     Some(true) => Ok(Some(eth_tx_for_test().into())),
                     Some(false) => Ok(None),
-                    None => Err("search backend down".to_string()),
+                    None => Err(search_error(asked)),
                 }
             };
             MockResult::Return(Box::new(futures01::future::result(answer)))
@@ -3770,6 +3862,271 @@ mod taker_swap_tests {
         let text = taker_payment_failed_text(&result);
         assert!(text.contains("search backend down"), "{text}");
         assert!(!text.contains("recover_funds_of_swap"), "{text}");
+    }
+
+    /// CRD ch.51, status note of 2026-11-28 after R29, taker: a swap that was not resumed at the payment step asks
+    /// again after an answer the coin marks as undetermined; "not sent" inside the send deadline then sends once.
+    #[test]
+    fn not_resumed_taker_payment_marked_error_then_not_sent_sends_once() {
+        let (searches, sends, result) = run_asking_taker_payment_step(false, usize::MAX, 1, Some(false), 100_000);
+        assert_eq!((searches, sends), (2, 1));
+        assert!(matches!(result.0, Some(TakerSwapCommand::WaitForTakerPaymentSpend)));
+        assert!(matches!(&result.1[..], [TakerSwapEvent::TakerPaymentSent(_)]));
+    }
+
+    /// The same, taker: marked answers through the fast phase, then found: the payment is adopted, nothing is sent.
+    #[test]
+    fn not_resumed_taker_payment_marked_errors_then_found_is_adopted() {
+        let (searches, sends, result) = run_asking_taker_payment_step(false, usize::MAX, 3, Some(true), 100_000);
+        assert_eq!((searches, sends), (4, 0));
+        assert!(matches!(result.0, Some(TakerSwapCommand::WaitForTakerPaymentSpend)));
+        assert!(matches!(&result.1[..], [TakerSwapEvent::TakerPaymentSent(_)]));
+    }
+
+    /// The same, taker: marked answers through the fast phase, then "not sent": the step fails, nothing is sent.
+    #[test]
+    fn not_resumed_taker_payment_marked_errors_then_not_sent_fails_without_sending() {
+        let (searches, sends, result) = run_asking_taker_payment_step(false, usize::MAX, 3, Some(false), 100_000);
+        assert_eq!((searches, sends), (4, 0));
+        let text = taker_payment_failed_text(&result);
+        assert!(
+            text.contains("now reports no payment; nothing was sent"),
+            "the payment-failed text does not say that the check reports no payment"
+        );
+    }
+
+    /// The same, taker: marked answers until the refund deadline: the step fails, names the manual recovery and
+    /// the kind of the last error only, and nothing is sent.
+    #[test]
+    fn not_resumed_taker_payment_marked_errors_to_the_cap_name_the_kind_only() {
+        let (searches, sends, result) = run_asking_taker_payment_step(false, usize::MAX, 0, None, 2);
+        assert!(searches > 3, "the slow phase did not ask");
+        assert_eq!(sends, 0);
+        let text = taker_payment_failed_text(&result);
+        assert!(
+            text.contains("stayed undetermined until the refund deadline"),
+            "the payment-failed text does not name the refund deadline"
+        );
+        assert!(
+            text.contains("recover_funds_of_swap"),
+            "the payment-failed text does not name the manual recovery"
+        );
+        assert!(
+            text.contains("last error: the nodes disagree"),
+            "the payment-failed text does not name the kind of the last error"
+        );
+        assert!(
+            !text.contains(MARKED_ERROR_NODE),
+            "the payment-failed text carries a node of the coin's error"
+        );
+    }
+
+    /// CRD ch.39 R39.11.19, taker: an error without the mark ends the step at once at any attempt, also after
+    /// marked ones, in the fast phase and after it.
+    #[test]
+    fn not_resumed_taker_payment_unmarked_error_ends_the_step_at_any_attempt() {
+        for marked_first in [2, 4] {
+            let (searches, sends, result) = run_asking_taker_payment_step(false, marked_first, 0, None, 100_000);
+            assert_eq!((searches, sends), (marked_first + 1, 0));
+            let text = taker_payment_failed_text(&result);
+            assert!(
+                text.contains("search backend down"),
+                "the payment-failed text does not carry the coin's error"
+            );
+            assert!(
+                !text.contains("recover_funds_of_swap"),
+                "the payment-failed text of a plain error names the manual recovery"
+            );
+        }
+    }
+
+    thread_local! {
+        /// The answers of the scripted read for a failed send, in order: `Some(true)` the payment, `Some(false)`
+        /// "not sent", `None` an error. After the last one the read answers an error for ever.
+        static READ_SCRIPT: std::cell::RefCell<Vec<Option<bool>>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// How many times the coin was asked for the read, and how many times the read ran.
+        static READ_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static SEND_KEEPS_TX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static COIN_HAS_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// The error of the scripted send.
+    const SEND_ERROR: &str = "the broadcast was answered by no node";
+    /// The error of the scripted read for a failed send; no stored text may carry it.
+    const READ_ERROR: &str = "read refused by node-b.example:8545";
+
+    /// Runs the taker payment step of a swap inside its send deadline whose already-sent search answers "not sent"
+    /// and whose send ends with an error. `keeps_tx` is whether the error keeps the signed transaction,
+    /// `coin_has_read` whether the coin has a read for such a send, `read_script` what that read answers (see
+    /// `READ_SCRIPT`); `cap_in_secs` is how far ahead the refund deadline lies. Returns how many payments were sent,
+    /// how many times the read ran, and the result.
+    fn run_taker_payment_step_with_failed_send(
+        keeps_tx: bool,
+        coin_has_read: bool,
+        read_script: &[Option<bool>],
+        cap_in_secs: u64,
+    ) -> (usize, usize, (Option<TakerSwapCommand>, Vec<TakerSwapEvent>)) {
+        SENDS.with(|c| c.set(0));
+        READ_REQUESTS.with(|c| c.set(0));
+        READS.with(|c| c.set(0));
+        READ_SCRIPT.with(|script| *script.borrow_mut() = read_script.to_vec());
+        SEND_KEEPS_TX.with(|c| c.set(keeps_tx));
+        COIN_HAS_READ.with(|c| c.set(coin_has_read));
+        let swap = taker_swap_for_payment_stage();
+        let now = now_ms() / 1000;
+        swap.w().data.started_at = now;
+        swap.w().data.maker_payment_wait = now + 1000;
+        swap.w().data.taker_payment_lock = now + cap_in_secs - 3700;
+        TestCoin::htlc_key_is_random_per_swap.mock_safe(|_| MockResult::Return(false));
+        TestCoin::check_if_my_payment_sent
+            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(None))));
+        TestCoin::send_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SENDS.with(|c| c.set(c.get() + 1));
+            let err = if SEND_KEEPS_TX.with(|c| c.get()) {
+                coins::TransactionErr::TxRecoverable(eth_tx_for_test().into(), SEND_ERROR.to_string())
+            } else {
+                coins::TransactionErr::Plain(SEND_ERROR.to_string())
+            };
+            MockResult::Return(Box::new(futures01::future::err(err)))
+        });
+        TestCoin::check_if_my_payment_sent_after_failed_send.mock_safe(|_, _, _, _, _, _| {
+            READ_REQUESTS.with(|c| c.set(c.get() + 1));
+            if !COIN_HAS_READ.with(|c| c.get()) {
+                return MockResult::Return(None);
+            }
+            let asked = READS.with(|c| c.replace(c.get() + 1));
+            let answer = match READ_SCRIPT.with(|script| script.borrow().get(asked).copied()) {
+                Some(Some(true)) => Ok(Some(eth_tx_for_test().into())),
+                Some(Some(false)) => Ok(None),
+                Some(None) | None => Err(READ_ERROR.to_string()),
+            };
+            MockResult::Return(Some(Box::new(futures01::future::result(answer))))
+        });
+        let result = block_on(swap.send_taker_payment_paced(TEST_RESUMED_PACING)).unwrap();
+        (SENDS.with(|c| c.get()), READS.with(|c| c.get()), result)
+    }
+
+    /// Asserts that the step adopted a payment and goes on as after a successful send.
+    fn assert_taker_payment_adopted(result: &(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)) {
+        assert!(matches!(result.0, Some(TakerSwapCommand::WaitForTakerPaymentSpend)));
+        assert!(matches!(&result.1[..], [TakerSwapEvent::TakerPaymentSent(_)]));
+    }
+
+    /// Asserts that the step ended with the payment-failed event that carries the send's error.
+    fn assert_taker_payment_failed_with_the_send_error(result: &(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)) {
+        let text = taker_payment_failed_text(result);
+        assert!(
+            text.contains(SEND_ERROR),
+            "the payment-failed text does not carry the send's error"
+        );
+        assert!(
+            !text.contains("recover_funds_of_swap"),
+            "the payment-failed text of a payment that was not sent names the manual recovery"
+        );
+    }
+
+    /// CRD ch.51, status note of 2026-11-28 after R29, taker: a send that ended with an error which kept the
+    /// signed transaction, and the coin's read finds the payment: it is adopted, and the swap goes on as after a
+    /// successful send.
+    #[test]
+    fn taker_payment_failed_send_found_by_the_read_is_adopted() {
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &[Some(true)], 100_000);
+        assert_eq!((sends, reads), (1, 1));
+        assert_taker_payment_adopted(&result);
+    }
+
+    /// The same, taker: the read answers an error, in the fast phase and after it, and is asked again; the payment
+    /// it then finds is adopted, and nothing is sent again.
+    #[test]
+    fn taker_payment_failed_send_read_error_then_found_is_adopted() {
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &[None, Some(true)], 100_000);
+        assert_eq!((sends, reads), (1, 2));
+        assert_taker_payment_adopted(&result);
+
+        let script = [None, None, None, None, Some(true)];
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &script, 100_000);
+        assert_eq!((sends, reads), (1, 5));
+        assert_taker_payment_adopted(&result);
+    }
+
+    /// The same, taker: "not sent" twice in a row ends the step with the send's error, in the fast phase and after
+    /// it.
+    #[test]
+    fn taker_payment_failed_send_not_sent_twice_fails_with_the_send_error() {
+        let script = [Some(false), Some(false)];
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &script, 100_000);
+        assert_eq!((sends, reads), (1, 2));
+        assert_taker_payment_failed_with_the_send_error(&result);
+
+        let script = [None, None, None, Some(false), Some(false)];
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &script, 100_000);
+        assert_eq!((sends, reads), (1, 5));
+        assert_taker_payment_failed_with_the_send_error(&result);
+    }
+
+    /// The same, taker: "not sent" once and then the payment: it is adopted. A "not sent" followed by an error
+    /// starts the count again.
+    #[test]
+    fn taker_payment_failed_send_not_sent_once_then_found_is_adopted() {
+        let script = [Some(false), Some(true)];
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &script, 100_000);
+        assert_eq!((sends, reads), (1, 2));
+        assert_taker_payment_adopted(&result);
+
+        let script = [Some(false), None, Some(false), Some(false)];
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &script, 100_000);
+        assert_eq!((sends, reads), (1, 4));
+        assert_taker_payment_failed_with_the_send_error(&result);
+    }
+
+    /// The same, taker: a coin without the read ends the step with the send's error at once.
+    #[test]
+    fn taker_payment_failed_send_of_a_coin_without_the_read_fails_at_once() {
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, false, &[Some(true)], 100_000);
+        assert_eq!((sends, reads), (1, 0));
+        assert_eq!(READ_REQUESTS.with(|c| c.get()), 1);
+        assert_taker_payment_failed_with_the_send_error(&result);
+    }
+
+    /// The same, taker: a send error that kept no transaction ends the step at once, and the coin is not asked for
+    /// the read.
+    #[test]
+    fn taker_payment_failed_send_without_a_transaction_fails_at_once() {
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(false, true, &[Some(true)], 100_000);
+        assert_eq!((sends, reads), (1, 0));
+        assert_eq!(READ_REQUESTS.with(|c| c.get()), 0);
+        assert_taker_payment_failed_with_the_send_error(&result);
+    }
+
+    /// The same, taker: the read stays undetermined until the refund deadline: the step fails, the text names the
+    /// manual recovery and the kind of the last error only, and nothing is sent again.
+    #[test]
+    fn taker_payment_failed_send_undetermined_to_the_cap_names_manual_recovery() {
+        let (sends, reads, result) = run_taker_payment_step_with_failed_send(true, true, &[], 2);
+        assert_eq!(sends, 1);
+        assert!(reads > 3, "the slow phase did not ask");
+        let text = taker_payment_failed_text(&result);
+        assert!(
+            text.contains("whether the payment reached the chain stayed undetermined until the refund deadline"),
+            "the payment-failed text does not say that the payment stayed undetermined"
+        );
+        assert!(
+            text.contains("nothing more was sent"),
+            "the payment-failed text does not say that nothing more was sent"
+        );
+        assert!(
+            text.contains("recover_funds_of_swap"),
+            "the payment-failed text does not name the manual recovery"
+        );
+        assert!(
+            text.contains("kind of the last error: the read failed"),
+            "the payment-failed text does not name the kind of the last error"
+        );
+        assert!(
+            !text.contains(READ_ERROR) && !text.contains("node-b.example"),
+            "the payment-failed text carries the text of the coin's error"
+        );
     }
 
     /// CRD ch.39 §39.11.5A, taker: only a kick-start whose next step is the payment step marks the swap; a
