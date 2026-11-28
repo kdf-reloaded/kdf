@@ -136,6 +136,8 @@ Each signed release ships `kdf` binaries for Linux (x86_64, aarch64 and armv7; g
 
 ## Usage
 
+New to running a node? [`docs/OPERATOR_QUICKSTART.md`](docs/OPERATOR_QUICKSTART.md) goes from the release download to a first order, step by step.
+
 Launch the daemon:
 
 ```sh
@@ -166,6 +168,7 @@ auditing, or redistributing the project:
 - [`docs/reloaded-rewrite/01-clean-room-rules.md`](docs/reloaded-rewrite/01-clean-room-rules.md) — the clean-room / provenance methodology and its explicit limits.
 - [`docs/reloaded-rewrite/30-provenance-attribution.md`](docs/reloaded-rewrite/30-provenance-attribution.md) — the index into the chapter set, cited inputs, and subsystem coverage map.
 - [`docs/reloaded-rewrite/34-provenance-ledger.md`](docs/reloaded-rewrite/34-provenance-ledger.md) — file-level provenance classifications, inherited exceptions, and open license items.
+- [`docs/OPERATOR_QUICKSTART.md`](docs/OPERATOR_QUICKSTART.md) — from the release download to a running node and a first order.
 - [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md) — operator-facing differences and compatibility posture relative to the GLEEC fork.
 - [`LEGAL/LICENSING-POLICY.md`](LEGAL/LICENSING-POLICY.md) — the repository-wide licensing posture: old combined work GPL-2.0-only, original post-anchor contributions GPL-2.0-or-later, plus disclosed inherited tensions.
 - [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) — the gate used before any tagged release or public binary distribution.

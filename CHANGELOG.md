@@ -278,6 +278,10 @@ the previous version used. The safe way:
 
 #### Start-up and configuration
 
+- **A quickstart for operators.** A new guide takes a clean Linux host to a running node: download and check of
+  the release binary, a minimal `MM2.json`, the settings new in this release with their defaults, the start and the
+  version answer, activating a UTXO and an EVM coin under the two-node rule, placing and cancelling an order, where
+  logs and data are kept, and upgrading. See [`docs/OPERATOR_QUICKSTART.md`](docs/OPERATOR_QUICKSTART.md).
 - **The node checks the computer's clock against time servers.** At start, and again every hour
   and after the computer slept or its clock was set, the node asks NTP time servers for the time
   and takes the median of their answers. Swaps rely on the clock for their lock times and
