@@ -3,6 +3,7 @@ use crate::mm2::lp_swap::taker_swap::{TakerSavedSwap, TakerSwap, TakerSwapEvent}
 use crate::mm2::lp_swap::{MySwapInfo, RecoveredSwap};
 use async_trait::async_trait;
 use coins::lp_coinfind;
+use coins::swap_evidence::strip_node_names;
 use derive_more::Display;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -158,6 +159,46 @@ impl SavedSwap {
                 }
             },
         };
+    }
+
+    /// Replaces every node name in the error text of every event of the record (see
+    /// [`coins::swap_evidence::strip_node_names`]); the tickers of the swap's two coins are kept. Used on the copy
+    /// made for the terminal report only: the callers must pass a copy, never the node's own stored record. The
+    /// event walk is `error_text_mut` of the two event enums, which lists every variant, so a new event variant is
+    /// covered or does not compile.
+    pub fn strip_node_names(&mut self) {
+        fn strip_events<'a>(
+            texts: impl Iterator<Item = &'a mut String>,
+            maker_coin: &Option<String>,
+            taker_coin: &Option<String>,
+        ) {
+            let keep: Vec<&str> = [maker_coin, taker_coin]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            for text in texts {
+                *text = strip_node_names(text, &keep);
+            }
+        }
+        match self {
+            SavedSwap::Maker(swap) => {
+                let (maker_coin, taker_coin) = (swap.maker_coin.clone(), swap.taker_coin.clone());
+                strip_events(
+                    swap.events.iter_mut().filter_map(|e| e.event.error_text_mut()),
+                    &maker_coin,
+                    &taker_coin,
+                );
+            },
+            SavedSwap::Taker(swap) => {
+                let (maker_coin, taker_coin) = (swap.maker_coin.clone(), swap.taker_coin.clone());
+                strip_events(
+                    swap.events.iter_mut().filter_map(|e| e.event.error_text_mut()),
+                    &maker_coin,
+                    &taker_coin,
+                );
+            },
+        }
     }
 }
 

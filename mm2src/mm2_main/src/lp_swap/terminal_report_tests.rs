@@ -13,6 +13,7 @@ use crate::mm2::lp_network::P2PContext;
 use crate::mm2::lp_ordermatch::price_service::stub_server::{dead_url, price_document, serve, OK};
 use crate::mm2::lp_swap::maker_swap::{MakerSavedEvent, MakerSwapData, MakerSwapEvent, TakerNegotiationData};
 use crate::mm2::lp_swap::taker_swap::{MakerNegotiationData, TakerSavedEvent, TakerSwapData, TakerSwapEvent};
+use coins::swap_evidence::strip_node_names;
 use common::block_on;
 use crypto::privkey::SerializableSecp256k1Keypair;
 use db_common::sqlite::rusqlite::Connection;
@@ -780,4 +781,177 @@ fn t28_undecodable_payload_is_dropped() {
         block_on(process_msg(receiver.ctx.clone(), &uuid.to_string(), payload));
         assert_eq!(receiver.stats_rows(), 0);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Node names in the published report
+// ---------------------------------------------------------------------------------------------------------
+
+const LABELLED_ERROR: &str =
+    "lp_swap:1888] eth:654] RIN payment validate failed via host.example:50002 and 203.0.113.7 (taker_swap.rs:1599)";
+const STRIPPED_ERROR: &str =
+    "lp_swap:1888] eth:654] RIN payment validate failed via <node> and <node> (taker_swap.rs:1599)";
+
+/// Sets the error text of every failure event of the record to `text`; returns how many it set.
+fn set_error_texts(swap: &mut SavedSwap, text: &str) -> usize {
+    let mut set = 0;
+    match swap {
+        SavedSwap::Maker(swap) => {
+            for event in swap.events.iter_mut() {
+                if let Some(error) = event.event.error_text_mut() {
+                    *error = text.to_owned();
+                    set += 1;
+                }
+            }
+        },
+        SavedSwap::Taker(swap) => {
+            for event in swap.events.iter_mut() {
+                if let Some(error) = event.event.error_text_mut() {
+                    *error = text.to_owned();
+                    set += 1;
+                }
+            }
+        },
+    }
+    set
+}
+
+/// The error texts of the record's events, in order.
+fn error_texts(swap: &mut SavedSwap) -> Vec<String> {
+    let mut texts = vec![];
+    match swap {
+        SavedSwap::Maker(swap) => texts.extend(
+            swap.events
+                .iter_mut()
+                .filter_map(|e| e.event.error_text_mut().map(|t| t.clone())),
+        ),
+        SavedSwap::Taker(swap) => texts.extend(
+            swap.events
+                .iter_mut()
+                .filter_map(|e| e.event.error_text_mut().map(|t| t.clone())),
+        ),
+    }
+    texts
+}
+
+/// The published report names no node of the user; the ticker and the kind phrase stay; the secrets stay hidden.
+#[test]
+fn the_redacted_record_names_no_node_in_any_event_error() {
+    for role in ROLES {
+        for outcome in [Outcome::NegotiationRefusal, Outcome::PaymentStageFailure] {
+            let node = TestNode::new();
+            let uuid = Uuid::new_v4();
+            let mut own = record(uuid, role, "RIN", "KMD", outcome, false);
+            assert!(
+                set_error_texts(&mut own, LABELLED_ERROR) >= 1,
+                "the record has a failure event"
+            );
+            node.store_own_record(&own);
+
+            let mut redacted = block_on(load_redacted_my_swap(&node.ctx, uuid)).unwrap();
+
+            for text in error_texts(&mut redacted) {
+                assert_eq!(
+                    text, STRIPPED_ERROR,
+                    "{:?} {:?}: error text of the report",
+                    role, outcome
+                );
+            }
+            let started = json::to_value(&redacted).unwrap()["events"][0]["event"]["data"].clone();
+            let (secret_field, secret_zero) = match role {
+                Role::Maker => ("secret", zero_32()),
+                Role::Taker => ("maker", zero_32()),
+            };
+            assert_eq!(
+                started[secret_field], secret_zero,
+                "{:?}: the secrets stay hidden",
+                role
+            );
+        }
+    }
+}
+
+/// The node's own stored record, and the local swap file, still hold the host after the terminal report.
+#[test]
+fn the_local_record_keeps_the_node_name_after_the_report() {
+    for role in ROLES {
+        let mut node = TestNode::with_price_urls(json!([dead_url()]));
+        let uuid = Uuid::new_v4();
+        let mut own = record(uuid, role, "RIN", "KMD", Outcome::PaymentStageFailure, false);
+        set_error_texts(&mut own, LABELLED_ERROR);
+        node.store_own_record(&own);
+
+        node.report_for_real(uuid);
+
+        let published = only_publication(node.published(), uuid);
+        let published = String::from_utf8(published).unwrap();
+        assert!(
+            !published.contains("host.example") && !published.contains("50002") && !published.contains("203.0.113.7"),
+            "{:?}: the published report names no node",
+            role
+        );
+        let mut stored = block_on(SavedSwap::load_my_swap_from_db(&node.ctx, uuid))
+            .unwrap()
+            .unwrap();
+        assert!(
+            error_texts(&mut stored).iter().any(|text| text == LABELLED_ERROR),
+            "{:?}: the stored record is unchanged",
+            role
+        );
+    }
+}
+
+/// Every error-carrying event variant of both sides gives its error text to the redaction, and every other
+/// variant gives none. The lists are checked against the `error_text_mut` match, which has no wildcard arm.
+#[test]
+fn every_error_event_variant_is_redacted() {
+    use maker_swap::MakerSwapEvent as M;
+    use taker_swap::TakerSwapEvent as T;
+    let makers: Vec<fn(SwapError) -> M> = vec![
+        M::StartFailed,
+        M::NegotiateFailed,
+        M::TakerFeeValidateFailed,
+        M::MakerPaymentTransactionFailed,
+        M::MakerPaymentDataSendFailed,
+        M::MakerPaymentWaitConfirmFailed,
+        M::TakerPaymentValidateFailed,
+        M::TakerPaymentWaitConfirmFailed,
+        M::TakerPaymentSpendFailed,
+        M::TakerPaymentSpendConfirmFailed,
+        M::MakerPaymentRefundFailed,
+    ];
+    let takers: Vec<fn(SwapError) -> T> = vec![
+        T::StartFailed,
+        T::NegotiateFailed,
+        T::TakerFeeSendFailed,
+        T::MakerPaymentValidateFailed,
+        T::MakerPaymentWaitConfirmFailed,
+        T::TakerPaymentTransactionFailed,
+        T::TakerPaymentDataSendFailed,
+        T::TakerPaymentWaitConfirmFailed,
+        T::TakerPaymentWaitForSpendFailed,
+        T::MakerPaymentSpendConfirmFailed,
+        T::MakerPaymentSpendFailed,
+        T::TakerPaymentRefundFailed,
+    ];
+    for make in makers {
+        let mut event = make(SwapError::from(LABELLED_ERROR));
+        let text = event
+            .error_text_mut()
+            .expect("a maker failure event carries an error text");
+        *text = strip_node_names(text, &["RIN"]);
+        assert_eq!(event.error_text_mut().unwrap().as_str(), STRIPPED_ERROR);
+    }
+    for make in takers {
+        let mut event = make(SwapError::from(LABELLED_ERROR));
+        let text = event
+            .error_text_mut()
+            .expect("a taker failure event carries an error text");
+        *text = strip_node_names(text, &["RIN"]);
+        assert_eq!(event.error_text_mut().unwrap().as_str(), STRIPPED_ERROR);
+    }
+    assert!(M::Finished.error_text_mut().is_none());
+    assert!(M::TakerPaymentWaitConfirmStarted.error_text_mut().is_none());
+    assert!(T::Finished.error_text_mut().is_none());
+    assert!(T::WatcherMessageSent.error_text_mut().is_none());
 }

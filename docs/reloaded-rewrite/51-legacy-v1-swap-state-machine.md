@@ -2398,6 +2398,25 @@ else. Its complete contract:
 > only by statistics stores, the extension breaks no peer, but it should
 > be adopted as a documented Reloaded-original divergence, not silently.
 
+*Status note (2026-11-28, clean side; Reloaded-original; maintainer decision of
+2026-11-28). The published report names no node in an error text.* It changes
+no sentence above. It is a documented Reloaded-original divergence from item 2
+("nothing else is removed") and from item 3 ("no other event and no other field
+is touched") of R50A. Besides the redaction of item 3, the copy of the record
+that a Reloaded node makes for the report is changed in one more way: in the
+error text of every event that carries one, each name of a node is replaced by
+the word `<node>`. A name of a node is a URL, an IPv4 address, an IPv6 address
+in brackets, a dotted host name, or a name followed by a port. The text of an
+undetermined swap read (R100) keeps its marker and the kind of the reason, and
+the part that lists the nodes is dropped. The coin tickers, the source
+positions that an error text carries and the rest of the text are kept. A
+dotted word that is not a host name, such as the name of a method, is replaced
+as well. The event types, their names, their order and every other member are
+unchanged, so a receiver decodes and stores the report as before (R49). The
+same copy is the one stored in the node's own statistics store (item 2). The
+node's own saved swap record, its log and the answers about its own swaps
+(`my_swap_status`, `my_recent_swaps`) are not changed and still name the node.
+
 **R50B.** *The transaction-helper topic (2026-10-30, Decision BB; the
 publisher side is parity, the receiver side a Reloaded correction of a
 reference defect -- see the notes below and D6).* Each side publishes the spend and refund transactions it
@@ -3998,3 +4017,8 @@ reference rows alike.
   `paused` member of `my_orders` and `order_status`. Reloaded-original; it
   records the maintainer's decision of 2026-11-28, takes no reference input
   and no forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-28, a second one:* the status note after R50A
+  on the error texts of the published swap report, which name no node.
+  Reloaded-original; it records the maintainer's decision of 2026-11-28, takes
+  no reference input and no forbidden-class input, and changes no sentence of
+  the chapter.

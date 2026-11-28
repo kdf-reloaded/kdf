@@ -1508,6 +1508,12 @@ the previous version used. The safe way:
   replaced in one step, so a reader does not see it empty (on a file system without hard links a new lock file is
   empty for a moment), and its content keeps the form GLEEC KDF reads. Detail: PR #480; CRD ch.51 R5 and ch.44
   §44.9A (status updates).
+- **The swap report shared with the network no longer names the nodes your coins were read from.** At the end of a
+  legacy swap the node shares a report of the swap with the network. An error text in that report could name a node
+  the coin was read from. Each such name is now replaced by `<node>` in the shared report and in the node's
+  statistics copy of it; the coin and the kind of the failure stay in the text. Your own saved swap record, the log
+  and `my_swap_status` are unchanged and still name the node. Detail: PR #560; CRD ch.51 R50A (status note of
+  2026-11-28).
 
 #### Legacy swaps
 
