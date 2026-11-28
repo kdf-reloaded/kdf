@@ -625,8 +625,13 @@ pub(super) struct ServerQuality {
     pub poor_until: f64,
     /// Why the connection was last marked poor.
     pub poor_reason: Option<PoorReason>,
-    /// The out-of-date state last reported in the log, so that a line is logged once per change (R38.6.4o item 9).
+    /// The out-of-date state last judged, so that a change of state is noticed (R38.6.4o item 9).
     pub reported_state: Option<OutOfDateKind>,
+    /// When `reported_state` began (seconds since the epoch).
+    pub state_since: f64,
+    /// The state of the current out-of-date episode for which a WARN line was logged; `None` when none was, so
+    /// that "up to date again" follows only a logged line (R38.6.4o item 9).
+    pub warned: Option<OutOfDateKind>,
 }
 
 impl ServerQuality {
@@ -639,6 +644,8 @@ impl ServerQuality {
         self.notified_at = now;
         self.lag_strikes = 0;
         self.reported_state = None;
+        self.state_since = now;
+        self.warned = None;
     }
 
     pub(super) fn is_poor_demoted(&self, now: f64) -> bool { now < self.poor_until }

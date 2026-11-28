@@ -45,6 +45,7 @@ fn test_timings() -> ElectrumPoolTimings {
         stuck_floor: ms(300),
         latency_floor: ms(300),
         slow_floor: ms(60),
+        out_of_date_warn_delay: ms(250),
     }
 }
 
@@ -3983,6 +3984,8 @@ fn t38_6_4o_3_a_connection_behind_is_out_of_date_at_once_and_reversibly() {
         assert!(answered.contains(&a.addr()) && answered.contains(&b.addr()));
         assert_eq!(c.requests(READ), 0);
         if capturing {
+            // The state is instant, the line waits for the warn delay and is then logged once, without a new event.
+            wait_until("the behind line", || !warn_lines(ticker).is_empty()).await;
             assert_eq!(warn_lines(ticker), vec![format!(
                 "WARN {ticker}: Electrum server {} is 4 blocks behind the other servers (tip {H})",
                 c.addr()
@@ -4027,6 +4030,91 @@ fn t38_6_4o_3_a_connection_behind_is_out_of_date_at_once_and_reversibly() {
             .iter()
             .all(|view| view.out_of_date.is_none()));
         assert!(warn_lines(ticker).is_empty());
+    });
+}
+
+/// R38.6.4o item 9, decision LHL (a): a behind state that clears before the warn delay logs nothing at all, neither
+/// the behind line nor "up to date again", although the state itself is instant and orders reads as out of date.
+#[test]
+fn t38_6_4o_9_a_short_behind_episode_logs_nothing() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "OOD9S";
+        let (a, b, c) = (stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H - 4).await);
+        let client = checked_pool(
+            &[&a, &b, &c],
+            PoolSetup {
+                order: ServerOrder::Random,
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new(ticker)
+            },
+            ElectrumPoolTimings {
+                out_of_date_warn_delay: ms(60_000),
+                ..quiet_timings()
+            },
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b, &c]).await;
+        // Instant: out of date at once, reads skip it.
+        assert_eq!(view_of(&client, &c).out_of_date, Some("behind"));
+        let answered = answered_by(&client, 20).await;
+        assert!(answered.iter().all(|addr| *addr != c.addr()), "{answered:?}");
+        c.set_tip(H);
+        wait_until("the stub to be up to date again", || {
+            view_of(&client, &c).out_of_date.is_none()
+        })
+        .await;
+        if capturing {
+            assert!(warn_lines(ticker).is_empty(), "{:?}", warn_lines(ticker));
+        }
+    });
+}
+
+/// R38.6.4o item 9: a lasting ahead state is logged once after the warn delay without any further event, and one
+/// "up to date again" follows when it clears.
+#[test]
+fn t38_6_4o_9_a_lasting_ahead_episode_logs_once_and_clears_once() {
+    let capturing = crate::eth::alloy_compat::transport::test_support::install_log_capture();
+    block_on(async {
+        const H: u64 = 1_000;
+        let ticker = "OOD9A";
+        let (a, b, c) = (stub_at(5, H).await, stub_at(5, H).await, stub_at(5, H + 10).await);
+        let client = checked_pool(
+            &[&a, &b, &c],
+            PoolSetup {
+                order: ServerOrder::Random,
+                block_interval: Some(Duration::from_secs(60)),
+                ..PoolSetup::new(ticker)
+            },
+            quiet_timings(),
+            script_draw(&[], 0.5),
+        );
+        join_with_heights(&client, &[&a, &b, &c]).await;
+        assert_eq!(view_of(&client, &c).out_of_date, Some("ahead"));
+        if capturing {
+            // Nothing happens to the pool now: the delayed re-check logs the line.
+            wait_until("the ahead line", || !warn_lines(ticker).is_empty()).await;
+            Timer::sleep(0.5).await;
+            assert_eq!(warn_lines(ticker), vec![format!(
+                "WARN {ticker}: Electrum server {} is 10 blocks ahead of the other servers (tip {H})",
+                c.addr()
+            )]);
+        }
+        a.set_tip(H + 10);
+        b.set_tip(H + 10);
+        wait_until("the stub to be up to date again", || {
+            view_of(&client, &c).out_of_date.is_none()
+        })
+        .await;
+        if capturing {
+            let lines = warn_lines(ticker);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert_eq!(
+                lines[1],
+                format!("WARN {ticker}: Electrum server {} is up to date again", c.addr())
+            );
+        }
     });
 }
 
@@ -4464,6 +4552,7 @@ fn t38_6_4o_6_a_far_ahead_server_is_kept_out_of_the_reads() {
         assert!(answered.iter().all(|addr| *addr != liar.addr()), "{answered:?}");
         assert_eq!(liar.requests(READ), 0);
         if capturing {
+            wait_until("the ahead line", || !warn_lines(ticker).is_empty()).await;
             assert_eq!(warn_lines(ticker), vec![format!(
                 "WARN {ticker}: Electrum server {} is 1000000 blocks ahead of the other servers (tip {H})",
                 liar.addr()

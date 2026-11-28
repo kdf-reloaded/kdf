@@ -636,12 +636,12 @@ async fn electrum_request_to(
 impl ElectrumClientImpl {
     /// Replaces the pool settings. To be called before the first server is added.
     pub fn configure_pool(&mut self, options: ElectrumPoolOptions) {
-        self.pool = Arc::new(PoolShared::new(
+        self.pool = PoolShared::new(
             self.coin_ticker.clone(),
             options,
             self.protocol_version.clone(),
             self.event_handlers.clone(),
-        ));
+        );
     }
 
     /// Adds a server to the pool. The position in the call order is the server's priority; see [`Self::add_servers`]. A server
@@ -2270,12 +2270,12 @@ impl ElectrumClientImpl {
     pub fn new(coin_ticker: String, event_handlers: Vec<RpcTransportEventHandlerShared>) -> ElectrumClientImpl {
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
         ElectrumClientImpl {
-            pool: Arc::new(PoolShared::new(
+            pool: PoolShared::new(
                 coin_ticker.clone(),
                 ElectrumPoolOptions::default(),
                 protocol_version.clone(),
                 event_handlers.clone(),
-            )),
+            ),
             coin_ticker,
             event_handlers,
             protocol_version,
