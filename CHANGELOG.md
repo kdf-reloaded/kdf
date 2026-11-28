@@ -1312,7 +1312,7 @@ the previous version used. The safe way:
 
 - **A QTUM coin in native mode on a node without fee estimation gives a clear error.** When the node has no
   `estimatefee` method and the coins entry has no `txfee`, enabling the coin fails with a text that says to set
-  `txfee` in the coins entry. Detail: PR #N.
+  `txfee` in the coins entry. Detail: PR #552.
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
   (`add_delegation`) asked for the lock that lets only one transaction from the wallet be built at
   a time but did not wait for it, so the lock was never held, and removing one
@@ -1412,7 +1412,7 @@ the previous version used. The safe way:
 #### TRON coins
 
 - **TRON swap and approval refusals use plain texts.** A TRON coin that is asked for a swap step, an approval
-  or an allowance answers "TRON swaps are not supported in this version" and the name of the step. Detail: PR #N.
+  or an allowance answers "TRON swaps are not supported in this version" and the name of the step. Detail: PR #552.
 - **A TRON withdrawal whose `fee` is `{"type":"Tron"}` is now refused with `InvalidFeePolicy`.** Before, such a
   request failed parsing, for example when the `fee_details` of an earlier TRON result was sent back as `fee`.
   TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
@@ -1520,7 +1520,7 @@ the previous version used. The safe way:
 
 - **A failed set-up of the encrypted peer-to-peer transport is reported as an error.** When the node cannot
   prepare the encryption of its peer connections at start-up, it stops with a start-up error that names the
-  cause. Detail: PR #N.
+  cause. Detail: PR #552.
 
 ### Tests
 
