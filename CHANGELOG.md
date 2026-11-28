@@ -11,6 +11,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.5.0-beta.1] — 2026-11-28
 
+### Highlights
+
+The most important changes of this release in short.
+
+- **Before a refund or a claim, a swap now needs chain reads that two nodes of the coin agree on, or a node
+  you trust, and a swap starts only when that is possible.** PRs #508, #522, #536, #547.
+- **Swaps are safer: a refund or a claim waits for a clear answer from the chain, and swap and order records
+  survive a crash.** PRs #480, #488, #490, #523.
+- **TRON and Solana are back as wallet-only coins; they cannot be traded yet.** PRs #451, #475.
+- **ZEC can be sent again.** PRs #404, #431.
+- **Tendermint coins gain a transaction history, watch-only activation and WalletConnect signing.** PRs #363,
+  #382, #393.
+- **Most RPC methods that had only the older request form also accept `mmrpc: "2.0"`.** PRs #359, #372, #379,
+  #387.
+- **Read the breaking changes below before you upgrade.** Among them, the shielded wallet database is migrated
+  irreversibly, and ARRR has a new fixed fee and a higher minimum trade.
+
 ### Breaking changes and upgrade notes
 
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
@@ -992,7 +1009,8 @@ the previous version used. The safe way:
 
 #### Transport, TLS and dependencies
 
-- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** The `url` crate moved from 2.5.8 to
+- **The URL library moved to 2.5.9, which clears RUSTSEC-2026-0592.** (also in 0.4.2-beta.1)
+  The `url` crate moved from 2.5.8 to
   2.5.9, and `form_urlencoded`, which the new version requires, from 1.2.2 to 1.2.3. KDF Reloaded's own code
   does not call the affected function. The dependency policy needs no exception for this advisory. Detail:
   PR #492.
@@ -1544,7 +1562,8 @@ the previous version used. The safe way:
 #### Shielded coins
 
 - **ARRR can spend the notes on the wallet's change address, and the balance it shows can be
-  spent.** In Light mode, ARRR notes on the wallet's change address (the internal address of the
+  spent.** (also in 0.4.2-beta.1)
+  In Light mode, ARRR notes on the wallet's change address (the internal address of the
   same seed), such as the change that a Pirate wallet on the same seed makes, are now spent like any
   other note: a withdrawal, a withdrawal to a `pirate1` address and a swap payment can use them. A
   shielded spend signs each note with the key of the ZIP-32 scope the note belongs to. `my_balance`
@@ -1810,7 +1829,8 @@ the previous version used. The safe way:
   Siacoin is the only coin that does, so no swap hands its data to a watcher, as the 0.4.0-beta.1 item "The swap
   watcher does not work yet" says. Keep your node running until your swaps have finished. Detail: CRD ch.09 R17,
   ch.20 D7.
-- **KDF Reloaded neither shows nor spends ARRR funds held in the Ironwood pool.** The Ironwood pool
+- **KDF Reloaded neither shows nor spends ARRR funds held in the Ironwood pool.** (also in 0.4.2-beta.1)
+  The Ironwood pool
   is Pirate Chain's newer shielded pool. Funds there, for example funds a Pirate wallet on the same
   seed keeps in it, stay safe and can be spent from that Pirate wallet; the balance KDF Reloaded
   shows covers the Sapling part only. A coin in native mode is still refused at activation.
