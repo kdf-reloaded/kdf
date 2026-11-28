@@ -1018,7 +1018,8 @@ fn dial_peer_addr(
 /// How often an address or a source is reported at the high log level (INFO or WARN) when its connections keep
 /// failing; the reports in between are logged at DEBUG.
 const CONNECTION_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(3600);
-/// How many addresses or sources are remembered. The map is cleared when it is full, so its memory stays bounded.
+/// How many addresses or sources are remembered. The map of the incoming sources is cleared when it is full; that of
+/// the outgoing addresses evicts its key with the oldest failure. Either way its memory stays bounded.
 const MAX_CONNECTION_FAILURE_LOG_KEYS: usize = 256;
 
 /// The time of the last high-level report per key.
@@ -1087,6 +1088,110 @@ fn dial_failure_keys(peer_id: Option<PeerId>, error: &DialError) -> Vec<DialFail
     keys
 }
 
+/// The gaps since the last WARN of an outgoing failure key after which its next failure is logged at WARN again: the
+/// first gap follows the first WARN, the second the second WARN, and so on. With the first WARN at 0, the WARN lines
+/// of a key that fails without a pause fall at 0, 1 h, 6 h and 24 h; the last gap repeats, so every later one follows
+/// 24 h after the previous.
+const OUTGOING_FAILURE_WARN_GAPS: [Duration; 3] = [
+    Duration::from_secs(3600),
+    Duration::from_secs(5 * 3600),
+    Duration::from_secs(18 * 3600),
+];
+/// The gap after the WARN lines of [`OUTGOING_FAILURE_WARN_GAPS`] are used up.
+const OUTGOING_FAILURE_WARN_GAP_REPEATED: Duration = Duration::from_secs(24 * 3600);
+
+/// What is remembered of one key of an outgoing connection failure.
+struct DialFailureState {
+    /// The time of the last WARN of this key.
+    last_warn: Instant,
+    /// The time of the last failure of this key, the eviction order.
+    last_failure: Instant,
+    /// How many WARN lines this key has had.
+    warns: usize,
+    /// How many failures of this key were logged at DEBUG since its last WARN.
+    suppressed: u32,
+    /// The peer ID the last failure of this key was recorded for, to forget the key when that peer connects.
+    peer_id: Option<PeerId>,
+}
+
+impl DialFailureState {
+    /// The time that has to pass after the last WARN before the next one.
+    fn warn_gap(&self) -> Duration {
+        OUTGOING_FAILURE_WARN_GAPS
+            .get(self.warns - 1)
+            .copied()
+            .unwrap_or(OUTGOING_FAILURE_WARN_GAP_REPEATED)
+    }
+}
+
+/// The back-off of the WARN lines of outgoing connection failures, per key.
+#[derive(Default)]
+struct DialFailureBackoff {
+    states: HashMap<DialFailureKey, DialFailureState>,
+}
+
+impl DialFailureBackoff {
+    /// The level an outgoing failure naming `keys` is logged at at `now`: WARN when any key is due (a new key, or one
+    /// whose gap since its last WARN has passed), DEBUG otherwise. Only the due keys advance a step. The second value
+    /// is the largest count of DEBUG-level failures since the last WARN among the due keys that had a WARN before;
+    /// it is `None` when no due key had.
+    fn level(&mut self, peer_id: Option<PeerId>, keys: Vec<DialFailureKey>, now: Instant) -> (Level, Option<u32>) {
+        let mut level = Level::Debug;
+        let mut suppressed: Option<u32> = None;
+        for key in keys {
+            match self.states.get_mut(&key) {
+                Some(state) => {
+                    state.last_failure = now;
+                    if peer_id.is_some() {
+                        state.peer_id = peer_id;
+                    }
+                    if now.duration_since(state.last_warn) >= state.warn_gap() {
+                        suppressed = Some(suppressed.map_or(state.suppressed, |n| n.max(state.suppressed)));
+                        state.suppressed = 0;
+                        state.warns += 1;
+                        state.last_warn = now;
+                        level = Level::Warn;
+                    } else {
+                        state.suppressed = state.suppressed.saturating_add(1);
+                    }
+                },
+                None => {
+                    if self.states.len() >= MAX_CONNECTION_FAILURE_LOG_KEYS {
+                        let oldest = self
+                            .states
+                            .iter()
+                            .min_by_key(|(_, state)| state.last_failure)
+                            .map(|(key, _)| key.clone());
+                        if let Some(oldest) = oldest {
+                            self.states.remove(&oldest);
+                        }
+                    }
+                    self.states.insert(key, DialFailureState {
+                        last_warn: now,
+                        last_failure: now,
+                        warns: 1,
+                        suppressed: 0,
+                        peer_id,
+                    });
+                    level = Level::Warn;
+                },
+            }
+        }
+        (level, suppressed)
+    }
+
+    /// Forgets the keys of a peer a connection was established with, so that its next failure is a first failure:
+    /// its `Peer` key, the `Address` key of the dialed address (`None` for an incoming connection) and every key
+    /// recorded for its peer ID.
+    fn forget_peer(&mut self, peer_id: PeerId, dialed: Option<&Multiaddr>) {
+        self.states.remove(&DialFailureKey::Peer(peer_id));
+        if let Some(address) = dialed {
+            self.states.remove(&DialFailureKey::Address(strip_p2p_suffix(address)));
+        }
+        self.states.retain(|_, state| state.peer_id != Some(peer_id));
+    }
+}
+
 /// How a closed connection is logged.
 enum ConnectionClosedLog<'a, E> {
     /// Closed without a cause: INFO, "closed cleanly".
@@ -1144,17 +1249,19 @@ fn source_ip(address: &Multiaddr) -> Option<IpAddr> {
     })
 }
 
-/// Rate limits of the connection failure log lines (CRD leaves the logging to the implementation).
+/// Rate limits and back-off of the connection failure log lines (CRD leaves the logging to the implementation).
 #[derive(Default)]
 struct ConnectionFailureLogs {
-    outgoing: ConnectionFailureLog<DialFailureKey>,
+    outgoing: DialFailureBackoff,
     incoming: ConnectionFailureLog<Option<IpAddr>>,
 }
 
 impl ConnectionFailureLogs {
-    /// An outgoing connection failure is logged at WARN at most once per address per hour, at DEBUG otherwise.
-    fn outgoing_level(&mut self, peer_id: Option<PeerId>, error: &DialError, now: Instant) -> Level {
-        self.outgoing.level(dial_failure_keys(peer_id, error), now, Level::Warn)
+    /// An outgoing connection failure is logged at WARN with a back-off per address (see
+    /// [`OUTGOING_FAILURE_WARN_GAPS`]), at DEBUG otherwise. The count, when present, is the number of DEBUG-level
+    /// failures since the last WARN, for the suffix of a later WARN line.
+    fn outgoing_level(&mut self, peer_id: Option<PeerId>, error: &DialError, now: Instant) -> (Level, Option<u32>) {
+        self.outgoing.level(peer_id, dial_failure_keys(peer_id, error), now)
     }
 
     /// An incoming transport negotiation failure is logged at INFO at most once per source IP per hour, at DEBUG
@@ -1189,6 +1296,12 @@ fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
                 "P2P connection established with peer {} via {:?}; total connections to peer: {}",
                 peer_id, endpoint, num_established
             );
+            // A connection in either direction ends the back-off of the failures recorded for the peer.
+            let dialed = match endpoint {
+                ConnectedPoint::Dialer { address, .. } => Some(address),
+                ConnectedPoint::Listener { .. } => None,
+            };
+            failure_logs.outgoing.forget_peer(*peer_id, dialed);
             if let Some(errors) = concurrent_dial_errors {
                 for (addr, error) in errors {
                     warn!(
@@ -1247,13 +1360,22 @@ fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
             );
         },
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-            let level = failure_logs.outgoing_level(*peer_id, error, Instant::now());
-            log::log!(
-                level,
-                "P2P outgoing connection failed for peer {:?}: {}",
-                peer_id,
-                error
-            );
+            let (level, suppressed) = failure_logs.outgoing_level(*peer_id, error, Instant::now());
+            match suppressed {
+                Some(n) => log::log!(
+                    level,
+                    "P2P outgoing connection failed for peer {:?}: {} (failures since the last warning: {})",
+                    peer_id,
+                    error,
+                    n
+                ),
+                None => log::log!(
+                    level,
+                    "P2P outgoing connection failed for peer {:?}: {}",
+                    peer_id,
+                    error
+                ),
+            }
         },
         SwarmEvent::NewListenAddr { listener_id, address } => {
             info!("P2P listener {:?} is listening on {}", listener_id, address);
@@ -1928,7 +2050,7 @@ mod application_tests {
 #[cfg(test)]
 mod connection_failure_log_tests {
     use super::{connection_closed_log, dial_failure_keys, ConnectionClosedLog, ConnectionFailureLog,
-                ConnectionFailureLogs, DialFailureKey, CONNECTION_FAILURE_LOG_INTERVAL,
+                ConnectionFailureLogs, DialFailureBackoff, DialFailureKey, CONNECTION_FAILURE_LOG_INTERVAL,
                 MAX_CONNECTION_FAILURE_LOG_KEYS};
     use libp2p::core::transport::TransportError;
     use libp2p::core::{ConnectedPoint, Endpoint, Multiaddr};
@@ -1959,53 +2081,141 @@ mod connection_failure_log_tests {
         )))
     }
 
-    /// An outgoing failure is logged at WARN the first time, at DEBUG within the hour, and at WARN again after it.
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    fn outgoing_levels(
+        logs: &mut ConnectionFailureLogs,
+        error: &DialError,
+        start: Instant,
+        minutes: &[u64],
+    ) -> Vec<u64> {
+        minutes
+            .iter()
+            .filter(|m| logs.outgoing_level(None, error, start + Duration::from_secs(*m * 60)).0 == Level::Warn)
+            .copied()
+            .collect()
+    }
+
+    /// An address that fails every 10 minutes for 49 h is warned at 0, 1 h, 6 h, 24 h and 48 h only.
     #[test]
-    fn outgoing_failure_is_warned_once_per_address_per_hour() {
+    fn outgoing_failure_warn_schedule() {
+        let mut logs = ConnectionFailureLogs::default();
+        let error = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
+        let minutes: Vec<u64> = (0..=49 * 6).map(|i| i * 10).collect();
+        assert_eq!(outgoing_levels(&mut logs, &error, Instant::now(), &minutes), vec![
+            0,
+            60,
+            6 * 60,
+            24 * 60,
+            48 * 60
+        ]);
+    }
+
+    /// A pause in the failures does not give a burst: the gap counts from the last WARN.
+    #[test]
+    fn outgoing_failure_pause_gives_no_burst() {
         let mut logs = ConnectionFailureLogs::default();
         let error = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
         let start = Instant::now();
+        assert_eq!(logs.outgoing_level(None, &error, start).0, Level::Warn);
+        assert_eq!(logs.outgoing_level(None, &error, start + 30 * HOUR).0, Level::Warn);
+        assert_eq!(
+            logs.outgoing_level(None, &error, start + 30 * HOUR + Duration::from_secs(600))
+                .0,
+            Level::Debug
+        );
+    }
 
-        assert_eq!(logs.outgoing_level(None, &error, start), Level::Warn);
-        assert_eq!(
-            logs.outgoing_level(None, &error, start + Duration::from_secs(30)),
-            Level::Debug
-        );
-        assert_eq!(
-            logs.outgoing_level(
-                None,
-                &error,
-                start + CONNECTION_FAILURE_LOG_INTERVAL - Duration::from_secs(1)
-            ),
-            Level::Debug
-        );
-        assert_eq!(
-            logs.outgoing_level(None, &error, start + CONNECTION_FAILURE_LOG_INTERVAL),
-            Level::Warn
-        );
-        // The hour counts from the last high-level report.
-        assert_eq!(
-            logs.outgoing_level(
-                None,
-                &error,
-                start + CONNECTION_FAILURE_LOG_INTERVAL + Duration::from_secs(60)
-            ),
-            Level::Debug
-        );
-
-        // Another address has its own hour. An event that names a new address among known ones is high.
-        let other = transport_error(&["/ip4/203.0.113.8/tcp/42845"]);
-        assert_eq!(
-            logs.outgoing_level(None, &other, start + Duration::from_secs(40)),
-            Level::Warn
-        );
+    /// Two addresses in one error: WARN when either is due; only the due keys advance.
+    #[test]
+    fn outgoing_failure_two_addresses() {
+        let mut logs = ConnectionFailureLogs::default();
+        let a = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
         let both = transport_error(&["/ip4/203.0.113.7/tcp/42845", "/ip4/203.0.113.9/tcp/42845"]);
+        let start = Instant::now();
+        assert_eq!(logs.outgoing_level(None, &a, start).0, Level::Warn);
+        // The second address is new: WARN. The first is not due.
         assert_eq!(
-            logs.outgoing_level(
-                None,
-                &both,
-                start + CONNECTION_FAILURE_LOG_INTERVAL + Duration::from_secs(70)
-            ),
+            logs.outgoing_level(None, &both, start + Duration::from_secs(60)).0,
+            Level::Warn
+        );
+        assert_eq!(
+            logs.outgoing_level(None, &both, start + Duration::from_secs(120)).0,
+            Level::Debug
+        );
+        // The first is due at 1 h from its first WARN, the second is not due until 1 h 1 min.
+        assert_eq!(logs.outgoing_level(None, &both, start + HOUR).0, Level::Warn);
+        // The first advanced to step 3 (gap 5 h); the second is due at 1 h 1 min.
+        assert_eq!(
+            logs.outgoing_level(None, &a, start + HOUR + Duration::from_secs(30)).0,
+            Level::Debug
+        );
+        assert_eq!(
+            logs.outgoing_level(None, &both, start + HOUR + Duration::from_secs(60))
+                .0,
+            Level::Warn
+        );
+    }
+
+    /// The suffix count is absent on the first WARN and counts the DEBUG failures before a later one.
+    #[test]
+    fn outgoing_failure_suffix_count() {
+        let mut logs = ConnectionFailureLogs::default();
+        let error = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
+        let start = Instant::now();
+        assert_eq!(logs.outgoing_level(None, &error, start), (Level::Warn, None));
+        for i in 1..=5 {
+            assert_eq!(
+                logs.outgoing_level(None, &error, start + Duration::from_secs(60 * i)),
+                (Level::Debug, None)
+            );
+        }
+        assert_eq!(logs.outgoing_level(None, &error, start + HOUR), (Level::Warn, Some(5)));
+        assert_eq!(
+            logs.outgoing_level(None, &error, start + 2 * HOUR),
+            (Level::Debug, None)
+        );
+        assert_eq!(
+            logs.outgoing_level(None, &error, start + 6 * HOUR),
+            (Level::Warn, Some(1))
+        );
+    }
+
+    /// A connection to the peer, dialed or incoming, restarts the schedule; other peers keep theirs.
+    #[test]
+    fn outgoing_failure_reset_on_connection() {
+        let start = Instant::now();
+        let peer = PeerId::random();
+        let other = PeerId::random();
+        let addr = "/ip4/203.0.113.7/tcp/42845";
+        let error = transport_error(&[addr]);
+        let other_error = transport_error(&["/ip4/203.0.113.8/tcp/42845"]);
+        let s = |secs| start + Duration::from_secs(secs);
+
+        for dialed in [true, false] {
+            let mut logs = ConnectionFailureLogs::default();
+            assert_eq!(logs.outgoing_level(Some(peer), &error, start).0, Level::Warn);
+            assert_eq!(logs.outgoing_level(Some(other), &other_error, start).0, Level::Warn);
+            assert_eq!(logs.outgoing_level(Some(peer), &error, s(10)).0, Level::Debug);
+            let dialed_address: Multiaddr = format!("{}/p2p/{}", addr, peer).parse().unwrap();
+            logs.outgoing.forget_peer(peer, dialed.then_some(&dialed_address));
+            // First failure again, and the schedule restarts at step 1.
+            assert_eq!(logs.outgoing_level(Some(peer), &error, s(20)), (Level::Warn, None));
+            assert_eq!(logs.outgoing_level(Some(peer), &error, s(30)).0, Level::Debug);
+            assert_eq!(logs.outgoing_level(Some(peer), &error, s(20) + HOUR).0, Level::Warn);
+            // The other peer's key is untouched.
+            assert_eq!(logs.outgoing_level(Some(other), &other_error, s(40)).0, Level::Debug);
+        }
+
+        // The Peer key is forgotten too.
+        let mut logs = ConnectionFailureLogs::default();
+        assert_eq!(
+            logs.outgoing_level(Some(peer), &DialError::Aborted, start).0,
+            Level::Warn
+        );
+        logs.outgoing.forget_peer(peer, None);
+        assert_eq!(
+            logs.outgoing_level(Some(peer), &DialError::Aborted, s(1)).0,
             Level::Warn
         );
     }
@@ -2199,7 +2409,7 @@ mod connection_failure_log_tests {
         }
     }
 
-    /// The remembered keys stay bounded: a full map is cleared.
+    /// The remembered keys stay bounded: a full incoming map is cleared.
     #[test]
     fn remembered_keys_stay_bounded() {
         let mut log = ConnectionFailureLog::<u32>::default();
@@ -2219,5 +2429,39 @@ mod connection_failure_log_tests {
             log.level([key], start, Level::Warn);
             assert!(log.last_high.len() <= MAX_CONNECTION_FAILURE_LOG_KEYS);
         }
+    }
+
+    /// The outgoing map keeps 256 keys and evicts only the one with the oldest failure; the others keep their step.
+    #[test]
+    fn outgoing_keys_evict_the_oldest() {
+        let mut backoff = DialFailureBackoff::default();
+        let start = Instant::now();
+        let key = |i: u32| DialFailureKey::Address(format!("/ip4/10.0.{}.{}/tcp/1", i / 256, i % 256).parse().unwrap());
+        for i in 0..MAX_CONNECTION_FAILURE_LOG_KEYS as u32 {
+            let now = start + Duration::from_secs(i as u64);
+            assert_eq!(backoff.level(None, vec![key(i)], now).0, Level::Warn);
+        }
+        // Key 0 gets a later failure, so key 1 is now the oldest.
+        let t = start + Duration::from_secs(1000);
+        assert_eq!(backoff.level(None, vec![key(0)], t).0, Level::Debug);
+        assert_eq!(backoff.level(None, vec![key(9999)], t).0, Level::Warn);
+        assert_eq!(backoff.states.len(), MAX_CONNECTION_FAILURE_LOG_KEYS);
+        assert!(!backoff.states.contains_key(&key(1)));
+        for i in (0..MAX_CONNECTION_FAILURE_LOG_KEYS as u32).filter(|i| *i != 1) {
+            assert!(backoff.states.contains_key(&key(i)), "key {} was evicted", i);
+        }
+        // The kept keys keep their step: key 2 is due 1 h after its first WARN (at 2 s), key 3 (at 3 s) is not yet.
+        assert_eq!(
+            backoff
+                .level(None, vec![key(2)], start + HOUR + Duration::from_secs(2))
+                .0,
+            Level::Warn
+        );
+        assert_eq!(
+            backoff
+                .level(None, vec![key(3)], start + HOUR + Duration::from_secs(2))
+                .0,
+            Level::Debug
+        );
     }
 }
