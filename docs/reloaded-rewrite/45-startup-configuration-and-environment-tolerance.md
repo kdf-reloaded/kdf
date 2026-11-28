@@ -429,6 +429,24 @@ recorded in swap records stay the bare short hash. The log text is
 operator-facing and non-normative: it carries no wire or compatibility
 obligation.
 
+> **Status note (2026-11-28; R45.6.7; Reloaded-original rule, no corpus input).**
+> The version the daemon reports is `R<crate version>-<hash part>`, for
+> example `R0.5.0-beta.1-6ea8598`. `R` marks KDF Reloaded and there is no
+> operating-system part. The crate version is the one R45.6.7 names. The hash
+> part is what the build used before as its whole version value: normally the
+> short commit hash, `UNKNOWN` without Git information, or the form derived
+> from an `MM_VERSION` file. This one string is the result of the `version` RPC
+> method (whose shape, `result` and `datetime`, is unchanged), the version
+> recorded in swap records, the answer to the peer version-statistics request
+> and the version in the Electrum client name. The startup banner (also the
+> `--version` and `version` output) reads `KDF-Reloaded DeFi Framework
+> <version> DT <build datetime>` and the second startup line reads
+> `Version: <version> DT <build datetime>`; the crate version and the hash part
+> are not repeated separately. This replaces the two line forms of R45.6.7 and
+> its sentence that the RPC result and swap records stay the bare short hash.
+> Release names and Git tags are not affected. Records saved earlier keep the
+> value they were saved with.
+
 ## 45.6A Memory Allocator Arena Limit (Reloaded-original)
 
 > **Reloaded-original (2026-10-31, Decision BJ).** This section binds a
@@ -951,6 +969,16 @@ pre-release crate version, an `UNKNOWN` hash and an empty build datetime; a
 second test MUST show that the banner produced for the running build contains
 the crate version and the short hash of that build, and that the bare short hash
 is unchanged as the value the `version` RPC method returns (R45.6.7).
+
+> **Status note (2026-11-28; T45.15; Reloaded-original rule, no corpus input).**
+> Under the 2026-11-28 status note of R45.6.7, the formatter test shows both
+> startup lines as `<version> DT <build datetime>` after their prefixes,
+> including a pre-release crate version, an `UNKNOWN` hash part and an empty
+> build datetime. Further tests show that the version of the running build is
+> `R<crate version>-<hash part>` with a non-empty hash part of word characters,
+> `.` and `-`, and that the startup text and the `version` RPC method carry that
+> same string. This replaces the statement that the bare short hash is the value
+> the method returns.
 
 T45.16 *Resolver key (R45.6B.2).* A table-driven test of the parsing MUST
 cover at least: absent, `null` and `"google"` → Google Public DNS; `"system"` →
