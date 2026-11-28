@@ -92,6 +92,8 @@ pub enum P2PInitError {
     ErrorListeningOnAddress { address: String, error: String },
     #[display(fmt = "Invalid WSS key/cert configuration: {}", _0)]
     InvalidWssConfig(String),
+    #[display(fmt = "Failed to set up the encrypted P2P transport: {}", _0)]
+    NoiseConfig(String),
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     #[display(fmt = "WASM node can be a seed if only 'p2p_in_memory' is true")]
     WasmNodeCannotBeSeed,
@@ -109,6 +111,7 @@ impl From<AdexBehaviourError> for P2PInitError {
             AdexBehaviourError::ParsingRelayAddress(e) => P2PInitError::InvalidRelayAddress(e),
             AdexBehaviourError::ListenOn { address, error } => P2PInitError::ErrorListeningOnAddress { address, error },
             AdexBehaviourError::WssConfig(error) => P2PInitError::InvalidWssConfig(error),
+            AdexBehaviourError::NoiseConfig(error) => P2PInitError::NoiseConfig(error),
         }
     }
 }
@@ -1064,6 +1067,15 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))] use mm2_p2p::NetworkInfo;
     use mm2_p2p::RelayAddress;
     use serde_json::json;
+
+    /// A failed set-up of the encrypted P2P transport reaches the launch as a start-up error that names the cause.
+    #[test]
+    fn noise_set_up_failure_is_a_p2p_start_up_error() {
+        let err = P2PInitError::from(mm2_p2p::AdexBehaviourError::NoiseConfig("key failure".to_owned()));
+        assert!(matches!(&err, P2PInitError::NoiseConfig(text) if text == "key failure"));
+        let init: MmInitError = err.into();
+        assert!(matches!(init, MmInitError::P2PError(P2PInitError::NoiseConfig(_))));
+    }
 
     /// CRD ch.45 T45.16 at the node's start-up: every invalid `dns_resolver` value refuses the launch with a clean
     /// configuration error that names the key, and installs nothing.

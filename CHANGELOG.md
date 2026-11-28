@@ -1252,6 +1252,9 @@ the previous version used. The safe way:
   `recover_funds_of_swap`. With `"chain_variant": "KRGN"` in the coin's entry, each header is now read by its
   algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #468; CRD ch.37
   §37.5.11.
+- **A UTXO coin in native mode (QTUM among them) on a node without fee estimation gives a clear error.** When
+  the node has no `estimatefee` method and the coins entry has no `txfee`, enabling the coin fails with a text
+  that says to set `txfee` in the coins entry. Detail: PR #552.
 
 #### Transaction history
 
@@ -1414,6 +1417,8 @@ the previous version used. The safe way:
 
 #### TRON coins
 
+- **TRON swap and approval refusals use plain texts.** A TRON coin that is asked for a swap step, an approval
+  or an allowance answers "TRON swaps are not supported in this version" and the name of the step. Detail: PR #552.
 - **A TRON withdrawal whose `fee` is `{"type":"Tron"}` is now refused with `InvalidFeePolicy`.** Before, such a
   request failed parsing, for example when the `fee_details` of an earlier TRON result was sent back as `fee`.
   TRON still works out its own fee and takes no `fee`. Every other coin treats this form as it treats any fee
@@ -1516,6 +1521,12 @@ the previous version used. The safe way:
   address and was not affected. Nothing needs to be done: no rescan and no new activation, since the
   wallet database already holds these notes. Detail: PR #542; CRD ch.39 R39.8.0ag1 (status note of
   2026-11-25).
+
+#### Peer-to-peer network
+
+- **A failed set-up of the encrypted peer-to-peer transport is reported as an error.** When the node cannot
+  prepare the encryption of its peer connections at start-up, it stops with a start-up error that names the
+  cause. Detail: PR #552.
 
 ### Tests
 

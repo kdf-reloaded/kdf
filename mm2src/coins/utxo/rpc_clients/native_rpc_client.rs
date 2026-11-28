@@ -241,6 +241,17 @@ impl fmt::Debug for NativeClientImpl {
     }
 }
 
+/// The text of a failed `estimatefee` call made while the fee method of a native coin is detected. A node that has
+/// no such method gets a text that names the cause and the fix; any other failure keeps its own text.
+fn estimate_fee_error_text(e: &UtxoRpcError) -> String {
+    let text = e.to_string();
+    if text.contains("Method not found") || text.contains("code=-32601") || text.contains("daemon error code -32601") {
+        "The node has no fee estimation method ('estimatefee' is not found); set 'txfee' in the coins entry".to_owned()
+    } else {
+        ERRL!("{}", text)
+    }
+}
+
 #[cfg(test)]
 impl Default for NativeClientImpl {
     fn default() -> Self {
@@ -793,7 +804,7 @@ impl NativeClientImpl {
                     Box::new(futures01::future::ok(EstimateFeeMethod::SmartFee))
                 } else {
                     info!("fee_rate from smart fee should be above zero, but got {:?}, trying estimatefee", smart_fee);
-                    Box::new(estimate_fee_fut.map_err(|e| ERRL!("{}", e)).and_then(|res| if res > 0. {
+                    Box::new(estimate_fee_fut.map_err(|e| estimate_fee_error_text(e.get_inner())).and_then(|res| if res > 0. {
                         Ok(EstimateFeeMethod::Standard)
                     } else {
                         ERR!("Estimate fee result should be above zero, but got {}, consider setting txfee in config", res)
@@ -801,7 +812,7 @@ impl NativeClientImpl {
                 },
                 Err(e) => {
                     error!("Error {} on estimate smart fee, trying estimatefee", e);
-                    Box::new(estimate_fee_fut.map_err(|e| ERRL!("{}", e)).and_then(|res| if res > 0. {
+                    Box::new(estimate_fee_fut.map_err(|e| estimate_fee_error_text(e.get_inner())).and_then(|res| if res > 0. {
                         Ok(EstimateFeeMethod::Standard)
                     } else {
                         ERR!("Estimate fee result should be above zero, but got {}, consider setting txfee in config", res)
@@ -1092,5 +1103,62 @@ mod daemon_answer_tests {
         );
         assert!(text.contains(&format!("http://127.0.0.1:{port}")), "{text}");
         assert!(!text.contains("URLMARKER"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod estimate_fee_error_tests {
+    use super::*;
+
+    fn node_answer(error: JsonRpcErrorType) -> UtxoRpcError {
+        UtxoRpcError::from(JsonRpcError {
+            client_info: "coin: TEST".to_owned(),
+            request: JsonRpcRequestEnum::Single(JsonRpcRequest {
+                jsonrpc: "1.0".to_owned(),
+                id: "0".to_owned(),
+                method: "estimatefee".to_owned(),
+                params: vec![json!(1)],
+            }),
+            error,
+        })
+    }
+
+    #[test]
+    fn method_not_found_names_the_cause_and_the_fix() {
+        let answer = node_answer(JsonRpcErrorType::Response(
+            JsonRpcRemoteAddr("127.0.0.1:1".to_owned()),
+            json!({"code": -32601, "message": "Method not found"}),
+        ));
+        let text = estimate_fee_error_text(&answer);
+        assert!(text.contains("no fee estimation method"), "{text}");
+        assert!(text.contains("set 'txfee' in the coins entry"), "{text}");
+    }
+
+    /// A daemon that answers an unknown method with HTTP 404 reaches the client as the text of
+    /// `failed_answer_text`, carried as a transport error; the code alone identifies it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn non_200_method_not_found_names_the_cause_and_the_fix() {
+        let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
+            jsonrpc: "1.0".to_owned(),
+            id: "0".to_owned(),
+            method: "estimatefee".to_owned(),
+            params: vec![json!(1)],
+        });
+        let body = r#"{"result":null,"error":{"code":-32601,"message":"No such RPC call"},"id":"0"}"#;
+        let failed = failed_answer_text(&request, StatusCode::NOT_FOUND, body.as_bytes(), "http://127.0.0.1:1");
+        assert!(!failed.contains("Method not found"), "{failed}");
+        let answer = node_answer(JsonRpcErrorType::Transport(failed));
+        let text = estimate_fee_error_text(&answer);
+        assert!(text.contains("no fee estimation method"), "{text}");
+        assert!(text.contains("set 'txfee' in the coins entry"), "{text}");
+    }
+
+    #[test]
+    fn other_failures_keep_their_own_text() {
+        let answer = node_answer(JsonRpcErrorType::Transport("connection refused".to_owned()));
+        let text = estimate_fee_error_text(&answer);
+        assert!(text.contains("connection refused"), "{text}");
+        assert!(!text.contains("txfee"), "{text}");
     }
 }

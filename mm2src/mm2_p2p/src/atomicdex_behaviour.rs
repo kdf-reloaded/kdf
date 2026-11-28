@@ -939,6 +939,8 @@ pub enum AdexBehaviourError {
     ListenOn { address: String, error: String },
     #[display(fmt = "Invalid WSS key or certificate configuration: {}", _0)]
     WssConfig(String),
+    #[display(fmt = "Failed to set up the encrypted P2P transport: {}", _0)]
+    NoiseConfig(String),
 }
 
 impl From<RelayAddressError> for AdexBehaviourError {
@@ -1420,7 +1422,7 @@ fn start_gossipsub(
 
     let network_info = node_type.to_network_info();
     let transport = match network_info {
-        NetworkInfo::InMemory => build_memory_transport(&local_key),
+        NetworkInfo::InMemory => build_memory_transport(&local_key)?,
         NetworkInfo::Distributed { .. } => build_dns_ws_transport(&local_key, node_type.wss_certs())?,
     };
 
@@ -1672,7 +1674,7 @@ fn build_dns_ws_transport(
 ) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     let websocket = libp2p::wasm_ext::ffi::websocket_transport();
     let transport = libp2p::wasm_ext::ExtTransport::new(websocket);
-    Ok(upgrade_transport(transport, keypair))
+    upgrade_transport(transport, keypair)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1709,12 +1711,12 @@ fn build_dns_ws_transport(
     }
 
     let transport = dns_tcp.or_transport(ws_dns_tcp);
-    Ok(upgrade_transport(transport, keypair))
+    upgrade_transport(transport, keypair)
 }
 
 fn build_memory_transport(
     keypair: &identity::Keypair,
-) -> BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)> {
+) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     let transport = libp2p::core::transport::MemoryTransport::default();
     upgrade_transport(transport, keypair)
 }
@@ -1726,7 +1728,7 @@ fn build_memory_transport(
 fn upgrade_transport<T>(
     transport: T,
     keypair: &identity::Keypair,
-) -> BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>
+) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError>
 where
     T: Transport + Send + Sync + Unpin + 'static,
     T::Output: futures::AsyncRead + futures::AsyncWrite + Unpin + Send + 'static,
@@ -1734,13 +1736,18 @@ where
     T::Dial: Send,
     T::Error: Send + Sync + 'static,
 {
-    transport
+    let noise_config = noise::Config::new(keypair).map_err(noise_error_to_behaviour_error)?;
+    Ok(transport
         .upgrade(libp2p::core::upgrade::Version::V1)
-        .authenticate(noise::Config::new(keypair).expect("Signing the noise static DH keypair failed"))
+        .authenticate(noise_config)
         .multiplex(libp2p::yamux::Config::default())
         .timeout(Duration::from_secs(20))
         .map(|(peer, muxer), _| (peer, libp2p::core::muxing::StreamMuxerBox::new(muxer)))
-        .boxed()
+        .boxed())
+}
+
+fn noise_error_to_behaviour_error(e: noise::Error) -> AdexBehaviourError {
+    AdexBehaviourError::NoiseConfig(e.to_string())
 }
 
 fn generate_ed25519_keypair<R: Rng>(rng: &mut R, force_key: Option<[u8; 32]>) -> identity::Keypair {
