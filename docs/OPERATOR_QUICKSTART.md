@@ -181,7 +181,7 @@ current hosts.
 | `netid` | Seed nodes | Source |
 |---|---|---|
 | 8762 (AtomicDEX) | `seed01.netid8762.fans`, `seed02.netid8762.fans`, `seed02.swapscope.net`, `mm2seed.shorelinecrypto.com`, `peer1.rincoin.online` | [`seed-nodes.json`](https://github.com/netid8762/coins/blob/nogeo/seed-nodes.json) of the coins repository above |
-| 6133 (GLEEC DEX) | `seed01.cipig.net`, `seed02.cipig.net`, `kdfseed1.decker.im`, `staking2.gleec.com` | The entries with `"netid": 6133` in [`seed-nodes.json`](https://github.com/GLEECBTC/coins/blob/master/seed-nodes.json) of that network's coins repository |
+| 6133 (GLEEC DEX) | `seed01.cipig.net`, `seed02.cipig.net`, `kdfseed1.decker.im`, `staking1.gleec.com`, `staking2.gleec.com`, `seed01.swapscope.net` | The entries with `"netid": 6133` in [`seed-nodes.json`](https://github.com/GLEECBTC/coins/blob/master/seed-nodes.json) of that network's coins repository |
 
 After the start, check that the node reached its seed nodes ([step 4](#4-start-the-node-and-check-its-version)).
 More about seed nodes and redials: [Seed Nodes](NETWORK_CONFIG.md#seed-nodes).
@@ -239,9 +239,10 @@ Check that the node reached the network:
 curl -s $RPC --data "{\"userpass\":\"$PASS\",\"method\":\"get_directly_connected_peers\"}"
 ```
 
-The answer lists the connected peers with their addresses. The node dials several seed nodes at start and then
-keeps two of them, so two peers are the normal state. An empty list, together with the log warning "P2P relays
-below low watermark", means that no seed node was reached: check `seednodes` and `netid`. Without peers the node
+The answer lists the connected peers with their addresses. The node dials several seed nodes at start and
+closes connections it does not need, so two or more peers are the normal state; with fewer than two the node logs
+the warning "P2P relays below low watermark" and dials more. An empty list together with that warning means that
+no seed node was reached: check `seednodes` and `netid`. Without peers the node
 still activates coins, but its orders reach nobody.
 
 To stop the node, send `{"userpass":"...","method":"stop"}` or press Ctrl-C in its terminal.
