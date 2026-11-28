@@ -532,6 +532,69 @@ has since closed.
 > keeps R17 and R29 as written. The event sets and resume maps of R19 and R32
 > are unchanged. Detail: PR #489.
 
+> **Status note (2026-11-28, Reloaded-original, clean side; maintainer
+> decision of 2026-11-28).** For an EVM coin, R17 and R29 no longer end the
+> swap when the search for the own payment cannot decide, or when the send
+> ends with an error that kept the signed transaction. No existing sentence
+> is changed.
+>
+> 1. *A search that cannot decide.* An EVM coin answers every search that
+>    cannot decide with an error that carries the mark of an undetermined
+>    read (§51.6G): a failed read of the contract's state, of the block
+>    number, of the payment events or of the payment transaction; an event
+>    without a transaction hash; an event whose transaction the node does
+>    not return; a state that reports a payment while no event is found. A
+>    failed read is named by its kind, without the node's error text. Where
+>    R100 applies to the coin, the state read is agreed by two nodes, each
+>    at its own tip, or taken from the trusted node. "Not sent" is answered
+>    only for an agreed state `Uninitialized`; a disagreement, too few
+>    answers and a silent trusted node are undetermined.
+> 2. *What the stage does with it.* A swap that the kick-start did not
+>    resume at the payment stage treats an answer with the mark as the
+>    status note of 2026-11-22 after T39.11.5A.1 in
+>    [chapter 39](39-zcash---z_coin-shielded-coin.md) describes for a
+>    resumed swap. It asks again every 30 s, at most 10 times counting the
+>    first and not later than 10 min after the stage began; "sent" adopts
+>    the payment, and "not sent" goes on to the deadline check and the
+>    send. After that nothing is sent any more, and it asks every 120 s
+>    until the refund deadline of R18: "sent" adopts the payment, "not
+>    sent" ends the stage with the payment-failed event, and so does an
+>    answer that is still undetermined at the refund deadline, with a text
+>    that names `recover_funds_of_swap`. An error without the mark ends the
+>    stage with the payment-failed event at once, as R17 and R29 state, at
+>    any attempt. A resumed swap asks again after every error, as before.
+> 3. *A send that ended with an error.* When the error kept no signed
+>    transaction, or the coin has no read for such a send, the stage ends
+>    with the payment-failed event at once, as before. An EVM coin has the
+>    read when the kept transaction is the swap's payment call; the
+>    approval of a token is not. The payment is then treated as possibly
+>    sent: nothing is sent again, and the read is asked at the pace of
+>    item 2 until the refund deadline. A payment the contract holds is
+>    adopted, and the swap goes on as after a successful send
+>    (`MakerPaymentSent`, `TakerPaymentSent`), so its refund chain covers
+>    the payment. "Not sent" is answered only while the contract's state
+>    is `Uninitialized` (agreed where R100 applies) and either no node
+>    asked returns the kept transaction, a node beside the agreeing ones
+>    included, or the transaction is mined and failed. Two such answers in
+>    a row, 30 s apart, end the stage with the payment-failed event and
+>    the send's error. A transaction that a node returns and that is not
+>    mined, one that is mined while the state is still `Uninitialized`, a
+>    failed read and a disagreement are undetermined and asked again. An
+>    answer still undetermined at the refund deadline ends the stage with
+>    the payment-failed event; its text says that nothing more was sent
+>    and names `recover_funds_of_swap`.
+> 4. *Kept as it was.* No event is written while the stage waits, so a
+>    restart resumes at the payment stage. A definite "not sent", a passed
+>    send deadline, an error without the mark and a send error without a
+>    kept transaction end with the payment-failed event as before. For an
+>    answer with the mark, and for the read after a failed send, the stored
+>    text and the warnings name the kind of the last error only. The reads
+>    and the sends of the other coin families, the event sets and the
+>    resume maps of R19 and R32 are unchanged. The stage acts on the mark
+>    whichever coin gives it: a coin of another family whose search, agreed
+>    under R100, is undetermined is asked again as item 2 says. No other
+>    family has a read for a failed send. Detail: PR #N.
+
 **R30.** *Await spend.* `STAGE-AWAIT-TAKER-PAYMENT-SPEND` MUST
 repeatedly broadcast the taker payment message on a fifteen-second
 interval and, when the coin pair supports third-party watchers and both
@@ -3998,3 +4061,9 @@ reference rows alike.
   `paused` member of `my_orders` and `order_status`. Reloaded-original; it
   records the maintainer's decision of 2026-11-28, takes no reference input
   and no forbidden-class input, and changes no sentence of the chapter.
+- *Clean-side addition of 2026-11-28 (PR #N):* the status note after R29 on
+  the payment stage of an EVM coin when the search for the own payment
+  cannot decide or the send ends with an error that kept the signed
+  transaction. Reloaded-original; it records the maintainer's decision of
+  2026-11-28, takes no reference input and no forbidden-class input, and
+  changes no sentence of the chapter.

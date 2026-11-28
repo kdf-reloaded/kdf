@@ -1,5 +1,6 @@
 //! SwapOps and WatcherOps trait implementations for EthCoin.
 
+use super::eth_swap_evidence::OwnPaymentState;
 use super::*;
 use crate::eth::tron::swap::send as tron_send;
 use crate::eth::tron::TronAddress;
@@ -411,6 +412,8 @@ impl SwapOps for EthCoin {
         from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+        use crate::eth::alloy_compat::assert_send_future;
+
         // A TRON coin reads `payments(id)` of the selected contract under the 32-byte secret hash (CRD ch.21
         // §21.11C); a failed read is an error and never "not sent".
         if self.is_tron_family() {
@@ -419,88 +422,59 @@ impl SwapOps for EthCoin {
         let id = self.etomic_swap_id(time_lock, secret_hash);
         let swap_contract_address = try_fus!(swap_contract_address.try_to_address());
         let selfi = self.clone();
+        // CRD ch.51, status note of 2026-11-28 after R29: the state decides "not sent", agreed between two nodes
+        // under an agreed policy; every answer that cannot decide is an error with the undetermined marker.
         let fut = async move {
-            let status = try_s!(
-                selfi
-                    .payment_status(swap_contract_address, Token::FixedBytes(id.clone()))
-                    .compat()
-                    .await
-            );
-
-            if status == PAYMENT_STATE_UNINITIALIZED.into() {
+            let state = assert_send_future(selfi.own_payment_state(swap_contract_address, &id)).await?;
+            if state == OwnPaymentState::Absent {
                 return Ok(None);
-            };
-
-            let mut current_block = try_s!(selfi.current_block().compat().await);
-            if current_block < from_block {
-                current_block = from_block;
             }
-
-            let search_from_block = from_block;
-            let mut from_block = from_block;
-
-            loop {
-                let to_block = selfi.log_window_end(from_block, current_block);
-
-                let events = try_s!(
-                    selfi
-                        .payment_sent_events(swap_contract_address, from_block, to_block)
-                        .compat()
-                        .await
-                );
-
-                let found = events.iter().find(|event| &event.data.0[..32] == id.as_slice());
-
-                match found {
-                    Some(event) => {
-                        // LP-17: alloy `Provider::get_transaction_by_hash` replaces
-                        // `web3.eth().transaction(...)`. The fetched alloy
-                        // `Transaction` is round-tripped through
-                        // `signed_tx_from_alloy_tx` which reconstructs the
-                        // legacy `UnverifiedTransaction` (artemii235 fork).
-                        use crate::eth::alloy_compat::assert_send_future;
-                        use alloy::providers::Provider;
-
-                        let provider = selfi.alloy_provider();
-                        let Some(hash) = event.transaction_hash else {
-                            return ERR!("The node returned a payment event without a transaction hash");
-                        };
-                        let event_hash = alloy::primitives::B256::from_slice(&hash.0);
-                        let transaction =
-                            try_s!(assert_send_future(provider.get_transaction_by_hash(event_hash)).await);
-                        match transaction {
-                            Some(t) => break Ok(Some(try_s!(signed_tx_from_alloy_tx(t)).into())),
-                            // CRD ch.39 R39.11.5A.6, D39.11.5A.1 (a): an event without its transaction does
-                            // not show that no payment exists.
-                            None => {
-                                break ERR!(
-                                    "Undetermined whether the payment was sent: a payment event was found in \
-                                     block range {} to {}, but the node does not return its transaction {:#x}",
-                                    from_block,
-                                    to_block,
-                                    event_hash
-                                )
-                            },
-                        }
-                    },
-                    None => {
-                        if to_block >= current_block {
-                            // CRD ch.39 R39.11.5A.4, D39.11.5A.1 (a): this point is reached only with a
-                            // contract state other than `Uninitialized` (checked above), so a search that
-                            // ends without the event contradicts the state.
-                            break ERR!(
-                                "Undetermined whether the payment was sent: the swap contract reports a \
-                                 payment for this swap, but no payment event was found in blocks {} to {}",
-                                search_from_block,
-                                current_block
-                            );
-                        }
-                        from_block = to_block + 1;
-                    },
-                }
-            }
+            let payment = assert_send_future(selfi.find_own_sent_payment(swap_contract_address, &id, from_block));
+            Ok(Some(payment.await?.into()))
         };
         Box::new(fut.boxed().compat())
+    }
+
+    /// An EVM coin has this read for a kept transaction that is the payment call of the swap (CRD ch.51, status
+    /// note of 2026-11-28 after R29). A TRON coin, a transaction of another family, and a kept transaction that is
+    /// not that call (the approval of a token, after which no payment was signed) have none.
+    ///
+    /// The contract's state of the swap id decides first, as in [`SwapOps::check_if_my_payment_sent`]: with a
+    /// payment in the contract the answer is the transaction the event search finds. With none, "not sent" is
+    /// answered only when no node asked returns the kept transaction, or when it is mined with a failed status.
+    fn check_if_my_payment_sent_after_failed_send(
+        &self,
+        failed_tx: &TransactionEnum,
+        time_lock: u32,
+        secret_hash: &[u8],
+        search_from_block: u64,
+        swap_contract_address: &Option<BytesJson>,
+    ) -> Option<Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send>> {
+        use crate::eth::alloy_compat::assert_send_future;
+
+        if self.is_tron_family() {
+            return None;
+        }
+        let TransactionEnum::SignedEthTx(failed_tx) = failed_tx else {
+            return None;
+        };
+        let swap_contract_address = swap_contract_address.try_to_address().ok()?;
+        let id = self.etomic_swap_id(time_lock, secret_hash);
+        if !self.is_own_payment_call(failed_tx, swap_contract_address, &id) {
+            return None;
+        }
+        let (selfi, failed_hash) = (self.clone(), failed_tx.tx_hash());
+        let fut = async move {
+            let state = assert_send_future(selfi.own_payment_state(swap_contract_address, &id)).await?;
+            if state == OwnPaymentState::Present {
+                let payment =
+                    assert_send_future(selfi.find_own_sent_payment(swap_contract_address, &id, search_from_block));
+                return Ok(Some(payment.await?.into()));
+            }
+            assert_send_future(selfi.failed_send_left_no_payment(failed_hash)).await?;
+            Ok(None)
+        };
+        Some(Box::new(fut.boxed().compat()))
     }
 
     /// A TRON coin also compares the stored payment hash with the one of the payment this swap would send;

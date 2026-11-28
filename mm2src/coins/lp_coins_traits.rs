@@ -118,6 +118,30 @@ pub trait SwapOps {
         )
     }
 
+    /// Whether a payment of this swap is on chain after a payment send that ended with an error which kept the
+    /// signed transaction `failed_tx` ([`TransactionErr::get_tx`]): a broadcast no node confirmed, which a node may
+    /// still have taken (CRD ch.51, status note of 2026-11-28 after R29). The swap machine asks it instead of
+    /// ending the payment step at once.
+    ///
+    /// `None` says that this coin has no such read for `failed_tx`, which is the default: the payment step then
+    /// ends as it always did. A coin that has the read returns it, and the read answers in the shape of
+    /// [`SwapOps::check_if_my_payment_sent`]:
+    ///
+    /// - `Ok(Some(tx))`: a payment of this swap is on chain; `tx` is that payment, which may be `failed_tx` or an
+    ///   earlier payment of the same swap;
+    /// - `Ok(None)`: `failed_tx` did not pay and can pay no more;
+    /// - `Err`: the read cannot decide. The text carries the marker of [`crate::swap_evidence::undetermined`].
+    fn check_if_my_payment_sent_after_failed_send(
+        &self,
+        _failed_tx: &TransactionEnum,
+        _time_lock: u32,
+        _secret_hash: &[u8],
+        _search_from_block: u64,
+        _swap_contract_address: &Option<BytesJson>,
+    ) -> Option<Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send>> {
+        None
+    }
+
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,

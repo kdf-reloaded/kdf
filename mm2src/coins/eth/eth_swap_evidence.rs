@@ -14,6 +14,9 @@
 //! - `EthCoin::agreed_swap_reads`: the policy the reads are agreed under, `None` while the coin reads as before.
 //! - `EthCoin::agreed_payment_read`, `EthCoin::agreed_swap_tx_spend`, `EthCoin::wait_for_agreed_payment_spend`,
 //!   `EthCoin::agreed_refund_gate`: the three reads.
+//! - `EthCoin::own_payment_state`, `EthCoin::find_own_sent_payment`, `EthCoin::is_own_payment_call`,
+//!   `EthCoin::failed_send_left_no_payment`: the reads behind the already-sent question of the wallet's own payment
+//!   (CRD ch.51, status note of 2026-11-28 after R29).
 //!
 //! # Invariants
 //!
@@ -1226,6 +1229,338 @@ impl EthCoin {
             }
             Timer::sleep(check_every).await;
         }
+    }
+}
+
+/// What the legacy swap contract shows of a payment id, as far as the already-sent question needs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum OwnPaymentState {
+    /// The state `Uninitialized`: the contract holds no payment of this id.
+    Absent,
+    /// Any other state: a payment of this id was mined.
+    Present,
+}
+
+fn own_payment_state_of(state: &U256) -> OwnPaymentState {
+    if *state == U256::from(PAYMENT_STATE_UNINITIALIZED) {
+        OwnPaymentState::Absent
+    } else {
+        OwnPaymentState::Present
+    }
+}
+
+/// What one node shows of a transaction whose send ended with an error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FailedSendFate {
+    /// The node does not return the transaction.
+    Unknown,
+    /// The node returns the transaction and has no receipt of it.
+    Pending,
+    /// The transaction is mined and succeeded.
+    Mined,
+    /// The transaction is mined and failed.
+    MinedFailed,
+}
+
+/// The fate of the transaction `hash` as one node shows it.
+async fn failed_send_fate_on(node: Web3Instance, hash: H256) -> Result<FailedSendFate, String> {
+    if node.transaction_by_hash(hash).await?.is_none() {
+        return Ok(FailedSendFate::Unknown);
+    }
+    Ok(match node.receipt_facts(hash).await? {
+        None => FailedSendFate::Pending,
+        Some(facts) if facts.succeeded => FailedSendFate::Mined,
+        Some(_) => FailedSendFate::MinedFailed,
+    })
+}
+
+// The fixed reasons of an own-payment read that cannot decide (CRD ch.51, status note of 2026-11-28 after R29).
+const STATE_READ_FAILED: &str = "the read of the payment state failed";
+const BLOCK_NUMBER_READ_FAILED: &str = "the read of the block number failed";
+const EVENTS_REQUEST_FAILED: &str = "a payment-events request failed";
+const EVENT_WITHOUT_HASH: &str = "the node returned a payment event without a transaction hash";
+const PAYMENT_TX_READ_FAILED: &str = "the read of the payment transaction failed";
+const PAYMENT_TX_NOT_DECODED: &str = "the payment transaction the node returned cannot be decoded";
+const EVENT_WITHOUT_TX: &str = "a payment event was found, but the node does not return its transaction";
+const STATE_WITHOUT_EVENT: &str = "the swap contract reports a payment for this swap, but no payment event was found";
+const FAILED_SEND_READ_FAILED: &str = "the read of the transaction of the failed send failed";
+const FAILED_SEND_PENDING: &str = "a node returns the transaction of the failed send, and it is not mined";
+const FAILED_SEND_MINED_WITHOUT_STATE: &str =
+    "the transaction of the failed send is mined, but the swap contract does not report the payment";
+const FAILED_SEND_KNOWN_ELSEWHERE: &str = "another node of the coin returns the transaction of the failed send";
+
+/// The error of an own-payment read that cannot decide: the marker of [`crate::swap_evidence::undetermined`] with
+/// the fixed `reason`, then `detail` (chain data: a block range, a transaction hash; never a node's text).
+fn own_payment_undetermined(reason: &str, detail: &str) -> String {
+    format!(
+        "Undetermined whether the payment was sent: {}{}",
+        crate::swap_evidence::undetermined(reason, &[]),
+        detail
+    )
+}
+
+/// The reads behind the already-sent question of the wallet's own legacy payment (CRD ch.39 §39.11.5A; ch.51, status
+/// note of 2026-11-28 after R29). Every answer that cannot decide is an error with the marker of
+/// [`crate::swap_evidence::undetermined`]; the text of a node's error is logged at DEBUG and is not part of it.
+impl EthCoin {
+    /// Logs the node's text of a failed own-payment read at DEBUG; the error the caller returns names the kind only.
+    fn debug_own_payment_read(&self, id: &[u8], reason: &str, node_text: &dyn fmt::Display) {
+        debug!(
+            "[{}] already-sent question of payment {}: {}: {}",
+            self.ticker(),
+            hex::encode(id),
+            reason,
+            node_text
+        );
+    }
+
+    /// Whether the legacy swap contract at `swap_contract_address` holds a payment `id`. Under an agreed policy two
+    /// nodes, each at its own latest block, or the trusted node alone, decide; without one the state is read once
+    /// through the coin's node failover.
+    ///
+    /// # Errors
+    ///
+    /// The read cannot decide: it failed, the nodes disagree, too few of them answer, or the trusted node is silent.
+    /// The text carries the marker of [`crate::swap_evidence::undetermined`]. Such a read is never answered as
+    /// [`OwnPaymentState::Absent`].
+    pub(crate) async fn own_payment_state(
+        &self,
+        swap_contract_address: Address,
+        id: &[u8],
+    ) -> Result<OwnPaymentState, String> {
+        let Some(policy) = self.agreed_swap_reads() else {
+            let read = self.payment_status(swap_contract_address, Token::FixedBytes(id.to_vec()));
+            return match read.compat().await {
+                Ok(state) => Ok(own_payment_state_of(&state)),
+                Err(e) => {
+                    self.debug_own_payment_read(id, STATE_READ_FAILED, &e);
+                    Err(own_payment_undetermined(STATE_READ_FAILED, ""))
+                },
+            };
+        };
+        let outcome = if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
+            Self::too_few_nodes()
+        } else {
+            let (from, payment_id) = (self.my_address, id.to_vec());
+            assert_send_future(self.agree_at_own_tips(
+                &policy,
+                false,
+                move |node: Web3Instance, at: u64| {
+                    let payment_id = payment_id.clone();
+                    assert_send_future(async move {
+                        node.payment_state_at(from, swap_contract_address, &payment_id, at)
+                            .await
+                    })
+                },
+                own_payment_state_of,
+                |_| false,
+            ))
+            .await
+        };
+        match outcome {
+            Agreement::Agreed { decision, .. } => Ok(decision.decision),
+            Agreement::Undetermined(undetermined) => {
+                let subject = format!("payment {}", hex::encode(id));
+                Err(self.report_undetermined("own payment state", &subject, &undetermined))
+            },
+        }
+    }
+
+    /// The transaction of the wallet's own payment `id`, found by its `PaymentSent` event in the blocks from
+    /// `from_block` up to the current block (CRD ch.39 R39.11.5A.2, reads 2 to 4), through the coin's node failover.
+    /// It is called only after [`EthCoin::own_payment_state`] answered [`OwnPaymentState::Present`], so a search that
+    /// does not end with the transaction contradicts the state and cannot decide.
+    ///
+    /// # Errors
+    ///
+    /// A read failed, the event has no transaction hash, the node does not return or the coin cannot decode the
+    /// event's transaction, or no event is in the range. The text carries the marker of
+    /// [`crate::swap_evidence::undetermined`].
+    pub(crate) async fn find_own_sent_payment(
+        &self,
+        swap_contract_address: Address,
+        id: &[u8],
+        from_block: u64,
+    ) -> Result<SignedEthTx, String> {
+        use alloy::providers::Provider;
+
+        let search_from_block = from_block;
+        let mut current_block = match self.current_block().compat().await {
+            Ok(block) => block,
+            Err(e) => {
+                self.debug_own_payment_read(id, BLOCK_NUMBER_READ_FAILED, &e);
+                return Err(own_payment_undetermined(BLOCK_NUMBER_READ_FAILED, ""));
+            },
+        };
+        if current_block < from_block {
+            current_block = from_block;
+        }
+        let mut from_block = from_block;
+        loop {
+            let to_block = self.log_window_end(from_block, current_block);
+            let request = self.payment_sent_events(swap_contract_address, from_block, to_block);
+            let events = match request.compat().await {
+                Ok(events) => events,
+                Err(e) => {
+                    self.debug_own_payment_read(id, EVENTS_REQUEST_FAILED, &e);
+                    let detail = format!(" (blocks {} to {})", from_block, to_block);
+                    return Err(own_payment_undetermined(EVENTS_REQUEST_FAILED, &detail));
+                },
+            };
+            let Some(event) = events.iter().find(|event| event.data.0.get(..32) == Some(id)) else {
+                if to_block >= current_block {
+                    // CRD ch.39 R39.11.5A.4, D39.11.5A.1 (a): the state said a payment exists, so a search that ends
+                    // without the event contradicts the state.
+                    let detail = format!(" in blocks {} to {}", search_from_block, current_block);
+                    return Err(own_payment_undetermined(STATE_WITHOUT_EVENT, &detail));
+                }
+                from_block = to_block + 1;
+                continue;
+            };
+            let Some(hash) = event.transaction_hash else {
+                let detail = format!(" (blocks {} to {})", from_block, to_block);
+                return Err(own_payment_undetermined(EVENT_WITHOUT_HASH, &detail));
+            };
+            let event_hash = alloy::primitives::B256::from_slice(&hash.0);
+            let provider = self.alloy_provider();
+            let transaction = match assert_send_future(provider.get_transaction_by_hash(event_hash)).await {
+                Ok(transaction) => transaction,
+                Err(e) => {
+                    self.debug_own_payment_read(id, PAYMENT_TX_READ_FAILED, &e);
+                    let detail = format!(" ({:#x})", event_hash);
+                    return Err(own_payment_undetermined(PAYMENT_TX_READ_FAILED, &detail));
+                },
+            };
+            return match transaction {
+                Some(transaction) => signed_tx_from_alloy_tx(transaction).map_err(|e| {
+                    self.debug_own_payment_read(id, PAYMENT_TX_NOT_DECODED, &e);
+                    own_payment_undetermined(PAYMENT_TX_NOT_DECODED, &format!(" ({:#x})", event_hash))
+                }),
+                // CRD ch.39 R39.11.5A.6, D39.11.5A.1 (a): an event without its transaction does not show that no
+                // payment exists.
+                None => {
+                    let detail = format!(" {:#x} (block range {} to {})", event_hash, from_block, to_block);
+                    Err(own_payment_undetermined(EVENT_WITHOUT_TX, &detail))
+                },
+            };
+        }
+    }
+
+    /// Whether `tx` is the payment call of the swap `id` to the swap contract at `swap_contract_address`
+    /// (`ethPayment`, or `erc20Payment` for a token). A send that ended at an earlier transaction, the approval of a
+    /// token, kept that transaction, and it is not a payment.
+    pub(crate) fn is_own_payment_call(&self, tx: &SignedEthTx, swap_contract_address: Address, id: &[u8]) -> bool {
+        let function = match self.coin_type {
+            EthCoinType::Eth => "ethPayment",
+            EthCoinType::Erc20 { .. } => "erc20Payment",
+            EthCoinType::Tron | EthCoinType::Trc20 { .. } => return false,
+        };
+        let Ok(function) = SWAP_CONTRACT.function(function) else {
+            return false;
+        };
+        if !matches!(&tx.action, Action::Call(to) if *to == swap_contract_address) {
+            return false;
+        }
+        let Some((selector, args)) = tx.data.split_at_checked(4) else {
+            return false;
+        };
+        if selector != function.short_signature() {
+            return false;
+        }
+        match function.decode_input(args) {
+            Ok(tokens) => matches!(tokens.first(), Some(Token::FixedBytes(called)) if called.as_slice() == id),
+            Err(_) => false,
+        }
+    }
+
+    /// Answers `Ok(())` when the transaction `hash`, whose send ended with an error, can pay no more: no node asked
+    /// returns it, or it is mined with a failed status. The caller has read the contract's state of the payment as
+    /// [`OwnPaymentState::Absent`] before.
+    ///
+    /// Under an agreed policy two nodes, each at its own latest block, or the trusted node alone, must show the same
+    /// fate. A node that returns the transaction while it is not mined and failed is taken alone, from any node of
+    /// the coin: a returned transaction proves that the node holds it. Without a policy the transaction and its
+    /// receipt are read once through the coin's node failover.
+    ///
+    /// On either path, when that read does not return the transaction, every node of the coin is asked for it once
+    /// more, and the transaction counts as returned when any of them returns it.
+    ///
+    /// # Errors
+    ///
+    /// Everything else, with the marker of [`crate::swap_evidence::undetermined`]: a node returns the transaction
+    /// and it is not mined, it is mined and succeeded while the state read before did not show the payment, a read
+    /// failed, the nodes disagree, too few of them answer, or the trusted node is silent.
+    pub(crate) async fn failed_send_left_no_payment(&self, hash: H256) -> Result<(), String> {
+        let transaction = format!(" ({:#x})", hash);
+        let fate = match self.agreed_swap_reads() {
+            None => self.failed_send_fate_by_failover(hash).await?,
+            Some(policy) => {
+                let outcome = if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
+                    Self::too_few_nodes()
+                } else {
+                    assert_send_future(self.agree_at_own_tips(
+                        &policy,
+                        true,
+                        move |node: Web3Instance, _at: u64| assert_send_future(failed_send_fate_on(node, hash)),
+                        |fate: &FailedSendFate| *fate,
+                        |fate| matches!(fate, FailedSendFate::Pending | FailedSendFate::Mined),
+                    ))
+                    .await
+                };
+                match outcome {
+                    Agreement::Agreed { decision, .. } => decision.decision,
+                    Agreement::Undetermined(undetermined) => {
+                        let subject = format!("transaction {:#x}", hash);
+                        return Err(self.report_undetermined("state of the failed send", &subject, &undetermined));
+                    },
+                }
+            },
+        };
+        if fate == FailedSendFate::Unknown && self.any_node_returns(hash).await {
+            return Err(own_payment_undetermined(FAILED_SEND_KNOWN_ELSEWHERE, &transaction));
+        }
+        match fate {
+            FailedSendFate::Unknown | FailedSendFate::MinedFailed => Ok(()),
+            FailedSendFate::Pending => Err(own_payment_undetermined(FAILED_SEND_PENDING, &transaction)),
+            FailedSendFate::Mined => Err(own_payment_undetermined(FAILED_SEND_MINED_WITHOUT_STATE, &transaction)),
+        }
+    }
+
+    /// The fate of the transaction `hash` read once through the coin's node failover.
+    async fn failed_send_fate_by_failover(&self, hash: H256) -> Result<FailedSendFate, String> {
+        use alloy::providers::Provider;
+
+        let failed = |e: &dyn fmt::Display| {
+            debug!("[{}] {} ({:#x}): {}", self.ticker(), FAILED_SEND_READ_FAILED, hash, e);
+            own_payment_undetermined(FAILED_SEND_READ_FAILED, &format!(" ({:#x})", hash))
+        };
+        let provider = self.alloy_provider();
+        let alloy_hash = alloy::primitives::B256::from_slice(&hash.0);
+        match assert_send_future(provider.get_transaction_by_hash(alloy_hash)).await {
+            Ok(Some(_)) => (),
+            Ok(None) => return Ok(FailedSendFate::Unknown),
+            Err(e) => return Err(failed(&e)),
+        }
+        match assert_send_future(provider.get_transaction_receipt(alloy_hash)).await {
+            Ok(None) => Ok(FailedSendFate::Pending),
+            Ok(Some(receipt)) if receipt.inner.status() => Ok(FailedSendFate::Mined),
+            Ok(Some(_)) => Ok(FailedSendFate::MinedFailed),
+            Err(e) => Err(failed(&e)),
+        }
+    }
+
+    /// Whether any node of the coin returns the transaction `hash`: every node is asked at the same time, each on
+    /// its own, and one that returns the transaction is enough. A node that does not answer, or does not return the
+    /// transaction, says nothing.
+    async fn any_node_returns(&self, hash: H256) -> bool {
+        let asking = self.web3_instances.iter().map(|instance| {
+            let instance = instance.clone();
+            assert_send_future(async move { instance.transaction_by_hash(hash).await })
+        });
+        join_all(asking)
+            .await
+            .into_iter()
+            .any(|answer| matches!(answer, Ok(Some(_))))
     }
 }
 

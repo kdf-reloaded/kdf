@@ -61,6 +61,8 @@ struct Node {
     /// The block and the success of the receipt the node returns for the transaction whose receipt is asked, when
     /// it has one.
     receipt: Option<(u64, bool)>,
+    /// The block of the `PaymentSent` log of the payment, when the node serves one.
+    payment_event: Option<u64>,
 }
 
 #[derive(Default)]
@@ -69,6 +71,9 @@ struct World {
     payment: Mutex<Option<SignedEthTx>>,
     /// `(host, method, params)` of every request, in arrival order.
     seen: Mutex<Vec<(String, String, Json)>>,
+    /// The host whose script the coin's failover provider follows. While `None`, the failover provider fails every
+    /// request: no agreed read may reach it.
+    failover: Mutex<Option<String>>,
 }
 
 fn event_topic(event: &str) -> String {
@@ -153,15 +158,24 @@ fn rpc_block(number: u64, timestamp: u64) -> Json {
 fn block_of(value: &Json) -> u64 { u64::from_str_radix(value.as_str().unwrap().trim_start_matches("0x"), 16).unwrap() }
 
 fn answer(world: &World, call: &Call) -> Reply {
+    // The failover provider follows the script of the node a test chose for it.
+    let host = if call.host == host_of(FAILOVER) {
+        match world.failover.lock().unwrap().clone() {
+            Some(host) => host,
+            None => return Reply::Fail("the failover provider must not be asked".to_owned()),
+        }
+    } else {
+        call.host.clone()
+    };
     let params = call.request["params"].clone();
     world
         .seen
         .lock()
         .unwrap()
         .push((call.host.clone(), call.method.clone(), params.clone()));
-    let node = match world.nodes.lock().unwrap().get(&call.host) {
+    let node = match world.nodes.lock().unwrap().get(&host) {
         Some(node) => node.clone(),
-        None => panic!("no script for the node {}", call.host),
+        None => panic!("no script for the node {}", host),
     };
     if node.down {
         return Reply::Fail("connection refused".to_owned());
@@ -169,7 +183,12 @@ fn answer(world: &World, call: &Call) -> Reply {
     let payment = world.payment.lock().unwrap().clone().expect("the payment is set");
     let result = match call.method.as_str() {
         "eth_call" => {
-            let block = block_of(&params[1]);
+            // The failover provider reads the state at `latest`; a directed read names the block.
+            let block = if params[1] == json!("latest") {
+                node.tip
+            } else {
+                block_of(&params[1])
+            };
             if block > node.tip {
                 return Reply::Body(error_body(&call.request, -32000, "header not found"));
             }
@@ -212,6 +231,22 @@ fn answer(world: &World, call: &Call) -> Reply {
             let (from, to) = (block_of(&filter["fromBlock"]), block_of(&filter["toBlock"]));
             let asked_topic = filter["topics"][0].to_string();
             match &node.spend {
+                // The `PaymentSent` log of the payment: its data starts with the payment id, the first argument of
+                // the payment call.
+                _ if asked_topic.contains(&event_topic("PaymentSent")) => match node.payment_event {
+                    Some(block) if (from..=to).contains(&block) && block <= node.tip => json!([{
+                        "address": filter["address"],
+                        "topics": [event_topic("PaymentSent")],
+                        "data": format!("0x{}", hex::encode(&payment.data[4..36])),
+                        "blockHash": format!("0x{}", "22".repeat(32)),
+                        "blockNumber": format!("{:#x}", block),
+                        "transactionHash": format!("{:#x}", payment.tx_hash()),
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x0",
+                        "removed": false,
+                    }]),
+                    _ => json!([]),
+                },
                 Some(spend)
                     if asked_topic.contains(&event_topic(spend.event))
                         && (from..=to).contains(&spend.block)
@@ -313,11 +348,11 @@ impl Fixture {
                 spend: None,
                 knows_payment: true,
                 receipt: None,
+                payment_event: None,
             });
         }
-        let (web3, failover) = stub_provider(&[FAILOVER], 10., |_| {
-            Reply::Fail("the failover provider must not be asked".to_owned())
-        });
+        let failover_world = world.clone();
+        let (web3, failover) = stub_provider(&[FAILOVER], 10., move |call| answer(&failover_world, call));
         let token_addr = match &coin_type {
             EthCoinType::Erc20 { token_addr, .. } => Some(*token_addr),
             _ => None,
@@ -1221,6 +1256,418 @@ fn the_readiness_probe_bounds_its_own_exchange() {
         instance.readiness_probe(crate::swap_evidence::READY_PROBE_TIMEOUT_SECS)
     ));
     assert_eq!(sender.bounds(), vec![crate::swap_evidence::READY_PROBE_TIMEOUT_SECS]);
+}
+
+// ---- O: the wallet's own payment (CRD ch.51, status note of 2026-11-28 after R29) ----
+
+impl Fixture {
+    fn contract_arg(&self) -> Option<BytesJson> { Some(self.coin.swap_contract_address.as_bytes().to_vec().into()) }
+
+    /// The already-sent question of the fixture's payment, searched from block 80.
+    fn own_payment_sent(&self) -> Result<Option<TransactionEnum>, String> {
+        block_on(
+            self.coin
+                .check_if_my_payment_sent(self.time_lock, &[], &[], &secret_hash(), 80, &self.contract_arg())
+                .compat(),
+        )
+    }
+
+    /// The read for `kept`, the transaction a failed send kept; `None` when the coin has no such read for it.
+    fn sent_after_failed_send(&self, kept: &TransactionEnum) -> Option<Result<Option<TransactionEnum>, String>> {
+        self.coin
+            .check_if_my_payment_sent_after_failed_send(kept, self.time_lock, &secret_hash(), 80, &self.contract_arg())
+            .map(|read| block_on(read.compat()))
+    }
+
+    /// [`Fixture::sent_after_failed_send`] for the fixture's payment, a payment call the coin has the read for.
+    fn payment_after_failed_send(&self) -> Result<Option<TransactionEnum>, String> {
+        self.sent_after_failed_send(&self.payment.clone().into())
+            .expect("the coin has the read for its payment call")
+    }
+
+    /// The coin's failover provider answers as the node `url` does, and that node serves the `PaymentSent` log of
+    /// the payment in block 90.
+    fn failover_follows(&self, url: &str) {
+        *self.world.failover.lock().unwrap() = Some(host_of(url));
+        self.set(url, |node| node.payment_event = Some(90));
+    }
+
+    /// The contract of the nodes `urls` holds no payment.
+    fn not_in_contract(&self, urls: &[&str]) {
+        for url in urls {
+            self.set(url, |node| node.states.clear());
+        }
+    }
+
+    /// The nodes `urls` do not return the payment transaction.
+    fn unknown_to(&self, urls: &[&str]) {
+        for url in urls {
+            self.set(url, |node| node.knows_payment = false);
+        }
+    }
+
+    /// The nodes `urls` return a receipt of the payment transaction, mined in block 95.
+    fn mined_on(&self, urls: &[&str], succeeded: bool) {
+        for url in urls {
+            self.set(url, |node| node.receipt = Some((95, succeeded)));
+        }
+    }
+
+    fn found(&self) -> Result<Option<TransactionEnum>, String> { Ok(Some(self.payment.clone().into())) }
+}
+
+/// Asserts that `answer` is an error with the undetermined mark and `reason` in its text: an answer that cannot
+/// decide is never "not sent".
+fn assert_cannot_decide(answer: Result<Option<TransactionEnum>, String>, reason: &str) {
+    let Err(text) = answer else {
+        panic!("an answer that cannot decide was given as a decided one");
+    };
+    assert!(is_undetermined(&text), "the error does not carry the undetermined mark");
+    assert!(text.contains(reason), "the error does not name its reason");
+    assert!(!text.contains("http://"), "the error names a node by a URL");
+}
+
+#[test]
+fn own_payment_absent_on_two_nodes_is_not_sent() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B]);
+    assert_eq!(fx.own_payment_sent(), Ok(None));
+    // Each node of the pair: its latest block, then the state at that block.
+    for node in [A, B] {
+        assert_eq!(fx.asked(node), ["eth_getBlockByNumber", "eth_call"]);
+        assert_eq!(fx.call_blocks(node), [100]);
+    }
+    assert!(fx.asked(C).is_empty(), "a third node was asked");
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn own_payment_differing_states_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    // Node B's contract does not hold the payment node A shows.
+    fx.not_in_contract(&[B]);
+    assert_cannot_decide(fx.own_payment_sent(), "the nodes disagree");
+    // The other way round.
+    fx.not_in_contract(&[A]);
+    fx.set(B, |node| node.states = vec![(90, SENT)]);
+    assert_cannot_decide(fx.own_payment_sent(), "the nodes disagree");
+    assert!(fx.asked(C).is_empty(), "a third node was asked to outvote the pair");
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn own_payment_one_answering_node_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    fx.set(B, |node| node.down = true);
+    fx.set(C, |node| node.down = true);
+    assert_cannot_decide(fx.own_payment_sent(), "fewer than two nodes answered");
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn own_payment_of_the_trusted_node_decides_alone() {
+    let fx = Fixture::eth(&[A, B], trusting("b.example:8545", &[A, B]));
+    // Node A shows the payment; it is not asked.
+    fx.not_in_contract(&[B]);
+    assert_eq!(fx.own_payment_sent(), Ok(None));
+    assert!(fx.asked(A).is_empty(), "a node beside the trusted one was asked");
+
+    fx.set(B, |node| node.down = true);
+    assert_cannot_decide(fx.own_payment_sent(), "the trusted node did not answer");
+    assert!(
+        fx.asked(A).is_empty(),
+        "another node was asked in place of the trusted one"
+    );
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn own_payment_with_too_few_nodes_asks_no_node() {
+    let fx = Fixture::eth(&[A, A2], listed(&[A, A2]));
+    fx.not_in_contract(&[A]);
+    fx.unknown_to(&[A]);
+    assert_cannot_decide(fx.own_payment_sent(), "fewer than two nodes answered");
+    assert_cannot_decide(fx.payment_after_failed_send(), "fewer than two nodes answered");
+    assert!(
+        fx.world.seen.lock().unwrap().is_empty(),
+        "a node was asked for a read nothing can decide"
+    );
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn own_payment_present_on_two_nodes_is_found_by_its_event() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.failover_follows(C);
+    assert_eq!(fx.own_payment_sent(), fx.found());
+    // The state is agreed by the pair; the search goes through the failover provider as before.
+    assert_eq!(fx.asked(FAILOVER), [
+        "eth_blockNumber",
+        "eth_getLogs",
+        "eth_getTransactionByHash"
+    ]);
+}
+
+#[test]
+fn own_payment_present_without_its_event_or_transaction_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.failover_follows(C);
+    fx.set(C, |node| node.payment_event = None);
+    assert_cannot_decide(fx.own_payment_sent(), "no payment event was found in blocks 80 to 100");
+
+    fx.set(C, |node| {
+        node.payment_event = Some(90);
+        node.knows_payment = false;
+    });
+    assert_cannot_decide(fx.own_payment_sent(), "the node does not return its transaction");
+
+    // The node behind the failover provider refuses every connection: the search's first read fails, and the
+    // error does not carry what the lower layer said.
+    fx.set(C, |node| node.down = true);
+    let err = fx.own_payment_sent().unwrap_err();
+    assert!(
+        !err.contains("connection refused"),
+        "the error carries the text of the failed request"
+    );
+    assert_cannot_decide(Err(err), "the read of the block number failed");
+}
+
+#[test]
+fn failed_send_whose_payment_is_in_the_contract_is_found() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.failover_follows(C);
+    assert_eq!(fx.payment_after_failed_send(), fx.found());
+}
+
+#[test]
+fn failed_send_unknown_to_every_node_is_not_sent() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    fx.unknown_to(&[A, B, C]);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+    // The pair agrees that it does not return the transaction; then every node of the coin is asked for it.
+    assert_eq!(fx.asked(C), ["eth_getTransactionByHash"]);
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_mined_and_failed_is_not_sent() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    fx.mined_on(&[A, B], false);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+    assert!(fx.asked(C).is_empty(), "a third node was asked");
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_pending_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    // Both nodes of the pair return the transaction and have no receipt of it.
+    fx.not_in_contract(&[A, B, C]);
+    assert_cannot_decide(fx.payment_after_failed_send(), "it is not mined");
+    // One node of the pair alone returns it: a returned transaction is taken from one node.
+    fx.unknown_to(&[A, C]);
+    assert_cannot_decide(fx.payment_after_failed_send(), "it is not mined");
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_known_to_a_node_beside_the_pair_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    // The pair does not return the transaction; node C does.
+    fx.unknown_to(&[A, B]);
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "another node of the coin returns the transaction of the failed send",
+    );
+    // Once node C does not return it either, the answer is "not sent".
+    fx.unknown_to(&[C]);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_mined_while_the_contract_holds_no_payment_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    fx.mined_on(&[A, B], true);
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "is mined, but the swap contract does not report the payment",
+    );
+}
+
+#[test]
+fn failed_send_differing_or_missing_answers_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    // Node A does not return the transaction; node B shows it mined and failed.
+    fx.unknown_to(&[A, C]);
+    fx.mined_on(&[B], false);
+    assert_cannot_decide(fx.payment_after_failed_send(), "the nodes disagree");
+
+    fx.set(B, |node| node.down = true);
+    fx.set(C, |node| node.down = true);
+    assert_cannot_decide(fx.payment_after_failed_send(), "fewer than two nodes answered");
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_under_a_trusted_node() {
+    let fx = Fixture::eth(&[A, B], trusting("b.example:8545", &[A, B]));
+    fx.not_in_contract(&[B]);
+    fx.unknown_to(&[B]);
+    // Node A, which is not the trusted one, returns the transaction: that counts.
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "another node of the coin returns the transaction of the failed send",
+    );
+    fx.unknown_to(&[A]);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+
+    fx.set(B, |node| node.down = true);
+    assert_cannot_decide(fx.payment_after_failed_send(), "the trusted node did not answer");
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_without_a_policy_is_read_through_the_failover_provider() {
+    let fx = Fixture::eth(&[A], SwapEvidencePolicy::NotAdopted);
+    fx.failover_follows(A);
+    assert_eq!(fx.payment_after_failed_send(), fx.found());
+
+    // No payment in the contract; the node returns the transaction without a receipt.
+    fx.not_in_contract(&[A]);
+    assert_cannot_decide(fx.payment_after_failed_send(), "it is not mined");
+
+    fx.mined_on(&[A], true);
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "is mined, but the swap contract does not report the payment",
+    );
+
+    fx.mined_on(&[A], false);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+
+    // Until here every read went through the failover provider.
+    assert!(fx.asked(A).is_empty(), "a node was asked beside the failover provider");
+
+    // The failover provider does not return the transaction: every node of the coin is asked for it once more.
+    fx.set(A, |node| node.receipt = None);
+    fx.unknown_to(&[A]);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+    assert_eq!(fx.asked(A), ["eth_getTransactionByHash"]);
+
+    fx.set(A, |node| node.down = true);
+    let err = fx.payment_after_failed_send().unwrap_err();
+    assert!(
+        !err.contains("connection refused"),
+        "the error carries the text of the failed request"
+    );
+    assert_cannot_decide(Err(err), "the read of the payment state failed");
+}
+
+#[test]
+fn failed_send_without_a_policy_known_to_another_node_cannot_decide() {
+    let fx = Fixture::eth(&[A, B], SwapEvidencePolicy::NotAdopted);
+    fx.failover_follows(A);
+    fx.not_in_contract(&[A, B]);
+    // The node behind the failover provider does not return the transaction; node B does.
+    fx.unknown_to(&[A]);
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "another node of the coin returns the transaction of the failed send",
+    );
+    assert_eq!(fx.asked(B), ["eth_getTransactionByHash"]);
+
+    // A node that does not answer says nothing; once node B does not return it either, the answer is "not sent".
+    fx.set(B, |node| node.down = true);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+    fx.set(B, |node| {
+        node.down = false;
+        node.knows_payment = false;
+    });
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+}
+
+#[test]
+fn a_kept_transaction_that_is_not_the_payment_call_of_the_swap_has_no_read() {
+    let fx = Fixture::eth(&[A, B], listed(&[A, B]));
+    // A call of another function of the swap contract.
+    let claim = fx.claim(&SECRET, 95).tx;
+    assert!(
+        fx.sent_after_failed_send(&claim.into()).is_none(),
+        "a claim call was taken for the payment call"
+    );
+    // The payment call of another swap.
+    let other_id = fx.coin.etomic_swap_id(TIME_LOCK + 1, &secret_hash());
+    let data = SWAP_CONTRACT
+        .function("ethPayment")
+        .unwrap()
+        .encode_input(&[
+            Token::FixedBytes(other_id),
+            Token::Address(fx.coin.my_address),
+            Token::FixedBytes(secret_hash()),
+            Token::Uint(U256::from(TIME_LOCK + 1)),
+        ])
+        .unwrap();
+    let other_payment = sign(&fx.coin, paid_wei(), data);
+    assert!(
+        fx.sent_after_failed_send(&other_payment.into()).is_none(),
+        "the payment call of another swap was taken for this swap's"
+    );
+    // A transaction of another coin family.
+    let utxo = TransactionEnum::UtxoTx(crate::UtxoTx::default());
+    assert!(
+        fx.sent_after_failed_send(&utxo).is_none(),
+        "a transaction of another family was taken for the payment call"
+    );
+    assert!(
+        fx.world.seen.lock().unwrap().is_empty(),
+        "a node was asked although the coin has no read for the kept transaction"
+    );
+}
+
+#[test]
+fn failed_send_of_a_token_reads_its_payment_call_and_no_approval() {
+    let token_addr = Address::from_slice(&hex::decode("c0eb7aed740e1796992a08962c15661bdeb58003").unwrap());
+    let coin_type = EthCoinType::Erc20 {
+        platform: "ETH".to_string(),
+        token_addr,
+    };
+    let fx = Fixture::new(coin_type, &[A, B], listed(&[A, B]), TIME_LOCK);
+    fx.not_in_contract(&[A, B]);
+    fx.unknown_to(&[A, B]);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
+
+    // The approval a token payment may send first is a call of the token contract: when the send ended there,
+    // no payment was signed, and the coin has no read for the approval.
+    let data = ERC20_CONTRACT
+        .function("approve")
+        .unwrap()
+        .encode_input(&[
+            Token::Address(fx.coin.swap_contract_address),
+            Token::Uint(U256::max_value()),
+        ])
+        .unwrap();
+    let approval = fx
+        .coin
+        .sign_tx_for_send(UnSignedEthTx {
+            nonce: next_nonce(),
+            value: 0.into(),
+            action: Action::Call(token_addr),
+            data,
+            gas: 200_000.into(),
+            gas_price: 1_000_000_000u64.into(),
+        })
+        .unwrap();
+    assert!(
+        fx.sent_after_failed_send(&approval.into()).is_none(),
+        "the approval of a token was taken for the payment call"
+    );
 }
 
 // ---- The reads of the version 2 coin methods (CRD ch.51 R100, ch.52 R18) ----

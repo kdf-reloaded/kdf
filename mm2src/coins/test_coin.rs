@@ -201,6 +201,18 @@ impl SwapOps for TestCoin {
         unimplemented!()
     }
 
+    // The trait default, listed so a test can mock it.
+    fn check_if_my_payment_sent_after_failed_send(
+        &self,
+        failed_tx: &TransactionEnum,
+        time_lock: u32,
+        secret_hash: &[u8],
+        search_from_block: u64,
+        swap_contract_address: &Option<BytesJson>,
+    ) -> Option<Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send>> {
+        None
+    }
+
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
