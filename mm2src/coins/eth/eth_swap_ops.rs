@@ -1,6 +1,6 @@
 //! SwapOps and WatcherOps trait implementations for EthCoin.
 
-use super::eth_swap_evidence::OwnPaymentState;
+use super::eth_swap_evidence::{KeptSend, OwnPaymentState};
 use super::*;
 use crate::eth::tron::swap::send as tron_send;
 use crate::eth::tron::TronAddress;
@@ -441,7 +441,9 @@ impl SwapOps for EthCoin {
     ///
     /// The contract's state of the swap id decides first, as in [`SwapOps::check_if_my_payment_sent`]: with a
     /// payment in the contract the answer is the transaction the event search finds. With none, "not sent" is
-    /// answered only when no node asked returns the kept transaction, or when it is mined with a failed status.
+    /// answered only when the kept transaction can never be mined: it is mined with a failed status, or no node of
+    /// the coin returns it and another transaction has used its nonce. A kept transaction that no node returns
+    /// while its nonce is unused can still be mined, so that answer is undetermined.
     fn check_if_my_payment_sent_after_failed_send(
         &self,
         failed_tx: &TransactionEnum,
@@ -463,7 +465,7 @@ impl SwapOps for EthCoin {
         if !self.is_own_payment_call(failed_tx, swap_contract_address, &id) {
             return None;
         }
-        let (selfi, failed_hash) = (self.clone(), failed_tx.tx_hash());
+        let (selfi, kept) = (self.clone(), KeptSend::of(failed_tx));
         let fut = async move {
             let state = assert_send_future(selfi.own_payment_state(swap_contract_address, &id)).await?;
             if state == OwnPaymentState::Present {
@@ -471,7 +473,7 @@ impl SwapOps for EthCoin {
                     assert_send_future(selfi.find_own_sent_payment(swap_contract_address, &id, search_from_block));
                 return Ok(Some(payment.await?.into()));
             }
-            assert_send_future(selfi.failed_send_left_no_payment(failed_hash)).await?;
+            assert_send_future(selfi.failed_send_left_no_payment(kept)).await?;
             Ok(None)
         };
         Some(Box::new(fut.boxed().compat()))

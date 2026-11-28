@@ -63,6 +63,8 @@ struct Node {
     receipt: Option<(u64, bool)>,
     /// The block of the `PaymentSent` log of the payment, when the node serves one.
     payment_event: Option<u64>,
+    /// The transaction count the node reports for the payment's sender: the account's next unused nonce.
+    sender_count: U256,
 }
 
 #[derive(Default)]
@@ -271,6 +273,19 @@ fn answer(world: &World, call: &Call) -> Reply {
             assert_eq!(params[0], json!("latest"), "only the latest block is read");
             rpc_block(node.tip, node.timestamp)
         },
+        // The transaction count of the payment's sender, at the block a directed read names or at `latest`.
+        "eth_getTransactionCount" => {
+            let asked = params[0].as_str().unwrap().to_ascii_lowercase();
+            assert_eq!(
+                asked,
+                format!("{:#x}", payment.sender()),
+                "the count of another account was asked"
+            );
+            if params[1] != json!("latest") && block_of(&params[1]) > node.tip {
+                return Reply::Body(error_body(&call.request, -32000, "header not found"));
+            }
+            json!(format!("{:#x}", node.sender_count))
+        },
         // The readiness probe before a swap starts.
         "eth_blockNumber" => json!(format!("{:#x}", node.tip)),
         other => panic!("the scripted node does not serve `{other}`"),
@@ -349,6 +364,7 @@ impl Fixture {
                 knows_payment: true,
                 receipt: None,
                 payment_event: None,
+                sender_count: U256::zero(),
             });
         }
         let failover_world = world.clone();
@@ -1307,6 +1323,19 @@ impl Fixture {
     }
 
     /// The nodes `urls` return a receipt of the payment transaction, mined in block 95.
+    /// The nodes `urls` report a transaction count of the payment's sender above the payment's nonce (`used`: another
+    /// transaction took the nonce) or equal to it (the nonce is the account's next unused one).
+    fn nonce_used_on(&self, urls: &[&str], used: bool) {
+        let count = if used {
+            self.payment.nonce + 1
+        } else {
+            self.payment.nonce
+        };
+        for url in urls {
+            self.set(url, |node| node.sender_count = count);
+        }
+    }
+
     fn mined_on(&self, urls: &[&str], succeeded: bool) {
         for url in urls {
             self.set(url, |node| node.receipt = Some((95, succeeded)));
@@ -1445,9 +1474,57 @@ fn failed_send_unknown_to_every_node_is_not_sent() {
     let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
     fx.not_in_contract(&[A, B, C]);
     fx.unknown_to(&[A, B, C]);
+    // Another transaction of the sender took the nonce: the kept transaction can never be mined.
+    fx.nonce_used_on(&[A, B], true);
     assert_eq!(fx.payment_after_failed_send(), Ok(None));
-    // The pair agrees that it does not return the transaction; then every node of the coin is asked for it.
+    // Each node of the pair: the state at its tip, then the transaction, then the sender's count at its tip, then
+    // (as every node of the coin) the transaction once more.
+    for node in [A, B] {
+        assert_eq!(fx.asked(node), [
+            "eth_getBlockByNumber",
+            "eth_call",
+            "eth_getBlockByNumber",
+            "eth_getTransactionByHash",
+            "eth_getTransactionCount",
+            "eth_getTransactionByHash"
+        ]);
+    }
     assert_eq!(fx.asked(C), ["eth_getTransactionByHash"]);
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_unknown_to_every_node_with_its_nonce_unused_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    fx.unknown_to(&[A, B, C]);
+    // No node returns the transaction, and the sender's count is not above its nonce: at zero, and at the nonce
+    // itself, the transaction can still be mined, so the answer is never "not sent".
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "no node returns the transaction of the failed send, but its nonce is unused, so it can still be mined",
+    );
+    fx.nonce_used_on(&[A, B, C], false);
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "no node returns the transaction of the failed send, but its nonce is unused, so it can still be mined",
+    );
+    fx.assert_failover_unused();
+}
+
+#[test]
+fn failed_send_with_nodes_that_differ_on_the_nonce_cannot_decide() {
+    let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
+    fx.not_in_contract(&[A, B, C]);
+    fx.unknown_to(&[A, B, C]);
+    // Node A shows the nonce as used, node B as unused.
+    fx.nonce_used_on(&[A], true);
+    fx.nonce_used_on(&[B], false);
+    assert_cannot_decide(fx.payment_after_failed_send(), "the nodes disagree");
+    assert!(fx.asked(C).is_empty(), "a third node was asked to outvote the pair");
+    // Once node B shows it as used too, the pair agrees.
+    fx.nonce_used_on(&[B], true);
+    assert_eq!(fx.payment_after_failed_send(), Ok(None));
     fx.assert_failover_unused();
 }
 
@@ -1477,8 +1554,9 @@ fn failed_send_pending_cannot_decide() {
 fn failed_send_known_to_a_node_beside_the_pair_cannot_decide() {
     let fx = Fixture::eth(&[A, B, C], listed(&[A, B, C]));
     fx.not_in_contract(&[A, B, C]);
-    // The pair does not return the transaction; node C does.
+    // The pair does not return the transaction and shows its nonce as used; node C returns it.
     fx.unknown_to(&[A, B]);
+    fx.nonce_used_on(&[A, B], true);
     assert_cannot_decide(
         fx.payment_after_failed_send(),
         "another node of the coin returns the transaction of the failed send",
@@ -1520,7 +1598,16 @@ fn failed_send_under_a_trusted_node() {
     let fx = Fixture::eth(&[A, B], trusting("b.example:8545", &[A, B]));
     fx.not_in_contract(&[B]);
     fx.unknown_to(&[B]);
-    // Node A, which is not the trusted one, returns the transaction: that counts.
+    // The trusted node shows the nonce as unused: the transaction can still be mined. Node A is not asked.
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "no node returns the transaction of the failed send, but its nonce is unused, so it can still be mined",
+    );
+    assert!(fx.asked(A).is_empty(), "a node beside the trusted one was asked");
+
+    // The trusted node shows the nonce as used. Node A, which is not the trusted one, returns the transaction:
+    // that counts.
+    fx.nonce_used_on(&[B], true);
     assert_cannot_decide(
         fx.payment_after_failed_send(),
         "another node of the coin returns the transaction of the failed send",
@@ -1555,9 +1642,22 @@ fn failed_send_without_a_policy_is_read_through_the_failover_provider() {
     // Until here every read went through the failover provider.
     assert!(fx.asked(A).is_empty(), "a node was asked beside the failover provider");
 
-    // The failover provider does not return the transaction: every node of the coin is asked for it once more.
+    // The failover provider does not return the transaction, and the sender's count at the latest block shows the
+    // nonce as unused: the transaction can still be mined.
     fx.set(A, |node| node.receipt = None);
     fx.unknown_to(&[A]);
+    assert_cannot_decide(
+        fx.payment_after_failed_send(),
+        "no node returns the transaction of the failed send, but its nonce is unused, so it can still be mined",
+    );
+    assert!(fx.asked(A).is_empty(), "a node was asked beside the failover provider");
+    assert_eq!(
+        fx.asked(FAILOVER).last().map(String::as_str),
+        Some("eth_getTransactionCount")
+    );
+
+    // The count shows the nonce as used: every node of the coin is asked for the transaction once more.
+    fx.nonce_used_on(&[A], true);
     assert_eq!(fx.payment_after_failed_send(), Ok(None));
     assert_eq!(fx.asked(A), ["eth_getTransactionByHash"]);
 
@@ -1575,8 +1675,10 @@ fn failed_send_without_a_policy_known_to_another_node_cannot_decide() {
     let fx = Fixture::eth(&[A, B], SwapEvidencePolicy::NotAdopted);
     fx.failover_follows(A);
     fx.not_in_contract(&[A, B]);
-    // The node behind the failover provider does not return the transaction; node B does.
+    // The node behind the failover provider does not return the transaction and shows its nonce as used; node B
+    // returns it.
     fx.unknown_to(&[A]);
+    fx.nonce_used_on(&[A], true);
     assert_cannot_decide(
         fx.payment_after_failed_send(),
         "another node of the coin returns the transaction of the failed send",
@@ -1641,6 +1743,7 @@ fn failed_send_of_a_token_reads_its_payment_call_and_no_approval() {
     let fx = Fixture::new(coin_type, &[A, B], listed(&[A, B]), TIME_LOCK);
     fx.not_in_contract(&[A, B]);
     fx.unknown_to(&[A, B]);
+    fx.nonce_used_on(&[A, B], true);
     assert_eq!(fx.payment_after_failed_send(), Ok(None));
 
     // The approval a token payment may send first is a call of the token contract: when the send ended there,

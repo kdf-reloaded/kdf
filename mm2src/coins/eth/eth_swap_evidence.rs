@@ -218,6 +218,18 @@ impl Web3Instance {
         }
     }
 
+    /// The transaction count of `address` at `block`, as this node reports it (`eth_getTransactionCount`): the
+    /// number of transactions the account has sent up to that block, which is its next unused nonce.
+    pub(crate) async fn transaction_count_at(&self, address: Address, block: u64) -> Result<U256, String> {
+        use alloy::providers::Provider;
+
+        let count = self
+            .web3
+            .client()
+            .request::<_, U256>("eth_getTransactionCount", (address, BlockNumber::Number(block)));
+        within_node_cutoff(&self.url, "eth_getTransactionCount", count).await
+    }
+
     /// The state of the payment `id` in the version 2 swap contract at `contract`, as this node reports it at
     /// `block`: the `state_index`-th value of the contract's `getter` (`makerPayments`, `takerPayments`).
     pub(crate) async fn payment_state_v2_at(
@@ -1249,11 +1261,35 @@ fn own_payment_state_of(state: &U256) -> OwnPaymentState {
     }
 }
 
+/// What the read after a failed send needs of the signed transaction the send kept.
+#[derive(Clone, Copy)]
+pub(crate) struct KeptSend {
+    hash: H256,
+    /// The account nonce the transaction was signed with.
+    nonce: U256,
+    /// The signer of the transaction.
+    sender: Address,
+}
+
+impl KeptSend {
+    pub(crate) fn of(tx: &SignedEthTx) -> KeptSend {
+        KeptSend {
+            hash: tx.tx_hash(),
+            nonce: tx.nonce,
+            sender: tx.sender(),
+        }
+    }
+}
+
 /// What one node shows of a transaction whose send ended with an error.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum FailedSendFate {
-    /// The node does not return the transaction.
-    Unknown,
+    /// The node does not return the transaction, and the sender's transaction count is not above the transaction's
+    /// nonce: the nonce is unused, so the transaction can still be mined.
+    UnknownNonceUnused,
+    /// The node does not return the transaction, and the sender's transaction count is above the transaction's
+    /// nonce: another transaction took the nonce, so this one can never be mined.
+    UnknownNonceUsed,
     /// The node returns the transaction and has no receipt of it.
     Pending,
     /// The transaction is mined and succeeded.
@@ -1262,12 +1298,24 @@ enum FailedSendFate {
     MinedFailed,
 }
 
-/// The fate of the transaction `hash` as one node shows it.
-async fn failed_send_fate_on(node: Web3Instance, hash: H256) -> Result<FailedSendFate, String> {
-    if node.transaction_by_hash(hash).await?.is_none() {
-        return Ok(FailedSendFate::Unknown);
+/// The fate of a transaction no node returns, by the sender's transaction `count`: the count is the next unused
+/// nonce of the account.
+fn unknown_fate(count: U256, nonce: U256) -> FailedSendFate {
+    if count > nonce {
+        FailedSendFate::UnknownNonceUsed
+    } else {
+        FailedSendFate::UnknownNonceUnused
     }
-    Ok(match node.receipt_facts(hash).await? {
+}
+
+/// The fate of the transaction `kept` as one node shows it at its block `at`: the transaction by its hash, then its
+/// receipt, or, when the node does not return it, the sender's transaction count at `at`.
+async fn failed_send_fate_on(node: Web3Instance, kept: KeptSend, at: u64) -> Result<FailedSendFate, String> {
+    if node.transaction_by_hash(kept.hash).await?.is_none() {
+        let count = node.transaction_count_at(kept.sender, at).await?;
+        return Ok(unknown_fate(count, kept.nonce));
+    }
+    Ok(match node.receipt_facts(kept.hash).await? {
         None => FailedSendFate::Pending,
         Some(facts) if facts.succeeded => FailedSendFate::Mined,
         Some(_) => FailedSendFate::MinedFailed,
@@ -1288,6 +1336,8 @@ const FAILED_SEND_PENDING: &str = "a node returns the transaction of the failed 
 const FAILED_SEND_MINED_WITHOUT_STATE: &str =
     "the transaction of the failed send is mined, but the swap contract does not report the payment";
 const FAILED_SEND_KNOWN_ELSEWHERE: &str = "another node of the coin returns the transaction of the failed send";
+const FAILED_SEND_NONCE_UNUSED: &str =
+    "no node returns the transaction of the failed send, but its nonce is unused, so it can still be mined";
 
 /// The error of an own-payment read that cannot decide: the marker of [`crate::swap_evidence::undetermined`] with
 /// the fixed `reason`, then `detail` (chain data: a block range, a transaction hash; never a node's text).
@@ -1473,27 +1523,35 @@ impl EthCoin {
         }
     }
 
-    /// Answers `Ok(())` when the transaction `hash`, whose send ended with an error, can pay no more: no node asked
-    /// returns it, or it is mined with a failed status. The caller has read the contract's state of the payment as
-    /// [`OwnPaymentState::Absent`] before.
+    /// Answers `Ok(())` when the transaction `kept`, whose send ended with an error, can never pay: it is mined with
+    /// a failed status, or no node of the coin returns it and another transaction has used its nonce (the sender's
+    /// transaction count is above the nonce `kept` was signed with). A transaction no node returns stays valid while
+    /// its nonce is unused, and a node that was not asked may still hold it, so that case is not "can never pay".
+    /// The caller has read the contract's state of the payment as [`OwnPaymentState::Absent`] before.
     ///
     /// Under an agreed policy two nodes, each at its own latest block, or the trusted node alone, must show the same
-    /// fate. A node that returns the transaction while it is not mined and failed is taken alone, from any node of
-    /// the coin: a returned transaction proves that the node holds it. Without a policy the transaction and its
-    /// receipt are read once through the coin's node failover.
+    /// fate; a node that does not return the transaction reads the sender's transaction count at that block. A node
+    /// that returns the transaction while it is not mined and failed is taken alone, from any node of the coin: a
+    /// returned transaction proves that the node holds it. Without a policy the transaction, its receipt and the
+    /// transaction count at the latest block are read once through the coin's node failover.
     ///
-    /// On either path, when that read does not return the transaction, every node of the coin is asked for it once
-    /// more, and the transaction counts as returned when any of them returns it.
+    /// On either path, when that read shows the nonce as used, every node of the coin is asked for the transaction
+    /// once more, and one that returns it leaves the answer undetermined.
+    ///
+    /// The state read of the caller and this read are not one moment: when `kept` is mined between them, the state
+    /// the caller read is still `Absent` while the nonce is used here. The swap machine covers that by taking "not
+    /// sent" only from two answers in a row; the second one reads the state again and finds the payment.
     ///
     /// # Errors
     ///
-    /// Everything else, with the marker of [`crate::swap_evidence::undetermined`]: a node returns the transaction
-    /// and it is not mined, it is mined and succeeded while the state read before did not show the payment, a read
-    /// failed, the nodes disagree, too few of them answer, or the trusted node is silent.
-    pub(crate) async fn failed_send_left_no_payment(&self, hash: H256) -> Result<(), String> {
-        let transaction = format!(" ({:#x})", hash);
+    /// Everything else, with the marker of [`crate::swap_evidence::undetermined`]: no node returns the transaction
+    /// and its nonce is unused, a node returns it and it is not mined, it is mined and succeeded while the state
+    /// read before did not show the payment, a read failed, the nodes disagree, too few of them answer, or the
+    /// trusted node is silent.
+    pub(crate) async fn failed_send_left_no_payment(&self, kept: KeptSend) -> Result<(), String> {
+        let transaction = format!(" ({:#x})", kept.hash);
         let fate = match self.agreed_swap_reads() {
-            None => self.failed_send_fate_by_failover(hash).await?,
+            None => self.failed_send_fate_by_failover(kept).await?,
             Some(policy) => {
                 let outcome = if matches!(policy, SwapEvidencePolicy::Insufficient { .. }) {
                     Self::too_few_nodes()
@@ -1501,7 +1559,7 @@ impl EthCoin {
                     assert_send_future(self.agree_at_own_tips(
                         &policy,
                         true,
-                        move |node: Web3Instance, _at: u64| assert_send_future(failed_send_fate_on(node, hash)),
+                        move |node: Web3Instance, at: u64| assert_send_future(failed_send_fate_on(node, kept, at)),
                         |fate: &FailedSendFate| *fate,
                         |fate| matches!(fate, FailedSendFate::Pending | FailedSendFate::Mined),
                     ))
@@ -1510,26 +1568,32 @@ impl EthCoin {
                 match outcome {
                     Agreement::Agreed { decision, .. } => decision.decision,
                     Agreement::Undetermined(undetermined) => {
-                        let subject = format!("transaction {:#x}", hash);
+                        let subject = format!("transaction {:#x}", kept.hash);
                         return Err(self.report_undetermined("state of the failed send", &subject, &undetermined));
                     },
                 }
             },
         };
-        if fate == FailedSendFate::Unknown && self.any_node_returns(hash).await {
-            return Err(own_payment_undetermined(FAILED_SEND_KNOWN_ELSEWHERE, &transaction));
-        }
         match fate {
-            FailedSendFate::Unknown | FailedSendFate::MinedFailed => Ok(()),
+            FailedSendFate::MinedFailed => Ok(()),
+            FailedSendFate::UnknownNonceUsed => {
+                if self.any_node_returns(kept.hash).await {
+                    return Err(own_payment_undetermined(FAILED_SEND_KNOWN_ELSEWHERE, &transaction));
+                }
+                Ok(())
+            },
+            FailedSendFate::UnknownNonceUnused => Err(own_payment_undetermined(FAILED_SEND_NONCE_UNUSED, &transaction)),
             FailedSendFate::Pending => Err(own_payment_undetermined(FAILED_SEND_PENDING, &transaction)),
             FailedSendFate::Mined => Err(own_payment_undetermined(FAILED_SEND_MINED_WITHOUT_STATE, &transaction)),
         }
     }
 
-    /// The fate of the transaction `hash` read once through the coin's node failover.
-    async fn failed_send_fate_by_failover(&self, hash: H256) -> Result<FailedSendFate, String> {
+    /// The fate of the transaction `kept` read once through the coin's node failover; the sender's transaction count
+    /// is read at the latest block.
+    async fn failed_send_fate_by_failover(&self, kept: KeptSend) -> Result<FailedSendFate, String> {
         use alloy::providers::Provider;
 
+        let hash = kept.hash;
         let failed = |e: &dyn fmt::Display| {
             debug!("[{}] {} ({:#x}): {}", self.ticker(), FAILED_SEND_READ_FAILED, hash, e);
             own_payment_undetermined(FAILED_SEND_READ_FAILED, &format!(" ({:#x})", hash))
@@ -1538,7 +1602,15 @@ impl EthCoin {
         let alloy_hash = alloy::primitives::B256::from_slice(&hash.0);
         match assert_send_future(provider.get_transaction_by_hash(alloy_hash)).await {
             Ok(Some(_)) => (),
-            Ok(None) => return Ok(FailedSendFate::Unknown),
+            Ok(None) => {
+                let count = provider
+                    .client()
+                    .request::<_, U256>("eth_getTransactionCount", (kept.sender, BlockNumber::Latest));
+                return match assert_send_future(count).await {
+                    Ok(count) => Ok(unknown_fate(count, kept.nonce)),
+                    Err(e) => Err(failed(&e)),
+                };
+            },
             Err(e) => return Err(failed(&e)),
         }
         match assert_send_future(provider.get_transaction_receipt(alloy_hash)).await {

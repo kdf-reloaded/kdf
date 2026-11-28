@@ -1540,9 +1540,10 @@ the previous version used. The safe way:
   refund deadline passes. Under the rule that two nodes must agree, "not sent" needs two agreeing nodes or the
   trusted node. When sending the payment ends with an error after the transaction was signed, the swap sends nothing
   again and asks the chain whether the payment exists. A payment it finds is taken over, so the swap continues and
-  can refund it like any other; the step stops only when the chain shows twice in a row that the payment was not
-  sent, or at the refund deadline, with a text that names `recover_funds_of_swap`. The check of another coin family
-  whose two servers do not agree is repeated in the same way. Detail: PR #558; CRD ch.51 R17, R29.
+  can refund it like any other; the step stops only when the chain shows twice in a row that the transaction failed
+  or that another transaction took its place, or at the refund deadline, with a text that names
+  `recover_funds_of_swap`. The check of another coin family whose two servers do not agree is repeated in the same
+  way. Detail: PR #558; CRD ch.51 R17, R29.
 - **The refund of an SLP, QRC20, ETH or ERC20 swap payment waits for the chain's time.** The node asks whether a
   payment can be refunded from the chain: an SLP token by the median time past of BCH, a QRC20 token by that of
   QTUM, and an ETH or ERC20 coin by the timestamp of the latest block, once the node's own clock is past the lock

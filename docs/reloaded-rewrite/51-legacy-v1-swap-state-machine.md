@@ -573,16 +573,18 @@ has since closed.
 >    adopted, and the swap goes on as after a successful send
 >    (`MakerPaymentSent`, `TakerPaymentSent`), so its refund chain covers
 >    the payment. "Not sent" is answered only while the contract's state
->    is `Uninitialized` (agreed where R100 applies) and either no node
->    asked returns the kept transaction, a node beside the agreeing ones
->    included, or the transaction is mined and failed. Two such answers in
->    a row, 30 s apart, end the stage with the payment-failed event and
->    the send's error. A transaction that a node returns and that is not
->    mined, one that is mined while the state is still `Uninitialized`, a
->    failed read and a disagreement are undetermined and asked again. An
->    answer still undetermined at the refund deadline ends the stage with
->    the payment-failed event; its text says that nothing more was sent
->    and names `recover_funds_of_swap`.
+>    is `Uninitialized` (agreed where R100 applies) and either the kept
+>    transaction is mined and failed, or no node of the coin returns it
+>    and another transaction has used its nonce. Two such answers in a
+>    row, 30 s apart, end the stage with the payment-failed event and the
+>    send's error. A transaction that no node returns while its nonce is
+>    unused, one that a node returns and that is not mined, one that is
+>    mined while the state is still `Uninitialized`, a failed read and a
+>    disagreement are undetermined and asked again. A send that no node
+>    took and whose nonce stays unused is therefore asked until the
+>    refund deadline. An answer still undetermined at the refund deadline
+>    ends the stage with the payment-failed event; its text says that
+>    nothing more was sent and names `recover_funds_of_swap`.
 > 4. *Kept as it was.* No event is written while the stage waits, so a
 >    restart resumes at the payment stage. A definite "not sent", a passed
 >    send deadline, an error without the mark and a send error without a
