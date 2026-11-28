@@ -664,6 +664,46 @@ pub enum TakerSwapEvent {
     Finished,
 }
 
+impl TakerSwapEvent {
+    /// The error text of a failure event, or `None` for an event that carries none. The match lists every variant
+    /// with no wildcard arm, so a variant added later does not compile until it is handled here.
+    pub(crate) fn error_text_mut(&mut self) -> Option<&mut String> {
+        match self {
+            TakerSwapEvent::StartFailed(SwapError { error })
+            | TakerSwapEvent::NegotiateFailed(SwapError { error })
+            | TakerSwapEvent::TakerFeeSendFailed(SwapError { error })
+            | TakerSwapEvent::MakerPaymentValidateFailed(SwapError { error })
+            | TakerSwapEvent::MakerPaymentWaitConfirmFailed(SwapError { error })
+            | TakerSwapEvent::TakerPaymentTransactionFailed(SwapError { error })
+            | TakerSwapEvent::TakerPaymentDataSendFailed(SwapError { error })
+            | TakerSwapEvent::TakerPaymentWaitConfirmFailed(SwapError { error })
+            | TakerSwapEvent::TakerPaymentWaitForSpendFailed(SwapError { error })
+            | TakerSwapEvent::MakerPaymentSpendConfirmFailed(SwapError { error })
+            | TakerSwapEvent::MakerPaymentSpendFailed(SwapError { error })
+            | TakerSwapEvent::TakerPaymentRefundFailed(SwapError { error }) => Some(error),
+            TakerSwapEvent::Started(_)
+            | TakerSwapEvent::Negotiated(_)
+            | TakerSwapEvent::TakerFeeSent(_)
+            | TakerSwapEvent::TakerPaymentInstructionsReceived(_)
+            | TakerSwapEvent::MakerPaymentReceived(_)
+            | TakerSwapEvent::MakerPaymentWaitConfirmStarted
+            | TakerSwapEvent::MakerPaymentValidatedAndConfirmed
+            | TakerSwapEvent::TakerPaymentSent(_)
+            | TakerSwapEvent::WatcherMessageSent
+            | TakerSwapEvent::TakerPaymentSpent(_)
+            | TakerSwapEvent::MakerPaymentSpent(_)
+            | TakerSwapEvent::MakerPaymentSpendConfirmed
+            | TakerSwapEvent::MakerPaymentSpentByWatcher(_)
+            | TakerSwapEvent::TakerPaymentWaitRefundStarted { .. }
+            | TakerSwapEvent::TakerPaymentRefundStarted
+            | TakerSwapEvent::TakerPaymentRefunded(_)
+            | TakerSwapEvent::TakerPaymentRefundFinished
+            | TakerSwapEvent::TakerPaymentRefundedByWatcher(_)
+            | TakerSwapEvent::Finished => None,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", content = "data")]
 #[allow(clippy::large_enum_variant)]

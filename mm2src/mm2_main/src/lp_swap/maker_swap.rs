@@ -2283,6 +2283,42 @@ pub enum MakerSwapEvent {
     Finished,
 }
 
+impl MakerSwapEvent {
+    /// The error text of a failure event, or `None` for an event that carries none. The match lists every variant
+    /// with no wildcard arm, so a variant added later does not compile until it is handled here.
+    pub(crate) fn error_text_mut(&mut self) -> Option<&mut String> {
+        match self {
+            MakerSwapEvent::StartFailed(SwapError { error })
+            | MakerSwapEvent::NegotiateFailed(SwapError { error })
+            | MakerSwapEvent::TakerFeeValidateFailed(SwapError { error })
+            | MakerSwapEvent::MakerPaymentTransactionFailed(SwapError { error })
+            | MakerSwapEvent::MakerPaymentDataSendFailed(SwapError { error })
+            | MakerSwapEvent::MakerPaymentWaitConfirmFailed(SwapError { error })
+            | MakerSwapEvent::TakerPaymentValidateFailed(SwapError { error })
+            | MakerSwapEvent::TakerPaymentWaitConfirmFailed(SwapError { error })
+            | MakerSwapEvent::TakerPaymentSpendFailed(SwapError { error })
+            | MakerSwapEvent::TakerPaymentSpendConfirmFailed(SwapError { error })
+            | MakerSwapEvent::MakerPaymentRefundFailed(SwapError { error }) => Some(error),
+            MakerSwapEvent::Started(_)
+            | MakerSwapEvent::Negotiated(_)
+            | MakerSwapEvent::MakerPaymentInstructionsReceived(_)
+            | MakerSwapEvent::TakerFeeValidated(_)
+            | MakerSwapEvent::MakerPaymentSent(_)
+            | MakerSwapEvent::TakerPaymentReceived(_)
+            | MakerSwapEvent::TakerPaymentWaitConfirmStarted
+            | MakerSwapEvent::TakerPaymentValidatedAndConfirmed
+            | MakerSwapEvent::TakerPaymentSpent(_)
+            | MakerSwapEvent::TakerPaymentSpendConfirmStarted
+            | MakerSwapEvent::TakerPaymentSpendConfirmed
+            | MakerSwapEvent::MakerPaymentWaitRefundStarted { .. }
+            | MakerSwapEvent::MakerPaymentRefundStarted
+            | MakerSwapEvent::MakerPaymentRefunded(_)
+            | MakerSwapEvent::MakerPaymentRefundFinished
+            | MakerSwapEvent::Finished => None,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", content = "data")]
 #[allow(clippy::large_enum_variant)]

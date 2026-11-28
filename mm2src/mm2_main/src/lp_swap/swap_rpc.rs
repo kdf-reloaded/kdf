@@ -256,13 +256,14 @@ pub(crate) struct SwapStatus {
 }
 
 /// Loads the node's own record of the swap and redacts it for the terminal report (CRD ch.51 R50A items 2-3).
-/// The stored record is not changed: only the loaded copy is redacted.
+/// The stored record is not changed: only the loaded copy is redacted (secrets hidden, no node named in an error text).
 async fn load_redacted_my_swap(ctx: &MmArc, uuid: Uuid) -> Result<SavedSwap, String> {
     let mut status = match try_s!(SavedSwap::load_my_swap_from_db(ctx, uuid).await) {
         Some(status) => status,
         None => return ERR!("swap data is not found"),
     };
     status.hide_secrets();
+    status.strip_node_names();
     Ok(status)
 }
 
