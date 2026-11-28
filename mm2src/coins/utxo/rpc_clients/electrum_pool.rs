@@ -481,7 +481,26 @@ struct ContractHistoryState {
     /// The last probe of the server that was not cancelled ended without serving the read: an error answer, an answer
     /// that could not be read, a timeout or a transport failure. Cleared when the server serves the read.
     last_probe_failed: bool,
+    /// The last failed series of probes ended with an error answer to every try: the server answered, and does not
+    /// have the method. Such a server is probed again only after the long gap. Cleared when the server serves the
+    /// read and when a later series fails otherwise.
+    last_probe_refused: bool,
 }
+
+/// How the probe of one server ended, as [`ElectrumPool::end_contract_history_probe`] records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeEnd {
+    /// The probe got the history (recorded where every answer of the read is) or was cancelled: the record of the
+    /// last probe stays as it is.
+    Unmarked,
+    /// The series ended without serving the read, and not every try was answered with an error.
+    Failed,
+    /// The series ended without serving the read, and every try was answered with a JSON-RPC error.
+    Refused,
+}
+
+/// The lists of [`ElectrumPool::contract_history_servers`] as one INFO line last showed them.
+pub(crate) type ContractHistoryLists = (Vec<String>, Vec<String>, Vec<String>);
 
 /// The failure of a server that answered `request` with a JSON-RPC error, when that answer moves the request on
 /// (D38.6.4Q.2 status note): `request` is a single request of [`ERROR_FAILOVER_METHODS`], `response` is an error
@@ -1042,6 +1061,8 @@ pub(super) struct PoolShared {
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     next_session_id: AtomicU64,
     next_request_id: AtomicU64,
+    /// The lists of the contract-event history servers the last INFO line of the probes showed, `None` before the first.
+    contract_history_logged: StdMutex<Option<ContractHistoryLists>>,
     /// Counts the connections that ended; a change tells a subscriber its subscription may be lost.
     session_epoch: AtomicU64,
     resubscribe_pending: AtomicBool,
@@ -1097,6 +1118,7 @@ impl PoolShared {
             event_handlers,
             next_session_id: AtomicU64::new(1),
             next_request_id: AtomicU64::new(0),
+            contract_history_logged: StdMutex::new(None),
             session_epoch: AtomicU64::new(0),
             resubscribe_pending: AtomicBool::new(false),
             contract_resubscribe_pending: AtomicBool::new(false),
@@ -1202,7 +1224,7 @@ impl PoolShared {
     /// request ended without serving the read: an error answer, an answer that could not be read, a timeout or a
     /// transport failure), also while a new probe of them runs, and those not asked yet (no probe of them has ended,
     /// or their first one is running).
-    pub(super) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+    pub(super) fn contract_history_servers(&self) -> ContractHistoryLists {
         let (mut served, mut failed, mut not_asked) = (Vec::new(), Vec::new(), Vec::new());
         for slot in self.usable_slots() {
             let state = slot.state();
@@ -1220,10 +1242,17 @@ impl PoolShared {
     }
 
     /// Takes the usable servers a probe of the contract-event history read may ask now: those that have not served
-    /// it, have no probe running and whose last probe ended at least `min_gap_secs` before `now`. With `only`, a
+    /// it, have no probe running and whose last probe ended at least `min_gap_secs` before `now`, or
+    /// `refused_gap_secs` when every try of its last failed series was answered with an error. With `only`, a
     /// server name (`host:port`, lowercased), no other server is taken. Each is marked as being probed until
     /// [`Self::end_contract_history_probe`].
-    pub(super) fn claim_contract_history_probes(&self, now: f64, min_gap_secs: f64, only: Option<&str>) -> Vec<String> {
+    pub(super) fn claim_contract_history_probes(
+        &self,
+        now: f64,
+        min_gap_secs: f64,
+        refused_gap_secs: f64,
+        only: Option<&str>,
+    ) -> Vec<String> {
         let mut claimed = Vec::new();
         for slot in self.usable_slots() {
             if only.map_or(false, |label| crate::swap_evidence::node_name(&slot.label) != label) {
@@ -1231,7 +1260,12 @@ impl PoolShared {
             }
             let mut state = slot.state();
             let history = &mut state.contract_history;
-            let due = history.probed_at.map_or(true, |at| now - at >= min_gap_secs);
+            let gap = if history.last_probe_refused {
+                refused_gap_secs
+            } else {
+                min_gap_secs
+            };
+            let due = history.probed_at.map_or(true, |at| now - at >= gap);
             if !history.served && !history.probing && due {
                 history.probing = true;
                 claimed.push(slot.addr.clone());
@@ -1240,19 +1274,36 @@ impl PoolShared {
         claimed
     }
 
-    /// Ends the probe of `addr` that [`Self::claim_contract_history_probes`] started. `failed` records that the probe's
-    /// request ended without serving the read (an error answer, an answer that could not be read, a timeout or a
-    /// transport failure); without it the record of the last probe stays as it is (a
-    /// probe that got the history is recorded where every answer of the read is, and one cancelled got no answer).
-    pub(super) fn end_contract_history_probe(&self, addr: &str, now: f64, failed: bool) {
+    /// Ends the probe of `addr` that [`Self::claim_contract_history_probes`] started. `end` records how the series
+    /// of requests ended; with [`ProbeEnd::Unmarked`] the record of the last probe stays as it is (a probe that got
+    /// the history is recorded where every answer of the read is, and one cancelled got no answer).
+    pub(super) fn end_contract_history_probe(&self, addr: &str, now: f64, end: ProbeEnd) {
         if let Some(slot) = self.slot_by_addr(addr) {
             let mut state = slot.state();
             state.contract_history.probing = false;
             state.contract_history.probed_at = Some(now);
-            if failed {
-                state.contract_history.last_probe_failed = true;
+            match end {
+                ProbeEnd::Unmarked => {},
+                ProbeEnd::Failed | ProbeEnd::Refused => {
+                    state.contract_history.last_probe_failed = true;
+                    state.contract_history.last_probe_refused = end == ProbeEnd::Refused;
+                },
             }
         }
+    }
+
+    /// Whether `lists` differ from the lists the last INFO line of the probes showed (or none was logged yet); when
+    /// they do they are kept as the lists of the line now to be logged.
+    pub(super) fn contract_history_lists_changed(&self, lists: &ContractHistoryLists) -> bool {
+        let mut logged = self
+            .contract_history_logged
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if logged.as_ref() == Some(lists) {
+            return false;
+        }
+        *logged = Some(lists.clone());
+        true
     }
 
     /// The ceiling of the maintained set; a ceiling above the list length behaves as the list length.
@@ -3491,6 +3542,7 @@ impl PoolShared {
                     let mut state = slot.state();
                     state.contract_history.served = true;
                     state.contract_history.last_probe_failed = false;
+                    state.contract_history.last_probe_refused = false;
                 }
                 Ok(response)
             },
