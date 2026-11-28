@@ -1464,6 +1464,15 @@ the previous version used. The safe way:
   when it is placed on the current connection. This applies to the address and token balance subscriptions of
   UTXO coins, QTUM and QRC20 tokens on Electrum. Detail: PR #520; CRD ch.38 status note of 2026-11-23 after
   D38.6.4Q.1.
+- **A QRC20 token is no longer held back from swaps by one failed check of a QTUM server.** A QRC20 token can be
+  swapped once two of its Electrum servers have served the contract-event history
+  (`blockchain.contract.event.get_history`). The node checks each server in the background, and one failed request
+  used to mark the server failed until the next check a minute later. A check now makes up to three requests of 5
+  seconds each (the `swap_evidence_probe_attempts` and `swap_evidence_probe_timeout_s` settings) before it marks the
+  server failed. A server that answers every request with an error is asked again after an hour, not every minute.
+  The log line that lists the servers is written when the lists change, not after every check. The rule itself is
+  unchanged: two servers on distinct hosts, or the trusted one. Detail: PR #561; CRD ch.38 (status note of
+  2026-11-28 at the end of 38.6.4).
 
 #### TRON coins
 

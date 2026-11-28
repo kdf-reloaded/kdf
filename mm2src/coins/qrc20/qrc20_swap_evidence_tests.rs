@@ -8,6 +8,7 @@ use super::qrc20_swap_evidence::{undetermined_text, undetermined_texts};
 use super::swap::ClaimCheck;
 use super::*;
 use crate::swap_evidence::{is_undetermined, Undetermined, UndeterminedReason};
+use crate::utxo::rpc_clients::electrum_pool::ProbeEnd;
 use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
 use crate::{CanRefundHtlc, SwapEvidencePolicy};
 use common::block_on;
@@ -53,7 +54,34 @@ fn now() -> u64 { now_ms() / 1000 }
 /// The scripted servers of a test and the names they are listed under.
 struct Hosts {
     _resolver: TestResolverGuard,
+    _series: SeriesGuard,
     servers: Vec<StubServer>,
+}
+
+/// The settings of the probe series of a test: three tries a short gap apart, as the node's defaults have it but
+/// without the two seconds. Removed when the test ends.
+struct SeriesGuard;
+
+impl SeriesGuard {
+    fn set(attempts: u32, probe_timeout_s: f64, retry_gap_s: f64) -> SeriesGuard {
+        *super::qrc20_swap_evidence::SERIES_SETTINGS_FOR_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(crate::swap_evidence::ReadinessSettings {
+            attempts,
+            probe_timeout_s,
+            retry_gap_s,
+            ..crate::swap_evidence::ReadinessSettings::default()
+        });
+        SeriesGuard
+    }
+}
+
+impl Drop for SeriesGuard {
+    fn drop(&mut self) {
+        *super::qrc20_swap_evidence::SERIES_SETTINGS_FOR_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
 }
 
 impl Hosts {
@@ -69,6 +97,7 @@ impl Hosts {
         }
         Hosts {
             _resolver: resolver,
+            _series: SeriesGuard::set(3, 5., 0.05),
             servers,
         }
     }
@@ -922,7 +951,7 @@ fn one_capable_host_refuses_with_the_text_naming_the_hosts() {
         let ctx = new_ctx();
         let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
         wait_for("the probe of both hosts", || {
-            hosts.a().requests(GET_HISTORY) == 1 && hosts.b().requests(GET_HISTORY) == 1
+            hosts.a().requests(GET_HISTORY) == 1 && hosts.b().requests(GET_HISTORY) == 3
         })
         .await;
         wait_for("the end of the probe of both hosts", || {
@@ -963,9 +992,9 @@ fn one_capable_host_refuses_with_the_text_naming_the_hosts() {
 
         // The refusals asked for a new probe, which is bounded: the host was probed within the last minute.
         Timer::sleep(0.3).await;
-        assert_eq!(hosts.b().requests(GET_HISTORY), 1);
+        assert_eq!(hosts.b().requests(GET_HISTORY), 3);
         let client = client_of(&coin);
-        assert!(client.claim_contract_history_probes(60., None).is_empty());
+        assert!(client.claim_contract_history_probes(60., 3600., None).is_empty());
 
         // Once the host serves the read, to a probe or to any other request, the token is admitted.
         hosts.b().clear_error(GET_HISTORY);
@@ -1019,19 +1048,19 @@ fn a_host_is_not_probed_while_a_probe_of_it_runs() {
         hosts.b().set_error(GET_HISTORY, "unknown method");
         let ctx = new_ctx();
         let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
-        wait_for("the probe of the second host", || hosts.b().requests(GET_HISTORY) == 1).await;
+        wait_for("the probe of the second host", || hosts.b().requests(GET_HISTORY) >= 1).await;
         let client = client_of(&coin);
         wait_for("the end of the probe", || {
-            client.contract_history_servers().0.len() == 1 && client.claim_contract_history_probes(60., None).is_empty()
+            client.contract_history_servers().0.len() == 1 && client.contract_history_servers().1.len() == 1
         })
         .await;
         // With no minimum gap the host that has not served the read is given once, and not again until its probe
         // ends; the host that served it is never given.
-        assert_eq!(client.claim_contract_history_probes(0., None), vec![hosts.name(1)]);
-        assert!(client.claim_contract_history_probes(0., None).is_empty());
-        client.end_contract_history_probe(&hosts.name(1), false);
-        assert_eq!(client.claim_contract_history_probes(0., None), vec![hosts.name(1)]);
-        client.end_contract_history_probe(&hosts.name(1), false);
+        assert_eq!(client.claim_contract_history_probes(0., 0., None), vec![hosts.name(1)]);
+        assert!(client.claim_contract_history_probes(0., 0., None).is_empty());
+        client.end_contract_history_probe(&hosts.name(1), ProbeEnd::Unmarked);
+        assert_eq!(client.claim_contract_history_probes(0., 0., None), vec![hosts.name(1)]);
+        client.end_contract_history_probe(&hosts.name(1), ProbeEnd::Unmarked);
     });
 }
 
@@ -1042,20 +1071,150 @@ fn a_disabled_token_starts_no_probe() {
         hosts.b().set_error(GET_HISTORY, "unknown method");
         let ctx = new_ctx();
         let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
-        wait_for("the probe of the second host", || hosts.b().requests(GET_HISTORY) == 1).await;
+        wait_for("the probe of the second host", || hosts.b().requests(GET_HISTORY) >= 1).await;
         let client = client_of(&coin);
         wait_for("the end of the probe", || {
-            client.contract_history_servers().0.len() == 1
+            client.contract_history_servers().0.len() == 1 && client.contract_history_servers().1.len() == 1
         })
         .await;
         // The minute of the bound is taken out of the way: the host may be probed again at once.
-        assert_eq!(client.claim_contract_history_probes(0., None), vec![hosts.name(1)]);
-        client.end_contract_history_probe(&hosts.name(1), false);
+        assert_eq!(client.claim_contract_history_probes(0., 0., None), vec![hosts.name(1)]);
+        client.end_contract_history_probe(&hosts.name(1), ProbeEnd::Unmarked);
 
         coin.end_capability_probes();
         coin.start_capability_probe();
         Timer::sleep(0.3).await;
-        assert_eq!(hosts.b().requests(GET_HISTORY), 1);
+        assert_eq!(hosts.b().requests(GET_HISTORY), 3);
+    });
+}
+
+/// A probe of the second host of a token over two hosts, `settings` as the series has them, the second host's answers
+/// to the event history delayed by `delay`. Returns the hosts, the context and the token.
+async fn probed_second_host(
+    attempts: u32,
+    timeout: f64,
+    gap: f64,
+    delay: std::time::Duration,
+) -> (Hosts, MmArc, Qrc20Coin, SeriesGuard) {
+    let hosts = Hosts::start(2).await;
+    let series = SeriesGuard::set(attempts, timeout, gap);
+    hosts.b().set_reply_delay(GET_HISTORY, delay);
+    let ctx = new_ctx();
+    let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
+    (hosts, ctx, coin, series)
+}
+
+#[test]
+fn a_server_that_serves_a_later_try_is_never_failed_in_between() {
+    block_on(async {
+        let (hosts, _ctx, coin, _series) =
+            probed_second_host(3, 0.4, 0.05, std::time::Duration::from_millis(1500)).await;
+        let client = client_of(&coin);
+        // Two tries get no answer; the delay is taken away before the third.
+        wait_for("the second try", || hosts.b().requests(GET_HISTORY) >= 2).await;
+        hosts.b().set_reply_delay(GET_HISTORY, std::time::Duration::ZERO);
+        let started = std::time::Instant::now();
+        loop {
+            let (served, failed, _) = client.contract_history_servers();
+            assert!(failed.is_empty(), "the server is not failed while its series runs");
+            if served.contains(&hosts.name(1)) {
+                break;
+            }
+            assert!(started.elapsed().as_secs_f64() < 20., "the third try serves the read");
+            Timer::sleep(0.01).await;
+        }
+        assert_eq!(coin.swap_evidence_refusal(), None);
+    });
+}
+
+#[test]
+fn a_server_that_never_answers_is_failed_after_the_series_and_keeps_the_short_gap() {
+    block_on(async {
+        let (hosts, _ctx, coin, _series) =
+            probed_second_host(3, 0.1, 0.05, std::time::Duration::from_millis(1500)).await;
+        let client = client_of(&coin);
+        wait_for("the failed list", || client.contract_history_servers().1.len() == 1).await;
+        assert_eq!(hosts.b().requests(GET_HISTORY), 3);
+        // Not due within the short gap, due when it has passed; the long gap does not apply.
+        assert!(client
+            .claim_contract_history_probes(60., 3600., Some(&hosts.name(1)))
+            .is_empty());
+        assert_eq!(
+            client.claim_contract_history_probes(0., 3600., Some(&hosts.name(1))),
+            vec![hosts.name(1)]
+        );
+        client.end_contract_history_probe(&hosts.name(1), ProbeEnd::Unmarked);
+    });
+}
+
+#[test]
+fn a_server_that_answers_every_try_with_an_error_keeps_the_long_gap() {
+    block_on(async {
+        let (hosts, _ctx, coin, _series) = probed_second_host(3, 0.4, 0.05, std::time::Duration::ZERO).await;
+        hosts.b().set_error(GET_HISTORY, "unknown method");
+        let client = client_of(&coin);
+        wait_for("the failed list", || client.contract_history_servers().1.len() == 1).await;
+        assert_eq!(hosts.b().requests(GET_HISTORY), 3);
+        assert!(client
+            .claim_contract_history_probes(0., 3600., Some(&hosts.name(1)))
+            .is_empty());
+        assert_eq!(
+            client.claim_contract_history_probes(0., 0., Some(&hosts.name(1))),
+            vec![hosts.name(1)]
+        );
+        client.end_contract_history_probe(&hosts.name(1), ProbeEnd::Unmarked);
+
+        // An answer of an ordinary request of the method clears the failure and the long gap.
+        hosts.b().clear_error(GET_HISTORY);
+        let address = contract_addr_into_rpc_format(&me(&coin));
+        let token = contract_addr_into_rpc_format(&coin.contract_address);
+        client
+            .blockchain_contract_event_get_history_from(&hosts.name(1), &address, &token, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await
+            .unwrap();
+        let (served, failed, _) = client.contract_history_servers();
+        assert!(served.contains(&hosts.name(1)) && failed.is_empty());
+    });
+}
+
+#[test]
+fn a_series_of_error_answers_and_timeouts_keeps_the_short_gap() {
+    block_on(async {
+        let (hosts, _ctx, coin, _series) = probed_second_host(3, 0.2, 0.3, std::time::Duration::ZERO).await;
+        hosts.b().set_error(GET_HISTORY, "unknown method");
+        let client = client_of(&coin);
+        // The first try is answered with an error; the next two get no answer.
+        wait_for("the first try", || hosts.b().requests(GET_HISTORY) >= 1).await;
+        hosts
+            .b()
+            .set_reply_delay(GET_HISTORY, std::time::Duration::from_millis(1500));
+        wait_for("the failed list", || client.contract_history_servers().1.len() == 1).await;
+        assert_eq!(
+            client.claim_contract_history_probes(0., 3600., Some(&hosts.name(1))),
+            vec![hosts.name(1)]
+        );
+        client.end_contract_history_probe(&hosts.name(1), ProbeEnd::Unmarked);
+    });
+}
+
+#[test]
+fn a_cancelled_series_releases_the_server_and_does_not_mark_it_failed() {
+    block_on(async {
+        let (hosts, _ctx, coin, _series) =
+            probed_second_host(3, 5., 0.05, std::time::Duration::from_millis(1500)).await;
+        let client = client_of(&coin);
+        wait_for("the first try", || hosts.b().requests(GET_HISTORY) >= 1).await;
+        coin.end_capability_probes();
+        wait_for("the release of the server", || {
+            !client
+                .claim_contract_history_probes(0., 0., Some(&hosts.name(1)))
+                .is_empty()
+        })
+        .await;
+        let (_, failed, _) = client.contract_history_servers();
+        assert!(failed.is_empty(), "a cancelled series marks nothing");
+        client.end_contract_history_probe(&hosts.name(1), ProbeEnd::Unmarked);
     });
 }
 
@@ -1069,7 +1228,7 @@ fn an_error_answer_to_the_event_history_does_not_count() {
         let ctx = new_ctx();
         let coin = token_on(&ctx, "QRC20", &hosts.urls(), None).await;
         wait_for("the probe of both hosts", || {
-            hosts.a().requests(GET_HISTORY) == 1 && hosts.b().requests(GET_HISTORY) == 1
+            hosts.a().requests(GET_HISTORY) == 3 && hosts.b().requests(GET_HISTORY) == 3
         })
         .await;
         Timer::sleep(0.2).await;
@@ -1138,13 +1297,13 @@ fn a_trusted_host_that_answers_the_event_history_with_an_error_is_refused() {
         hosts.a().set_error(GET_HISTORY, "unknown method");
         let ctx = new_ctx();
         let coin = token_on(&ctx, "QRC20", &hosts.urls(), Some(&hosts.name(0))).await;
-        wait_for("the probe of the trusted host", || hosts.a().requests(GET_HISTORY) == 1).await;
+        wait_for("the probe of the trusted host", || hosts.a().requests(GET_HISTORY) >= 1).await;
         let client = client_of(&coin);
         wait_for("the end of the probe", || {
-            client.claim_contract_history_probes(0., Some(&hosts.name(0))).len() == 1
+            client.claim_contract_history_probes(0., 0., Some(&hosts.name(0))).len() == 1
         })
         .await;
-        client.end_contract_history_probe(&hosts.name(0), false);
+        client.end_contract_history_probe(&hosts.name(0), ProbeEnd::Unmarked);
         assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {
             hosts: 0
         });
@@ -1163,7 +1322,7 @@ fn a_trusted_host_that_answers_the_event_history_with_an_error_is_refused() {
         // The refusals asked for a new probe, which is bounded to once a minute for the host, and the other host is
         // never probed.
         Timer::sleep(0.3).await;
-        assert_eq!(hosts.a().requests(GET_HISTORY), 1);
+        assert_eq!(hosts.a().requests(GET_HISTORY), 3);
         assert_eq!(hosts.b().requests(GET_HISTORY), 0);
 
         // Once the trusted host serves the read, the token is admitted.
@@ -1192,13 +1351,13 @@ fn one_configured_host_is_trusted_and_needs_the_capability() {
         assert_eq!(coin.utxo.swap_evidence, SwapEvidencePolicy::Trusted {
             node: hosts.name(0)
         });
-        wait_for("the probe of the one host", || hosts.a().requests(GET_HISTORY) == 1).await;
+        wait_for("the probe of the one host", || hosts.a().requests(GET_HISTORY) >= 1).await;
         let client = client_of(&coin);
         wait_for("the end of the probe", || {
-            client.claim_contract_history_probes(0., Some(&hosts.name(0))).len() == 1
+            client.claim_contract_history_probes(0., 0., Some(&hosts.name(0))).len() == 1
         })
         .await;
-        client.end_contract_history_probe(&hosts.name(0), false);
+        client.end_contract_history_probe(&hosts.name(0), ProbeEnd::Unmarked);
 
         // Refused while the host has not served the read, with the text of a trusted server.
         assert_eq!(coin.swap_evidence_policy(), SwapEvidencePolicy::Insufficient {

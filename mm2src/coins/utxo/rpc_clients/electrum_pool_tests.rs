@@ -4,8 +4,8 @@
 //! pinned in `electrum_pool::budget_tests`; the 12-hour suspension cap is tested there with a clock stub.
 
 use super::electrum_measure::{OutOfDate, NEAR_OFFSET_DEFAULT_MS};
-use super::electrum_pool::{parse_server_order, ElectrumPoolOptions, ElectrumPoolTimings, OpenedByCall, ServerOrder,
-                           ServerStateSnapshot};
+use super::electrum_pool::{parse_server_order, ElectrumPoolOptions, ElectrumPoolTimings, OpenedByCall, ProbeEnd,
+                           ServerOrder, ServerStateSnapshot};
 use super::electrum_stub_server::{StubBehavior, StubServer};
 use super::*;
 use crate::utxo::UtxoRpcMode;
@@ -1813,12 +1813,12 @@ fn the_contract_history_servers_are_served_failed_or_not_yet_asked() {
         // probed.
         for i in 1..=3 {
             assert_eq!(
-                pool.claim_contract_history_probes(now_float(), 0., Some(&addr(i))),
+                pool.claim_contract_history_probes(now_float(), 0., 0., Some(&addr(i))),
                 vec![addr(i)]
             );
         }
-        pool.end_contract_history_probe(&addr(2), now_float(), true);
-        pool.end_contract_history_probe(&addr(3), now_float(), false);
+        pool.end_contract_history_probe(&addr(2), now_float(), ProbeEnd::Failed);
+        pool.end_contract_history_probe(&addr(3), now_float(), ProbeEnd::Unmarked);
         assert_eq!(
             pool.contract_history_servers(),
             (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
@@ -1826,14 +1826,14 @@ fn the_contract_history_servers_are_served_failed_or_not_yet_asked() {
 
         // The failed server stays failed while a new probe of it runs, and its error leaves it failed.
         assert_eq!(
-            pool.claim_contract_history_probes(now_float(), 0., Some(&addr(2))),
+            pool.claim_contract_history_probes(now_float(), 0., 0., Some(&addr(2))),
             vec![addr(2)]
         );
         assert_eq!(
             pool.contract_history_servers(),
             (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
         );
-        pool.end_contract_history_probe(&addr(2), now_float(), true);
+        pool.end_contract_history_probe(&addr(2), now_float(), ProbeEnd::Failed);
         assert_eq!(
             pool.contract_history_servers(),
             (vec![addr(4)], vec![addr(2)], vec![addr(0), addr(1), addr(3)])
@@ -1841,18 +1841,87 @@ fn the_contract_history_servers_are_served_failed_or_not_yet_asked() {
 
         // A new probe of the failed server that gets the history moves it to served.
         assert_eq!(
-            pool.claim_contract_history_probes(now_float(), 0., Some(&addr(2))),
+            pool.claim_contract_history_probes(now_float(), 0., 0., Some(&addr(2))),
             vec![addr(2)]
         );
         assert_eq!(pool.contract_history_servers().1, vec![addr(2)]);
         pool.route_directed(rpc(CONTRACT_HISTORY, vec![]), &addr(2))
             .await
             .unwrap();
-        pool.end_contract_history_probe(&addr(2), now_float(), false);
+        pool.end_contract_history_probe(&addr(2), now_float(), ProbeEnd::Unmarked);
         assert_eq!(
             pool.contract_history_servers(),
             (vec![addr(2), addr(4)], none, vec![addr(0), addr(1), addr(3)])
         );
+    });
+}
+
+/// The gap before a server is probed again is the short one, or the long one when every try of its last failed series
+/// was answered with an error; a served answer clears the long one, and a failed series of another kind replaces it.
+#[test]
+fn a_refused_server_is_probed_again_only_after_the_long_gap() {
+    block_on(async {
+        let server = StubServer::start(StubBehavior::Answer).await;
+        server.set_result(CONTRACT_HISTORY, json!([]));
+        let client = pool_client(&[&server], 1, None, test_timings());
+        let pool = &client.pool;
+        let addr = server.addr();
+        let claim = |now: f64| pool.claim_contract_history_probes(now, 60., 3600., Some(&addr));
+
+        // A series that failed without an answer: due again after the short gap, not before.
+        assert_eq!(claim(0.), vec![addr.clone()]);
+        pool.end_contract_history_probe(&addr, 10., ProbeEnd::Failed);
+        assert!(claim(69.).is_empty());
+        assert_eq!(claim(70.), vec![addr.clone()]);
+
+        // A series answered with an error every time: due after the long gap only.
+        pool.end_contract_history_probe(&addr, 100., ProbeEnd::Refused);
+        assert!(claim(160.).is_empty());
+        assert!(claim(3699.).is_empty());
+        assert_eq!(claim(3700.), vec![addr.clone()]);
+
+        // A later series of another kind (a mixed one) takes the short gap back.
+        pool.end_contract_history_probe(&addr, 4000., ProbeEnd::Failed);
+        assert!(claim(4059.).is_empty());
+        assert_eq!(claim(4060.), vec![addr.clone()]);
+
+        // A cancelled probe leaves the record, long gap included, as it was.
+        pool.end_contract_history_probe(&addr, 5000., ProbeEnd::Refused);
+        assert_eq!(claim(8600.), vec![addr.clone()]);
+        pool.end_contract_history_probe(&addr, 8600., ProbeEnd::Unmarked);
+        assert!(claim(8700.).is_empty());
+        assert_eq!(claim(12200.), vec![addr.clone()]);
+        pool.end_contract_history_probe(&addr, 12200., ProbeEnd::Unmarked);
+
+        // A served answer of an ordinary request clears the failure and the long gap.
+        pool.route_directed(rpc(CONTRACT_HISTORY, vec![]), &addr).await.unwrap();
+        assert_eq!(
+            pool.contract_history_servers(),
+            (vec![addr.clone()], Vec::new(), Vec::new())
+        );
+        assert!(claim(100_000.).is_empty());
+    });
+}
+
+/// The INFO line of the probes is due at the first result and when a list changes, not when the lists are the same.
+#[test]
+fn the_contract_history_lists_are_logged_at_the_first_result_and_when_they_change() {
+    block_on(async {
+        let server = StubServer::start(StubBehavior::Answer).await;
+        let client = pool_client(&[&server], 1, None, test_timings());
+        let pool = &client.pool;
+        let lists = |served: &[&str], failed: &[&str]| {
+            (
+                served.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                failed.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                Vec::<String>::new(),
+            )
+        };
+        assert!(pool.contract_history_lists_changed(&lists(&[], &[])));
+        assert!(!pool.contract_history_lists_changed(&lists(&[], &[])));
+        assert!(pool.contract_history_lists_changed(&lists(&["a"], &[])));
+        assert!(!pool.contract_history_lists_changed(&lists(&["a"], &[])));
+        assert!(pool.contract_history_lists_changed(&lists(&[], &["a"])));
     });
 }
 

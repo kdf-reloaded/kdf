@@ -5011,6 +5011,27 @@ token's swap paths were read only for the set of methods they send
 >    Electrum client (chapter 51 §51.6G R100), given the token's policy of
 >    item 5: the median time past is read through that client's directed
 >    header reads, and the tips are compared within its tolerance.
+>
+> **Status note (2026-11-28, clean side; Reloaded-original; maintainer
+> decision of 2026-11-28; amends the probe of item 6, not the capability rule
+> of item 5).** (a) *Tries.* The probe of one server is a series of up to
+> `swap_evidence_probe_attempts` requests (3 by default), each limited to
+> `swap_evidence_probe_timeout_s` (5 seconds by default) and about 2 seconds
+> apart, the settings of the readiness check (chapter 51 §51.6G, status note
+> of 2026-11-27). The series ends at the first answer with a result. A server
+> is recorded as failed only when the whole series ended without one; while
+> the series runs, the record of the server stays as it was. An answer with a
+> result, to the probe or to any other request of the method, clears the
+> failed record at once, as before. (b) *A server that answers with an
+> error.* When every request of a series was answered with a JSON-RPC error,
+> the server is probed again after one hour at the earliest, not after one
+> minute. A series in which a request got no answer (a timeout, a transport
+> failure or an answer that could not be read) keeps the gap of one minute.
+> (c) *Log line.* The line that names the hosts is logged when its lists
+> (served, failed, not yet asked) differ from those of the last line of the
+> same client, and at the first result; its text is unchanged. Item 5 is
+> unchanged: two distinct hosts that have answered with a result, or the
+> trusted server.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
@@ -6880,3 +6901,9 @@ R38.8.6 **Tests (two-direction, observable).**
   seconds. Reloaded-original; it records the maintainer's decision of
   2026-11-28; no reference input and no forbidden-class input; no sentence of
   the chapter is changed.
+- *Clean-side addition of 2026-11-28 (PR #561):* the status note at the end of
+  38.6.4 on the tries of the contract-event history probe of a QRC20 token, the
+  longer gap for a server that answers with an error, and the log line.
+  Reloaded-original; it records the maintainer's decision of 2026-11-28; no
+  reference input and no forbidden-class input; no sentence of the chapter is
+  changed.

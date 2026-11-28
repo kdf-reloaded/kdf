@@ -40,7 +40,11 @@ use super::*;
 use crate::swap_evidence::NotReadyKind;
 use crate::swap_evidence::{agree_with_tips, distinct_hosts, effective_policy, insufficient_refusal, node_name,
                            Agreement, SwapFamily, Undetermined, UndeterminedReason};
+use crate::utxo::rpc_clients::electrum_pool::ProbeEnd;
 use crate::SwapEvidencePolicy;
+use common::custom_futures::FutureTimerExt;
+use common::executor::Timer;
+use common::jsonrpc_client::JsonRpcErrorType;
 use common::log::{debug, info};
 use std::fmt;
 use std::future::Future as StdFuture;
@@ -50,6 +54,10 @@ const READ_RETRY_SECS: f64 = 10.;
 
 /// The least seconds between two probes of one server for the contract-event history.
 const CAPABILITY_PROBE_GAP_SECS: f64 = 60.;
+
+/// The least seconds between two probes of a server whose last failed series was answered with a JSON-RPC error to
+/// every try: it answered, so it does not have the method, and asking it every minute gains nothing.
+const CAPABILITY_REFUSED_PROBE_GAP_SECS: f64 = 3600.;
 
 /// How many undetermined reads are remembered as already reported at WARN.
 const REPORTED_CAP: usize = 256;
@@ -232,18 +240,67 @@ enum CapabilityScope {
 struct ProbeGuard {
     client: ElectrumClient,
     server: String,
-    /// The probe got an error or an answer that could not be read.
-    failed: bool,
+    /// How the series of the probe ended; unmarked when it got the history or was cancelled.
+    end: ProbeEnd,
 }
 
 impl ProbeGuard {
-    /// Records that the probe got an error or an answer that could not be read; the probe ends so when the guard
-    /// drops.
-    fn mark_failed(&mut self) { self.failed = true; }
+    /// Records how the series ended; the probe ends so when the guard drops.
+    fn mark(&mut self, end: ProbeEnd) { self.end = end; }
 }
 
 impl Drop for ProbeGuard {
-    fn drop(&mut self) { self.client.end_contract_history_probe(&self.server, self.failed); }
+    fn drop(&mut self) { self.client.end_contract_history_probe(&self.server, self.end); }
+}
+
+/// The settings of one probe series: the tries, the bound of a try and the gap between two tries, those of the
+/// readiness probes (CRD ch.51 R100).
+fn series_settings() -> crate::swap_evidence::ReadinessSettings {
+    #[cfg(test)]
+    if let Some(settings) = *SERIES_SETTINGS_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    {
+        return settings;
+    }
+    crate::swap_evidence::readiness_settings()
+}
+
+/// The settings a test gives the series instead of the node's.
+#[cfg(test)]
+pub(super) static SERIES_SETTINGS_FOR_TESTS: std::sync::Mutex<Option<crate::swap_evidence::ReadinessSettings>> =
+    std::sync::Mutex::new(None);
+
+/// The series of tries one probe of `server` is: up to `settings.attempts` requests of the contract-event history,
+/// each bounded by `settings.probe_timeout_s`, `settings.retry_gap_s` apart, ending at the first served answer. How it
+/// ended is marked on `guard`: unmarked when a try was served, `Refused` when every try was answered with a JSON-RPC
+/// error, `Failed` otherwise (a timeout, a transport failure or an answer that could not be read among the tries).
+async fn probe_series(
+    mut guard: ProbeGuard,
+    settings: crate::swap_evidence::ReadinessSettings,
+    address: H160Json,
+    token: H160Json,
+) {
+    let mut answered_with_error = 0;
+    for attempt in 1..=settings.attempts {
+        if attempt > 1 {
+            Timer::sleep(settings.retry_gap_s).await;
+        }
+        let request = guard
+            .client
+            .blockchain_contract_event_get_history_from(&guard.server, &address, &token, QRC20_TRANSFER_TOPIC)
+            .compat();
+        match request.timeout_secs(settings.probe_timeout_s).await {
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) if matches!(error.error, JsonRpcErrorType::Response(..)) => answered_with_error += 1,
+            _ => {},
+        }
+    }
+    guard.mark(if answered_with_error == settings.attempts {
+        ProbeEnd::Refused
+    } else {
+        ProbeEnd::Failed
+    });
 }
 
 impl Qrc20Coin {
@@ -338,13 +395,15 @@ impl Qrc20Coin {
         ))
     }
 
-    /// Starts a probe of the contract-event history on the servers of this token's client that have not served it:
-    /// one request per server, the token's own transfer history. A server is probed at most once a minute and never
-    /// while a probe of it runs (the client keeps that, so it holds for every token that shares the client). The
-    /// probe runs for a token over two or more hosts, and for a token with a trusted server on that server only. It
-    /// ends when the token is disabled or dropped, and holds the client no longer than the token does. An answer is recorded by the client itself; one INFO line names the
-    /// hosts by `host:port`: served, failed (the last probe got an error or an answer that could not be read) and not
-    /// yet asked.
+    /// Starts a probe of the contract-event history on the servers of this token's client that have not served it: one
+    /// series of requests per server, for the token's own transfer history. A server is probed at most once a minute
+    /// (once an hour when every try of its last failed probe was answered with an error) and never while a probe of it
+    /// runs (the client keeps that, so it holds for every token that shares the client). The probe runs for a token
+    /// over two or more hosts, and for a token with a trusted server on that server only. It ends when the token is
+    /// disabled or dropped, and holds the client no longer than the token does. The probe of a server is a series of
+    /// tries (see [`probe_series`]); an answer is recorded by the client itself. One INFO line names the hosts by
+    /// `host:port`: served, failed (the last series got no served answer) and not yet asked; it is logged when these
+    /// lists differ from those of the last line of the client, and at the first result.
     pub(crate) fn start_capability_probe(&self) {
         let Some((client, scope)) = self.capability_scope() else {
             return;
@@ -363,12 +422,12 @@ impl Qrc20Coin {
             return;
         };
         let guards: Vec<ProbeGuard> = client
-            .claim_contract_history_probes(CAPABILITY_PROBE_GAP_SECS, only)
+            .claim_contract_history_probes(CAPABILITY_PROBE_GAP_SECS, CAPABILITY_REFUSED_PROBE_GAP_SECS, only)
             .into_iter()
             .map(|server| ProbeGuard {
                 client: client.clone(),
                 server,
-                failed: false,
+                end: ProbeEnd::Unmarked,
             })
             .collect();
         if guards.is_empty() {
@@ -378,21 +437,20 @@ impl Qrc20Coin {
         let platform = self.platform.clone();
         let address = contract_addr_into_rpc_format(&my_address);
         let token = contract_addr_into_rpc_format(&self.contract_address);
+        let settings = series_settings();
         let probe = async move {
-            // Each server's probe ends with its own answer. A served read is recorded by the client where every
-            // answer of the method is; a failed one here.
-            let probes = guards.into_iter().map(|mut guard| {
-                let request = client
-                    .blockchain_contract_event_get_history_from(&guard.server, &address, &token, QRC20_TRANSFER_TOPIC)
-                    .compat();
-                async move {
-                    if request.await.is_err() {
-                        guard.mark_failed();
-                    }
-                }
-            });
+            // Each server's probe is a series of tries that ends with its own answer. A served read is recorded by
+            // the client where every answer of the method is; a failed series here, when the whole series ended.
+            let probes = guards
+                .into_iter()
+                .map(|guard| probe_series(guard, settings, address.clone(), token.clone()));
             futures::future::join_all(probes).await;
-            let (served, failed, not_asked) = client.contract_history_servers();
+            let lists = client.contract_history_servers();
+            // The line shows a change only, and the first result.
+            if !client.contract_history_lists_changed(&lists) {
+                return;
+            }
+            let (served, failed, not_asked) = lists;
             let names = |labels: &[String]| labels.iter().map(|label| node_name(label)).collect::<Vec<_>>();
             info!(
                 "{}: Electrum hosts that have served blockchain.contract.event.get_history: {:?}; failed: {:?}; not \

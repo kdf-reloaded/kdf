@@ -1,6 +1,7 @@
 use super::electrum_client_registry::ReleaseNote;
 #[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
-use super::electrum_pool::{call_budget_of_caller, ElectrumPoolOptions, ElectrumServersView, PoolShared};
+use super::electrum_pool::{call_budget_of_caller, ContractHistoryLists, ElectrumPoolOptions, ElectrumServersView,
+                           PoolShared, ProbeEnd};
 use super::*;
 use crate::swap_evidence::{evidence_ready, node_name, HostReadiness, ReadinessProbes, ReadyMode, ReadyScope,
                            SwapEvidencePolicy};
@@ -692,22 +693,32 @@ impl ElectrumClientImpl {
 
     /// The labels (`host:port`) of the usable servers that have served `blockchain.contract.event.get_history` since
     /// this client was built, of those whose last probe of it failed, and of those not asked yet.
-    pub(crate) fn contract_history_servers(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
-        self.pool.contract_history_servers()
-    }
+    pub(crate) fn contract_history_servers(&self) -> ContractHistoryLists { self.pool.contract_history_servers() }
 
     /// The servers a probe of `blockchain.contract.event.get_history` may ask now, each marked as being probed until
-    /// [`Self::end_contract_history_probe`]: a server is given at most once per `min_gap_secs` and never while a probe
-    /// of it runs. With `only`, a server label (`host:port`), no other server is given.
-    pub(crate) fn claim_contract_history_probes(&self, min_gap_secs: f64, only: Option<&str>) -> Vec<String> {
+    /// [`Self::end_contract_history_probe`]: a server is given at most once per `min_gap_secs` (per `refused_gap_secs`
+    /// when every try of its last failed series was answered with an error) and never while a probe of it runs. With
+    /// `only`, a server label (`host:port`), no other server is given.
+    pub(crate) fn claim_contract_history_probes(
+        &self,
+        min_gap_secs: f64,
+        refused_gap_secs: f64,
+        only: Option<&str>,
+    ) -> Vec<String> {
         self.pool
-            .claim_contract_history_probes(common::now_float(), min_gap_secs, only)
+            .claim_contract_history_probes(common::now_float(), min_gap_secs, refused_gap_secs, only)
     }
 
-    /// Ends the probe of `server`; `failed` when it got an error or an answer that could not be read.
-    pub(crate) fn end_contract_history_probe(&self, server: &str, failed: bool) {
-        self.pool
-            .end_contract_history_probe(server, common::now_float(), failed)
+    /// Ends the probe of `server`; `end` tells whether its series of requests failed, and how.
+    pub(crate) fn end_contract_history_probe(&self, server: &str, end: ProbeEnd) {
+        self.pool.end_contract_history_probe(server, common::now_float(), end)
+    }
+
+    /// Whether `lists` differ from those the last INFO line of the probes of this client showed (or none was logged
+    /// yet); when they do they are kept as the lists of the line now to be logged. Tokens that share the client share
+    /// this record.
+    pub(crate) fn contract_history_lists_changed(&self, lists: &ContractHistoryLists) -> bool {
+        self.pool.contract_history_lists_changed(lists)
     }
 
     /// The coin's tolerance in blocks, the gap within which the pool judges a server up to date (CRD ch.38
