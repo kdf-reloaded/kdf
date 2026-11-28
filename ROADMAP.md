@@ -28,21 +28,17 @@ netids 8762 and 6133.
 
 ### 0.3.0-beta.1 (2026-11-01)
 
-- Lighter peer-to-peer networking: seeds, relays and busy makers need less memory and cope with slow
-  peers, and orders are posted faster.
-- ARRR swaps on the Ironwood transaction format, with refunds and recovery that hold up.
-- Better handling of Electrum and EVM nodes that fail or fall behind.
-- Many fixes to swaps and refunds, among them for merged-mined coins and Radiant (RXD) signing.
+- Lighter and faster peer-to-peer networking and order posting.
+- ARRR swaps on the Ironwood transaction format, with dependable refunds and recovery.
+- Swaps that cope better with failing nodes, and many swap and refund fixes.
 
-### 0.4 series
+### 0.4.0-beta.1 (2026-11-14)
 
-- 0.4.0-beta.1 (2026-11-14): Siacoin (SC) swaps; under an HD login each coin uses its own key and
-  address; ARRR pays `pirate1` addresses; Bitcoin II (BC2) support; Electrum servers that fall behind or
-  disagree are detected; a more robust order book; two price sources that check each other; more release
-  builds, among them Linux ARM and the mobile libraries.
-- 0.4.1-beta.1 (2026-11-21): the order book no longer shows ARRR or BC2 orders from nodes that cannot
-  complete such a swap.
-- 0.4.2-beta.1 (2026-11-26): ARRR can spend the notes on the wallet's change address.
+- More coins: Siacoin (SC) swaps and Bitcoin II (BC2).
+- HD wallets: each coin trades and withdraws with its own key and address.
+- A more robust network: detection of Electrum servers that fall behind or disagree, a sturdier order book
+  and two price sources that check each other.
+- Builds for more platforms, among them Linux ARM and the mobile libraries.
 
 ### 0.5.0-beta.1
 
@@ -69,6 +65,9 @@ These are the next larger pieces of work. No version or date is assigned to them
   [ch.52](docs/reloaded-rewrite/52-swap-v2-state-machine.md).
 - **Solana swaps.** SOL and SPL tokens can be held and sent, not traded. See
   [`solana-support`](docs/plans/solana-support.md).
+- **TRON swaps.** The swap code is in and switched off. The swap contract is to be deployed after 0.5.0, and
+  swaps are to be tested before they are switched on. See
+  [`tron-swap-support`](docs/plans/tron-swap-support.md).
 - **SLP tokens.** Finishing the support for SLP tokens and testing it on a live network; parts of the SLP
   changes so far rest on unit tests only.
 - **Swap watchers.** A watcher that can finish or refund a swap while your node is offline does not work
