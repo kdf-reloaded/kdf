@@ -36,7 +36,7 @@ For the relationship to other downstream projects (notably the GLEEC fork), see 
 
 ## Beta disclaimer
 
-KDF Reloaded is currently in **public beta** (the early roadmap is in [`ROADMAP.md`](ROADMAP.md); current work is in [`docs/plans/`](docs/plans/)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
+KDF Reloaded is currently in **public beta** (the direction is in [`ROADMAP.md`](ROADMAP.md); current work is in [`docs/plans/`](docs/plans/)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
 
 > **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
 
@@ -176,7 +176,7 @@ auditing, or redistributing the project:
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [PR review checklist](docs/PR_REVIEW_CHECKLIST.md). All contributors must agree to the [Developer Agreement](LEGAL/DEVELOPER-AGREEMENT) and abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-For the early roadmap, see [`ROADMAP.md`](ROADMAP.md); for current and planned work, see [`docs/plans/`](docs/plans/) and the tests run before a release in [`docs/release-tests/`](docs/release-tests/). For the change log, see [`CHANGELOG.md`](CHANGELOG.md).
+For the direction of the project, see [`ROADMAP.md`](ROADMAP.md); for current and planned work, see [`docs/plans/`](docs/plans/) and the tests run before a release in [`docs/release-tests/`](docs/release-tests/). For the change log, see [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

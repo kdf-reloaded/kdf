@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 <!-- How to add an entry: put it under the matching ### group and #### area (add the area heading if it is missing), as a bold one-sentence summary in plain words, then the detail, ending with "Detail: PR #N; CRD ch.X RY". A change that an older version can no longer read or undo, or that needs a step from the user before or after upgrading, also gets an emphasized plain-words item under "### Breaking changes and upgrade notes" at the top of the section. -->
 <!-- The same PR updates every affected document: the CRD chapter, the plan body and its "Plans touched" row, RELOADED_VS_GLEEC.md, docs/GLEEC_COMPATIBILITY.md and "Known limitations" below; a plan's Status line is left to the maintainer. -->
 
+## [0.5.0-beta.1] — 2026-11-28
+
 ### Breaking changes and upgrade notes
 
 Read this before you upgrade. It lists every change in this release that an older version can no longer read
@@ -234,6 +236,14 @@ or undo, and every change that needs a step from you.
     317 class a positive `txfee`, or remove it. A `txfee` of 1000 gives the earlier fee and a minimum of 0.0001 ARRR
     back.
   - Detail: PR #544; CRD ch.39 R39.6.5f (status note of 2026-11-26); the item under "Changed" / "Shielded coins".
+
+- **The `version` answer is no longer the bare commit hash.** The node reports `R<version>-<short commit hash>`,
+  for example `R0.5.0-beta.1-6ea8598`.
+  - *What changes:* the `version` RPC, the version recorded in swap data and the other places where the node names
+    its version carry the new form.
+  - *What to do:* a script or tool that reads the commit hash from the `version` answer takes the part after the
+    last `-`. See the item under "Changed" / "Start-up and configuration".
+  - Detail: PR #555; CRD ch.45 R45.6.7, status note of 2026-11-28.
 
 #### Coins that are no longer visible after an upgrade
 
@@ -712,6 +722,16 @@ the previous version used. The safe way:
 
 ### Changed
 
+#### Start-up and configuration
+
+- **The node reports its version as `R<version>-<short commit hash>`, for example
+  `R0.5.0-beta.1-6ea8598`.** The `version` RPC, the version recorded in swap data and the other places where the
+  node names its version carried the bare short commit hash before; `R` stands for KDF Reloaded, and the text
+  names no operating system. `--version` and the two start-up log lines show the same string, followed by the
+  build date. Release names and git tags keep the form `0.5.0-beta.1`. A script or tool that reads the commit
+  hash from the `version` answer needs to take the part after the last `-`. Detail: PR #555; CRD ch.45 R45.6.7,
+  status note of 2026-11-28.
+
 #### RPC interface
 
 - **Disabling a coin now ends its background work.** When `disable_coin` removes a coin (a coin, a token, a platform
@@ -1037,6 +1057,11 @@ the previous version used. The safe way:
   - Detail: PR #549; CRD ch.52 R18 status note of 2026-11-27, ch.51 §51.6G R100.
 
 #### Legacy swaps and orders
+
+- **The confirmation wait of an EVM coin now asks two nodes in legacy swaps too.** On a coin under the
+  two-node rule it is agreed like the UTXO confirmation wait. The change is described with the version-two chain
+  reads, in the item "The chain reads of a v2 swap on UTXO and EVM coins ask two nodes" under "Swap protocol v2".
+  - Detail: PR #549; CRD ch.51 §51.6G R100.
 
 - **A swap starts only when its chain reads can be agreed right now.** Before a swap starts, the node checks that
   both coins can give the reads the two-node rule needs (see the breaking change "A new swap needs two nodes of the
@@ -1647,6 +1672,8 @@ the previous version used. The safe way:
 
 ### Plans touched
 
+- [`crate-versioning`](docs/plans/crate-versioning.md) — note of 2026-11-28: the `version` RPC and swap records
+  now carry `R<version>-<short commit hash>`, in PR #555.
 - [`swap-v2-chain-read-agreement`](docs/plans/swap-v2-chain-read-agreement.md) — new, planning: swap protocol v2
   follows the agreement of chain reads (R100) in 0.5.0, with the recovery and the funding-refund rules decided on
   2026-11-23, PR #528.
@@ -1740,6 +1767,8 @@ the previous version used. The safe way:
 
 ### Known limitations (additions since 0.4.0-beta.1)
 
+- **New version-two swaps cannot be started.** The node resumes a version-two swap that an earlier run saved;
+  it does not start a new one. Detail: CRD ch.52; [`swap-v2-chain-read-agreement`](docs/plans/swap-v2-chain-read-agreement.md).
 - **QRC20 transaction history needs Electrum servers that answer the contract-event methods.** As of 2026-11-22, the
   QTUM servers of the published coins file answer them with an error. With only those servers, a QRC20 token's
   history stops with error code -2 after three passes in a row in which every listed server answered with an error.
@@ -5603,7 +5632,11 @@ Tag `v0.2.0-beta.1` (2026-08-05) was cut on `staging` from the development line 
 2026-11-08; until then its entries were listed under 0.3.0-alpha.1. The correction of its KMD fee
 entry is in the 0.3.0-alpha.1 section (the entry marked "Superseded (issue #11)").
 
-[Unreleased]: https://github.com/kdf-reloaded/kdf/compare/v0.3.0-beta.1...HEAD
+[Unreleased]: https://github.com/kdf-reloaded/kdf/compare/v0.5.0-beta.1...HEAD
+[0.5.0-beta.1]: https://github.com/kdf-reloaded/kdf/compare/v0.4.2-beta.1...v0.5.0-beta.1
+[0.4.2-beta.1]: https://github.com/kdf-reloaded/kdf/compare/v0.4.1-beta.1...v0.4.2-beta.1
+[0.4.1-beta.1]: https://github.com/kdf-reloaded/kdf/compare/v0.4.0-beta.1...v0.4.1-beta.1
+[0.4.0-beta.1]: https://github.com/kdf-reloaded/kdf/compare/v0.3.0-beta.1...v0.4.0-beta.1
 [0.3.0-beta.1]: https://github.com/kdf-reloaded/kdf/compare/ddb87a4849f91400b1b4aa120090f1acb12aa7bf...v0.3.0-beta.1
 [0.3.0-alpha.3]: https://github.com/kdf-reloaded/kdf/compare/49a46bc54fc16761796ed0bad53a472b8183ed9b...ddb87a4849f91400b1b4aa120090f1acb12aa7bf
 [0.3.0-alpha.2]: https://github.com/kdf-reloaded/kdf/compare/7a18f94b2f5de1ff7ba2ae69c4b445132d305a3f...49a46bc54fc16761796ed0bad53a472b8183ed9b

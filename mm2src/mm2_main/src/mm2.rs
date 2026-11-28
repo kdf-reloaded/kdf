@@ -80,18 +80,17 @@ mod malloc_arena;
 pub mod mm2_tests;
 
 pub const MM_DATETIME: &str = env!("MM_DATETIME");
+/// The version this binary reports, `R<crate-version>-<short-hash>` (see `build.rs`). It is shown in the startup log
+/// lines, answered by the `version` RPC and recorded in swap records.
 pub const MM_VERSION: &str = env!("MM_VERSION");
-/// The version of the `mm2_bin_lib` crate (see `build.rs`), shown in the version text.
+/// The version of the `mm2_bin_lib` crate (see `build.rs`), which is part of `MM_VERSION`.
 pub const MM_CRATE_VERSION: &str = env!("MM_CRATE_VERSION");
 
-/// Formats the user-visible version text `<crate-version> (<short-hash>) DT <datetime>`.
-/// `MM_VERSION` itself stays the bare short hash; it is also used by the `version` RPC and the swap records.
-fn format_version_text(crate_version: &str, short_hash: &str, datetime: &str) -> String {
-    format!("{crate_version} ({short_hash}) DT {datetime}")
-}
+/// Formats the user-visible version text `<version> DT <datetime>`.
+fn format_version_text(version: &str, datetime: &str) -> String { format!("{version} DT {datetime}") }
 
 /// The version text of this binary, shown in the startup log lines.
-pub fn version_text() -> String { format_version_text(MM_CRATE_VERSION, MM_VERSION, MM_DATETIME) }
+pub fn version_text() -> String { format_version_text(MM_VERSION, MM_DATETIME) }
 pub const PASSWORD_MAXIMUM_CONSECUTIVE_CHARACTERS: usize = 3;
 
 #[cfg(feature = "custom-swap-locktime")]
@@ -811,7 +810,7 @@ fn init_logger(level: LogLevel) -> Result<(), String> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{format_version_text, get_mm2config, startup_path_report, version_text, CoinsSource, ConfigSource,
-                ConfigSources, MM_CRATE_VERSION, MM_VERSION};
+                ConfigSources, MmVersionResult, MM_CRATE_VERSION, MM_DATETIME, MM_VERSION};
     use lazy_static::lazy_static;
     use std::env;
     use std::ffi::OsString;
@@ -995,37 +994,50 @@ mod tests {
     #[test]
     fn test_format_version_text_normal() {
         assert_eq!(
-            format_version_text("0.4.0", "e65d3c4", "2026-11-02T18:30:00+00:00"),
-            "0.4.0 (e65d3c4) DT 2026-11-02T18:30:00+00:00"
+            format_version_text("R0.4.0-e65d3c4", "2026-11-02T18:30:00+00:00"),
+            "R0.4.0-e65d3c4 DT 2026-11-02T18:30:00+00:00"
         );
     }
 
     #[test]
     fn test_format_version_text_prerelease() {
         assert_eq!(
-            format_version_text("0.4.0-alpha.1", "e65d3c4", "2026-11-02T18:30:00+00:00"),
-            "0.4.0-alpha.1 (e65d3c4) DT 2026-11-02T18:30:00+00:00"
+            format_version_text("R0.4.0-alpha.1-e65d3c4", "2026-11-02T18:30:00+00:00"),
+            "R0.4.0-alpha.1-e65d3c4 DT 2026-11-02T18:30:00+00:00"
         );
     }
 
     #[test]
     fn test_format_version_text_unknown_hash() {
         assert_eq!(
-            format_version_text("0.4.0", "UNKNOWN", "2026-11-02T18:30:00+00:00"),
-            "0.4.0 (UNKNOWN) DT 2026-11-02T18:30:00+00:00"
+            format_version_text("R0.4.0-UNKNOWN", "2026-11-02T18:30:00+00:00"),
+            "R0.4.0-UNKNOWN DT 2026-11-02T18:30:00+00:00"
         );
     }
 
     #[test]
     fn test_format_version_text_empty_datetime() {
-        assert_eq!(format_version_text("0.4.0", "e65d3c4", ""), "0.4.0 (e65d3c4) DT ");
+        assert_eq!(format_version_text("R0.4.0-e65d3c4", ""), "R0.4.0-e65d3c4 DT ");
     }
 
+    /// T45.15: the compiled version is `R<crate version>-<hash part>`.
     #[test]
-    fn test_version_text_contains_crate_version_and_hash() {
-        let text = version_text();
-        assert!(text.starts_with(MM_CRATE_VERSION), "{text}");
-        assert!(text.contains(&format!("({MM_VERSION})")), "{text}");
+    fn test_mm_version_has_reloaded_form() {
+        let hash_part = MM_VERSION
+            .strip_prefix(&format!("R{MM_CRATE_VERSION}-"))
+            .unwrap_or_else(|| panic!("unexpected version form: {MM_VERSION}"));
+        assert!(!hash_part.is_empty(), "{MM_VERSION}");
+        assert!(
+            hash_part.chars().all(|c| c.is_alphanumeric() || "_.-".contains(c)),
+            "{MM_VERSION}"
+        );
+    }
+
+    /// T45.15: the startup lines and the `version` RPC method carry the same version.
+    #[test]
+    fn test_version_text_and_rpc_carry_mm_version() {
+        assert_eq!(version_text(), format!("{MM_VERSION} DT {MM_DATETIME}"));
+        assert_eq!(MmVersionResult::new().to_json()["result"], MM_VERSION);
     }
 
     /// `MM_CRATE_VERSION` must follow the `mm2_bin_lib` package version.

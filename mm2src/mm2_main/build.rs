@@ -38,14 +38,16 @@ fn root() -> PathBuf {
 /// The build script will usually help us by putting the MarketMaker version into the “MM_VERSION” file
 /// and the corresponding ISO 8601 time into the “MM_DATETIME” file
 ///
-/// For the nightly builds the version contains the short commit hash.
+/// "MM_VERSION" has the form `R<crate version>-<hash part>`: `R` marks KDF Reloaded, the crate version is the one
+/// of [`mm_crate_version`], and the hash part is normally the short commit hash (`UNKNOWN` without Git, or the form
+/// derived from the "MM_VERSION" file).
 ///
 /// We're also trying to get the hash and the time from Git.
 ///
 /// Git information isn't always available during the build (for instance, when a build server is used,
 /// we might skip synchronizing the Git repository there),
 /// but if it is, then we're going to check if the “MM_DATETIME” and the Git data match.
-fn mm_version() -> String {
+fn mm_version(crate_version: &str) -> String {
     // We fetch the actual git version here,
     // with `git log '--pretty=format:%h' -n 1` for the nightlies,
     // and a release tag when building from some kind of a stable branch,
@@ -79,7 +81,7 @@ fn mm_version() -> String {
         }
     }
 
-    println!("cargo:rustc-env=MM_VERSION={}", version);
+    println!("cargo:rustc-env=MM_VERSION=R{}-{}", crate_version, version);
 
     let mut dt_git = None;
     let mut command = Command::new("git");
@@ -128,7 +130,7 @@ fn package_version(manifest: &str) -> Option<String> {
 
 /// Emits `MM_CRATE_VERSION`: the version of the `mm2_bin_lib` crate, which is the one bumped for a release.
 /// Falls back to the version of this crate if the manifest or its version is not available.
-fn mm_crate_version() {
+fn mm_crate_version() -> String {
     let manifest_p = root().join("../mm2_bin_lib/Cargo.toml");
     println!("cargo:rerun-if-changed=../mm2_bin_lib/Cargo.toml");
     let version = fs::read_to_string(&manifest_p)
@@ -136,6 +138,7 @@ fn mm_crate_version() {
         .and_then(|manifest| package_version(&manifest))
         .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
     println!("cargo:rustc-env=MM_CRATE_VERSION={}", version);
+    version
 }
 
 fn main() {
@@ -155,8 +158,8 @@ fn main() {
         // This allows build script to run even if no source code files change as rerun-if-changed checks for a file that doesn't exist
         println!("cargo:rerun-if-changed=NON_EXISTING_FILE");
     }
-    mm_version();
-    mm_crate_version();
+    let crate_version = mm_crate_version();
+    mm_version(&crate_version);
 
     // Compile swap V2 protobuf definitions.
     println!("cargo:rerun-if-changed=src/lp_swap/swap_v2.proto");

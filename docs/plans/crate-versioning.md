@@ -26,6 +26,9 @@ The `version` method and the version recorded in swap records carry the bare sho
 banner work. Open (maintainer decision D4 (b), deferred): should either ever carry the release version, and what would
 other nodes and clients do with it?
 
+*Note (2026-11-28):* both now carry `R<crate version>-<hash part>`, the release version included (CRD ch.45 R45.6.7,
+status note of 2026-11-28). The paragraph above and the matching line under *Not in scope* describe the earlier state.
+
 ## Not in scope
 
 No version change of any crate, no new policy, no change to the string that swap records and the `version` method carry.
