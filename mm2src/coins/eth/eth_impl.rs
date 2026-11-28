@@ -3116,9 +3116,9 @@ impl EthCoin {
                 },
                 // TRC20 allowance would use the dedicated TRON read-only call;
                 // ETH allowance() pipeline is not used. Gated until P10.2.5.
-                EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(Web3RpcError::Internal(
-                    "TRON allowance not yet wired (pending P10.2.5)".to_owned(),
-                )),
+                EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
+                    MmError::err(Web3RpcError::Internal(tron_swaps_unsupported("allowance")))
+                },
             }
         };
         Box::new(fut.boxed().compat())
@@ -3147,7 +3147,7 @@ impl EthCoin {
                 // ERC20 approve() is not used for TRON/TRC20 (the TRON contract
                 // surface is invoked via the TRON HTTP API). Gated until P10.2.5.
                 EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                    return TX_PLAIN_ERR!("TRON approve not yet wired (pending P10.2.5)")
+                    return TX_PLAIN_ERR!("{}", tron_swaps_unsupported("approve"))
                 },
             };
             let function = try_tx_s!(ERC20_CONTRACT.function("approve"));

@@ -668,9 +668,7 @@ impl EthGasLimitV2 {
             },
             // P10.2.5: TRON gas estimates not modelled here. Activation rejects
             // TRON coins until swap V2 wiring lands, so this branch is unreachable.
-            (EthCoinType::Tron, _, _) | (EthCoinType::Trc20 { .. }, _, _) => {
-                Err("TRON swap V2 gas limits not yet defined (P10.2.5)".to_string())
-            },
+            (EthCoinType::Tron, _, _) | (EthCoinType::Trc20 { .. }, _, _) => Err(tron_swaps_unsupported("gas limits")),
         }
     }
 
@@ -780,4 +778,9 @@ pub enum EthAddressFormat {
     /// https://eips.ethereum.org/EIPS/eip-55
     #[serde(rename = "mixedcase")]
     MixedCase,
+}
+
+/// Error text for an EVM swap or contract operation that is refused for TRON coins.
+pub(crate) fn tron_swaps_unsupported(operation: &str) -> String {
+    format!("TRON swaps are not supported in this version ({operation})")
 }

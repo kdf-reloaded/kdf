@@ -5682,3 +5682,11 @@ mod swap_key_agreement_tests {
         assert!(coin.own_signing_key_pair().is_none());
     }
 }
+
+#[test]
+fn tron_refusal_text_is_plain() {
+    let text = tron_swaps_unsupported("approve");
+    assert_eq!(text, "TRON swaps are not supported in this version (approve)");
+    assert!(!text.contains("P10"));
+    assert!(!text.contains("pending"));
+}

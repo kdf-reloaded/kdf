@@ -1,4 +1,5 @@
-use super::{spawn_gossipsub_with_guards, AdexBehaviourCmd, AdexBehaviourEvent, AdexResponse, NodeType, RelayAddress};
+use super::{noise_error_to_behaviour_error, spawn_gossipsub_with_guards, AdexBehaviourCmd, AdexBehaviourError,
+            AdexBehaviourEvent, AdexResponse, NodeType, RelayAddress};
 use crate::redial_guard::RedialGuardConfig;
 use async_std::task::spawn;
 use futures::channel::{mpsc, oneshot};
@@ -958,4 +959,13 @@ async fn test_connected_seed_gets_no_second_connection_over_ten_ticks() {
         async_std::task::sleep(config.tick).await;
         assert_eq!(connection_count(&mut node).await, 1, "tick {}", tick);
     }
+}
+
+#[test]
+fn noise_setup_failure_maps_to_typed_start_up_error() {
+    let err = noise_error_to_behaviour_error(libp2p::noise::Error::Io(std::io::Error::other("key failure")));
+    assert!(matches!(err, AdexBehaviourError::NoiseConfig(_)));
+    assert!(err
+        .to_string()
+        .starts_with("Failed to set up the encrypted P2P transport"));
 }

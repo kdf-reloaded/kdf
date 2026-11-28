@@ -169,7 +169,8 @@ impl EthCoin {
             // TRON coins are wallet-only while
             // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(TransactionErr::Plain(ERRL!(
-                "TRON maker payment v2 not yet wired (pending P10.2.5)"
+                "{}",
+                crate::eth::tron_swaps_unsupported("maker payment")
             ))),
         }
     }
@@ -216,7 +217,7 @@ impl EthCoin {
             // TRON coins are wallet-only while
             // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(ValidatePaymentError::InternalError(
-                "TRON maker payment validation not yet wired (pending P10.2.5)".to_owned(),
+                crate::eth::tron_swaps_unsupported("maker payment validation"),
             )),
         }
     }

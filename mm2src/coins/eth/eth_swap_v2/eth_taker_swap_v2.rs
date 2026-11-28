@@ -194,7 +194,8 @@ impl EthCoin {
             // TRON coins are wallet-only while
             // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(TransactionErr::Plain(ERRL!(
-                "TRON taker funding v2 not yet wired (pending P10.2.5)"
+                "{}",
+                crate::eth::tron_swaps_unsupported("taker funding")
             ))),
         }
     }
@@ -250,7 +251,7 @@ impl EthCoin {
             // TRON coins are wallet-only while
             // `TRON_SWAPS_AVAILABLE` is `false` (CRD ch.21 R-D1, R21.B3), so a swap never reaches this branch.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(ValidateSwapV2TxError::InternalError(
-                "TRON taker funding validation not yet wired (pending P10.2.5)".to_owned(),
+                crate::eth::tron_swaps_unsupported("taker funding validation"),
             )),
         }
     }
@@ -271,7 +272,8 @@ impl EthCoin {
             // TRON approve flow lives in the TRON pipeline. Gated. P10.2.5.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return Err(TransactionErr::Plain(ERRL!(
-                    "TRON taker payment approve not yet wired (pending P10.2.5)"
+                    "{}",
+                    crate::eth::tron_swaps_unsupported("taker payment approve")
                 )))
             },
         };
@@ -697,7 +699,7 @@ impl EthCoin {
                 ])?)
             },
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(PrepareTxDataError::Internal(
-                "TRON taker payment approve data not yet wired (pending P10.2.5)".to_owned(),
+                crate::eth::tron_swaps_unsupported("taker payment approve data"),
             )),
         }
     }
@@ -739,7 +741,7 @@ impl EthCoin {
                 ])?)
             },
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(PrepareTxDataError::Internal(
-                "TRON spend taker payment data not yet wired (pending P10.2.5)".to_owned(),
+                crate::eth::tron_swaps_unsupported("spend taker payment data"),
             )),
         }
     }
@@ -761,7 +763,8 @@ impl EthCoin {
             EthCoinType::Erc20 { token_addr, .. } => (try_tx_s!(TAKER_SWAP_V2.function(erc20_func_name)), token_addr),
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return Err(TransactionErr::Plain(ERRL!(
-                    "TRON swap v2 contract details not yet wired (pending P10.2.5)"
+                    "{}",
+                    crate::eth::tron_swaps_unsupported("swap contract details")
                 )))
             },
         };
@@ -779,9 +782,9 @@ impl EthCoin {
             EthCoinType::Eth => TAKER_SWAP_V2.function(FN_ETH_TAKER_PAYMENT)?,
             EthCoinType::Erc20 { .. } => TAKER_SWAP_V2.function(FN_ERC20_TAKER_PAYMENT)?,
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                return Err(PrepareTxDataError::Internal(
-                    "TRON funding decoding not yet wired (pending P10.2.5)".to_owned(),
-                ));
+                return Err(PrepareTxDataError::Internal(crate::eth::tron_swaps_unsupported(
+                    "funding decoding",
+                )));
             },
         };
         let decoded = decode_contract_call(func, &tx.data)?;
