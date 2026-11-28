@@ -196,7 +196,7 @@ MM_LOG=$HOME/kdf/kdf.log ./kdf
 ```
 
 The node keeps running in the foreground. With `MM_LOG` set it writes its log to that file and prints nothing; the
-first line of the log is the version, and the next lines name the configuration file, the coins file and the log
+first line of the log names the version, and the next lines name the configuration file, the coins file and the log
 file in use. For a long-running node, run it under a service manager such as systemd with `WorkingDirectory` set to
 `~/kdf`.
 
@@ -294,8 +294,8 @@ two of its hosts answer), the order is still accepted and saved, but it is not a
 `setprice` answer then carries `"paused": true` and `"paused_reason"`, for example
 `"RIN: swap evidence not available (fewer than two hosts answering)"`. `my_orders` and `order_status` show
 `"paused": true` while the order is paused, and the log has one warning per order that starts paused. The order is
-announced as soon as the coin's servers answer again; nothing needs to be done. When an order is not paused, these
-members are absent.
+announced again by the next order refresh once the coin's servers answer; nothing needs to be done. When an order
+is not paused, these members are absent.
 
 A taker's `buy` or `sell` on such a coin is refused with the `error_type` `SwapEvidenceNotReady` and a text that
 names the coin and the reason; try again when its servers answer.
@@ -332,7 +332,7 @@ running swaps: a swap that was in progress needs its files to claim or refund.
 
 ## 9. Upgrade and downgrade
 
-1. Stop the node and let no swap be in progress, or note the running swaps (`my_recent_swaps`).
+1. Let running swaps finish (check `my_recent_swaps`), or note them; then stop the node.
 2. Back up `dbdir` and `MM2.json`, and keep the old binary.
 3. Read [Breaking changes and upgrade notes](../CHANGELOG.md#breaking-changes-and-upgrade-notes) of every release
    between your version and the new one. Some changes cannot be undone by going back, for example a database that
