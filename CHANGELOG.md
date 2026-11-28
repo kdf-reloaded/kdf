@@ -745,6 +745,11 @@ the previous version used. The safe way:
 
 #### Start-up and configuration
 
+- **The documentation names `netid8762/coins` as the source of the coins file and the seed node list.** The README
+  and the operator quickstart point to [github.com/netid8762/coins](https://github.com/netid8762/coins) for the
+  `coins` file and for `seed-nodes.json`, the seed nodes of netid 8762; before, the README named
+  `KomodoPlatform/coins`. Nothing changes in the node: it has no built-in coins file or seed nodes and reads the
+  `coins` file and the `seednodes` list you give it.
 - **The node reports its version as `R<version>-<short commit hash>`, for example
   `R0.5.0-beta.1-6ea8598`.** The `version` RPC, the version recorded in swap data and the other places where the
   node names its version carried the bare short commit hash before; `R` stands for KDF Reloaded, and the text

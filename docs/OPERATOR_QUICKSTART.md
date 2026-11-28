@@ -68,28 +68,27 @@ other paths.
 
 ### The coins file
 
-Take the community-maintained coins file:
+Take the community-maintained coins file from the [coins repository](https://github.com/netid8762/coins):
 
 ```sh
-curl -fL -o coins https://raw.githubusercontent.com/KomodoPlatform/coins/master/coins
+curl -fL -o coins https://raw.githubusercontent.com/netid8762/coins/nogeo/coins
 ```
 
-The node activates a coin only if `coins` has an entry for its ticker. BNB, one of the examples below, is in the
-file; RIN, the other, may not be in your copy yet and then needs an entry first (see
-[Adding a coin entry](#adding-a-coin-entry)). Keep the file current: an old file can lack settings that swaps need,
-such as gas limits.
+The node activates a coin only if `coins` has an entry for its ticker. RIN and BNB, the examples below, are in the
+file; a coin that is not needs an entry first (see [Adding a coin entry](#adding-a-coin-entry)). Keep the file
+current: an old file can lack settings that swaps need, such as gas limits.
+
+The same repository also holds the public server lists of the coins (the `electrums` and `ethereum` folders) and
+the seed nodes of the network (`seed-nodes.json`, see [Seed nodes](#seed-nodes)).
 
 ### Adding a coin entry
 
 A coin whose ticker is not in `coins` cannot be activated: the activation answers with an error that ends in
 "assuming that coin is not supported". Add an entry for it to the array in `coins` before you
-start the node; the file is read at start. Check whether your copy has RIN:
+start the node; the file is read at start.
 
-```sh
-grep -c '"coin": "RIN"' coins
-```
-
-If that prints `0`, add this entry to the array (after the opening `[`, followed by a comma):
+An entry carries the coin's chain parameters. As a worked example, this is the entry of a UTXO coin, RIN, from the
+coins file, shortened to its main members:
 
 ```json
 {
@@ -142,7 +141,8 @@ then activated as in [step 5](#5-activate-coins), with its own Electrum servers 
   "passphrase": "<your 12 or 24 word seed phrase>",
   "rpc_password": "<8 to 32 characters>",
   "dbdir": "/home/kdf/kdf-db",
-  "seednodes": ["<seed host 1>", "<seed host 2>"]
+  "seednodes": ["seed01.netid8762.fans", "seed02.netid8762.fans", "seed02.swapscope.net",
+                "mm2seed.shorelinecrypto.com", "peer1.rincoin.online"]
 }
 ```
 
@@ -157,13 +157,34 @@ then activated as in [step 5](#5-activate-coins), with its own Electrum servers 
 - **`dbdir`** is where the node keeps its databases (see [step 8](#8-logs-and-data)). The default is `DB` in the
   start directory. Use an absolute path on a disk that is backed up.
 - **`seednodes`** lists the seed nodes of the network. Neither network has seed nodes built in; without this list
-  the node starts but finds no peers until another node connects to it. The coins repository lists public seed
-  nodes in `seed-nodes.json`, each with its `netid`; take hosts of your network only, and check after the start
-  that the node reached them ([step 4](#4-start-the-node-and-check-its-version)). See
-  [Seed Nodes](NETWORK_CONFIG.md#seed-nodes).
+  the node starts but finds no peers until another node connects to it. See [Seed nodes](#seed-nodes) below for
+  the hosts of each network.
 
 The RPC interface listens on `127.0.0.1:7783` and accepts requests only from this host. Keep it that way, or
 put an authenticated proxy in front of it.
+
+### Seed nodes
+
+A node joins one network, the one its `netid` names, and reaches it through that network's seed nodes. The seed
+nodes of one network do not serve the other, so the `seednodes` list must match the `netid`.
+
+The seed nodes of a network are published in the file `seed-nodes.json` of a coins repository, one entry per host
+with its `netid`. Print the hosts of netid 8762:
+
+```sh
+curl -fsL https://raw.githubusercontent.com/netid8762/coins/nogeo/seed-nodes.json | grep '"host"'
+```
+
+The lists below are as of 2026-11-28. Seed nodes are run by volunteers and change; check the source for the
+current hosts.
+
+| `netid` | Seed nodes | Source |
+|---|---|---|
+| 8762 (AtomicDEX) | `seed01.netid8762.fans`, `seed02.netid8762.fans`, `seed02.swapscope.net`, `mm2seed.shorelinecrypto.com`, `peer1.rincoin.online` | [`seed-nodes.json`](https://github.com/netid8762/coins/blob/nogeo/seed-nodes.json) of the coins repository above |
+| 6133 (GLEEC DEX) | `seed01.cipig.net`, `seed02.cipig.net`, `kdfseed1.decker.im`, `staking2.gleec.com` | The entries with `"netid": 6133` in [`seed-nodes.json`](https://github.com/GLEECBTC/coins/blob/master/seed-nodes.json) of that network's coins repository |
+
+After the start, check that the node reached its seed nodes ([step 4](#4-start-the-node-and-check-its-version)).
+More about seed nodes and redials: [Seed Nodes](NETWORK_CONFIG.md#seed-nodes).
 
 ### Settings new in 0.5.0
 
@@ -218,7 +239,8 @@ Check that the node reached the network:
 curl -s $RPC --data "{\"userpass\":\"$PASS\",\"method\":\"get_directly_connected_peers\"}"
 ```
 
-The answer lists the connected peers with their addresses. An empty list, together with the log warning "P2P relays
+The answer lists the connected peers with their addresses. The node dials several seed nodes at start and then
+keeps two of them, so two peers are the normal state. An empty list, together with the log warning "P2P relays
 below low watermark", means that no seed node was reached: check `seednodes` and `netid`. Without peers the node
 still activates coins, but its orders reach nobody.
 
