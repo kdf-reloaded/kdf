@@ -2852,6 +2852,24 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    - on entering the disagreement state of item 12, at ERROR, the text of the
      activation error of item 12; on leaving it, at WARN:
      `<ticker>: the Electrum servers agree about the chain again`.
+
+   *Status note (2026-11-28, clean side; Reloaded-original; maintainer
+   decision of 2026-11-28; amends the logging of items 4 and 9, not the
+   states).* The *behind* and *ahead* lines on a change of state are logged
+   only once that state has lasted 5 seconds, with the lag or lead and the tip
+   at that moment; a change between behind and ahead starts the time again.
+   An episode that ends sooner logs nothing, and the *up to date again* line
+   is logged only for an episode whose line was logged. The node judges the
+   connection again when the time has passed, so a lasting state is logged
+   even when no further header arrives; that judgment is a full one, as on a
+   header event, so the stuck state and the disagreement state of item 12 can
+   also be entered at that moment, by the same rules. The state itself is still judged at
+   once as item 4 says, so reads, broadcasts, demotion, replacement and the
+   disagreement state of item 12 are unchanged. The *stuck* line and the lines
+   of a measurement round are unchanged. *Reason.* In a field run of this
+   project on coins with bursty blocks and a tolerance of one block, each node
+   logged about ten behind or ahead lines a day; each state ended within one
+   second, with no demotion and no replacement.
 10. *The `electrum_servers` request (Reloaded-only RPC).* An mmrpc 2.0 method
     `electrum_servers` with the parameter `coin` (a ticker) answers, for an
     active coin served by the Electrum client, a snapshot of its pool:
@@ -6857,3 +6875,8 @@ R38.8.6 **Tests (two-direction, observable).**
   Electrum. Reloaded-original; written from this repository's code and tests;
   no reference input and no forbidden-class input; no sentence of the chapter
   is changed.
+- *Clean-side addition of 2026-11-28 (PR #553):* the status note after R38.6.4o item 9
+  on logging the behind and ahead lines only once the state has lasted 5
+  seconds. Reloaded-original; it records the maintainer's decision of
+  2026-11-28; no reference input and no forbidden-class input; no sentence of
+  the chapter is changed.

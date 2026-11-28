@@ -945,6 +945,12 @@ the previous version used. The safe way:
   `QTUM`) and the servers as `host:port` only, without the protocol or any user name, password, path or query of a
   server entry. No line is written per request or on a timer. Detail: PR #476; CRD ch.38 status note of
   2026-11-22 after D38.6.4Q.1.
+- **Fewer warnings about an Electrum server being behind or ahead of the others.** The warning now appears only
+  when the server has stayed behind or ahead for 5 seconds, and the matching "up to date again" line only after
+  such a warning. On coins whose blocks come in bursts, servers are often a block apart for less than a second,
+  which used to log about ten warnings a day per node. How the node treats such a server is unchanged: it is
+  still passed over for reads and broadcasts at once. Detail: PR #553; CRD ch.38 R38.6.4o, status note of
+  2026-11-28 after item 9.
 
 #### ZEC
 

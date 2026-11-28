@@ -92,7 +92,13 @@ pub struct ElectrumPoolTimings {
     pub latency_floor: Duration,
     /// The latency below which a smoothed latency is never slow (R38.6.4l item 6, P2).
     pub slow_floor: Duration,
+    /// How long a behind or ahead state must last before its WARN line is logged (R38.6.4o item 9). The state
+    /// itself is instant; only the line waits.
+    pub out_of_date_warn_delay: Duration,
 }
+
+/// The default of [`ElectrumPoolTimings::out_of_date_warn_delay`], in seconds.
+const OUT_OF_DATE_WARN_DELAY_SECS: f64 = 5.0;
 
 impl Default for ElectrumPoolTimings {
     fn default() -> Self {
@@ -118,6 +124,7 @@ impl Default for ElectrumPoolTimings {
             stuck_floor: Duration::from_secs(180),
             latency_floor: Duration::from_millis(300),
             slow_floor: Duration::from_secs(1),
+            out_of_date_warn_delay: Duration::from_secs_f64(OUT_OF_DATE_WARN_DELAY_SECS),
         }
     }
 }
@@ -981,6 +988,8 @@ fn random_draw() -> DrawSource {
 }
 
 pub(super) struct PoolShared {
+    /// The pool itself, for the delayed re-check of a behind or ahead state (R38.6.4o item 9).
+    me: Weak<PoolShared>,
     ticker: String,
     servers: RwLock<Vec<Arc<ServerSlot>>>,
     min_connected: usize,
@@ -1050,10 +1059,11 @@ impl PoolShared {
         options: ElectrumPoolOptions,
         protocol_version: OrdRange<f32>,
         event_handlers: Vec<RpcTransportEventHandlerShared>,
-    ) -> PoolShared {
+    ) -> Arc<PoolShared> {
         let (trigger_tx, trigger_rx) = futures_mpsc::unbounded();
         let (measure_tx, measure_rx) = futures_mpsc::unbounded();
-        PoolShared {
+        Arc::new_cyclic(|me| PoolShared {
+            me: me.clone(),
             ticker,
             servers: RwLock::new(Vec::new()),
             min_connected: options.min_connected.max(1),
@@ -1092,7 +1102,7 @@ impl PoolShared {
             contract_resubscribe_pending: AtomicBool::new(false),
             trigger_tx,
             trigger_rx: StdMutex::new(Some(trigger_rx)),
-        }
+        })
     }
 
     // ---- composition -------------------------------------------------------------------------
@@ -2865,21 +2875,46 @@ impl PoolShared {
         out_of_date_states(&heights, &reports, self.tolerance, self.stuck_period(), now)
     }
 
-    /// Judges the maintained connections anew and logs each change of state once (R38.6.4o items 4 and 9): on
-    /// becoming out of date as behind or as stuck, and on becoming up to date again. Returns the maintained
-    /// connections in priority order with their states.
+    /// Judges the maintained connections anew and logs the states (R38.6.4o items 4 and 9): a stuck state at once,
+    /// a behind or ahead state once it has lasted `out_of_date_warn_delay` (a delayed re-check logs it when no
+    /// further event arrives), and "up to date again" only when a line for the episode was logged. Returns the
+    /// maintained connections in priority order with their states.
     fn refresh_out_of_date(&self) -> Vec<(Arc<ServerSlot>, Option<OutOfDate>)> {
         let maintained = self.maintained_slots();
-        let states = self.judge_out_of_date(&maintained, now_float());
+        let now = now_float();
+        let states = self.judge_out_of_date(&maintained, now);
+        let delay = self.timings.out_of_date_warn_delay.as_secs_f64();
+        let mut recheck = false;
         for (slot, state) in maintained.iter().zip(&states) {
             let kind = state.as_ref().map(OutOfDate::kind);
-            let changed = {
+            let emit = {
                 let mut slot_state = slot.state();
-                let changed = slot_state.quality.reported_state != kind;
-                slot_state.quality.reported_state = kind;
-                changed
+                let quality = &mut slot_state.quality;
+                let changed = quality.reported_state != kind;
+                if changed {
+                    quality.reported_state = kind;
+                    quality.state_since = now;
+                }
+                match kind {
+                    None => changed && quality.warned.take().is_some(),
+                    Some(super::electrum_measure::OutOfDateKind::Stuck) => {
+                        if changed {
+                            quality.warned = kind;
+                        }
+                        changed
+                    },
+                    Some(_) => {
+                        let due = quality.warned != kind && now - quality.state_since >= delay;
+                        if due {
+                            quality.warned = kind;
+                        } else if changed && quality.warned != kind {
+                            recheck = true;
+                        }
+                        due
+                    },
+                }
             };
-            if !changed {
+            if !emit {
                 continue;
             }
             match state {
@@ -2900,6 +2935,17 @@ impl PoolShared {
                 ),
                 None => warn!("{}: Electrum server {} is up to date again", self.ticker, slot.label),
             }
+        }
+        if recheck {
+            // No event may follow a lasting state: one bounded timer judges again after the delay. It holds the
+            // pool weakly, so a dropped pool ends it.
+            let me = self.me.clone();
+            spawn(async move {
+                Timer::sleep(delay + 0.05).await;
+                if let Some(pool) = me.upgrade() {
+                    pool.refresh_out_of_date();
+                }
+            });
         }
         self.update_disagreement();
         maintained.into_iter().zip(states).collect()
