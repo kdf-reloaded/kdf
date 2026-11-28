@@ -9678,7 +9678,7 @@ entries in its list cannot be told apart. Passing the position to the fallback c
   clean side: it records the maintainer's decision of 2026-11-28 on a
   payment step whose already-sent answer is marked undetermined, or whose
   send ends with an error that kept the signed transaction, and this
-  repository's code (PR #N), rests only on this repository's own swap code
+  repository's code (PR #558), rests only on this repository's own swap code
   and the cleared text of R39.11.19 and chapter 51 R17 and R29, takes no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
   is required. No cleared sentence is edited.

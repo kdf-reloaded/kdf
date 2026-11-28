@@ -593,7 +593,7 @@ has since closed.
 >    resume maps of R19 and R32 are unchanged. The stage acts on the mark
 >    whichever coin gives it: a coin of another family whose search, agreed
 >    under R100, is undetermined is asked again as item 2 says. No other
->    family has a read for a failed send. Detail: PR #N.
+>    family has a read for a failed send. Detail: PR #558.
 
 **R30.** *Await spend.* `STAGE-AWAIT-TAKER-PAYMENT-SPEND` MUST
 repeatedly broadcast the taker payment message on a fifteen-second
@@ -4061,7 +4061,7 @@ reference rows alike.
   `paused` member of `my_orders` and `order_status`. Reloaded-original; it
   records the maintainer's decision of 2026-11-28, takes no reference input
   and no forbidden-class input, and changes no sentence of the chapter.
-- *Clean-side addition of 2026-11-28 (PR #N):* the status note after R29 on
+- *Clean-side addition of 2026-11-28 (PR #558):* the status note after R29 on
   the payment stage of an EVM coin when the search for the own payment
   cannot decide or the send ends with an error that kept the signed
   transaction. Reloaded-original; it records the maintainer's decision of
