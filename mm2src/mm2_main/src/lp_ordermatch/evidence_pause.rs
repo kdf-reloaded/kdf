@@ -131,8 +131,9 @@ async fn judge(ordermatch_ctx: &OrdermatchContext, coin: &MmCoinEnum) -> (Result
 
 /// Judges the coins of a new maker order (`setprice`; a taker order that becomes a maker order is judged by
 /// [`converted_maker_order_starts_paused`]): the not-ready texts of the coins that are not ready, base first (empty
-/// when the order does not start paused). A non-empty answer records the paused coin (with its INFO line at a change) and the order's pair. A coin
-/// that is ready is left to the keep-alive loop, which re-announces the other orders of a coin that recovered.
+/// when the order does not start paused). A non-empty answer records the paused coin (with its INFO line at a change)
+/// and the order's pair. A coin that is ready is left to the keep-alive loop, which re-announces the other orders of a
+/// coin that recovered.
 pub(crate) async fn new_maker_order_starts_paused(
     ordermatch_ctx: &OrdermatchContext,
     order: &MakerOrder,
