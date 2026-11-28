@@ -84,7 +84,7 @@ For WebAssembly builds, see [`docs/WASM_BUILD.md`](docs/WASM_BUILD.md). In this 
 Two files drive runtime configuration:
 
 - `MM2.json` — RPC credentials, mnemonic, `netid`, optional toggles. This project targets RPC/config compatibility with the Komodo DeFi Framework API; see the [Komodo DeFi Framework documentation](https://komodoplatform.com/en/docs/komodo-defi-framework/) for the full schema.
-- `coins` — list of activatable coin definitions. A community-maintained registry lives at [github.com/KomodoPlatform/coins](https://github.com/KomodoPlatform/coins). Keep your copy current: swaps of Monad tokens, for example, need a coins file from October 28, 2026 or later, which carries their gas limits.
+- `coins` — list of activatable coin definitions. A community-maintained registry lives at [github.com/netid8762/coins](https://github.com/netid8762/coins); its `seed-nodes.json` lists the seed nodes of netid 8762. Keep your copy current: swaps of Monad tokens, for example, need a coins file from October 28, 2026 or later, which carries their gas limits.
 
 Minimal example:
 
@@ -136,6 +136,8 @@ Each signed release ships `kdf` binaries for Linux (x86_64, aarch64 and armv7; g
 
 ## Usage
 
+New to running a node? [`docs/OPERATOR_QUICKSTART.md`](docs/OPERATOR_QUICKSTART.md) goes from the release download to a first order, step by step.
+
 Launch the daemon:
 
 ```sh
@@ -166,6 +168,7 @@ auditing, or redistributing the project:
 - [`docs/reloaded-rewrite/01-clean-room-rules.md`](docs/reloaded-rewrite/01-clean-room-rules.md) — the clean-room / provenance methodology and its explicit limits.
 - [`docs/reloaded-rewrite/30-provenance-attribution.md`](docs/reloaded-rewrite/30-provenance-attribution.md) — the index into the chapter set, cited inputs, and subsystem coverage map.
 - [`docs/reloaded-rewrite/34-provenance-ledger.md`](docs/reloaded-rewrite/34-provenance-ledger.md) — file-level provenance classifications, inherited exceptions, and open license items.
+- [`docs/OPERATOR_QUICKSTART.md`](docs/OPERATOR_QUICKSTART.md) — from the release download to a running node and a first order.
 - [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md) — operator-facing differences and compatibility posture relative to the GLEEC fork.
 - [`LEGAL/LICENSING-POLICY.md`](LEGAL/LICENSING-POLICY.md) — the repository-wide licensing posture: old combined work GPL-2.0-only, original post-anchor contributions GPL-2.0-or-later, plus disclosed inherited tensions.
 - [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) — the gate used before any tagged release or public binary distribution.
