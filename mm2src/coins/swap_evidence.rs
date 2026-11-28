@@ -243,6 +243,19 @@ static NODE_TOKEN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(
     .expect("the node token pattern is valid")
 });
 
+/// Whether the token at `start..end` of `text` is a source position as the error macros write it: `name:line]`
+/// with a lowercase snake_case single-label name, directly followed by `]`, at the start of the text or after
+/// whitespace, but not after `[` or `, ` (so the last item of a bracketed list is still a node name).
+/// A text that starts with `localhost:8545]` is kept by this rule: the accepted edge.
+fn is_source_position(text: &str, start: usize, end: usize, name: &str) -> bool {
+    let mut chars = name.chars();
+    let name_ok = matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_lowercase())
+        && chars.all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
+    let before = &text[..start];
+    let after_ok = before.is_empty() || (before.ends_with(char::is_whitespace) && !before.ends_with(", "));
+    name_ok && text[end..].starts_with(']') && after_ok
+}
+
 /// Whether a dotted match reads as an amount or a version: its last label is all ASCII digits.
 fn dotted_name_is_number_like(name: &str) -> bool {
     let last = name.rsplit('.').next().unwrap_or("");
@@ -255,9 +268,12 @@ fn dotted_name_is_number_like(name: &str) -> bool {
 ///    [`undetermined_reason_kind`]; everything after the prefix is dropped (so [`is_undetermined`] still holds).
 /// 2. In the rest, a URL, a bracketed IPv6 address, an IPv4 address, a dotted DNS name and a single-label name with
 ///    a port (each with an optional port) is replaced. When unsure, a token is replaced.
-/// 3. Never replaced: a source position (a name ending in `.rs`), a token equal to one of `keep` (the tickers of
-///    the swap's coins, compared exactly), and a dotted token (not a URL, not bracketed, not an IPv4 address) whose
-///    last label is all digits (an amount or a version). Every other dotted token is replaced.
+/// 3. Never replaced: a source position, which is `name:line]` as the error macros write it (a lowercase
+///    snake_case name, directly followed by `]`, at the start of the text or after whitespace but not after `[` or
+///    `, `) or a name ending in `.rs`; a token equal to one of `keep` (the tickers of the swap's coins, compared
+///    exactly); and a dotted token (not a URL, not bracketed, not an IPv4 address) whose last label is all digits
+///    (an amount or a version). Every other dotted token is replaced; a dotted word that is not a host, such as a
+///    method name, is replaced as well.
 pub fn strip_node_names(text: &str, keep: &[&str]) -> String {
     let (head, tail) = match text.find(UNDETERMINED_PREFIX) {
         Some(at) => {
@@ -268,7 +284,8 @@ pub fn strip_node_names(text: &str, keep: &[&str]) -> String {
     };
     let mut out = NODE_TOKEN
         .replace_all(head, |caps: &regex::Captures| {
-            let token = &caps[0];
+            let whole = caps.get(0).expect("group 0 always matches");
+            let token = whole.as_str();
             let name = match token.rsplit_once(':') {
                 Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
                 _ => token,
@@ -283,6 +300,7 @@ pub fn strip_node_names(text: &str, keep: &[&str]) -> String {
             let keep_it = keep.contains(&token)
                 || keep.contains(&name)
                 || name.ends_with(".rs")
+                || (!token.contains('.') && !is_url && is_source_position(head, whole.start(), whole.end(), name))
                 || (is_dotted_only && !is_ipv4 && dotted_name_is_number_like(name));
             if keep_it {
                 token.to_owned()
@@ -978,6 +996,39 @@ mod tests {
             strip_node_names("[taker_swap.rs:1599] failed via a.example:1", &[]),
             "[taker_swap.rs:1599] failed via <node>"
         );
+    }
+
+    #[test]
+    fn strip_node_names_keeps_the_positions_the_error_macros_write() {
+        let inner: Result<(), String> = ERR!("RPC error: connection to {} failed", "node.example:8545");
+        let nested = ERRL!("{}", inner.clone().unwrap_err());
+        let nested = ERRL!("{}", nested);
+        let stripped = strip_node_names(&nested, &[]);
+        assert_eq!(
+            stripped,
+            nested.replace("node.example:8545", NODE_PLACEHOLDER),
+            "only the node name changes"
+        );
+        assert!(stripped.starts_with("swap_evidence:"), "the position prefix is kept");
+        assert_eq!(
+            stripped.matches("swap_evidence:").count(),
+            3,
+            "all three positions are kept"
+        );
+
+        let text = "lp_swap:1888] eth:654] RPC error: connection to node.example:8545 failed";
+        assert_eq!(
+            strip_node_names(text, &[]),
+            "lp_swap:1888] eth:654] RPC error: connection to <node> failed"
+        );
+        assert_eq!(
+            strip_node_names("[a.example:1, geth:8545]", &[]),
+            "[<node>, <node>]",
+            "both items of a list are replaced"
+        );
+        assert_eq!(strip_node_names("failed on geth:8545", &[]), "failed on <node>");
+        // The accepted edge: a text that starts with `name:digits]` reads as a source position.
+        assert_eq!(strip_node_names("localhost:8545] x", &[]), "localhost:8545] x");
     }
 
     #[test]

@@ -787,8 +787,10 @@ fn t28_undecodable_payload_is_dropped() {
 // Node names in the published report
 // ---------------------------------------------------------------------------------------------------------
 
-const LABELLED_ERROR: &str = "RIN payment validate failed via host.example:50002 and 203.0.113.7 (taker_swap.rs:1599)";
-const STRIPPED_ERROR: &str = "RIN payment validate failed via <node> and <node> (taker_swap.rs:1599)";
+const LABELLED_ERROR: &str =
+    "lp_swap:1888] eth:654] RIN payment validate failed via host.example:50002 and 203.0.113.7 (taker_swap.rs:1599)";
+const STRIPPED_ERROR: &str =
+    "lp_swap:1888] eth:654] RIN payment validate failed via <node> and <node> (taker_swap.rs:1599)";
 
 /// Sets the error text of every failure event of the record to `text`; returns how many it set.
 fn set_error_texts(swap: &mut SavedSwap, text: &str) -> usize {

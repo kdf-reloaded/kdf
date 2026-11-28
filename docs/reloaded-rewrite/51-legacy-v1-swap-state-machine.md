@@ -2409,12 +2409,13 @@ the word `<node>`. A name of a node is a URL, an IPv4 address, an IPv6 address
 in brackets, a dotted host name, or a name followed by a port. The text of an
 undetermined swap read (R100) keeps its marker and the kind of the reason, and
 the part that lists the nodes is dropped. The coin tickers, the source
-positions and the rest of the text are kept. The event types, their names,
-their order and every other member are unchanged, so a receiver decodes and
-stores the report as before (R49). The same copy is the one stored in the
-node's own statistics store (item 2). The node's own saved swap record, its log
-and the answers about its own swaps (`my_swap_status`, `my_recent_swaps`) are
-not changed and still name the node.
+positions that an error text carries and the rest of the text are kept. A
+dotted word that is not a host name, such as the name of a method, is replaced
+as well. The event types, their names, their order and every other member are
+unchanged, so a receiver decodes and stores the report as before (R49). The
+same copy is the one stored in the node's own statistics store (item 2). The
+node's own saved swap record, its log and the answers about its own swaps
+(`my_swap_status`, `my_recent_swaps`) are not changed and still name the node.
 
 **R50B.** *The transaction-helper topic (2026-10-30, Decision BB; the
 publisher side is parity, the receiver side a Reloaded correction of a
