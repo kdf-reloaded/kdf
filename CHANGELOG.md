@@ -721,7 +721,7 @@ the previous version used. The safe way:
   node names its version carried the bare short commit hash before; `R` stands for KDF Reloaded, and the text
   names no operating system. `--version` and the two start-up log lines show the same string, followed by the
   build date. Release names and git tags keep the form `0.5.0-beta.1`. A script or tool that reads the commit
-  hash from the `version` answer needs to take the part after the last `-`. Detail: PR #PRNUM; CRD ch.45 R45.6.7,
+  hash from the `version` answer needs to take the part after the last `-`. Detail: PR #555; CRD ch.45 R45.6.7,
   status note of 2026-11-28.
 
 #### RPC interface
@@ -1665,7 +1665,7 @@ the previous version used. The safe way:
 ### Plans touched
 
 - [`crate-versioning`](docs/plans/crate-versioning.md) — note of 2026-11-28: the `version` RPC and swap records
-  now carry `R<version>-<short commit hash>`, in PR #PRNUM.
+  now carry `R<version>-<short commit hash>`, in PR #555.
 - [`swap-v2-chain-read-agreement`](docs/plans/swap-v2-chain-read-agreement.md) — new, planning: swap protocol v2
   follows the agreement of chain reads (R100) in 0.5.0, with the recovery and the funding-refund rules decided on
   2026-11-23, PR #528.
