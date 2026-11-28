@@ -245,7 +245,7 @@ impl fmt::Debug for NativeClientImpl {
 /// no such method gets a text that names the cause and the fix; any other failure keeps its own text.
 fn estimate_fee_error_text(e: &UtxoRpcError) -> String {
     let text = e.to_string();
-    if text.contains("Method not found") || text.contains("code=-32601") {
+    if text.contains("Method not found") || text.contains("code=-32601") || text.contains("daemon error code -32601") {
         "The node has no fee estimation method ('estimatefee' is not found); set 'txfee' in the coins entry".to_owned()
     } else {
         ERRL!("{}", text)
@@ -1129,6 +1129,25 @@ mod estimate_fee_error_tests {
             JsonRpcRemoteAddr("127.0.0.1:1".to_owned()),
             json!({"code": -32601, "message": "Method not found"}),
         ));
+        let text = estimate_fee_error_text(&answer);
+        assert!(text.contains("no fee estimation method"), "{text}");
+        assert!(text.contains("set 'txfee' in the coins entry"), "{text}");
+    }
+
+    /// A daemon that answers an unknown method with HTTP 404 reaches the client as the text of
+    /// `failed_answer_text`, carried as a transport error; the code alone identifies it.
+    #[test]
+    fn non_200_method_not_found_names_the_cause_and_the_fix() {
+        let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
+            jsonrpc: "1.0".to_owned(),
+            id: "0".to_owned(),
+            method: "estimatefee".to_owned(),
+            params: vec![json!(1)],
+        });
+        let body = r#"{"result":null,"error":{"code":-32601,"message":"No such RPC call"},"id":"0"}"#;
+        let failed = failed_answer_text(&request, StatusCode::NOT_FOUND, body.as_bytes(), "http://127.0.0.1:1");
+        assert!(!failed.contains("Method not found"), "{failed}");
+        let answer = node_answer(JsonRpcErrorType::Transport(failed));
         let text = estimate_fee_error_text(&answer);
         assert!(text.contains("no fee estimation method"), "{text}");
         assert!(text.contains("set 'txfee' in the coins entry"), "{text}");

@@ -1246,6 +1246,9 @@ the previous version used. The safe way:
   `recover_funds_of_swap`. With `"chain_variant": "KRGN"` in the coin's entry, each header is now read by its
   algorithm. A node connected to a Kerrigan daemon instead of Electrum was not affected. Detail: PR #468; CRD ch.37
   §37.5.11.
+- **A UTXO coin in native mode (QTUM among them) on a node without fee estimation gives a clear error.** When
+  the node has no `estimatefee` method and the coins entry has no `txfee`, enabling the coin fails with a text
+  that says to set `txfee` in the coins entry. Detail: PR #552.
 
 #### Transaction history
 
@@ -1310,9 +1313,6 @@ the previous version used. The safe way:
   CRD ch.40 R40.2A.4, D40.2A.1.
 #### QTUM and QRC20
 
-- **A QTUM coin in native mode on a node without fee estimation gives a clear error.** When the node has no
-  `estimatefee` method and the coins entry has no `txfee`, enabling the coin fails with a text that says to set
-  `txfee` in the coins entry. Detail: PR #552.
 - **A QTUM delegation is no longer built at the same time as a withdraw.** Building a delegation
   (`add_delegation`) asked for the lock that lets only one transaction from the wallet be built at
   a time but did not wait for it, so the lock was never held, and removing one
