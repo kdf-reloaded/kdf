@@ -1620,7 +1620,7 @@ fn order_status_core_answers_by_where_the_order_is() {
     let node = Node::new();
     let order = node.add_order(true, true);
     let response = block_on(order_status_core(node.ctx.clone(), OrderStatusReq { uuid: order.uuid })).unwrap();
-    assert!(matches!(response, OrderStatusResponse::Maker(ref maker) if *maker == order));
+    assert!(matches!(response, OrderStatusResponse::Maker(ref maker, _) if *maker == order));
 
     let unknown = Uuid::new_v4();
     let error = block_on(order_status_core(node.ctx.clone(), OrderStatusReq { uuid: unknown }))

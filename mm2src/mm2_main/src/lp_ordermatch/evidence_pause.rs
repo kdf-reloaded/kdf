@@ -32,6 +32,9 @@ pub(crate) struct EvidencePause {
     /// The INFO lines logged since the node started, in order.
     #[cfg(test)]
     lines: Vec<String>,
+    /// The WARN lines of the new orders that started paused, in order.
+    #[cfg(test)]
+    new_order_lines: Vec<String>,
 }
 
 /// How a coin's state changed.
@@ -69,6 +72,17 @@ impl EvidencePause {
 
     /// Adds the order-book pair of an order that starts paused.
     pub(crate) fn pause_pair(&mut self, alb_pair: AlbOrderedOrderbookPair) { self.paused_pairs.insert(alb_pair); }
+
+    /// Logs the one WARN line of a new maker order that starts paused.
+    pub(crate) fn log_new_order_paused(&mut self, line: String) {
+        log::warn!("{}", line);
+        #[cfg(test)]
+        self.new_order_lines.push(line);
+    }
+
+    /// The WARN lines of the new orders that started paused.
+    #[cfg(test)]
+    pub(crate) fn new_order_lines(&self) -> Vec<String> { self.new_order_lines.clone() }
 
     fn log(&mut self, line: String) {
         log::info!("{}", line);
@@ -116,34 +130,35 @@ async fn judge(ordermatch_ctx: &OrdermatchContext, coin: &MmCoinEnum) -> (Result
 }
 
 /// Judges the coins of a new maker order (`setprice`; a taker order that becomes a maker order is judged by
-/// [`converted_maker_order_starts_paused`]): `true` when the
-/// order starts paused, which records the paused coin (with its INFO line at a change) and the order's pair. A coin
-/// that is ready is left to the keep-alive loop, which re-announces the other orders of a coin that recovered.
+/// [`converted_maker_order_starts_paused`]): the not-ready texts of the coins that are not ready, base first (empty
+/// when the order does not start paused). A non-empty answer records the paused coin (with its INFO line at a change)
+/// and the order's pair. A coin that is ready is left to the keep-alive loop, which re-announces the other orders of a
+/// coin that recovered.
 pub(crate) async fn new_maker_order_starts_paused(
     ordermatch_ctx: &OrdermatchContext,
     order: &MakerOrder,
     base: &MmCoinEnum,
     rel: &MmCoinEnum,
-) -> bool {
+) -> Vec<String> {
     let (base_ready, rel_ready) = futures::join!(
         base.swap_evidence_ready_for_pause(),
         rel.swap_evidence_ready_for_pause()
     );
     let mut pause = ordermatch_ctx.evidence_pause.lock();
-    let mut paused = false;
+    let mut not_ready_texts = Vec::new();
     for (coin, readiness) in [(base, base_ready), (rel, rel_ready)] {
         if let Err(not_ready) = readiness {
             pause.note_not_ready(coin.ticker(), &not_ready);
-            paused = true;
+            not_ready_texts.push(not_ready);
         }
     }
-    if paused {
+    if !not_ready_texts.is_empty() {
         pause.pause_pair(alb_ordered_pair(
             order.base_orderbook_ticker(),
             order.rel_orderbook_ticker(),
         ));
     }
-    paused
+    not_ready_texts
 }
 
 /// Judges, without asking any node, whether the maker order a timed-out taker order becomes starts paused: `true`

@@ -12614,6 +12614,127 @@ mod t60_7_maker_balance_watch_tests {
         std::fs::remove_dir_all(&dbdir).ok();
     }
 
+    /// The answer of `setprice` says when the new order starts paused (maintainer decision LHM (c)): `paused` and
+    /// `paused_reason` (the not-ready texts, base first, joined by "; ") in the legacy and the mmrpc 2.0 forms, and
+    /// neither member for an order that does not start paused. `my_orders` and `order_status` show `paused` for an
+    /// own order that is paused now. No member names a host.
+    #[test]
+    fn setprice_answer_says_when_the_order_starts_paused() {
+        use coins::swap_evidence::{not_ready_text, NotReadyKind};
+
+        let dbdir = std::env::temp_dir().join(format!("kdf-setprice-paused-answer-{}", Uuid::new_v4()));
+        let _probe = Probe::install("42");
+        let unready: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let mocked = unready.clone();
+        TestCoin::swap_evidence_ready.mock_safe(move |coin| {
+            let ticker = coin.ticker().to_owned();
+            let result = match ticker.as_str() {
+                "BASE" if mocked.lock().unwrap().contains(&"BASE") => {
+                    Err(not_ready_text(&ticker, NotReadyKind::TooFewHostsAnswering))
+                },
+                "REL" if mocked.lock().unwrap().contains(&"REL") => {
+                    Err(not_ready_text(&ticker, NotReadyKind::TrustedNodeSilent))
+                },
+                _ => Ok(()),
+            };
+            MockResult::Return(Box::pin(async move { result }))
+        });
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({
+                "coins": [{ "coin": "BASE" }, { "coin": "REL" }],
+                "dbdir": dbdir.to_str().unwrap()
+            }))
+            .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+            .into_mm_arc();
+        let (tx, _p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in ["BASE", "REL"] {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        let request = || {
+            json!({
+                "base": "BASE", "rel": "REL", "price": 1, "volume": 3, "cancel_previous": false,
+                "save_in_history": false
+            })
+        };
+        let legacy = |ctx: &MmArc| -> Json {
+            let response = block_on(set_price(ctx.clone(), request())).unwrap();
+            json::from_slice::<Json>(response.body()).unwrap()["result"].clone()
+        };
+        let core = |ctx: &MmArc| -> Json {
+            let answer = block_on(set_price_core(ctx.clone(), json::from_value(request()).unwrap())).unwrap();
+            json::to_value(&answer).unwrap()
+        };
+        let no_host = |answer: &Json| {
+            for member in ["paused", "paused_reason"] {
+                assert!(!answer[member].to_string().contains("://"), "{member} names no host");
+            }
+        };
+
+        // Ready: neither member, in both forms.
+        for answer in [legacy(&ctx), core(&ctx)] {
+            assert!(answer.get("paused").is_none() && answer.get("paused_reason").is_none());
+            assert!(answer.get("uuid").is_some());
+        }
+        let ready_uuid = legacy(&ctx)["uuid"].as_str().unwrap().to_owned();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let my_orders = block_on(my_orders_core(ctx.clone(), MyOrdersRequest {})).unwrap();
+        let my_orders = json::to_value(&my_orders).unwrap();
+        assert!(my_orders["maker_orders"][&ready_uuid].get("paused").is_none());
+
+        // The coin of the rel side is not ready.
+        *unready.lock().unwrap() = vec!["REL"];
+        let rel_text = not_ready_text("REL", NotReadyKind::TrustedNodeSilent);
+        for answer in [legacy(&ctx), core(&ctx)] {
+            assert_eq!(answer["paused"], json!(true));
+            assert_eq!(answer["paused_reason"], json!(rel_text));
+            assert!(rel_text.contains("REL") && rel_text.contains("the trusted node is not answering"));
+            no_host(&answer);
+        }
+
+        // Both are not ready: the joined text, base first.
+        *unready.lock().unwrap() = vec!["BASE", "REL"];
+        let both = format!(
+            "{}; {}",
+            not_ready_text("BASE", NotReadyKind::TooFewHostsAnswering),
+            rel_text
+        );
+        let paused_answer = core(&ctx);
+        assert_eq!(paused_answer["paused_reason"], json!(both));
+        assert_eq!(legacy(&ctx)["paused_reason"], json!(both));
+        no_host(&paused_answer);
+        let paused_uuid = paused_answer["uuid"].as_str().unwrap().to_owned();
+
+        // `my_orders` and `order_status`: `paused` for the paused pair only when it is paused now.
+        assert!(ordermatch_ctx.evidence_pause.lock().is_pair_paused("BASE:REL"));
+        let listed = block_on(my_orders_core(ctx.clone(), MyOrdersRequest {})).unwrap();
+        let listed = json::to_value(&listed).unwrap();
+        assert_eq!(listed["maker_orders"][&paused_uuid]["paused"], json!(true));
+        assert!(listed["maker_orders"][&paused_uuid].get("paused_reason").is_none());
+        let status = block_on(order_status_core(
+            ctx.clone(),
+            json::from_value(json!({ "uuid": paused_uuid })).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(json::to_value(&status).unwrap()["order"]["paused"], json!(true));
+        // One WARN line per new paused order (REL-paused x2, both-paused x2, none for the ready ones), no host.
+        let warns = ordermatch_ctx.evidence_pause.lock().new_order_lines();
+        assert_eq!(warns.len(), 4, "once per new paused order: {warns:?}");
+        assert!(warns.iter().all(|line| !line.contains("://")));
+        assert!(warns.iter().all(|line| line.starts_with("BASE/REL: new maker order ")));
+        assert!(warns.iter().any(|line| line.contains(&paused_uuid)));
+        assert!(warns.iter().all(|line| line.ends_with(&format!(
+            " is saved but paused, not announced until its coins are ready ({})",
+            rel_text
+        )) || line.ends_with(&format!(
+            " is saved but paused, not announced until its coins are ready ({})",
+            both
+        ))));
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+
     // ---- R60.4.6 item 5: the maintenance reads hold no order lock -------------------------------------------
 
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};

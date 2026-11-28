@@ -1063,6 +1063,13 @@ the previous version used. The safe way:
   tune this: `swap_evidence_probe_attempts` (default 3), `swap_evidence_probe_timeout_s` (default 5) and
   `swap_evidence_host_log_interval_s` (default 3600); an invalid value stops the start with an error naming the key.
   Detail: CRD ch.51 §51.6G, status note of 2026-11-27; [NETWORK_CONFIG](docs/NETWORK_CONFIG.md).
+- **`setprice` tells when the new order starts paused.** When a coin of the pair cannot give the agreed chain reads
+  right now, the new order is still accepted and saved but is not announced yet. The answer now says so with
+  `"paused": true` and `"paused_reason"`, the coin's text, for example "<TICKER>: swap evidence not available (fewer
+  than two hosts answering)". `my_orders` and `order_status` show `"paused": true` for an own maker order that is
+  paused at that moment. When an order is not paused, these members are left out, so answers are unchanged for
+  existing clients. The log also gets one warning per new order that starts paused, naming the pair, the order's
+  uuid and the same reason. Detail: CRD ch.51 §51.6G, status note of 2026-11-28.
 
 ### Fixed
 
