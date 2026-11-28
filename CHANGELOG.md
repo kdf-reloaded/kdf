@@ -1581,7 +1581,7 @@ the previous version used. The safe way:
 - **Fewer warnings for peers that stay unreachable.** A failed outgoing connection to the same address is a
   warning at its first failure, then 1 hour, 6 hours and 24 hours later, and then once a day while it keeps
   failing. The failures in between are logged at debug. Before, it was a warning once per address per hour. A
-  later warning ends with the number of failures since the previous one. When a connection to the peer is
+  later warning ends with the number of failures logged at debug in between. When a connection to the peer is
   established, the next failure is a warning at once and the times start again. Only the log changes: dialing and
   retries work as before. Detail: PR #557.
 
