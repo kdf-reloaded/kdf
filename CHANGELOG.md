@@ -16,9 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 The most important changes of this release in short.
 
 - **Before a refund or a claim, a swap now needs chain reads that two nodes of the coin agree on, or a node
-  you trust.** PRs #508, #522, #536.
+  you trust, and a swap starts only when that is possible.** PRs #508, #522, #536, #547.
 - **Swaps are safer: a refund or a claim waits for a clear answer from the chain, and swap and order records
-  survive a crash.** PRs #480, #488, #490, #523, #547.
+  survive a crash.** PRs #480, #488, #490, #523.
 - **TRON and Solana are back as wallet-only coins; they cannot be traded yet.** PRs #451, #475.
 - **ZEC can be sent again.** PRs #404, #431.
 - **Tendermint coins gain a transaction history, watch-only activation and WalletConnect signing.** PRs #363,

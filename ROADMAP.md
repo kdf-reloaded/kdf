@@ -65,9 +65,8 @@ These are the next larger pieces of work. No version or date is assigned to them
   [ch.52](docs/reloaded-rewrite/52-swap-v2-state-machine.md).
 - **Solana swaps.** SOL and SPL tokens can be held and sent, not traded. See
   [`solana-support`](docs/plans/solana-support.md).
-- **TRON swaps.** The swap code is in and switched off. The swap contract is to be deployed after 0.5.0, and
-  swaps are to be tested before they are switched on. See
-  [`tron-swap-support`](docs/plans/tron-swap-support.md).
+- **TRON swaps.** The swap code is in and switched off, also in 0.5.0. Deploying the swap contract and
+  testing come before swaps are switched on. See [`tron-swap-support`](docs/plans/tron-swap-support.md).
 - **SLP tokens.** Finishing the support for SLP tokens and testing it on a live network; parts of the SLP
   changes so far rest on unit tests only.
 - **Swap watchers.** A watcher that can finish or refund a swap while your node is offline does not work
