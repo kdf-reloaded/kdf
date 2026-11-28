@@ -237,6 +237,14 @@ or undo, and every change that needs a step from you.
     back.
   - Detail: PR #544; CRD ch.39 R39.6.5f (status note of 2026-11-26); the item under "Changed" / "Shielded coins".
 
+- **The `version` answer is no longer the bare commit hash.** The node reports `R<version>-<short commit hash>`,
+  for example `R0.5.0-beta.1-6ea8598`.
+  - *What changes:* the `version` RPC, the version recorded in swap data and the other places where the node names
+    its version carry the new form.
+  - *What to do:* a script or tool that reads the commit hash from the `version` answer takes the part after the
+    last `-`. See the item under "Changed" / "Start-up and configuration".
+  - Detail: PR #555; CRD ch.45 R45.6.7, status note of 2026-11-28.
+
 #### Coins that are no longer visible after an upgrade
 
 **If coins or Lightning channels you held are no longer visible after an upgrade, follow these steps
@@ -1759,6 +1767,8 @@ the previous version used. The safe way:
 
 ### Known limitations (additions since 0.4.0-beta.1)
 
+- **New version-two swaps cannot be started.** The node resumes a version-two swap that an earlier run saved;
+  it does not start a new one. Detail: CRD ch.52; [`swap-v2-chain-read-agreement`](docs/plans/swap-v2-chain-read-agreement.md).
 - **QRC20 transaction history needs Electrum servers that answer the contract-event methods.** As of 2026-11-22, the
   QTUM servers of the published coins file answer them with an error. With only those servers, a QRC20 token's
   history stops with error code -2 after three passes in a row in which every listed server answered with an error.
