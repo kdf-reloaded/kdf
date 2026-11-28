@@ -3098,15 +3098,36 @@ async fn get_max_volume_and_balance<E: MakerVolumeError>(
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
     with_request_fee_scope(ctx, create_maker_order_impl(ctx, req))
         .await
+        .map(|(order, _paused_reason)| order)
         .map_err(|e| legacy_error(e))
 }
 
 /// The `result` of `setprice` and `update_maker_order`: the order as the RPC renders it.
-pub struct MakerOrderResponse(pub(crate) MakerOrder);
+///
+/// The second member is the `paused_reason` of an order that starts paused (`setprice` only): the not-ready texts of
+/// its coins joined by `"; "`, base first. It is not part of the order, which is saved as it is.
+pub struct MakerOrderResponse(pub(crate) MakerOrder, pub(crate) Option<String>);
 
 impl serde::Serialize for MakerOrderResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serde::Serialize::serialize(&MakerOrderForRpc::from(&self.0), serializer)
+        /// The members of the order, then `paused` and `paused_reason` when the new order starts paused.
+        #[derive(Serialize)]
+        struct WithPause<'a> {
+            #[serde(flatten)]
+            order: MakerOrderForRpc<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            paused: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            paused_reason: Option<&'a str>,
+        }
+        serde::Serialize::serialize(
+            &WithPause {
+                order: MakerOrderForRpc::from(&self.0),
+                paused: self.1.as_ref().map(|_| true),
+                paused_reason: self.1.as_deref(),
+            },
+            serializer,
+        )
     }
 }
 
@@ -3119,10 +3140,14 @@ impl serde::Serialize for MakerOrderResponse {
 pub async fn set_price_core(ctx: MmArc, req: SetPriceReq) -> Result<MakerOrderResponse, MmError<SetPriceError>> {
     with_request_fee_scope(&ctx, create_maker_order_impl(&ctx, req))
         .await
-        .map(MakerOrderResponse)
+        .map(|(order, paused_reason)| MakerOrderResponse(order, paused_reason))
 }
 
-async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, MmError<SetPriceError>> {
+/// Places the order; the second member is the joined not-ready texts when the order starts paused.
+async fn create_maker_order_impl(
+    ctx: &MmArc,
+    req: SetPriceReq,
+) -> Result<(MakerOrder, Option<String>), MmError<SetPriceError>> {
     let base_coin: MmCoinEnum = match lp_coinfind(ctx, &req.base)
         .await
         .map_to_mm(SetPriceError::InternalError)?
@@ -3259,7 +3284,15 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
     // An order of a coin whose swap evidence is not available now is accepted and saved, and starts paused: it is
     // announced once the coin is ready (maintainer decision of 2026-11-25/26 under CRD ch.51 R100). Judged before the
     // previous orders may be cancelled below, so nothing but the local insert and the publication follows that.
-    let starts_paused = new_maker_order_starts_paused(&ordermatch_ctx, &new_order, &base_coin, &rel_coin).await;
+    let not_ready = new_maker_order_starts_paused(&ordermatch_ctx, &new_order, &base_coin, &rel_coin).await;
+    let starts_paused = !not_ready.is_empty();
+    let paused_reason = starts_paused.then(|| not_ready.join("; "));
+    if let Some(reason) = &paused_reason {
+        ordermatch_ctx.evidence_pause.lock().log_new_order_paused(format!(
+            "{}/{}: new maker order {} is saved but paused, not announced until its coins are ready ({})",
+            new_order.base, new_order.rel, new_order.uuid, reason
+        ));
+    }
 
     let request_orderbook = false;
     subscribe_to_orderbook_topic(
@@ -3293,7 +3326,7 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         ordermatch_ctx.maker_orders_ctx.lock().add_order(&new_order, order_arc);
     }
     start_maker_balance_watch(ctx, &ordermatch_ctx, &new_order.base, Some(base_balance_read));
-    Ok(new_order)
+    Ok((new_order, paused_reason))
 }
 
 /// The legacy `setprice`: decodes the inline body, calls [`set_price_core`] and answers `{"result": <order>}`.
@@ -3360,7 +3393,7 @@ pub async fn update_maker_order_core(
 ) -> Result<MakerOrderResponse, MmError<UpdateMakerOrderError>> {
     with_request_fee_scope(&ctx, update_maker_order_impl(&ctx, req))
         .await
-        .map(MakerOrderResponse)
+        .map(|order| MakerOrderResponse(order, None))
 }
 
 async fn update_maker_order_impl(
@@ -3593,7 +3626,8 @@ pub(crate) struct OrderForRpcWithCancellationReason<'a> {
 /// bare object (`{"type": ..., "order": ...}`, and for a finished order also `"cancellation_reason"`).
 pub enum OrderStatusResponse {
     /// An active maker order of this node, in the shape of a `my_orders` entry.
-    Maker(MakerOrder),
+    /// The flag is whether the order is paused now (its coin's swap evidence is not available).
+    Maker(MakerOrder, bool),
     /// An active taker order of this node.
     Taker(TakerOrder),
     /// An order that is not active any more, read from the order history, with the reason it left.
@@ -3611,10 +3645,10 @@ impl serde::Serialize for OrderStatusResponse {
         }
 
         match self {
-            OrderStatusResponse::Maker(order) => serde::Serialize::serialize(
+            OrderStatusResponse::Maker(order, paused) => serde::Serialize::serialize(
                 &ActiveOrder {
                     order_type: "Maker",
-                    order: MakerOrderForMyOrdersRpc::from(order),
+                    order: MakerOrderForMyOrdersRpc::from(order).with_paused(*paused),
                 },
                 serializer,
             ),
@@ -3655,7 +3689,8 @@ pub async fn order_status_core(
     let maybe_order_mutex = ordermatch_ctx.maker_orders_ctx.lock().get_order(&req.uuid);
     if let Some(order_mutex) = maybe_order_mutex {
         let order = order_mutex.lock().await.clone();
-        return Ok(OrderStatusResponse::Maker(order));
+        let paused = order_is_paused(&ordermatch_ctx, &order);
+        return Ok(OrderStatusResponse::Maker(order, paused));
     }
 
     let taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
@@ -3993,6 +4028,22 @@ pub(crate) struct MakerOrderForMyOrdersRpc<'a> {
     pub(crate) order: MakerOrderForRpc<'a>,
     pub(crate) cancellable: bool,
     pub(crate) available_amount: RenderedDecimal,
+    /// `true` for an own order that is paused now; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) paused: Option<bool>,
+}
+
+impl MakerOrderForMyOrdersRpc<'_> {
+    fn with_paused(mut self, paused: bool) -> Self {
+        self.paused = paused.then_some(true);
+        self
+    }
+}
+
+/// Whether the own maker order is paused now: a read of the cached state, no probe.
+fn order_is_paused(ordermatch_ctx: &OrdermatchContext, order: &MakerOrder) -> bool {
+    let pair = alb_ordered_pair(order.base_orderbook_ticker(), order.rel_orderbook_ticker());
+    ordermatch_ctx.evidence_pause.lock().is_pair_paused(&pair)
 }
 
 impl<'a> From<&'a MakerOrder> for MakerOrderForMyOrdersRpc<'a> {
@@ -4001,6 +4052,7 @@ impl<'a> From<&'a MakerOrder> for MakerOrderForMyOrdersRpc<'a> {
             order: order.into(),
             cancellable: order.is_cancellable(),
             available_amount: order.available_amount_rendered(),
+            paused: None,
         }
     }
 }
@@ -4067,6 +4119,8 @@ pub(crate) enum OrderForRpc<'a> {
 pub struct MyOrdersRpcResponse {
     pub(crate) maker_orders: HashMap<Uuid, MakerOrder>,
     pub(crate) taker_orders: HashMap<Uuid, TakerOrder>,
+    /// The UUIDs of the maker orders that are paused now.
+    pub(crate) paused: HashSet<Uuid>,
 }
 
 impl serde::Serialize for MyOrdersRpcResponse {
@@ -4083,7 +4137,12 @@ impl serde::Serialize for MyOrdersRpcResponse {
                 maker_orders: self
                     .maker_orders
                     .iter()
-                    .map(|(uuid, order)| (uuid, MakerOrderForMyOrdersRpc::from(order)))
+                    .map(|(uuid, order)| {
+                        (
+                            uuid,
+                            MakerOrderForMyOrdersRpc::from(order).with_paused(self.paused.contains(uuid)),
+                        )
+                    })
                     .collect(),
                 taker_orders: self
                     .taker_orders
@@ -4113,14 +4172,19 @@ pub async fn my_orders_core(
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).map_to_mm(MyOrdersRpcError::InternalError)?;
     let my_maker_orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
     let mut maker_orders = HashMap::with_capacity(my_maker_orders.len());
+    let mut paused = HashSet::new();
     for (uuid, order_mutex) in my_maker_orders.iter() {
         let order = order_mutex.lock().await.clone();
+        if order_is_paused(&ordermatch_ctx, &order) {
+            paused.insert(*uuid);
+        }
         maker_orders.insert(*uuid, order);
     }
     let taker_orders = ordermatch_ctx.my_taker_orders.lock().await.clone();
     Ok(MyOrdersRpcResponse {
         maker_orders,
         taker_orders,
+        paused,
     })
 }
 

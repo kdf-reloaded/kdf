@@ -2120,6 +2120,23 @@ status note of 2026-11-26 with the following.
    interval of the host lines are top-level settings of the node, with the
    defaults 3, 5 seconds and one hour.
 
+*Status note (2026-11-28, clean side; Reloaded-original; maintainer decision of
+2026-11-28). The answer tells when a new order starts paused.* It changes no
+sentence above and adds no condition to R100. A new maker order that starts
+paused under item 2 of the status note of 2026-11-26 is still accepted and
+saved. The answer to `setprice`, in the legacy and the versioned form, then
+carries two more members next to the order's own: `paused` with the value
+`true`, and `paused_reason`, the text of each coin that is not ready
+("<ticker>: swap evidence not available (<kind>)"), base first, joined by
+"; ". The answers to `my_orders` and `order_status` carry `paused` with the
+value `true` for an own maker order whose pair is paused at that moment, read
+from the node's record without asking any host. When an order is not paused,
+none of these members is present, so the answer is the same as before. The
+answer to `update_maker_order` is unchanged. No member names a host. The node
+also logs one warning per new order that starts paused:
+"<base>/<rel>: new maker order <uuid> is saved but paused, not announced until
+its coins are ready (<reason>)", with the same reason text.
+
 > **Status note (2026-11-27, Reloaded-original, clean side; maintainer
 > decision of 2026-11-27).** The confirmation wait of an EVM coin under
 > the agreed-reads policy is agreed by two nodes for every caller. The
@@ -3976,3 +3993,8 @@ reference rows alike.
   Reloaded-original; it records the maintainer's decision of 2026-11-27, takes
   no reference input and no forbidden-class input, and changes no sentence of
   the chapter.
+- *Clean-side addition of 2026-11-28:* the status note before §51.7 on the
+  `paused` and `paused_reason` members of the `setprice` answer and the
+  `paused` member of `my_orders` and `order_status`. Reloaded-original; it
+  records the maintainer's decision of 2026-11-28, takes no reference input
+  and no forbidden-class input, and changes no sentence of the chapter.
