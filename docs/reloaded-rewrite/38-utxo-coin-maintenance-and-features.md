@@ -2861,7 +2861,9 @@ holds under every value of `electrum_server_order` unless it says otherwise.
    An episode that ends sooner logs nothing, and the *up to date again* line
    is logged only for an episode whose line was logged. The node judges the
    connection again when the time has passed, so a lasting state is logged
-   even when no further header arrives. The state itself is still judged at
+   even when no further header arrives; that judgment is a full one, as on a
+   header event, so the stuck state and the disagreement state of item 12 can
+   also be entered at that moment, by the same rules. The state itself is still judged at
    once as item 4 says, so reads, broadcasts, demotion, replacement and the
    disagreement state of item 12 are unchanged. The *stuck* line and the lines
    of a measurement round are unchanged. *Reason.* In a field run of this
@@ -6873,7 +6875,7 @@ R38.8.6 **Tests (two-direction, observable).**
   Electrum. Reloaded-original; written from this repository's code and tests;
   no reference input and no forbidden-class input; no sentence of the chapter
   is changed.
-- *Clean-side addition of 2026-11-28:* the status note after R38.6.4o item 9
+- *Clean-side addition of 2026-11-28 (PR #553):* the status note after R38.6.4o item 9
   on logging the behind and ahead lines only once the state has lasted 5
   seconds. Reloaded-original; it records the maintainer's decision of
   2026-11-28; no reference input and no forbidden-class input; no sentence of

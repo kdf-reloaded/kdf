@@ -949,8 +949,8 @@ the previous version used. The safe way:
   when the server has stayed behind or ahead for 5 seconds, and the matching "up to date again" line only after
   such a warning. On coins whose blocks come in bursts, servers are often a block apart for less than a second,
   which used to log about ten warnings a day per node. How the node treats such a server is unchanged: it is
-  still passed over for reads and broadcasts at once. Detail: CRD ch.38 R38.6.4o, status note of 2026-11-28
-  after item 9.
+  still passed over for reads and broadcasts at once. Detail: PR #553; CRD ch.38 R38.6.4o, status note of
+  2026-11-28 after item 9.
 
 #### ZEC
 
