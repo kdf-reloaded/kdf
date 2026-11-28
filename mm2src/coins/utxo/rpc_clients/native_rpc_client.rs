@@ -1136,6 +1136,7 @@ mod estimate_fee_error_tests {
 
     /// A daemon that answers an unknown method with HTTP 404 reaches the client as the text of
     /// `failed_answer_text`, carried as a transport error; the code alone identifies it.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn non_200_method_not_found_names_the_cause_and_the_fix() {
         let request = JsonRpcRequestEnum::Single(JsonRpcRequest {
